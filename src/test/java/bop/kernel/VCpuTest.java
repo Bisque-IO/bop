@@ -83,11 +83,12 @@ public class VCpuTest {
 
     for (int i = 0; i < cpu.cores.length; i++) {
       cpu.createCore(VCore.of(() -> {
-        var value = cpuTask(ThreadLocalRandom.current().nextInt(150, 500));
-        // ensure cpuTask does not get optimized away
-        if (value == 0L) {
-          return VCore.SCHEDULE;
-        }
+//        var value = cpuTask(ThreadLocalRandom.current().nextInt(1, 5));
+////        var value = 0L;
+//        // ensure cpuTask does not get optimized away
+//        if (value == 0L) {
+//          return VCore.SCHEDULE;
+//        }
         return VCore.SCHEDULE;
       }));
     }

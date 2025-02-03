@@ -121,7 +121,7 @@ public abstract class VCpu {
   /// @return selected index
   public long execute(Selector selector) {
     final var signalIndex = selector.nextSelect();
-    //            var index = (int)(Thread.currentThread().threadId() & 31);
+//    var index = (int)(Thread.currentThread().threadId() & 31);
     final var index = (int) (selector.map & signalMask);
     final var signal = signals[index];
 

@@ -15,7 +15,6 @@ public class VCore {
   static final long CPU_TIME_OFFSET;
   static final long CONTENTION_OFFSET;
   static final long EXCEPTIONS_OFFSET;
-  static final CarrierThreadLocal<VCore> TLS = new CarrierThreadLocal<>();
   private static final Unsafe UNSAFE = Danger.UNSAFE;
 
   static {
@@ -64,10 +63,6 @@ public class VCore {
   public static Builder<WithStep> of(final Step step) {
     return (VCpu owner, long id, int signalIndex, Signal signal, int selectIndex) ->
         new WithStep(owner, id, signalIndex, signal, selectIndex, step);
-  }
-
-  public static VCore current() {
-    return TLS.get();
   }
 
   long cpuTimeAdd(long delta) {
@@ -145,7 +140,6 @@ public class VCore {
     final var start = Epoch.nanos();
     byte result = 0;
     try {
-      TLS.set(this);
       incrCounter();
       flags = EXECUTE;
       result = step();
@@ -168,7 +162,6 @@ public class VCore {
         }
       }
       UNSAFE.getAndAddLong(this, CPU_TIME_OFFSET, Epoch.nanos() - start);
-      TLS.remove();
     }
     return result;
   }
