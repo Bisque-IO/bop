@@ -1,0 +1,26 @@
+
+-XX:GCDrainStackTargetSize=64
+-XX:InitialHeapSize=268435456
+-XX:MarkStackSize=4194304
+-XX:MaxHeapSize=268435456
+-XX:MinHeapSize=6815736
+-XX:OnOutOfMemoryError=kill -3 %p
+-XX:ParallelGCThreads=8
+-XX:+PrintCommandLineFlags
+-XX:ReservedCodeCacheSize=251658240
+-XX:+SegmentedCodeCache
+-XX:+UseCompressedClassPointers
+-XX:+UseG1GC
+-XX:G1PeriodicGCInterval
+-XX:ConcGCThreads=1
+-XX:G1ConcRefinementThreads=1
+-XX:ParallelGCThreads=1
+
+
+
+bop.kernel.VThreadTests
+
+java -Xmx4G -Xms1m --add-exports=java.base/jdk.internal.vm=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/jdk.internal.vm=ALL-UNNAMED --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.access=ALL-UNNAMED -server -XX:+UseG1GC -XX:ConcGCThreads=1 -XX:ParallelGCThreads=1 -XX:G1ConcRefinementThreads=1 -XX:MaxGCPauseMillis=1 -Xlog:gc -XX:+PrintGC -XX:+PrintGCDetails -XX:+G1PeriodicGCInvokesConcurrent -XX:+UnlockExperimentalVMOptions -XX:+UseGraalJIT -XX:+UseCompressedClassPointers -XX:G1PeriodicGCInterval=60000 -jar build/libs/bop-java-1.0-SNAPSHOT-all.jar -cp build/classes/java/main bop.kernel.VThreadTests
+
+
+./gradlew test --tests 'bop.kernel.VCoreTests.benchSchedule'
