@@ -85,13 +85,20 @@ public class QueueTest {
       final AtomicLong counter = new AtomicLong();
       var mpsc = new ManyToOneConcurrentArrayQueue<Long>(4096 * 8);
       var thread = new Thread(() -> {
-        ArrayList<Long> list = new ArrayList<>(4096 * 8);
+        //        ArrayList<Long> list = new ArrayList<>(4096 * 8);
+        //        while (!Thread.interrupted()) {
+        //          if (mpsc.drainTo(list, 4096 * 8) == 0) {
+        //            Thread.onSpinWait();
+        //          }
+        //          counter.addAndGet(list.size());
+        //          list.clear();
+        //        }
+
         while (!Thread.interrupted()) {
-          if (mpsc.drainTo(list, 4096 * 8) == 0) {
+          if (mpsc.poll() == null) {
             Thread.onSpinWait();
           }
-          counter.addAndGet(list.size());
-          list.clear();
+          counter.addAndGet(1);
         }
       });
       thread.start();
@@ -108,11 +115,11 @@ public class QueueTest {
 
     {
       final AtomicLong counter = new AtomicLong();
-      var mpsc = new MpscSharded<Long>(16, 4096);
+      var mpsc = new MpscSharded<Long>(16, 4096 * 8);
       var thread = new Thread(() -> {
-        ArrayList<Long> list = new ArrayList<>(4096 * 8);
+        ArrayList<Long> list = new ArrayList<>(4096 * 4);
         while (!Thread.interrupted()) {
-          if (mpsc.drain(list, 4096 * 8) == 0) {
+          if (mpsc.drain(list, 4096 * 4) == 0) {
             Thread.onSpinWait();
           }
           counter.addAndGet(list.size());
@@ -120,10 +127,10 @@ public class QueueTest {
         }
       });
       thread.start();
-      Bench.threaded("MPSC Partitioned", 8, 10, 1000000, (threadId, cycle, iteration) -> {
+      Bench.threaded("MPSC Partitioned", 16, 10, 1000000, (threadId, cycle, iteration) -> {
         //      mpsc.offer(value);
         while (!mpsc.offer(value)) {
-          Thread.yield();
+          Thread.onSpinWait();
         }
       });
       thread.interrupt();

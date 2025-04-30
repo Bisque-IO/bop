@@ -3,9 +3,9 @@ plugins {
     `java-library`
     application
     id("me.champeau.jmh") version "0.7.2"
-    id("org.graalvm.buildtools.native") version "0.10.4"
+    id("org.graalvm.buildtools.native") version "0.10.6"
     id("com.gradleup.shadow") version "9.0.0-beta5"
-    id("com.diffplug.spotless") version "7.0.2"
+    id("com.diffplug.spotless") version "7.0.3"
 }
 
 group = "bop"
@@ -13,52 +13,62 @@ version = "1.0-SNAPSHOT"
 
 repositories {
     mavenCentral()
+    gradlePluginPortal()
+    mavenLocal()
 }
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_23
-    targetCompatibility = JavaVersion.VERSION_23
+    sourceCompatibility = JavaVersion.VERSION_24
+    targetCompatibility = JavaVersion.VERSION_24
     toolchain {
-        languageVersion = JavaLanguageVersion.of(23)
+        languageVersion = JavaLanguageVersion.of(24)
     }
 }
 
 application {
 //    mainClass = "bop.Main"
-    mainClass = "bop.kernel.VThreadTests"
+    mainClass = "bop.cluster.Server"
 }
 
 dependencies {
-    compileOnly("com.google.googlejavaformat:google-java-format:1.25.2")
-    compileOnly("com.palantir.javaformat:palantir-java-format:2.50.0")
+    compileOnly("com.google.googlejavaformat:google-java-format:1.26.0")
+    compileOnly("com.palantir.javaformat:palantir-java-format:2.62.0")
 
-    implementation("org.agrona:agrona:2.0.1")
-    implementation("org.openjdk.jol:jol-core:0.17")
+//    api("org.agrona:agrona:2.1.0")
+    api("org.openjdk.jol:jol-core:0.17")
 //    implementation("com.conversantmedia:disruptor:1.2.21")
 //    implementation("org.ow2.asm:asm:9.7.1")
 //    implementation("org.ow2.asm:asm-util:9.7.1")
 //    implementation("net.bytebuddy:byte-buddy-dep:1.15.11")
 //    implementation("net.bytebuddy:byte-buddy-agent:1.15.11")
-    implementation("org.jctools:jctools-core:4.0.5")
-    implementation("com.google.dagger:dagger:2.55")
-    implementation("net.openhft:zero-allocation-hashing:0.27ea0")
-    implementation("org.jspecify:jspecify:1.0.0")
+    api("org.jctools:jctools-core:4.0.5")
+    api("com.google.dagger:dagger:2.56.1")
+    api("net.openhft:zero-allocation-hashing:0.27ea0")
+    api("net.openhft:affinity:3.27ea0")
+    api("org.jspecify:jspecify:1.0.0")
 
+    api("com.google.guava:guava:33.4.8-jre")
+    api("io.aeron:aeron-client:1.47.4")
+    api("io.aeron:aeron-driver:1.47.4")
+    api("io.aeron:aeron-archive:1.47.4")
+    api("io.aeron:aeron-annotations:1.47.4")
+    api("io.aeron:aeron-cluster:1.47.4")
 
-
-    compileOnly("org.projectlombok:lombok:1.18.36")
-    annotationProcessor("com.google.dagger:dagger-compiler:2.55")
-    annotationProcessor("org.projectlombok:lombok:1.18.36")
+    compileOnly("org.projectlombok:lombok:1.18.38")
+    annotationProcessor("com.google.dagger:dagger-compiler:2.56.1")
+    annotationProcessor("org.projectlombok:lombok:1.18.38")
     annotationProcessor("com.google.auto.service:auto-service:1.1.1")
 
-    testAnnotationProcessor("com.google.dagger:dagger-compiler:2.55")
-    testAnnotationProcessor("org.projectlombok:lombok:1.18.36")
+    testImplementation("net.openhft:zero-allocation-hashing:0.27ea0")
+    testImplementation("net.openhft:affinity:3.27ea0")
+    testAnnotationProcessor("com.google.dagger:dagger-compiler:2.56.1")
+    testAnnotationProcessor("org.projectlombok:lombok:1.18.38")
     testAnnotationProcessor("com.google.auto.service:auto-service:1.1.1")
 
-    testCompileOnly("org.projectlombok:lombok:1.18.36")
-    testImplementation("org.junit.jupiter:junit-jupiter-api:5.10.2")
+    testCompileOnly("org.projectlombok:lombok:1.18.38")
+    testImplementation("org.junit.jupiter:junit-jupiter-api:5.12.2")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine")
-    testImplementation(platform("org.junit:junit-bom:5.10.2"))
+    testImplementation(platform("org.junit:junit-bom:5.12.2"))
     testImplementation("org.junit.jupiter:junit-jupiter")
 }
 
@@ -85,7 +95,7 @@ spotless {
         target("src/**/*.java", "build/generated/**/*.java")
         importOrder()
 //        googleJavaFormat("1.25.2").reflowLongStrings()
-        palantirJavaFormat("2.50.0")
+        palantirJavaFormat("2.62.0")
             .formatJavadoc(true)
             .style("GOOGLE")
         formatAnnotations()
@@ -104,12 +114,13 @@ tasks.test {
 
 allprojects {
     tasks.withType<JavaCompile> {
-        options.compilerArgs.add("--enable-preview")
+//        options.compilerArgs.add("--enable-preview")
         options.compilerArgs.add("--add-exports=java.base/java.nio=ALL-UNNAMED")
         options.compilerArgs.add("--add-exports=java.base/java.lang=ALL-UNNAMED")
         options.compilerArgs.add("--add-exports=java.base/java.lang.classfile=ALL-UNNAMED")
         options.compilerArgs.add("--add-exports=java.base/jdk.internal.access=ALL-UNNAMED")
         options.compilerArgs.add("--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED")
+        options.compilerArgs.add("--add-exports=java.base/jdk.internal.foreign=ALL-UNNAMED")
         options.compilerArgs.add("--add-exports=java.base/jdk.internal.ref=ALL-UNNAMED")
         options.compilerArgs.add("--add-exports=java.base/jdk.internal.util=ALL-UNNAMED")
         options.compilerArgs.add("--add-exports=java.base/jdk.internal.util.random=ALL-UNNAMED")
@@ -126,6 +137,7 @@ allprojects {
             "--add-opens=java.base/java.nio=ALL-UNNAMED",
             "--add-opens=java.base/java.lang=ALL-UNNAMED",
             "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+            "--add-opens=java.base/jdk.internal.foreign=ALL-UNNAMED",
             "--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED",
             "--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED",
             "--add-opens=java.base/jdk.internal.util=ALL-UNNAMED",
@@ -144,6 +156,7 @@ allprojects {
             "--add-opens=java.base/java.nio=ALL-UNNAMED",
             "--add-opens=java.base/java.lang=ALL-UNNAMED",
             "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+            "--add-opens=java.base/jdk.internal.foreign=ALL-UNNAMED",
             "--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED",
             "--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED",
             "--add-opens=java.base/jdk.internal.util=ALL-UNNAMED",
@@ -197,6 +210,10 @@ graalvmNative {
 
 
         buildArgs.add("-H:+UnlockExperimentalVMOptions")
+        val reflectConfigPath = buildscript.sourceFile?.toPath()?.parent?.resolve("reflectconfig.json")?.toAbsolutePath()
+        buildArgs.add("-H:ReflectionConfigurationFiles=$reflectConfigPath")
+        buildArgs.add("-H:+UnlockExperimentalVMOptions")
+        buildArgs.add("-H:+ForeignAPISupport")
 //        buildArgs.add("-H:+BuildReport")
 //        buildArgs.add("--emit build-report")
 //        buildArgs.add("build-report")
@@ -241,7 +258,7 @@ graalvmNative {
 
 //        buildArgs("--initialize-at-build-time=io.movemedical.server.essentials.runtime.AppGraph")
 //        buildArgs("--initialize-at-build-time=move.*")
-        buildArgs("-O3")
+        buildArgs("-O1")
 //        buildArgs("-march=native")
 //        buildArgs("--pgo")
 //        buildArgs("--initialize-at-build-time=move.App")

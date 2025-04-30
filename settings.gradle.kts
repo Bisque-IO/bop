@@ -1,2 +1,1 @@
-rootProject.name = "bop-java"
-
+rootProject.name = "bop"

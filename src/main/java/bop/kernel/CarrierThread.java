@@ -1,10 +1,18 @@
 package bop.kernel;
 
+import jdk.internal.vm.annotation.Contended;
+
 ///
 public class CarrierThread extends Thread {
-  public VCore core;
+  protected VCore core;
   protected Selector selector;
   protected VCpu cpu;
+
+  /// Flag to determine whether this carrier thread is pinned because
+  /// a VCore is blocking progress for too long or a VThread gets
+  /// pinned via the JVM.
+  @Contended
+  volatile boolean pinned;
 
   public CarrierThread(VCpu cpu) {
     this(cpu, Selector.random());

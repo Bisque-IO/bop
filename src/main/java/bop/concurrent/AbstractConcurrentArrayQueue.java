@@ -8,7 +8,6 @@ import java.util.Queue;
 import jdk.internal.misc.Unsafe;
 import jdk.internal.vm.annotation.Contended;
 import org.agrona.BitUtil;
-import org.agrona.UnsafeApi;
 
 /// Pad out a cacheline to the left of a producer fields to prevent false sharing.
 @SuppressWarnings("unused")
@@ -82,10 +81,12 @@ abstract class AbstractConcurrentArrayQueuePadding1 {
 /// Value for the producer that are expected to be padded.
 abstract class AbstractConcurrentArrayQueueProducer extends AbstractConcurrentArrayQueuePadding1 {
   /// Tail index.
+  @Contended
   protected volatile long tail;
   /// Cached head index.
   protected long headCache;
   /// Shared cached head index.
+  @Contended
   protected volatile long sharedHeadCache;
 }
 
@@ -161,6 +162,7 @@ abstract class AbstractConcurrentArrayQueuePadding2 extends AbstractConcurrentAr
 /// Values for the consumer that are expected to be padded.
 abstract class AbstractConcurrentArrayQueueConsumer extends AbstractConcurrentArrayQueuePadding2 {
   /// Head index.
+  @Contended
   protected volatile long head;
 }
 
@@ -253,24 +255,22 @@ public abstract class AbstractConcurrentArrayQueue<E> extends AbstractConcurrent
 
   static {
     try {
-      BUFFER_ARRAY_BASE = UnsafeApi.arrayBaseOffset(Object[].class);
-      SHIFT_FOR_SCALE = BitUtil.calculateShiftForScale(UnsafeApi.arrayIndexScale(Object[].class));
-      TAIL_OFFSET = UnsafeApi.objectFieldOffset(
-          AbstractConcurrentArrayQueueProducer.class.getDeclaredField("tail"));
-      SHARED_HEAD_CACHE_OFFSET = UnsafeApi.objectFieldOffset(
+      BUFFER_ARRAY_BASE = U.arrayBaseOffset(Object[].class);
+      SHIFT_FOR_SCALE = BitUtil.calculateShiftForScale(U.arrayIndexScale(Object[].class));
+      TAIL_OFFSET =
+          U.objectFieldOffset(AbstractConcurrentArrayQueueProducer.class.getDeclaredField("tail"));
+      SHARED_HEAD_CACHE_OFFSET = U.objectFieldOffset(
           AbstractConcurrentArrayQueueProducer.class.getDeclaredField("sharedHeadCache"));
-      HEAD_OFFSET = UnsafeApi.objectFieldOffset(
-          AbstractConcurrentArrayQueueConsumer.class.getDeclaredField("head"));
+      HEAD_OFFSET =
+          U.objectFieldOffset(AbstractConcurrentArrayQueueConsumer.class.getDeclaredField("head"));
     } catch (final Exception ex) {
       throw new RuntimeException(ex);
     }
   }
 
   /// Queue capacity.
-  @Contended
   protected final int capacity;
   /// Backing array.
-  @Contended
   protected final E[] buffer;
 
   /// Constructs a queue with the requested capacity.

@@ -23,13 +23,17 @@ public class Selector {
     return new RandomSelector();
   }
 
+  public static Selector simple() {
+    return new Selector();
+  }
+
   static long unsignedLongMulXorFold(final long lhs, final long rhs) {
     final long upper = Math.multiplyHigh(lhs, rhs) + ((lhs >> 63) & rhs) + ((rhs >> 63) & lhs);
     final long lower = lhs * rhs;
     return lower ^ upper;
   }
 
-  public long nextLongRapid() {
+  public long nextLong0() {
     seed += 0x2d358dccaa6c78a5L;
     return unsignedLongMulXorFold(seed, seed ^ 0x8bb84b93962eacc9L);
   }
@@ -44,7 +48,8 @@ public class Selector {
 
   public long nextLong() {
     // it's okay that the bottom word remains signed.
-    return ((long) (next(32)) << 32) + next(32);
+    return next(32);
+    //    return ((long) (next(32)) << 32) + next(32);
   }
 
   public int mapIndex(long mask) {

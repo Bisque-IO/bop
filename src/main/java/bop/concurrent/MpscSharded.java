@@ -17,10 +17,6 @@ import jdk.internal.vm.annotation.Contended;
 /// a resource starved system. This internal spinning eats up a CPU core and prevents other
 /// threads making progress resulting in latency spikes. To avoid this a more relaxed approach
 /// is taken in that an in-progress offer is not waited on to complete.
-///
-/// If you wish to check for empty then call {@link #isEmpty()} rather than {@link #size()}
-/// checking for zero.
-///
 /// @param <E> type of the elements stored in the {@link java.util.Queue}.
 @SuppressWarnings("removal")
 public class MpscSharded<E> {
@@ -56,6 +52,10 @@ public class MpscSharded<E> {
       }
     }
     return false;
+  }
+
+  public E poll(int cursor) {
+    return queues[Math.abs(cursor) & mask].poll();
   }
 
   public int drain(ArrayList<E> list, int limit) {

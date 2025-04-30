@@ -50,7 +50,7 @@ public class SpinLock implements Lock, Serializable {
   /// The number of times to "spin" in a busy-wait loop before yielding.
   private static final int SPIN_TIMES = 2;
 
-  private static final Unsafe UNSAFE = Danger.UNSAFE;
+  private static final Unsafe U = Danger.UNSAFE;
   private static final long OWNER_OFFSET;
 
   static {
@@ -58,7 +58,7 @@ public class SpinLock implements Lock, Serializable {
       {
         var field = SpinLock.class.getDeclaredField("owner");
         field.setAccessible(true);
-        OWNER_OFFSET = UNSAFE.objectFieldOffset(field);
+        OWNER_OFFSET = U.objectFieldOffset(field);
       }
     } catch (Throwable e) {
       throw new ExceptionInInitializerError(e);
@@ -83,7 +83,7 @@ public class SpinLock implements Lock, Serializable {
   /// {@inheritDoc}
   @Override
   public void lock() {
-    if (UNSAFE.compareAndSetReference(this, OWNER_OFFSET, null, Thread.currentThread())) {
+    if (U.compareAndSetReference(this, OWNER_OFFSET, null, Thread.currentThread())) {
       return;
     }
 
@@ -92,11 +92,11 @@ public class SpinLock implements Lock, Serializable {
     int spins = 0;
     while (true) {
       Thread.onSpinWait();
-      if (UNSAFE.compareAndSetReference(this, OWNER_OFFSET, null, newOwner)) {
+      if (U.compareAndSetReference(this, OWNER_OFFSET, null, newOwner)) {
         return;
       }
 
-      UNSAFE.park(
+      U.park(
           false, ThreadLocalRandom.current().nextLong(2000 + (newOwner.threadId() & 1023), 5157));
     }
   }
@@ -106,7 +106,7 @@ public class SpinLock implements Lock, Serializable {
   public void lockInterruptibly() throws InterruptedException {
     while (true) {
       for (int i = 0; i < SPIN_TIMES; i++) {
-        if (UNSAFE.compareAndSetReference(this, OWNER_OFFSET, null, Thread.currentThread())) {
+        if (U.compareAndSetReference(this, OWNER_OFFSET, null, Thread.currentThread())) {
           return;
         }
         Thread.onSpinWait();
@@ -123,7 +123,7 @@ public class SpinLock implements Lock, Serializable {
   /// {@inheritDoc}
   @Override
   public boolean tryLock() {
-    return UNSAFE.compareAndSetReference(this, OWNER_OFFSET, null, Thread.currentThread());
+    return U.compareAndSetReference(this, OWNER_OFFSET, null, Thread.currentThread());
   }
 
   /// {@inheritDoc}
@@ -135,7 +135,7 @@ public class SpinLock implements Lock, Serializable {
         throw new InterruptedException();
       }
       for (int i = 0; i < SPIN_TIMES; i++) {
-        if (UNSAFE.compareAndSetReference(this, OWNER_OFFSET, null, Thread.currentThread())) {
+        if (U.compareAndSetReference(this, OWNER_OFFSET, null, Thread.currentThread())) {
           return true;
         }
         Thread.onSpinWait();
@@ -151,7 +151,7 @@ public class SpinLock implements Lock, Serializable {
   /// {@inheritDoc}
   @Override
   public void unlock() {
-    if (!UNSAFE.compareAndSetReference(this, OWNER_OFFSET, Thread.currentThread(), null)) {
+    if (!U.compareAndSetReference(this, OWNER_OFFSET, Thread.currentThread(), null)) {
       throw new IllegalMonitorStateException();
     }
     //        if (!UNSAFE.getAndSetBoolean(this, LOCKED_OFFSET, false)) {
@@ -249,8 +249,7 @@ public class SpinLock implements Lock, Serializable {
       // between await and signal, so add it first.
       queue.add(th);
       //      if (!UNSAFE.compareAndSetBoolean(SpinLock.this, LOCKED_OFFSET, true, false)) {
-      if (!UNSAFE.compareAndSetReference(
-          SpinLock.this, OWNER_OFFSET, Thread.currentThread(), null)) {
+      if (!U.compareAndSetReference(SpinLock.this, OWNER_OFFSET, Thread.currentThread(), null)) {
         // but we can't leave the thread in the queue if the lock was in an invalid state,
         // so
         // remove before throwing

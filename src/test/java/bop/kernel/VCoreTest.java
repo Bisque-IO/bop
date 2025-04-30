@@ -10,19 +10,19 @@ public class VCoreTest {
     final var core = cpu.createCore(VCore.of(() -> (byte) 0));
 
     Bench.printHeader();
-    Bench.threaded(
-        "VCore.schedule", 1, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
-    Bench.threaded(
-        "VCore.schedule", 2, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
-    Bench.threaded(
-        "VCore.schedule", 4, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
-    Bench.threaded(
-        "VCore.schedule", 8, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
-    Bench.threaded(
-        "VCore.schedule", 16, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
-    Bench.threaded(
-        "VCore.schedule", 32, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
-    Bench.printSeparator();
+    //    Bench.threaded(
+    //        "VCore.schedule", 1, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
+    //    Bench.threaded(
+    //        "VCore.schedule", 2, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
+    //    Bench.threaded(
+    //        "VCore.schedule", 4, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
+    //    Bench.threaded(
+    //        "VCore.schedule", 8, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
+    //    Bench.threaded(
+    //        "VCore.schedule", 16, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
+    //    Bench.threaded(
+    //        "VCore.schedule", 32, 25, 5000000, (threadId, cycle, iteration) -> core.schedule());
+    //    Bench.printSeparator();
 
     final var thread = Thread.ofPlatform().start(() -> {
       var selector = Selector.random();

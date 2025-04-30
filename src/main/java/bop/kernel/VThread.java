@@ -309,6 +309,10 @@ public class VThread implements Executor {
         }
       }
 
+      case WAITING -> {}
+      case RUNNING -> {}
+      case PINNED -> {}
+
       case PARKED | PARKING -> unpark();
 
       default -> {
@@ -382,10 +386,7 @@ public class VThread implements Executor {
   }
 
   public boolean run(Runnable task) {
-    if (!U.compareAndSetReference(this, TASK_OFFSET, null, task)) {
-      return false;
-    }
-    return true;
+    return U.compareAndSetReference(this, TASK_OFFSET, null, task);
   }
 
   void start(Runnable task) {

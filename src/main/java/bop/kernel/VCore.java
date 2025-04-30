@@ -1,7 +1,6 @@
 package bop.kernel;
 
 import bop.unsafe.Danger;
-import jdk.internal.misc.CarrierThreadLocal;
 import jdk.internal.misc.Unsafe;
 import jdk.internal.vm.annotation.Contended;
 
@@ -15,15 +14,15 @@ public class VCore {
   static final long CPU_TIME_OFFSET;
   static final long CONTENTION_OFFSET;
   static final long EXCEPTIONS_OFFSET;
-  private static final Unsafe UNSAFE = Danger.UNSAFE;
+  private static final Unsafe U = Danger.UNSAFE;
 
   static {
     try {
-      FLAGS_OFFSET = UNSAFE.objectFieldOffset(VCore.class.getDeclaredField("flags"));
-      CPU_TIME_OFFSET = UNSAFE.objectFieldOffset(VCore.class.getDeclaredField("cpuTime"));
-      COUNTER_OFFSET = UNSAFE.objectFieldOffset(VCore.class.getDeclaredField("counter"));
-      CONTENTION_OFFSET = UNSAFE.objectFieldOffset(VCore.class.getDeclaredField("contention"));
-      EXCEPTIONS_OFFSET = UNSAFE.objectFieldOffset(VCore.class.getDeclaredField("exceptions"));
+      FLAGS_OFFSET = U.objectFieldOffset(VCore.class.getDeclaredField("flags"));
+      CPU_TIME_OFFSET = U.objectFieldOffset(VCore.class.getDeclaredField("cpuTime"));
+      COUNTER_OFFSET = U.objectFieldOffset(VCore.class.getDeclaredField("counter"));
+      CONTENTION_OFFSET = U.objectFieldOffset(VCore.class.getDeclaredField("contention"));
+      EXCEPTIONS_OFFSET = U.objectFieldOffset(VCore.class.getDeclaredField("exceptions"));
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }
@@ -43,6 +42,8 @@ public class VCore {
 
   @Contended
   volatile long cpuTime;
+
+  long cpuTime2;
 
   @Contended
   volatile long contention;
@@ -66,7 +67,7 @@ public class VCore {
   }
 
   long cpuTimeAdd(long delta) {
-    return UNSAFE.getAndAddLong(this, CPU_TIME_OFFSET, delta);
+    return U.getAndAddLong(this, CPU_TIME_OFFSET, delta);
   }
 
   public long cpuTime() {
@@ -74,19 +75,19 @@ public class VCore {
   }
 
   public long cpuTimeReset() {
-    return UNSAFE.getAndSetLong(this, CPU_TIME_OFFSET, 0);
+    return U.getAndSetLong(this, CPU_TIME_OFFSET, 0);
   }
 
   long incrCounter() {
-    return UNSAFE.getAndAddLong(this, COUNTER_OFFSET, 1);
+    return U.getAndAddLong(this, COUNTER_OFFSET, 1);
   }
 
   long incrContention() {
-    return UNSAFE.getAndAddLong(this, CONTENTION_OFFSET, 1);
+    return U.getAndAddLong(this, CONTENTION_OFFSET, 1);
   }
 
   long incrExceptions() {
-    return UNSAFE.getAndAddLong(this, EXCEPTIONS_OFFSET, 1);
+    return U.getAndAddLong(this, EXCEPTIONS_OFFSET, 1);
   }
 
   /// The number of resumes since last reset.
@@ -95,7 +96,7 @@ public class VCore {
   }
 
   public long countReset() {
-    return UNSAFE.getAndSetLong(this, COUNTER_OFFSET, 0);
+    return U.getAndSetLong(this, COUNTER_OFFSET, 0);
   }
 
   public long exceptionsCount() {
@@ -103,7 +104,7 @@ public class VCore {
   }
 
   public long exceptionsReset() {
-    return UNSAFE.getAndSetLong(this, EXCEPTIONS_OFFSET, 0);
+    return U.getAndSetLong(this, EXCEPTIONS_OFFSET, 0);
   }
 
   public long contentionCount() {
@@ -111,7 +112,7 @@ public class VCore {
   }
 
   public long contentionReset() {
-    return UNSAFE.getAndSetLong(this, CONTENTION_OFFSET, 0);
+    return U.getAndSetLong(this, CONTENTION_OFFSET, 0);
   }
 
   public boolean isScheduled() {
@@ -121,10 +122,14 @@ public class VCore {
   /// Schedule this VCore to resume processing.
   public void schedule() {
     if ((flags & SCHEDULE) != 0) return;
-    final var previousFlags = UNSAFE.getAndBitwiseOrByte(this, FLAGS_OFFSET, SCHEDULE);
+    final var previousFlags = U.getAndBitwiseOrByte(this, FLAGS_OFFSET, SCHEDULE);
     final var notScheduledNorExecuting = (previousFlags & (SCHEDULE | EXECUTE)) == 0;
-    if (notScheduledNorExecuting && signal.set(select)) {
-      owner.incrNonZeroCounter();
+    if (notScheduledNorExecuting) {
+      final var bit = 1L << select;
+      final var prev = U.getAndBitwiseOrLong(signal, Signal.VALUE_OFFSET, bit);
+      if (prev == 0L) {
+        owner.incrNonZeroCounter();
+      }
     }
   }
 
@@ -137,7 +142,7 @@ public class VCore {
 
   /// Resumes execution.
   byte resume() {
-    final var start = Epoch.nanos();
+    //    final var start = Epoch.nanos();
     byte result = 0;
     try {
       incrCounter();
@@ -152,16 +157,8 @@ public class VCore {
         // ignore
       }
     } finally {
-      if (result == SCHEDULE) {
-        flags = SCHEDULE;
-        signal.set(select);
-      } else {
-        var afterFlags = UNSAFE.getAndAddByte(this, FLAGS_OFFSET, (byte) -EXECUTE);
-        if ((afterFlags & SCHEDULE) != 0) {
-          signal.set(select);
-        }
-      }
-      UNSAFE.getAndAddLong(this, CPU_TIME_OFFSET, Epoch.nanos() - start);
+      //      U.getAndAddLong(this, CPU_TIME_OFFSET, System.nanoTime() - start);
+      //      U.getAndAddLong(this, CPU_TIME_OFFSET, Epoch.nanos() - start);
     }
     return result;
   }

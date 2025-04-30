@@ -41,3 +41,22 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+
+
+build*
+.vscode
+.cache
+CMakeLists.txt
+cmake-build-debug
+cmake-build-release
+cmake-build-relwithdebinfo
+cmake-build-relwithdebinfo-wsl
+@build*
+.mdbx
+.data
+.xmake
+compile_commands.json
+.next
+.node_modules
+.VSCodeCounter

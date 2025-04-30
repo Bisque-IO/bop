@@ -1,0 +1,11 @@
+[
+  {
+    "name" : "io.aeron.security.DefaultAuthenticatorSupplier",
+    "queryAllDeclaredConstructors" : true,
+    "queryAllPublicConstructors" : true,
+    "queryAllDeclaredMethods" : true,
+    "queryAllPublicMethods" : true,
+    "allDeclaredClasses" : true,
+    "allPublicClasses" : true
+  }
+]

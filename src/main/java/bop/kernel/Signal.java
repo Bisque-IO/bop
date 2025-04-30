@@ -27,7 +27,7 @@ public class Signal {
 
   public Signal() {}
 
-  public long findNearest(long signalIndex) {
+  public long nearest(long signalIndex) {
     var value = this.value;
     var found = Long.numberOfTrailingZeros(value >> signalIndex) + signalIndex;
     return found < 64

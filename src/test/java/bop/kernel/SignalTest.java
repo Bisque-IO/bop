@@ -12,21 +12,21 @@ public class SignalTest {
     System.out.println("trailing zeroes: " + Long.numberOfTrailingZeros(s.value >> 26));
     System.out.println("trailing zeroes: " + Long.numberOfTrailingZeros(s.value >> 27));
 
-    System.out.println("nearest 37: " + s.findNearest(39));
-    System.out.println("nearest 26: " + s.findNearest(26));
-    System.out.println("nearest 15: " + s.findNearest(15));
-    System.out.println("nearest 0: " + s.findNearest(0));
-    System.out.println("nearest 63: " + s.findNearest(63));
+    System.out.println("nearest 37: " + s.nearest(39));
+    System.out.println("nearest 26: " + s.nearest(26));
+    System.out.println("nearest 15: " + s.nearest(15));
+    System.out.println("nearest 0: " + s.nearest(0));
+    System.out.println("nearest 63: " + s.nearest(63));
 
     s.set(7);
     s.set(58);
-    System.out.println("nearest 0: " + s.findNearest(0));
-    System.out.println("nearest 63: " + s.findNearest(63));
+    System.out.println("nearest 0: " + s.nearest(0));
+    System.out.println("nearest 63: " + s.nearest(63));
 
     s.value = 0;
-    System.out.println("nearest 26: " + s.findNearest(26));
-    System.out.println("nearest 26: " + s.findNearest(0));
-    System.out.println("nearest 26: " + s.findNearest(63));
+    System.out.println("nearest 26: " + s.nearest(26));
+    System.out.println("nearest 26: " + s.nearest(0));
+    System.out.println("nearest 26: " + s.nearest(63));
 
     var index = 22;
     System.out.println("is set " + index + ":  " + s.isSet(index));
@@ -42,6 +42,19 @@ public class SignalTest {
     System.out.println("is set " + index + ":  " + s.isSet(index));
     System.out.println("set " + index + ":     " + s.set(index));
     System.out.println();
+
+    s.value = 0;
+    for (int i = 0; i < Signal.CAPACITY; i++) {
+      s.set(i);
+    }
+
+    System.out.println("size: " + s.size());
+
+    for (int i = 0; i < Signal.CAPACITY; i++) {
+      s.acquire(i);
+    }
+
+    System.out.println("size: " + s.size());
   }
 
   @Test
@@ -58,7 +71,7 @@ public class SignalTest {
   }
 
   @Test
-  public void benchmarkFindNearest() throws Throwable {
+  public void benchmarkNearest() throws Throwable {
     final var signal = new Signal();
 
     signal.set(20);
@@ -69,13 +82,13 @@ public class SignalTest {
         1,
         25,
         5000000,
-        (threadId, cycle, iteration) -> signal.findNearest(5));
+        (threadId, cycle, iteration) -> signal.nearest(5));
     Bench.threaded(
         "Signal.findNearest 20|38",
         1,
         25,
         5000000,
-        (threadId, cycle, iteration) -> signal.findNearest(38));
+        (threadId, cycle, iteration) -> signal.nearest(38));
     Bench.printFooter();
   }
 }

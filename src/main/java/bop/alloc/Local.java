@@ -10,8 +10,8 @@ public class Local {
   static final CarrierThreadLocal<Local> TLS = new CarrierThreadLocal<>();
 
   Thread carrierThread = SharedSecrets.getJavaLangAccess().currentCarrierThread();
-  AtomicLong size = new AtomicLong();
-  AtomicLong capacity = new AtomicLong();
+  final AtomicLong size = new AtomicLong();
+  final AtomicLong capacity = new AtomicLong();
   HashMap<Class<?>, Allocator<?>> allocators = new HashMap<>(1024);
 
   ArrayList<Object> args = new ArrayList<>(32);

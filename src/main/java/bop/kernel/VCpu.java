@@ -7,10 +7,10 @@ import jdk.internal.vm.annotation.Contended;
 import org.agrona.BitUtil;
 
 public abstract class VCpu {
-  //      static final int CAPACITY = 4096 * 8;
-  public static final int DEFAULT_CAPACITY = 8 * 8 * (8 * 8);
+  static final int DEFAULT_CAPACITY = 4096 * 64;
+  //  public static final int DEFAULT_CAPACITY = 8 * 8 * (8 * 8);
 
-  private static final Unsafe UNSAFE = InvokeUtils.UNSAFE;
+  private static final Unsafe U = InvokeUtils.UNSAFE;
   private static final long NEXT_SIGNAL_INDEX_OFFSET;
   private static final long NON_ZERO_COUNTER_OFFSET;
 
@@ -19,12 +19,12 @@ public abstract class VCpu {
       {
         var field = VCpu.class.getDeclaredField("signalIndexCounter");
         field.setAccessible(true);
-        NEXT_SIGNAL_INDEX_OFFSET = UNSAFE.objectFieldOffset(field);
+        NEXT_SIGNAL_INDEX_OFFSET = U.objectFieldOffset(field);
       }
       {
         var field = VCpu.class.getDeclaredField("nonZeroCounter");
         field.setAccessible(true);
-        NON_ZERO_COUNTER_OFFSET = UNSAFE.objectFieldOffset(field);
+        NON_ZERO_COUNTER_OFFSET = U.objectFieldOffset(field);
       }
     } catch (Throwable e) {
       throw new RuntimeException(e);
@@ -73,7 +73,7 @@ public abstract class VCpu {
 
     outer:
     for (int i = 0; i < assigned.length; i++) {
-      signalIndex = (int) (UNSAFE.getAndAddLong(this, NEXT_SIGNAL_INDEX_OFFSET, 1) & signalMask);
+      signalIndex = (int) (U.getAndAddLong(this, NEXT_SIGNAL_INDEX_OFFSET, 1) & signalMask);
       var signal = assigned[signalIndex];
       var count = signal.size();
       if (count == Signal.CAPACITY) {
@@ -113,6 +113,10 @@ public abstract class VCpu {
   /// Decrement the number of non-zero signals.
   abstract void decrNonZeroCounter();
 
+  public static final long ERROR_EMPTY_SIGNAL = -1L;
+  public static final long ERROR_CORE_IS_NULL = -2L;
+  public static final long ERROR_CONTENDED = -3L;
+
   /// select a signal (a set signal) from the array of signal trees and, if found,
   /// (which clears the signal) then process the pending action on that contract
   /// based on the flags associated with that contract.
@@ -121,8 +125,9 @@ public abstract class VCpu {
   /// @return selected index
   public long execute(Selector selector) {
     final var signalIndex = selector.nextSelect();
-//    var index = (int)(Thread.currentThread().threadId() & 31);
+    //    var index = (int)(Thread.currentThread().threadId() & 31);
     final var index = (int) (selector.map & signalMask);
+    //    final var index = (int)(selector.nextMap() & signalMask);
     final var signal = signals[index];
 
     // Cache signal value.
@@ -132,36 +137,52 @@ public abstract class VCpu {
     if (signalValue == 0) {
       // Go to the next map.
       selector.nextMap();
-      return -1L;
+      return ERROR_EMPTY_SIGNAL;
     }
 
     // Select nearest index. This is guaranteed to succeed.
     final var selected = Signal.nearest(signalValue, signalIndex);
 
     final var bit = 1L << selected;
-    final var expected = UNSAFE.getAndBitwiseAndLong(signal, Signal.VALUE_OFFSET, ~bit);
+    final var expected = U.getAndBitwiseAndLong(signal, Signal.VALUE_OFFSET, ~bit);
     final var acquired = (expected & bit) == bit;
 
     // Select contract.
     final var core = cores[index * 64 + (int) selected];
     if (core == null) {
-      return -2L;
+      return ERROR_CORE_IS_NULL;
     }
 
     // Atomically acquire index
     if (!acquired) {
       // Select contract.
       core.incrContention();
-      return -1L;
+      return ERROR_CONTENDED;
     }
 
     // Is the signal empty?
-    if (expected == bit) {
-      decrNonZeroCounter();
-    }
+    final var empty = expected == bit;
 
-    // Execute contract.
-    core.resume();
+    // Execute contract
+    if (core.resume() == VCore.SCHEDULE) {
+      core.flags = VCore.SCHEDULE;
+      //        final var bit = 1L << select;
+      final var prev = U.getAndBitwiseOrLong(signal, Signal.VALUE_OFFSET, bit);
+      if (prev == 0L && !empty) {
+        core.owner.incrNonZeroCounter();
+      }
+    } else {
+      var afterFlags = U.getAndAddByte(core, VCore.FLAGS_OFFSET, (byte) -VCore.EXECUTE);
+      if ((afterFlags & VCore.SCHEDULE) != 0) {
+        final var prev = U.getAndBitwiseOrLong(signal, Signal.VALUE_OFFSET, bit);
+        if (prev == 0L && !empty) {
+          core.owner.incrNonZeroCounter();
+        }
+      } else if (signal.value == 0L && empty) {
+        // Signal is now guaranteed to be empty
+        core.owner.decrNonZeroCounter();
+      }
+    }
 
     // Return selected index.
     return selected;
@@ -178,10 +199,12 @@ public abstract class VCpu {
   }
 
   /// Blocking version of VCpu that blocks the current thread until
-  /// there is a signal to process. This should the default since,
+  /// there is a signal to process. This should be the default since,
   /// the performance is almost identical and idle threads consume
   /// no additional CPU resources.
   public static class Blocking extends VCpu {
+    //    final ReentrantLock lock = new ReentrantLock();
+    //    final Condition condition = lock.newCondition();
     final SpinLock lock = new SpinLock();
     // SpinLock condition objects do not spin when waiting for a signal.
     // No CPU cycles are wasted when waiting for any amount of time.
@@ -222,18 +245,23 @@ public abstract class VCpu {
     }
 
     final void incrNonZeroCounter() {
-      if (UNSAFE.getAndAddLong(this, NON_ZERO_COUNTER_OFFSET, 1) == 0) {
+      if (U.getAndAddLong(this, NON_ZERO_COUNTER_OFFSET, 1) == 0) {
         signalAll();
       }
     }
-
+    //
     final void decrNonZeroCounter() {
-      UNSAFE.getAndAddLong(this, NON_ZERO_COUNTER_OFFSET, -1);
+      U.getAndAddLong(this, NON_ZERO_COUNTER_OFFSET, -1);
     }
 
     /// Try to execute the next VCore as selected by supplied selector,
     /// optionally blocking current thread until at least 1 is available.
     public final long execute(Selector selector) {
+      var result = super.execute(selector);
+      if (result > -1L) {
+        return result;
+      }
+
       if (nonZeroCounter == 0L) {
         try {
           await();
@@ -241,6 +269,7 @@ public abstract class VCpu {
           throw new RuntimeException(e);
         }
       }
+
       return super.execute(selector);
     }
   }

@@ -1,8 +1,8 @@
 package bop.alloc;
 
+import bop.concurrent.SpinLock;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
 
 public class Allocator<T> {
   public static final long PAGE_BYTES = Factory.estimateSizeOf(Block.class);
@@ -12,7 +12,7 @@ public class Allocator<T> {
   final Local local;
   final Factory<T> factory;
   final long itemSize;
-  final ReentrantLock lock = new ReentrantLock();
+  final SpinLock lock = new SpinLock();
   final AtomicLong counter = new AtomicLong(0L);
 
   Block<Block<T>> full;
