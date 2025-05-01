@@ -21,7 +21,7 @@ public class Env {
     this.path = path;
     this.pathPointer = Memory.allocCString(path.getAbsolutePath());
     this.envPointer = envPointer;
-    this.scratchPointer = Memory.allocZeroed(1024);
+    this.scratchPointer = Memory.zalloc(1024);
     this.scratchPointerLength = 1024;
   }
 
@@ -63,6 +63,63 @@ public class Env {
       return (int) CFunctions.MDBX_ENV_DELETE.invokeExact(tempArena.allocateFrom(path), mode);
     } catch (Throwable e) {
       throw new RuntimeException(e);
+    }
+  }
+
+  /// Copy an MDBX environment to the specified path, with options.
+  ///
+  /// This function may be used to make a backup of an existing environment.
+  /// No lockfile is created, since it gets recreated at need.
+  /// \note This call can trigger significant file size growth if run in
+  /// parallel with write transactions, because it employs a read-only
+  /// transaction. See long-lived transactions under \ref restrictions section.
+  /// \note On Windows the \ref mdbx_env_copyW() is recommended to use.
+  ///
+  /// \see mdbx_env_copy2fd()
+  /// \see mdbx_txn_copy2pathname()
+  ///
+  /// @param dst    The pathname of a file in which the copy will reside.
+  ///               This file must not be already exist, but parent directory
+  ///               must be writable.
+  /// @param flags  Specifies options for this operation. This parameter
+  ///               must be bitwise OR'ing together any of the constants
+  ///               described here:
+  ///
+  ///  - \ref MDBX_CP_DEFAULTS
+  ///      Perform copy as-is without compaction, etc.
+  ///  - \ref MDBX_CP_COMPACT
+  ///      Perform compaction while copying: omit free pages and sequentially
+  ///      renumber all pages in output. This option consumes little bit more
+  ///      CPU for processing, but may running quickly than the default, on
+  ///      account skipping free pages.
+  ///  - \ref MDBX_CP_FORCE_DYNAMIC_SIZE
+  ///      Force to make resizable copy, i.e. dynamic size instead of fixed.
+  ///  - \ref MDBX_CP_DONT_FLUSH
+  ///      Don't explicitly flush the written data to an output media to reduce
+  ///      the time of the operation and the duration of the transaction.
+  ///  - \ref MDBX_CP_THROTTLE_MVCC
+  ///      Use read transaction parking during copying MVCC-snapshot
+  ///      to avoid stopping recycling and overflowing the database.
+  ///      This allows the writing transaction to oust the read
+  ///      transaction used to copy the database if copying takes so long
+  ///      that it will interfere with the recycling old MVCC snapshots
+  ///      and may lead to an overflow of the database.
+  ///      However, if the reading transaction is ousted the copy will
+  ///      be aborted until successful completion. Thus, this option
+  ///      allows copy the database without interfering with write
+  ///      transactions and a threat of database overflow, but at the cost
+  ///      that copying will be aborted to prevent such conditions.
+  ///      \see mdbx_txn_park()
+  ///
+  /// \returns A non-zero error value on failure and 0 on success.
+  public int copy(String dst, int flags) {
+    final var dstPtr = Memory.allocCString(dst);
+    try {
+      return (int) CFunctions.MDBX_ENV_COPY.invokeExact(envPointer, dstPtr, flags);
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    } finally {
+      Memory.dealloc(dstPtr);
     }
   }
 
@@ -1088,408 +1145,6 @@ public class Env {
     int UTTERLY_NOSYNC = 0x100000;
   }
 
-  /// /** \brief Information about the environment
-  ///  * \ingroup c_statinfo
-  ///  * \see mdbx_env_info_ex() */
-  /// struct MDBX_envinfo {
-  ///   struct {
-  ///     uint64_t lower;   /**< Lower limit for datafile size */
-  ///     uint64_t upper;   /**< Upper limit for datafile size */
-  ///     uint64_t current; /**< Current datafile size */
-  ///     uint64_t shrink;  /**< Shrink threshold for datafile */
-  ///     uint64_t grow;    /**< Growth step for datafile */
-  ///   } mi_geo;
-  ///   uint64_t mi_mapsize;                  /**< Size of the data memory map */
-  ///   uint64_t mi_last_pgno;                /**< Number of the last used page */
-  ///   uint64_t mi_recent_txnid;             /**< ID of the last committed transaction */
-  ///   uint64_t mi_latter_reader_txnid;      /**< ID of the last reader transaction */
-  ///   uint64_t mi_self_latter_reader_txnid; /**< ID of the last reader transaction
-  ///                                            of caller process */
-  ///   uint64_t mi_meta_txnid[3], mi_meta_sign[3];
-  ///   uint32_t mi_maxreaders;   /**< Total reader slots in the environment */
-  ///   uint32_t mi_numreaders;   /**< Max reader slots used in the environment */
-  ///   uint32_t mi_dxb_pagesize; /**< Database pagesize */
-  ///   uint32_t mi_sys_pagesize; /**< System pagesize */
-  ///
-  ///   /** \brief A mostly unique ID that is regenerated on each boot.
-  ///
-  ///    As such it can be used to identify the local machine's current boot. MDBX
-  ///    uses such when open the database to determine whether rollback required to
-  ///    the last steady sync point or not. I.e. if current bootid is differ from the
-  ///    value within a database then the system was rebooted and all changes since
-  ///    last steady sync must be reverted for data integrity. Zeros mean that no
-  ///    relevant information is available from the system. */
-  ///   struct {
-  ///     struct {
-  ///       uint64_t x, y;
-  ///     } current, meta[3];
-  ///   } mi_bootid;
-  ///
-  ///   /** Bytes not explicitly synchronized to disk */
-  ///   uint64_t mi_unsync_volume;
-  ///   /** Current auto-sync threshold, see \ref mdbx_env_set_syncbytes(). */
-  ///   uint64_t mi_autosync_threshold;
-  ///   /** Time since entering to a "dirty" out-of-sync state in units of 1/65536 of
-  ///    * second. In other words, this is the time since the last non-steady commit
-  ///    * or zero if it was steady. */
-  ///   uint32_t mi_since_sync_seconds16dot16;
-  ///   /** Current auto-sync period in 1/65536 of second,
-  ///    * see \ref mdbx_env_set_syncperiod(). */
-  ///   uint32_t mi_autosync_period_seconds16dot16;
-  ///   /** Time since the last readers check in 1/65536 of second,
-  ///    * see \ref mdbx_reader_check(). */
-  ///   uint32_t mi_since_reader_check_seconds16dot16;
-  ///   /** Current environment mode.
-  ///    * The same as \ref mdbx_env_get_flags() returns. */
-  ///   uint32_t mi_mode;
-  ///
-  ///   /** Statistics of page operations.
-  ///    * \details Overall statistics of page operations of all (running, completed
-  ///    * and aborted) transactions in the current multi-process session (since the
-  ///    * first process opened the database after everyone had previously closed it).
-  ///    */
-  ///   struct {
-  ///     uint64_t newly;    /**< Quantity of a new pages added */
-  ///     uint64_t cow;      /**< Quantity of pages copied for update */
-  ///     uint64_t clone;    /**< Quantity of parent's dirty pages clones
-  ///                             for nested transactions */
-  ///     uint64_t split;    /**< Page splits */
-  ///     uint64_t merge;    /**< Page merges */
-  ///     uint64_t spill;    /**< Quantity of spilled dirty pages */
-  ///     uint64_t unspill;  /**< Quantity of unspilled/reloaded pages */
-  ///     uint64_t wops;     /**< Number of explicit write operations (not a pages)
-  ///                             to a disk */
-  ///     uint64_t prefault; /**< Number of prefault write operations (not a pages) */
-  ///     uint64_t mincore;  /**< Number of mincore() calls */
-  ///     uint64_t msync;    /**< Number of explicit msync-to-disk operations (not a pages) */
-  ///     uint64_t fsync;    /**< Number of explicit fsync-to-disk operations (not a pages) */
-  ///   } mi_pgop_stat;
-  ///
-  ///   /* GUID of the database DXB file. */
-  ///   struct {
-  ///     uint64_t x, y;
-  ///   } mi_dxbid;
-  /// };
-
-  public static final class Info {
-    public static final long SIZE = 352L;
-
-    public final Geo geo = new Geo();
-    /// Size of the data memory map
-    public long mapSize;
-    /// Number of the last used page
-    public long lastPageNo;
-    /// ID of the last committed transaction
-    public long recentTxnId;
-    /// ID of the last reader transaction
-    public long latterReaderTxnId;
-    /// ID of the last reader transaction
-    public long selfLatterReaderTxnId;
-    public long metaTxnID0;
-    public long metaTxnID1;
-    public long metaTxnID2;
-    public long metaSign0;
-    public long metaSign1;
-    public long metaSign2;
-    /// Total reader slots in the environment
-    public int maxReaders;
-    /// Max reader slots used in the environment
-    public int numReaders;
-    /// Database pagesize
-    public int dxbPageSize;
-    /// System pagesize
-    public int sysPageSize;
-
-    /// \brief A mostly unique ID that is regenerated on each boot.
-    /// As such it can be used to identify the local machine's current boot. MDBX
-    /// uses such when open the database to determine whether rollback required to
-    /// the last steady sync point or not. I.e. if current bootid is differ from the
-    /// value within a database then the system was rebooted and all changes since
-    /// last steady sync must be reverted for data integrity. Zeros mean that no
-    /// relevant information is available from the system.
-    public final BootID bootId = new BootID();
-
-    /// Bytes not explicitly synchronized to disk
-    public long unsyncVolume;
-    /// Current auto-sync threshold, see \ref mdbx_env_set_syncbytes().
-    public long autoSyncThreshold;
-    /// Time since entering to a "dirty" out-of-sync state in units of 1/65536 of
-    /// second. In other words, this is the time since the last non-steady commit
-    /// or zero if it was steady.
-    public int sinceSyncSeconds16dot16;
-    /// Current auto-sync period in 1/65536 of second,
-    /// see \ref mdbx_env_set_syncperiod().
-    public int autoSyncPeriodSeconds16dot16;
-    /// Time since the last readers check in 1/65536 of second,
-    /// see \ref mdbx_reader_check().
-    public int sinceReaderCheckSeconds16dot16;
-    /// Current environment mode.
-    /// The same as \ref mdbx_env_get_flags() returns.
-    public int mode;
-
-    /// Statistics of page operations.
-    /// \details Overall statistics of page operations of all (running, completed
-    /// and aborted) transactions in the current multi-process session (since the
-    /// first process opened the database after everyone had previously closed it).
-    public final PageOpStat pageOpStat = new PageOpStat();
-
-    /// GUID of the database DXB file.
-    public final XY dxbId = new XY();
-
-    void update(long ptr) {
-      geo.lower = Danger.UNSAFE.getLong(ptr);
-      geo.upper = Danger.UNSAFE.getLong(ptr + 8L);
-      geo.current = Danger.UNSAFE.getLong(ptr + 16L);
-      geo.shrink = Danger.UNSAFE.getLong(ptr + 24L);
-      geo.grow = Danger.UNSAFE.getLong(ptr + 32L);
-      mapSize = Danger.UNSAFE.getLong(ptr + 40L);
-      lastPageNo = Danger.UNSAFE.getLong(ptr + 48L);
-      recentTxnId = Danger.UNSAFE.getLong(ptr + 56L);
-      latterReaderTxnId = Danger.UNSAFE.getLong(ptr + 64L);
-      selfLatterReaderTxnId = Danger.UNSAFE.getLong(ptr + 72L);
-      metaTxnID0 = Danger.UNSAFE.getLong(ptr + 80L);
-      metaTxnID1 = Danger.UNSAFE.getLong(ptr + 88L);
-      metaTxnID2 = Danger.UNSAFE.getLong(ptr + 96L);
-      metaSign0 = Danger.UNSAFE.getLong(ptr + 104L);
-      metaSign1 = Danger.UNSAFE.getLong(ptr + 112L);
-      metaSign2 = Danger.UNSAFE.getLong(ptr + 120L);
-      maxReaders = Danger.UNSAFE.getInt(ptr + 128L);
-      numReaders = Danger.UNSAFE.getInt(ptr + 132L);
-      dxbPageSize = Danger.UNSAFE.getInt(ptr + 136L);
-      sysPageSize = Danger.UNSAFE.getInt(ptr + 140L);
-      bootId.current.x = Danger.UNSAFE.getLong(ptr + 144L);
-      bootId.current.y = Danger.UNSAFE.getLong(ptr + 152L);
-      bootId.meta0.x = Danger.UNSAFE.getLong(ptr + 160L);
-      bootId.meta0.y = Danger.UNSAFE.getLong(ptr + 168L);
-      bootId.meta1.x = Danger.UNSAFE.getLong(ptr + 176L);
-      bootId.meta1.y = Danger.UNSAFE.getLong(ptr + 184L);
-      bootId.meta2.x = Danger.UNSAFE.getLong(ptr + 192L);
-      bootId.meta2.y = Danger.UNSAFE.getLong(ptr + 200L);
-      unsyncVolume = Danger.UNSAFE.getLong(ptr + 208L);
-      autoSyncThreshold = Danger.UNSAFE.getLong(ptr + 216L);
-      sinceSyncSeconds16dot16 = Danger.UNSAFE.getInt(ptr + 224L);
-      autoSyncPeriodSeconds16dot16 = Danger.UNSAFE.getInt(ptr + 228L);
-      sinceReaderCheckSeconds16dot16 = Danger.UNSAFE.getInt(ptr + 232L);
-      mode = Danger.UNSAFE.getInt(ptr + 236L);
-      pageOpStat.newly = Danger.UNSAFE.getLong(ptr + 240L);
-      pageOpStat.cow = Danger.UNSAFE.getLong(ptr + 248L);
-      pageOpStat.cloned = Danger.UNSAFE.getLong(ptr + 256L);
-      pageOpStat.split = Danger.UNSAFE.getLong(ptr + 264L);
-      pageOpStat.merge = Danger.UNSAFE.getLong(ptr + 272L);
-      pageOpStat.spill = Danger.UNSAFE.getLong(ptr + 280L);
-      pageOpStat.unspill = Danger.UNSAFE.getLong(ptr + 288L);
-      pageOpStat.wops = Danger.UNSAFE.getLong(ptr + 296L);
-      pageOpStat.prefault = Danger.UNSAFE.getLong(ptr + 304L);
-      pageOpStat.mincore = Danger.UNSAFE.getLong(ptr + 312L);
-      pageOpStat.msync = Danger.UNSAFE.getLong(ptr + 320L);
-      pageOpStat.fsync = Danger.UNSAFE.getLong(ptr + 328L);
-      dxbId.x = Danger.UNSAFE.getLong(ptr + 336L);
-      dxbId.y = Danger.UNSAFE.getLong(ptr + 344L);
-    }
-
-    @Override
-    public String toString() {
-      return "Record{"
-          + "geo="
-          + geo
-          + ", mapSize="
-          + mapSize
-          + ", lastPageNo="
-          + lastPageNo
-          + ", recentTxnId="
-          + recentTxnId
-          + ", latterReaderTxnId="
-          + latterReaderTxnId
-          + ", selfLatterReaderTxnId="
-          + selfLatterReaderTxnId
-          + ", metaTxnID0="
-          + metaTxnID0
-          + ", metaTxnID1="
-          + metaTxnID1
-          + ", metaTxnID2="
-          + metaTxnID2
-          + ", metaSign0="
-          + metaSign0
-          + ", metaSign1="
-          + metaSign1
-          + ", metaSign2="
-          + metaSign2
-          + ", maxReaders="
-          + maxReaders
-          + ", numReaders="
-          + numReaders
-          + ", dxbPageSize="
-          + dxbPageSize
-          + ", sysPageSize="
-          + sysPageSize
-          + ", bootId="
-          + bootId
-          + ", unsyncVolume="
-          + unsyncVolume
-          + ", autoSyncThreshold="
-          + autoSyncThreshold
-          + ", sinceSyncSeconds16dot16="
-          + sinceSyncSeconds16dot16
-          + ", autoSyncPeriodSeconds16dot16="
-          + autoSyncPeriodSeconds16dot16
-          + ", sinceReaderCheckSeconds16dot16="
-          + sinceReaderCheckSeconds16dot16
-          + ", mode="
-          + mode
-          + ", pageOpStat="
-          + pageOpStat
-          + ", dxbId="
-          + dxbId
-          + '}';
-    }
-
-    public static final class Geo {
-      /// Lower limit for datafile size
-      public long lower;
-      /// Upper limit for datafile size
-      public long upper;
-      /// Current datafile size
-      public long current;
-      /// Shrink threshold for datafile
-      public long shrink;
-      /// Growth step for datafile
-      public long grow;
-
-      @Override
-      public String toString() {
-        return "Geo["
-            + "lower="
-            + lower
-            + ", "
-            + "upper="
-            + upper
-            + ", "
-            + "current="
-            + current
-            + ", "
-            + "shrink="
-            + shrink
-            + ", "
-            + "grow="
-            + grow
-            + ']';
-      }
-    }
-
-    /// Statistics of page operations.
-    /// \details Overall statistics of page operations of all (running, completed
-    /// and aborted) transactions in the current multi-process session (since the
-    /// first process opened the database after everyone had previously closed it).
-    public static final class PageOpStat {
-      /// Quantity of a new pages added
-      public long newly;
-      /// Quantity of pages copied for update
-      public long cow;
-      /// Quantity of parent's dirty pages clones for nested transactions
-      public long cloned;
-      /// Page splits
-      public long split;
-      /// Page merges
-      public long merge;
-      /// Quantity of spilled dirty pages
-      public long spill;
-      /// Quantity of unspilled/reloaded pages
-      public long unspill;
-      /// Number of explicit write operations (not a pages) to a disk
-      public long wops;
-      /// Number of prefault write operations (not a pages)
-      public long prefault;
-      /// Number of mincore() calls
-      public long mincore;
-      /// Number of explicit msync-to-disk operations (not a pages)
-      public long msync;
-      /// Number of explicit fsync-to-disk operations (not a pages)
-      public long fsync;
-
-      @Override
-      public String toString() {
-        return "PageOpStat["
-            + "newly="
-            + newly
-            + ", "
-            + "cow="
-            + cow
-            + ", "
-            + "cloned="
-            + cloned
-            + ", "
-            + "split="
-            + split
-            + ", "
-            + "merge="
-            + merge
-            + ", "
-            + "spill="
-            + spill
-            + ", "
-            + "unspill="
-            + unspill
-            + ", "
-            + "wops="
-            + wops
-            + ", "
-            + "prefault="
-            + prefault
-            + ", "
-            + "mincore="
-            + mincore
-            + ", "
-            + "msync="
-            + msync
-            + ", "
-            + "fsync="
-            + fsync
-            + ']';
-      }
-    }
-
-    public static final class XY {
-      public long x;
-      public long y;
-
-      public XY() {}
-
-      public XY(long x, long y) {
-        this.x = x;
-        this.y = y;
-      }
-
-      @Override
-      public String toString() {
-        return "XY[" + "x=" + x + ", " + "y=" + y + ']';
-      }
-    }
-
-    public static final class BootID {
-      public final XY current = new XY();
-      public final XY meta0 = new XY();
-      public final XY meta1 = new XY();
-      public final XY meta2 = new XY();
-
-      @Override
-      public String toString() {
-        return "BootID["
-            + "current="
-            + current
-            + ", "
-            + "meta0="
-            + meta0
-            + ", "
-            + "meta1="
-            + meta1
-            + ", "
-            + "meta2="
-            + meta2
-            + ']';
-      }
-    }
-  }
-
   /// \brief MDBX environment extra runtime options.
   /// \ingroup c_settings
   /// \see mdbx_env_set_option() \see mdbx_env_get_option()
@@ -1820,5 +1475,479 @@ public class Env {
 
     /// Wait until other processes closes the environment before deletion.
     int WAIT_FOR_UNUSED = 2;
+  }
+
+  /// \brief Warming up options
+  /// \ingroup c_settings
+  /// \anchor warmup_flags
+  /// \see mdbx_env_warmup()
+  public interface WarmupFlags {
+    /// By default \ref mdbx_env_warmup() just ask OS kernel to asynchronously
+    /// prefetch database pages.
+    int DEFAULT = 0;
+
+    /// Peeking all pages of allocated portion of the database
+    /// to force ones to be loaded into memory. However, the pages are just peeks
+    /// sequentially, so unused pages that are in GC will be loaded in the same
+    /// way as those that contain payload.
+    int FORCE = 1;
+
+    /// Using system calls to peeks pages instead of directly accessing ones,
+    /// which at the cost of additional overhead avoids killing the current
+    /// process by OOM-killer in a lack of memory condition.
+    /// \note Has effect only on POSIX (non-Windows) systems with conjunction
+    /// to \ref MDBX_warmup_force option.
+    int OOM_SAFE = 2;
+
+    /// Try to lock database pages in memory by `mlock()` on POSIX-systems
+    /// or `VirtualLock()` on Windows. Please refer to description of these
+    /// functions for reasonability of such locking and the information of
+    /// effects, including the system as a whole.
+    ///
+    /// Such locking in memory requires that the corresponding resource limits
+    /// (e.g. `RLIMIT_RSS`, `RLIMIT_MEMLOCK` or process working set size)
+    /// and the availability of system RAM are sufficiently high.
+    ///
+    /// On successful, all currently allocated pages, both unused in GC and
+    /// containing payload, will be locked in memory until the environment closes,
+    /// or explicitly unblocked by using \ref MDBX_warmup_release, or the
+    /// database geometry will changed, including its auto-shrinking.
+    int LOCK = 4;
+
+    /// Alters corresponding current resource limits to be enough for lock pages
+    /// by \ref MDBX_warmup_lock. However, this option should be used in simpler
+    /// applications since takes into account only current size of this environment
+    /// disregarding all other factors. For real-world database application you
+    /// will need full-fledged management of resources and their limits with
+    /// respective engineering.
+    int TOUCH_LIMIT = 8;
+
+    /// Release the lock that was performed before by \ref MDBX_warmup_lock.
+    int RELEASE = 16;
+  }
+
+  public interface CopyFlags {
+    int DEFAULTS = 0;
+
+    /// Copy with compactification: Omit free space from copy and renumber all
+    /// pages sequentially
+    int COMPACT = 1;
+
+    /// Force to make resizable copy, i.e. dynamic size instead of fixed
+    int FORCE_DYNAMIC_SIZE = 2;
+
+    /// Don't explicitly flush the written data to an output media
+    int DONT_FLUSH = 4;
+
+    /// Use read transaction parking during copying MVCC-snapshot
+    /// \see mdbx_txn_park()
+    int THROTTLE_MVCC = 8;
+
+    /// Abort/dispose passed transaction after copy
+    /// \see mdbx_txn_copy2fd() \see mdbx_txn_copy2pathname()
+    int DISPOSE_TXN = 16;
+
+    /// Enable renew/restart read transaction in case it use outdated
+    /// MVCC shapshot, otherwise the \ref MDBX_MVCC_RETARDED will be returned
+    /// \see mdbx_txn_copy2fd() \see mdbx_txn_copy2pathname()
+    int RENEW_TXN = 32;
+  }
+
+  /// /** \brief Information about the environment
+  ///  * \ingroup c_statinfo
+  ///  * \see mdbx_env_info_ex() */
+  /// struct MDBX_envinfo {
+  ///   struct {
+  ///     uint64_t lower;   /**< Lower limit for datafile size */
+  ///     uint64_t upper;   /**< Upper limit for datafile size */
+  ///     uint64_t current; /**< Current datafile size */
+  ///     uint64_t shrink;  /**< Shrink threshold for datafile */
+  ///     uint64_t grow;    /**< Growth step for datafile */
+  ///   } mi_geo;
+  ///   uint64_t mi_mapsize;                  /**< Size of the data memory map */
+  ///   uint64_t mi_last_pgno;                /**< Number of the last used page */
+  ///   uint64_t mi_recent_txnid;             /**< ID of the last committed transaction */
+  ///   uint64_t mi_latter_reader_txnid;      /**< ID of the last reader transaction */
+  ///   uint64_t mi_self_latter_reader_txnid; /**< ID of the last reader transaction
+  ///                                            of caller process */
+  ///   uint64_t mi_meta_txnid[3], mi_meta_sign[3];
+  ///   uint32_t mi_maxreaders;   /**< Total reader slots in the environment */
+  ///   uint32_t mi_numreaders;   /**< Max reader slots used in the environment */
+  ///   uint32_t mi_dxb_pagesize; /**< Database pagesize */
+  ///   uint32_t mi_sys_pagesize; /**< System pagesize */
+  ///
+  ///   /** \brief A mostly unique ID that is regenerated on each boot.
+  ///
+  ///    As such it can be used to identify the local machine's current boot. MDBX
+  ///    uses such when open the database to determine whether rollback required to
+  ///    the last steady sync point or not. I.e. if current bootid is differ from the
+  ///    value within a database then the system was rebooted and all changes since
+  ///    last steady sync must be reverted for data integrity. Zeros mean that no
+  ///    relevant information is available from the system. */
+  ///   struct {
+  ///     struct {
+  ///       uint64_t x, y;
+  ///     } current, meta[3];
+  ///   } mi_bootid;
+  ///
+  ///   /** Bytes not explicitly synchronized to disk */
+  ///   uint64_t mi_unsync_volume;
+  ///   /** Current auto-sync threshold, see \ref mdbx_env_set_syncbytes(). */
+  ///   uint64_t mi_autosync_threshold;
+  ///   /** Time since entering to a "dirty" out-of-sync state in units of 1/65536 of
+  ///    * second. In other words, this is the time since the last non-steady commit
+  ///    * or zero if it was steady. */
+  ///   uint32_t mi_since_sync_seconds16dot16;
+  ///   /** Current auto-sync period in 1/65536 of second,
+  ///    * see \ref mdbx_env_set_syncperiod(). */
+  ///   uint32_t mi_autosync_period_seconds16dot16;
+  ///   /** Time since the last readers check in 1/65536 of second,
+  ///    * see \ref mdbx_reader_check(). */
+  ///   uint32_t mi_since_reader_check_seconds16dot16;
+  ///   /** Current environment mode.
+  ///    * The same as \ref mdbx_env_get_flags() returns. */
+  ///   uint32_t mi_mode;
+  ///
+  ///   /** Statistics of page operations.
+  ///    * \details Overall statistics of page operations of all (running, completed
+  ///    * and aborted) transactions in the current multi-process session (since the
+  ///    * first process opened the database after everyone had previously closed it).
+  ///    */
+  ///   struct {
+  ///     uint64_t newly;    /**< Quantity of a new pages added */
+  ///     uint64_t cow;      /**< Quantity of pages copied for update */
+  ///     uint64_t clone;    /**< Quantity of parent's dirty pages clones
+  ///                             for nested transactions */
+  ///     uint64_t split;    /**< Page splits */
+  ///     uint64_t merge;    /**< Page merges */
+  ///     uint64_t spill;    /**< Quantity of spilled dirty pages */
+  ///     uint64_t unspill;  /**< Quantity of unspilled/reloaded pages */
+  ///     uint64_t wops;     /**< Number of explicit write operations (not a pages)
+  ///                             to a disk */
+  ///     uint64_t prefault; /**< Number of prefault write operations (not a pages) */
+  ///     uint64_t mincore;  /**< Number of mincore() calls */
+  ///     uint64_t msync;    /**< Number of explicit msync-to-disk operations (not a pages) */
+  ///     uint64_t fsync;    /**< Number of explicit fsync-to-disk operations (not a pages) */
+  ///   } mi_pgop_stat;
+  ///
+  ///   /* GUID of the database DXB file. */
+  ///   struct {
+  ///     uint64_t x, y;
+  ///   } mi_dxbid;
+  /// };
+
+  public static final class Info {
+    public static final long SIZE = 352L;
+
+    public final Geo geo = new Geo();
+    /// \brief A mostly unique ID that is regenerated on each boot.
+    /// As such it can be used to identify the local machine's current boot. MDBX
+    /// uses such when open the database to determine whether rollback required to
+    /// the last steady sync point or not. I.e. if current bootid is differ from the
+    /// value within a database then the system was rebooted and all changes since
+    /// last steady sync must be reverted for data integrity. Zeros mean that no
+    /// relevant information is available from the system.
+    public final BootID bootId = new BootID();
+    /// Statistics of page operations.
+    /// \details Overall statistics of page operations of all (running, completed
+    /// and aborted) transactions in the current multi-process session (since the
+    /// first process opened the database after everyone had previously closed it).
+    public final PageOpStat pageOpStat = new PageOpStat();
+    /// GUID of the database DXB file.
+    public final XY dxbId = new XY();
+    /// Size of the data memory map
+    public long mapSize;
+    /// Number of the last used page
+    public long lastPageNo;
+    /// ID of the last committed transaction
+    public long recentTxnId;
+    /// ID of the last reader transaction
+    public long latterReaderTxnId;
+    /// ID of the last reader transaction
+    public long selfLatterReaderTxnId;
+    public long metaTxnID0;
+    public long metaTxnID1;
+    public long metaTxnID2;
+    public long metaSign0;
+    public long metaSign1;
+    public long metaSign2;
+    /// Total reader slots in the environment
+    public int maxReaders;
+    /// Max reader slots used in the environment
+    public int numReaders;
+    /// Database pagesize
+    public int dxbPageSize;
+    /// System pagesize
+    public int sysPageSize;
+    /// Bytes not explicitly synchronized to disk
+    public long unsyncVolume;
+    /// Current auto-sync threshold, see \ref mdbx_env_set_syncbytes().
+    public long autoSyncThreshold;
+    /// Time since entering to a "dirty" out-of-sync state in units of 1/65536 of
+    /// second. In other words, this is the time since the last non-steady commit
+    /// or zero if it was steady.
+    public int sinceSyncSeconds16dot16;
+    /// Current auto-sync period in 1/65536 of second,
+    /// see \ref mdbx_env_set_syncperiod().
+    public int autoSyncPeriodSeconds16dot16;
+    /// Time since the last readers check in 1/65536 of second,
+    /// see \ref mdbx_reader_check().
+    public int sinceReaderCheckSeconds16dot16;
+    /// Current environment mode.
+    /// The same as \ref mdbx_env_get_flags() returns.
+    public int mode;
+
+    void update(long ptr) {
+      geo.lower = Danger.UNSAFE.getLong(ptr);
+      geo.upper = Danger.UNSAFE.getLong(ptr + 8L);
+      geo.current = Danger.UNSAFE.getLong(ptr + 16L);
+      geo.shrink = Danger.UNSAFE.getLong(ptr + 24L);
+      geo.grow = Danger.UNSAFE.getLong(ptr + 32L);
+      mapSize = Danger.UNSAFE.getLong(ptr + 40L);
+      lastPageNo = Danger.UNSAFE.getLong(ptr + 48L);
+      recentTxnId = Danger.UNSAFE.getLong(ptr + 56L);
+      latterReaderTxnId = Danger.UNSAFE.getLong(ptr + 64L);
+      selfLatterReaderTxnId = Danger.UNSAFE.getLong(ptr + 72L);
+      metaTxnID0 = Danger.UNSAFE.getLong(ptr + 80L);
+      metaTxnID1 = Danger.UNSAFE.getLong(ptr + 88L);
+      metaTxnID2 = Danger.UNSAFE.getLong(ptr + 96L);
+      metaSign0 = Danger.UNSAFE.getLong(ptr + 104L);
+      metaSign1 = Danger.UNSAFE.getLong(ptr + 112L);
+      metaSign2 = Danger.UNSAFE.getLong(ptr + 120L);
+      maxReaders = Danger.UNSAFE.getInt(ptr + 128L);
+      numReaders = Danger.UNSAFE.getInt(ptr + 132L);
+      dxbPageSize = Danger.UNSAFE.getInt(ptr + 136L);
+      sysPageSize = Danger.UNSAFE.getInt(ptr + 140L);
+      bootId.current.x = Danger.UNSAFE.getLong(ptr + 144L);
+      bootId.current.y = Danger.UNSAFE.getLong(ptr + 152L);
+      bootId.meta0.x = Danger.UNSAFE.getLong(ptr + 160L);
+      bootId.meta0.y = Danger.UNSAFE.getLong(ptr + 168L);
+      bootId.meta1.x = Danger.UNSAFE.getLong(ptr + 176L);
+      bootId.meta1.y = Danger.UNSAFE.getLong(ptr + 184L);
+      bootId.meta2.x = Danger.UNSAFE.getLong(ptr + 192L);
+      bootId.meta2.y = Danger.UNSAFE.getLong(ptr + 200L);
+      unsyncVolume = Danger.UNSAFE.getLong(ptr + 208L);
+      autoSyncThreshold = Danger.UNSAFE.getLong(ptr + 216L);
+      sinceSyncSeconds16dot16 = Danger.UNSAFE.getInt(ptr + 224L);
+      autoSyncPeriodSeconds16dot16 = Danger.UNSAFE.getInt(ptr + 228L);
+      sinceReaderCheckSeconds16dot16 = Danger.UNSAFE.getInt(ptr + 232L);
+      mode = Danger.UNSAFE.getInt(ptr + 236L);
+      pageOpStat.newly = Danger.UNSAFE.getLong(ptr + 240L);
+      pageOpStat.cow = Danger.UNSAFE.getLong(ptr + 248L);
+      pageOpStat.cloned = Danger.UNSAFE.getLong(ptr + 256L);
+      pageOpStat.split = Danger.UNSAFE.getLong(ptr + 264L);
+      pageOpStat.merge = Danger.UNSAFE.getLong(ptr + 272L);
+      pageOpStat.spill = Danger.UNSAFE.getLong(ptr + 280L);
+      pageOpStat.unspill = Danger.UNSAFE.getLong(ptr + 288L);
+      pageOpStat.wops = Danger.UNSAFE.getLong(ptr + 296L);
+      pageOpStat.prefault = Danger.UNSAFE.getLong(ptr + 304L);
+      pageOpStat.mincore = Danger.UNSAFE.getLong(ptr + 312L);
+      pageOpStat.msync = Danger.UNSAFE.getLong(ptr + 320L);
+      pageOpStat.fsync = Danger.UNSAFE.getLong(ptr + 328L);
+      dxbId.x = Danger.UNSAFE.getLong(ptr + 336L);
+      dxbId.y = Danger.UNSAFE.getLong(ptr + 344L);
+    }
+
+    @Override
+    public String toString() {
+      return "Record{"
+          + "geo="
+          + geo
+          + ", mapSize="
+          + mapSize
+          + ", lastPageNo="
+          + lastPageNo
+          + ", recentTxnId="
+          + recentTxnId
+          + ", latterReaderTxnId="
+          + latterReaderTxnId
+          + ", selfLatterReaderTxnId="
+          + selfLatterReaderTxnId
+          + ", metaTxnID0="
+          + metaTxnID0
+          + ", metaTxnID1="
+          + metaTxnID1
+          + ", metaTxnID2="
+          + metaTxnID2
+          + ", metaSign0="
+          + metaSign0
+          + ", metaSign1="
+          + metaSign1
+          + ", metaSign2="
+          + metaSign2
+          + ", maxReaders="
+          + maxReaders
+          + ", numReaders="
+          + numReaders
+          + ", dxbPageSize="
+          + dxbPageSize
+          + ", sysPageSize="
+          + sysPageSize
+          + ", bootId="
+          + bootId
+          + ", unsyncVolume="
+          + unsyncVolume
+          + ", autoSyncThreshold="
+          + autoSyncThreshold
+          + ", sinceSyncSeconds16dot16="
+          + sinceSyncSeconds16dot16
+          + ", autoSyncPeriodSeconds16dot16="
+          + autoSyncPeriodSeconds16dot16
+          + ", sinceReaderCheckSeconds16dot16="
+          + sinceReaderCheckSeconds16dot16
+          + ", mode="
+          + mode
+          + ", pageOpStat="
+          + pageOpStat
+          + ", dxbId="
+          + dxbId
+          + '}';
+    }
+
+    public static final class Geo {
+      /// Lower limit for datafile size
+      public long lower;
+      /// Upper limit for datafile size
+      public long upper;
+      /// Current datafile size
+      public long current;
+      /// Shrink threshold for datafile
+      public long shrink;
+      /// Growth step for datafile
+      public long grow;
+
+      @Override
+      public String toString() {
+        return "Geo["
+            + "lower="
+            + lower
+            + ", "
+            + "upper="
+            + upper
+            + ", "
+            + "current="
+            + current
+            + ", "
+            + "shrink="
+            + shrink
+            + ", "
+            + "grow="
+            + grow
+            + ']';
+      }
+    }
+
+    /// Statistics of page operations.
+    /// \details Overall statistics of page operations of all (running, completed
+    /// and aborted) transactions in the current multi-process session (since the
+    /// first process opened the database after everyone had previously closed it).
+    public static final class PageOpStat {
+      /// Quantity of a new pages added
+      public long newly;
+      /// Quantity of pages copied for update
+      public long cow;
+      /// Quantity of parent's dirty pages clones for nested transactions
+      public long cloned;
+      /// Page splits
+      public long split;
+      /// Page merges
+      public long merge;
+      /// Quantity of spilled dirty pages
+      public long spill;
+      /// Quantity of unspilled/reloaded pages
+      public long unspill;
+      /// Number of explicit write operations (not a pages) to a disk
+      public long wops;
+      /// Number of prefault write operations (not a pages)
+      public long prefault;
+      /// Number of mincore() calls
+      public long mincore;
+      /// Number of explicit msync-to-disk operations (not a pages)
+      public long msync;
+      /// Number of explicit fsync-to-disk operations (not a pages)
+      public long fsync;
+
+      @Override
+      public String toString() {
+        return "PageOpStat["
+            + "newly="
+            + newly
+            + ", "
+            + "cow="
+            + cow
+            + ", "
+            + "cloned="
+            + cloned
+            + ", "
+            + "split="
+            + split
+            + ", "
+            + "merge="
+            + merge
+            + ", "
+            + "spill="
+            + spill
+            + ", "
+            + "unspill="
+            + unspill
+            + ", "
+            + "wops="
+            + wops
+            + ", "
+            + "prefault="
+            + prefault
+            + ", "
+            + "mincore="
+            + mincore
+            + ", "
+            + "msync="
+            + msync
+            + ", "
+            + "fsync="
+            + fsync
+            + ']';
+      }
+    }
+
+    public static final class XY {
+      public long x;
+      public long y;
+
+      public XY() {}
+
+      public XY(long x, long y) {
+        this.x = x;
+        this.y = y;
+      }
+
+      @Override
+      public String toString() {
+        return "XY[" + "x=" + x + ", " + "y=" + y + ']';
+      }
+    }
+
+    public static final class BootID {
+      public final XY current = new XY();
+      public final XY meta0 = new XY();
+      public final XY meta1 = new XY();
+      public final XY meta2 = new XY();
+
+      @Override
+      public String toString() {
+        return "BootID["
+            + "current="
+            + current
+            + ", "
+            + "meta0="
+            + meta0
+            + ", "
+            + "meta1="
+            + meta1
+            + ", "
+            + "meta2="
+            + meta2
+            + ']';
+      }
+    }
   }
 }

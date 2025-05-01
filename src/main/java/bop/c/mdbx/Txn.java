@@ -2,6 +2,8 @@ package bop.c.mdbx;
 
 import bop.c.Memory;
 import bop.unsafe.Danger;
+import java.lang.foreign.MemorySegment;
+import org.agrona.collections.MutableLong;
 
 public class Txn {
   Env env;
@@ -12,8 +14,8 @@ public class Txn {
   Info info;
   Stat stat;
   CommitLatency commitLatency;
-  final Val keyValue = Val.allocate();
-  final Val dataValue = Val.allocate();
+  final Val key = Val.allocate();
+  final Val data = Val.allocate();
 
   Txn() {}
 
@@ -23,8 +25,8 @@ public class Txn {
       Memory.dealloc(scratchPointer);
       this.scratchPointer = 0L;
     }
-    keyValue.close();
-    dataValue.close();
+    key.close();
+    data.close();
     env = null;
   }
 
@@ -53,7 +55,7 @@ public class Txn {
       info = new Info();
     }
     if (scratchPointer == 0L) {
-      scratchPointer = Memory.allocZeroed(256L);
+      scratchPointer = Memory.zalloc(256L);
       scratchPointerLength = 256L;
     }
     int err;
@@ -447,7 +449,7 @@ public class Txn {
       stat = new Stat();
     }
     if (scratchPointer == 0L) {
-      scratchPointer = Memory.allocZeroed(256L);
+      scratchPointer = Memory.zalloc(256L);
       scratchPointerLength = 256L;
     }
     int err;
@@ -645,7 +647,7 @@ public class Txn {
   ///                               by current thread.
   public int open(Dbi dbi) {
     if (scratchPointer == 0L) {
-      scratchPointer = Memory.allocZeroed(256L);
+      scratchPointer = Memory.zalloc(256L);
       scratchPointerLength = 256L;
     }
     final int err;
@@ -709,7 +711,7 @@ public class Txn {
       dbi.stat = new Stat();
     }
     if (dbi.statPtr == 0L) {
-      dbi.statPtr = Memory.allocZeroed(Stat.SIZE);
+      dbi.statPtr = Memory.zalloc(Stat.SIZE);
     }
     final int err;
     try {
@@ -858,17 +860,66 @@ public class Txn {
     }
   }
 
+  public int get(Dbi dbi) {
+    if (key.len() == 0L) {
+      return Error.NOTFOUND;
+    }
+    return get(dbi, this.key, this.data);
+  }
+
+  public int get(Dbi dbi, Val key) {
+    assert key != null;
+    return get(dbi, key, this.data);
+  }
+
+  public int get(Dbi dbi, String key) {
+    final var b = Danger.getBytes(key);
+    return get(dbi, b, 0, b.length);
+  }
+
+  public int get(Dbi dbi, byte[] key) {
+    return get(dbi, key, 0, key.length);
+  }
+
+  public int get(Dbi dbi, byte[] key, int offset, int length) {
+    assert key != null;
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_GET.invokeExact(
+          txnPointer,
+          dbi.dbi,
+          MemorySegment.ofArray(key),
+          (long) offset,
+          (long) length,
+          this.key.address(),
+          this.data.address());
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public int get(Dbi dbi, long key) {
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_GET_INT.invokeExact(
+          txnPointer, dbi.dbi, key, this.key.address(), this.data.address());
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
   public int get(Dbi dbi, long key, Val data) {
     assert data != null;
     if (dbi == null || dbi.dbi < 0) {
       return Error.BAD_DBI;
     }
-    Danger.UNSAFE.putLong(scratchPointer, key);
-    keyValue.base(scratchPointer);
-    keyValue.len(8L);
     try {
-      return (int)
-          CFunctions.MDBX_GET.invokeExact(txnPointer, dbi.dbi, keyValue.address(), data.address());
+      return (int) CFunctions.BOP_MDBX_GET_INT.invokeExact(
+          txnPointer, dbi.dbi, key, this.key.address(), data.address());
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }
@@ -912,17 +963,41 @@ public class Txn {
     }
   }
 
-  public int getEqualOrGreater(Dbi dbi, long key, Val data) {
-    assert data != null;
+  public int getEqualOrGreater(Dbi dbi, String key) {
+    final var b = Danger.getBytes(key);
+    return getEqualOrGreater(dbi, b, 0, b.length);
+  }
+
+  public int getEqualOrGreater(Dbi dbi, byte[] key) {
+    return getEqualOrGreater(dbi, key, 0, key.length);
+  }
+
+  public int getEqualOrGreater(Dbi dbi, byte[] key, int offset, int length) {
+    assert key != null;
     if (dbi == null || dbi.dbi < 0) {
       return Error.BAD_DBI;
     }
-    Danger.UNSAFE.getLong(scratchPointer, key);
-    keyValue.base(scratchPointer);
-    keyValue.len(8L);
     try {
-      return (int) CFunctions.MDBX_GET_EQUAL_OR_GREATER.invokeExact(
-          txnPointer, dbi.dbi, keyValue.address(), data.address());
+      return (int) CFunctions.BOP_MDBX_GET_EQUAL_OR_GREATER.invokeExact(
+          txnPointer,
+          dbi.dbi,
+          MemorySegment.ofArray(key),
+          (long) offset,
+          (long) length,
+          this.key.address(),
+          this.data.address());
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public int getEqualOrGreater(Dbi dbi, long key) {
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_GET_EQUAL_OR_GREATER_INT.invokeExact(
+          txnPointer, dbi.dbi, key, this.key.address(), this.data.address());
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }
@@ -1012,20 +1087,175 @@ public class Txn {
     }
   }
 
+  public int put(Dbi dbi, String key, String data, int flags) {
+    return put(dbi, Danger.getBytes(key), Danger.getBytes(data), flags);
+  }
+
+  public int put(Dbi dbi, String key, byte[] data, int flags) {
+    return put(dbi, Danger.getBytes(key), data, flags);
+  }
+
+  public int put(Dbi dbi, String key, byte[] data, int offset, int length, int flags) {
+    final var k = Danger.getBytes(key);
+    return put(dbi, k, 0, k.length, data, offset, length, flags);
+  }
+
+  public int put(Dbi dbi, String key, Val data, int flags) {
+    return put(dbi, Danger.getBytes(key), data, flags);
+  }
+
+  public int put(Dbi dbi, String key, int flags) {
+    return put(dbi, Danger.getBytes(key), data, flags);
+  }
+
+  public int put(Dbi dbi, byte[] key, byte[] data, int flags) {
+    return put(dbi, key, 0, key.length, data, 0, data.length, flags);
+  }
+
+  public int put(Dbi dbi, byte[] key, int offset, int length, byte[] data, int flags) {
+    return put(dbi, key, offset, length, data, 0, data.length, flags);
+  }
+
+  public int put(Dbi dbi, byte[] key, byte[] data, int offset, int length, int flags) {
+    return put(dbi, key, 0, key.length, data, offset, length, flags);
+  }
+
+  public int put(
+      Dbi dbi,
+      byte[] key,
+      int keyOffset,
+      int keyLength,
+      byte[] data,
+      int dataOffset,
+      int dataLength,
+      int flags) {
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_PUT.invokeExact(
+          txnPointer,
+          dbi.dbi,
+          MemorySegment.ofArray(key),
+          (long) keyOffset,
+          (long) keyLength,
+          MemorySegment.ofArray(data),
+          (long) dataOffset,
+          (long) dataLength,
+          this.data.address(),
+          flags);
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public int put(Dbi dbi, byte[] key, int flags) {
+    return put(dbi, key, 0, key.length, data, flags);
+  }
+
+  public int put(Dbi dbi, byte[] key, Val data, int flags) {
+    return put(dbi, key, 0, key.length, data, flags);
+  }
+
+  public int put(Dbi dbi, byte[] key, int offset, int length, int flags) {
+    return put(dbi, key, offset, length, data, flags);
+  }
+
+  public int put(Dbi dbi, byte[] key, int keyOffset, int keyLength, Val data, int flags) {
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_PUT2.invokeExact(
+          txnPointer,
+          dbi.dbi,
+          MemorySegment.ofArray(key),
+          (long) keyOffset,
+          (long) keyLength,
+          data.address(),
+          flags);
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public int put(Dbi dbi, Val key, byte[] data, int offset, int length, int flags) {
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_PUT3.invokeExact(
+          txnPointer,
+          dbi.dbi,
+          key.address(),
+          MemorySegment.ofArray(data),
+          (long) offset,
+          (long) length,
+          this.data.address(),
+          flags);
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public int put(Dbi dbi, long key, String data) {
+    return put(dbi, key, data.getBytes(), PutFlags.UPSERT);
+  }
+
+  public int put(Dbi dbi, long key, String data, int flags) {
+    return put(dbi, key, Danger.getBytes(data), flags);
+  }
+
+  public int put(Dbi dbi, long key, byte[] data) {
+    return put(dbi, key, data, 0, data.length, PutFlags.UPSERT);
+  }
+
+  public int put(Dbi dbi, long key, byte[] data, int flags) {
+    return put(dbi, key, data, 0, data.length, flags);
+  }
+
+  public int put(Dbi dbi, long key, byte[] data, int offset, int length) {
+    return put(dbi, key, data, offset, length, PutFlags.UPSERT);
+  }
+
+  public int put(Dbi dbi, long key, byte[] data, int offset, int length, int flags) {
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_PUT_INT.invokeExact(
+          txnPointer,
+          dbi.dbi,
+          key,
+          MemorySegment.ofArray(data),
+          (long) offset,
+          (long) length,
+          this.data.address(),
+          flags);
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public int put(Dbi dbi, long key) {
+    return put(dbi, key, PutFlags.UPSERT);
+  }
+
+  public int put(Dbi dbi, long key, int flags) {
+    return put(dbi, key, data, flags);
+  }
+
+  public int put(Dbi dbi, long key, Val data) {
+    return put(dbi, key, data, PutFlags.UPSERT);
+  }
+
   public int put(Dbi dbi, long key, Val data, int flags) {
     if (dbi == null || dbi.dbi < 0) {
       return Error.BAD_DBI;
     }
-    if (data == null) {
-      data = dataValue;
-      data.clear();
-    }
-    Danger.UNSAFE.putLong(scratchPointer, key);
-    keyValue.base(scratchPointer);
-    keyValue.len(8L);
     try {
-      return (int) CFunctions.MDBX_PUT.invokeExact(
-          txnPointer, dbi.dbi, keyValue.address(), data.address(), flags);
+      return (int)
+          CFunctions.BOP_MDBX_PUT_INT2.invokeExact(txnPointer, dbi.dbi, key, data.address(), flags);
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }
@@ -1088,11 +1318,11 @@ public class Txn {
       return Error.BAD_DBI;
     }
     Danger.UNSAFE.putLong(scratchPointer, key);
-    keyValue.base(scratchPointer);
-    keyValue.len(8L);
+    this.key.base(scratchPointer);
+    this.key.len(8L);
     try {
       return (int) CFunctions.MDBX_REPLACE.invokeExact(
-          txnPointer, dbi.dbi, keyValue.address(), newData.address(), oldData.address(), flags);
+          txnPointer, dbi.dbi, this.key.address(), newData.address(), oldData.address(), flags);
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }
@@ -1135,17 +1365,123 @@ public class Txn {
     }
   }
 
-  public int delete(Dbi dbi, long key, Val data) {
-    assert data != null;
+  public int delete(Dbi dbi, byte[] key, int offset, int length) {
+    data.clear();
+    return delete(dbi, key, offset, length, data);
+  }
+
+  public int delete(Dbi dbi, byte[] key, byte[] data, int offset, int length) {
+    return delete(dbi, key, 0, key.length, data, offset, length);
+  }
+
+  public int delete(Dbi dbi, byte[] key, int offset, int length, byte[] data) {
+    return delete(dbi, key, offset, length, data, 0, data.length);
+  }
+
+  public int delete(
+      Dbi dbi,
+      byte[] key,
+      int keyOffset,
+      int keyLength,
+      byte[] data,
+      int dataOffset,
+      int dataLength) {
     if (dbi == null || dbi.dbi < 0) {
       return Error.BAD_DBI;
     }
-    Danger.UNSAFE.putLong(scratchPointer, key);
-    keyValue.base(scratchPointer);
-    keyValue.len(8L);
     try {
-      return (int)
-          CFunctions.MDBX_DEL.invokeExact(txnPointer, dbi.dbi, keyValue.address(), data.address());
+      return (int) CFunctions.BOP_MDBX_DEL.invokeExact(
+          txnPointer,
+          dbi.dbi,
+          MemorySegment.ofArray(key),
+          (long) keyOffset,
+          (long) keyLength,
+          MemorySegment.ofArray(data),
+          (long) dataOffset,
+          (long) dataLength);
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public int delete(Dbi dbi, String key) {
+    data.clear();
+    return delete(dbi, Danger.getBytes(key), data);
+  }
+
+  public int delete(Dbi dbi, String key, Val data) {
+    return delete(dbi, Danger.getBytes(key), data);
+  }
+
+  public int delete(Dbi dbi, byte[] key) {
+    return delete(dbi, key, (Val) null);
+  }
+
+  public int delete(Dbi dbi, byte[] key, Val data) {
+    return delete(dbi, key, 0, key.length, data);
+  }
+
+  public int delete(Dbi dbi, byte[] key, int offset, int length, Val data) {
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_DEL2.invokeExact(
+          txnPointer,
+          dbi.dbi,
+          MemorySegment.ofArray(key),
+          (long) offset,
+          (long) length,
+          data == null ? 0L : data.address());
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public int delete(Dbi dbi, Val key, byte[] data, int offset, int length) {
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_DEL3.invokeExact(
+          txnPointer, dbi.dbi, key.address(), MemorySegment.ofArray(data), (long) offset, (long)
+              length);
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public int delete(Dbi dbi, long key) {
+    return delete(dbi, key, (Val) null);
+  }
+
+  public int delete(Dbi dbi, long key, String data) {
+    return delete(dbi, key, Danger.getBytes(data));
+  }
+
+  public int delete(Dbi dbi, long key, byte[] data) {
+    return delete(dbi, key, data, 0, data.length);
+  }
+
+  public int delete(Dbi dbi, long key, byte[] data, int offset, int length) {
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_DEL_INT.invokeExact(
+          txnPointer, dbi.dbi, key, MemorySegment.ofArray(data), (long) offset, (long) length);
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public int delete(Dbi dbi, long key, Val data) {
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    try {
+      return (int) CFunctions.BOP_MDBX_DEL_INT2.invokeExact(
+          txnPointer, dbi.dbi, key, data == null ? 0L : data.address());
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }
@@ -1154,6 +1490,134 @@ public class Txn {
   public int close() {
     return 0;
   }
+
+  /// Create a cursor handle for the specified transaction and DBI handle.
+  ///
+  /// Using of the `mdbx_cursor_open()` is equivalent to calling
+  /// \ref mdbx_cursor_create() and then \ref mdbx_cursor_bind() functions.
+  ///
+  /// A cursor cannot be used when its table handle is closed. Nor when its
+  /// transaction has ended, except with \ref mdbx_cursor_bind() and \ref
+  /// mdbx_cursor_renew(). Also, it can be discarded with \ref mdbx_cursor_close().
+  ///
+  /// A cursor must be closed explicitly always, before or after its transaction
+  /// ends. It can be reused with \ref mdbx_cursor_bind()
+  /// or \ref mdbx_cursor_renew() before finally closing it.
+  ///
+  /// \note In contrast to LMDB, the MDBX required that any opened cursors can be
+  /// reused and must be freed explicitly, regardless ones was opened in a
+  /// read-only or write transaction. The REASON for this is eliminating ambiguity
+  /// which helps to avoid errors such as: use-after-free, double-free, i.e.
+  /// memory corruption and segfaults.
+  ///
+  /// @param dbi      A table handle returned by \ref mdbx_dbi_open().
+  /// @param cursor  Address where the new \ref MDBX_cursor handle will be
+  ///                      stored.
+  /// \returns A non-zero error value on failure and 0 on success,
+  ///          some possible errors are:
+  /// \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+  ///                               by current thread.
+  /// \retval MDBX_EINVAL  An invalid parameter was specified.
+  public int openCursor(Dbi dbi, Cursor cursor) {
+    assert cursor != null;
+    final var txnPointer = this.txnPointer;
+    if (txnPointer == 0L) {
+      return Error.BAD_TXN;
+    }
+    if (dbi == null || dbi.dbi < 0) {
+      return Error.BAD_DBI;
+    }
+    if (cursor.txn != null) {
+      return Error.TXN_OVERLAPPING;
+    }
+    return cursor.bind(this, dbi);
+
+    //    keyValue.base(scratchPointer);
+    //    keyValue.len(8L);
+    //    final int err;
+    //    try {
+    //      err = (int)CFunctions.MDBX_CURSOR_OPEN.invokeExact(txnPointer, dbi.dbi,
+    // keyValue.address());
+    //    } catch (Throwable e) {
+    //      throw new RuntimeException(e);
+    //    }
+    //    if (err != Error.SUCCESS) {
+    //      return err;
+    //    }
+    //    cursor.cursorPointer = keyValue.asLong();
+    //    cursor.txn = this;
+    //    cursor.dbi = dbi;
+    //    return err;
+  }
+
+  /// Unbind or closes all cursors of a given transaction and of all
+  /// its parent transactions if ones are.
+  ///
+  /// Unbinds either closes all cursors associated (opened, renewed or binded) with
+  /// the given transaction in a bulk with minimal overhead.
+  ///
+  /// \see mdbx_cursor_unbind()
+  /// \see mdbx_cursor_close()
+  ///
+  /// @param unbind   If non-zero, unbinds cursors and leaves ones reusable.
+  ///                 Otherwise, close and dispose cursors.
+  ///
+  /// \returns A non-zero error value on failure and 0 on success,
+  ///          some possible errors are:
+  /// \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+  ///                               by current thread.
+  /// \retval MDBX_BAD_TXN          Given transaction is invalid or has
+  ///                               a child/nested transaction.
+  public int releaseAllCursors(boolean unbind) {
+    return releaseAllCursors(unbind, null);
+  }
+
+  /// Unbind or closes all cursors of a given transaction and of all
+  /// its parent transactions if ones are.
+  ///
+  /// Unbinds either closes all cursors associated (opened, renewed or binded) with
+  /// the given transaction in a bulk with minimal overhead.
+  ///
+  /// \see mdbx_cursor_unbind()
+  /// \see mdbx_cursor_close()
+  ///
+  /// @param unbind   If non-zero, unbinds cursors and leaves ones reusable.
+  ///                 Otherwise, close and dispose cursors.
+  /// @param count    An optional pointer to return the number of cursors
+  ///                 processed by the requested operation.
+  ///
+  /// \returns A non-zero error value on failure and 0 on success,
+  ///          some possible errors are:
+  /// \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+  ///                               by current thread.
+  /// \retval MDBX_BAD_TXN          Given transaction is invalid or has
+  ///                               a child/nested transaction.
+  public int releaseAllCursors(boolean unbind, MutableLong count) {
+    final var txnPointer = this.txnPointer;
+    if (txnPointer == 0L) {
+      return Error.BAD_TXN;
+    }
+
+    key.base(scratchPointer);
+    key.len(8L);
+    final int err;
+    try {
+      err = (int)
+          CFunctions.MDBX_TXN_RELEASE_ALL_CURSORS_EX.invokeExact(txnPointer, unbind, key.address());
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+    if (err != Error.SUCCESS) {
+      return err;
+    }
+    final var cnt = key.asLong();
+    if (count != null) {
+      count.value = cnt;
+    }
+    return err;
+  }
+
+  void unbound(Cursor cursor) {}
 
   public interface Flags {
     /// Start read-write transaction.

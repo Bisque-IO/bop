@@ -11,7 +11,7 @@ public final class LongRef {
   }
 
   public static LongRef allocate() {
-    return new LongRef(Memory.allocZeroed(8L));
+    return new LongRef(Memory.zalloc(8L));
   }
 
   public long address() {

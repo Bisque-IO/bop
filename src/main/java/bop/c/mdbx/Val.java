@@ -29,7 +29,7 @@ public class Val {
   }
 
   public static Val allocate() {
-    return new Val(Memory.allocZeroed(SIZE));
+    return new Val(Memory.zalloc(SIZE));
   }
 
   public void close() {
@@ -61,6 +61,11 @@ public class Val {
     if (ptr != 0L) {
       Danger.UNSAFE.putLong(ptr + LEN_OFFSET, len);
     }
+  }
+
+  public void set(long base, long len) {
+    base(base);
+    len(len);
   }
 
   public void clear() {
@@ -138,7 +143,7 @@ public class Val {
 
     public static Vec alloc(int size) {
       final var v = new Vec();
-      v.ptr = Memory.allocZeroed(size * SIZE);
+      v.ptr = Memory.zalloc(size * SIZE);
       v.capacity = size;
       return v;
     }

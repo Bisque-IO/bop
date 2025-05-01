@@ -1,8 +1,12 @@
 package bop.c.mdbx;
 
+import bop.bench.Bench;
 import bop.c.LongRef;
 import bop.c.Memory;
 import bop.unsafe.Danger;
+import java.lang.foreign.MemorySegment;
+import jdk.internal.foreign.MemorySessionImpl;
+import org.agrona.DirectBuffer;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -47,7 +51,7 @@ public class MDBXTest {
   }
 
   @Test
-  public void beginTxn() {
+  public void beginTxn() throws Throwable {
     Env.delete(DB_NAME, Env.DeleteMode.JUST_DELETE);
     final var env = Env.create(DB_NAME);
     Assertions.assertEquals(
@@ -64,6 +68,9 @@ public class MDBXTest {
     int err = txn.open(dbi);
     Assertions.assertEquals(Error.SUCCESS, err);
 
+    err = txn.put(dbi, 7L, "hello");
+    Assertions.assertEquals(Error.SUCCESS, err);
+
     final var stat = txn.stat();
     final var info = txn.info(true);
     System.out.println(stat);
@@ -76,7 +83,7 @@ public class MDBXTest {
     keyRef.value(9L);
     key.set(keyRef);
 
-    final var ptr = Memory.allocZeroed(64L);
+    final var ptr = Memory.zalloc(64L);
     final var value = "hello world";
     final var valueBytes = Danger.getBytes(value);
     Danger.UNSAFE.copyMemory(valueBytes, Danger.BYTE_BASE, null, ptr, valueBytes.length);
@@ -105,6 +112,77 @@ public class MDBXTest {
     var dataStr = data.asString();
 
     Assertions.assertEquals(value, dataStr);
+
+    final var cursor = Cursor.create();
+    err = cursor.bind(txn, dbi);
+    Assertions.assertEquals(Error.SUCCESS, err);
+    err = cursor.put(3L, "bye");
+    Assertions.assertEquals(Error.SUCCESS, err);
+    err = cursor.put(1L, "bye bye");
+    Assertions.assertEquals(Error.SUCCESS, err);
+    err = cursor.put(2L, "hi bye");
+    Assertions.assertEquals(Error.SUCCESS, err);
+
+
+    err = txn.put(dbi, 10L, "hello");
+    err = txn.delete(dbi, 10L);
+    err = cursor.put(10L, "hi hi", PutFlags.UPSERT);
+    err = cursor.get(10L, Cursor.Op.SET_KEY);
+    err = cursor.delete(PutFlags.CURRENT);
+    err = cursor.get(2L, Cursor.Op.SET_KEY);
+
+    Bench.printHeader();
+    Bench.threaded("txn.get", 1, 10, 10_000_000, (threadId, cycle, iteration) -> {
+      Assertions.assertEquals(Error.SUCCESS, txn.get(dbi, iteration % 2 == 0 ? 3L : 9L));
+    });
+    Bench.threaded("txn.put", 1, 10, 10_000_000, (threadId, cycle, iteration) -> {
+      Assertions.assertEquals(Error.SUCCESS, txn.put(dbi, iteration % 2 == 0 ? 3L : 9L, "hello"));
+    });
+    Bench.threaded("cursor.get FIRST/LAST", 1, 10, 10_000_000, (threadId, cycle, iteration) -> {
+      Assertions.assertEquals(
+          Error.SUCCESS, cursor.get(iteration % 2 == 0 ? Cursor.Op.FIRST : Cursor.Op.LAST));
+    });
+    Bench.threaded("cursor.get", 1, 10, 10_000_000, (threadId, cycle, iteration) -> {
+      Assertions.assertEquals(
+          Error.SUCCESS, cursor.get(iteration % 2 == 0 ? 3L : 9L, Cursor.Op.SET_KEY));
+    });
+    Bench.threaded("cursor.put", 1, 10, 10_000_000, (threadId, cycle, iteration) -> {
+      Assertions.assertEquals(
+          Error.SUCCESS, cursor.put(iteration % 2 == 0 ? 3L : 9L, "hello", PutFlags.UPSERT));
+    });
+    Bench.printFooter();
+
+    //    Bench.printHeader();
+    //    Bench.threaded("cursor.get", 1, 10, 10000000, (threadId, cycle, iteration) -> {
+    //      cursor.get();
+    //    });
+    //    Bench.printFooter();
+
+    err = txn.get(dbi, 3L);
+    dataStr = txn.data.asString();
+    Assertions.assertEquals(Error.SUCCESS, err);
+
+    //    err = cursor.get(0L, Cursor.Op.SET_LOWERBOUND);
+    err = cursor.get(Cursor.Op.FIRST);
+    Assertions.assertEquals(Error.SUCCESS, err);
+    var firstValue = cursor.key.asLong();
+    var firstData = cursor.data.asString();
+    err = cursor.get(Cursor.Op.NEXT);
+    Assertions.assertEquals(Error.SUCCESS, err);
+    var secondValue = cursor.key.asLong();
+    var secondData = cursor.data.asString();
+    err = cursor.get(Cursor.Op.NEXT);
+    Assertions.assertEquals(Error.SUCCESS, err);
+    var thirdValue = cursor.key.asLong();
+    var thirdData = cursor.data.asString();
+    err = cursor.get(Cursor.Op.NEXT);
+    Assertions.assertEquals(Error.SUCCESS, err);
+    var fourthValue = cursor.key.asLong();
+    var fourthData = cursor.data.asString();
+    err = cursor.get(Cursor.Op.NEXT);
+    Assertions.assertEquals(Error.SUCCESS, err);
+    err = cursor.get(Cursor.Op.NEXT);
+    Assertions.assertEquals(Error.NOTFOUND, err);
 
     Assertions.assertEquals(Error.SUCCESS, txn.commit(true));
     System.out.println(txn.commitLatency());

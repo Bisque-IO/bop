@@ -4,26 +4,45 @@ import static bop.c.Loader.LINKER;
 
 import bop.unsafe.Danger;
 import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import jdk.internal.foreign.SegmentFactories;
 
+/// Memory provides access to a high quality native memory manager
+/// snmalloc. All methods are thread-safe and scale to any number of
+/// cores.
 public class Memory {
-  interface Library {
+  interface CFunctions {
+    MethodHandle BOP_HELLO = LINKER.downcallHandle(
+        Loader.LOOKUP.find("bop_hello").orElseThrow(),
+        FunctionDescriptor.ofVoid(),
+        Linker.Option.critical(true));
+
+    MethodHandle BOP_HEAP_ACCESS = LINKER.downcallHandle(
+        Loader.LOOKUP.find("bop_heap_access").orElseThrow(),
+        FunctionDescriptor.ofVoid(
+            ValueLayout.ADDRESS, // uint8_t*
+            ValueLayout.JAVA_LONG // size_t size
+            ),
+        Linker.Option.critical(true));
+
     MethodHandle BOP_ALLOC = LINKER.downcallHandle(
         Loader.LOOKUP.find("bop_alloc").orElseThrow(),
         FunctionDescriptor.of(
             ValueLayout.JAVA_LONG, // void*
             ValueLayout.JAVA_LONG // size_t size
-            ));
+            ),
+        Linker.Option.critical(true));
 
     MethodHandle BOP_ZALLOC = LINKER.downcallHandle(
         Loader.LOOKUP.find("bop_zalloc").orElseThrow(),
         FunctionDescriptor.of(
             ValueLayout.JAVA_LONG, // void*
             ValueLayout.JAVA_LONG // size_t size
-            ));
+            ),
+        Linker.Option.critical(true));
 
     MethodHandle BOP_ALLOC_ALIGNED = LINKER.downcallHandle(
         Loader.LOOKUP.find("bop_alloc_aligned").orElseThrow(),
@@ -31,7 +50,8 @@ public class Memory {
             ValueLayout.JAVA_LONG, // void*
             ValueLayout.JAVA_LONG, // size_t alignment
             ValueLayout.JAVA_LONG // size_t size
-            ));
+            ),
+        Linker.Option.critical(true));
 
     MethodHandle BOP_ZALLOC_ALIGNED = LINKER.downcallHandle(
         Loader.LOOKUP.find("bop_zalloc_aligned").orElseThrow(),
@@ -39,7 +59,8 @@ public class Memory {
             ValueLayout.JAVA_LONG, // void*
             ValueLayout.JAVA_LONG, // size_t alignment
             ValueLayout.JAVA_LONG // size_t size
-            ));
+            ),
+        Linker.Option.critical(true));
 
     MethodHandle BOP_REALLOC = LINKER.downcallHandle(
         Loader.LOOKUP.find("bop_realloc").orElseThrow(),
@@ -47,20 +68,49 @@ public class Memory {
             ValueLayout.JAVA_LONG, // void*
             ValueLayout.JAVA_LONG, // size_t size
             ValueLayout.JAVA_LONG // size_t size
-            ));
+            ),
+        Linker.Option.critical(true));
 
     MethodHandle BOP_DEALLOC = LINKER.downcallHandle(
         Loader.LOOKUP.find("bop_dealloc").orElseThrow(),
         FunctionDescriptor.ofVoid(
             ValueLayout.JAVA_LONG // void* p
-            ));
+            ),
+        Linker.Option.critical(true));
 
     MethodHandle BOP_DEALLOC_SIZED = LINKER.downcallHandle(
         Loader.LOOKUP.find("bop_dealloc_sized").orElseThrow(),
         FunctionDescriptor.ofVoid(
             ValueLayout.JAVA_LONG, // void* p
             ValueLayout.JAVA_LONG // size_t size
-            ));
+            ),
+        Linker.Option.critical(true));
+  }
+
+  public static void hello() {
+    try {
+      CFunctions.BOP_HELLO.invokeExact();
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static void heapAccess(byte[] data) {
+    try {
+      CFunctions.BOP_HEAP_ACCESS.invokeExact(MemorySegment.ofArray(data), (long) data.length);
+      //      Library.BOP_HEAP_ACCESS.invoke(MemorySegment.ofArray(data), (long)data.length);
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static void heapAccess(MemorySegment data) {
+    try {
+      CFunctions.BOP_HEAP_ACCESS.invokeExact(data, data.byteSize());
+      //      Library.BOP_HEAP_ACCESS.invoke(MemorySegment.ofArray(data), (long)data.length);
+    } catch (Throwable e) {
+      throw new RuntimeException(e);
+    }
   }
 
   public static long allocCString(String value) {
@@ -73,7 +123,7 @@ public class Memory {
 
   public static long alloc(long size) {
     try {
-      final var ptr = (long) Library.BOP_ALLOC.invokeExact(size);
+      final var ptr = (long) CFunctions.BOP_ALLOC.invokeExact(size);
       if (ptr == 0L) throw new OutOfMemoryError();
       return ptr;
     } catch (Throwable e) {
@@ -85,9 +135,9 @@ public class Memory {
     return SegmentFactories.makeNativeSegmentUnchecked(alloc(size), size);
   }
 
-  public static long allocZeroed(long size) {
+  public static long zalloc(long size) {
     try {
-      final var ptr = (long) Library.BOP_ZALLOC.invokeExact(size);
+      final var ptr = (long) CFunctions.BOP_ZALLOC.invokeExact(size);
       if (ptr == 0L) throw new OutOfMemoryError();
       return ptr;
     } catch (Throwable e) {
@@ -96,12 +146,12 @@ public class Memory {
   }
 
   public static MemorySegment allocZeroedSegment(long size) {
-    return SegmentFactories.makeNativeSegmentUnchecked(allocZeroed(size), size);
+    return SegmentFactories.makeNativeSegmentUnchecked(zalloc(size), size);
   }
 
   public static long allocAligned(long alignment, long size) {
     try {
-      final var ptr = (long) Library.BOP_ALLOC_ALIGNED.invokeExact(alignment, size);
+      final var ptr = (long) CFunctions.BOP_ALLOC_ALIGNED.invokeExact(alignment, size);
       if (ptr == 0L) throw new OutOfMemoryError();
       return ptr;
     } catch (Throwable e) {
@@ -111,7 +161,7 @@ public class Memory {
 
   public static long zallocAligned(long alignment, long size) {
     try {
-      final var ptr = (long) Library.BOP_ZALLOC_ALIGNED.invokeExact(alignment, size);
+      final var ptr = (long) CFunctions.BOP_ZALLOC_ALIGNED.invokeExact(alignment, size);
       if (ptr == 0L) throw new OutOfMemoryError();
       return ptr;
     } catch (Throwable e) {
@@ -121,7 +171,7 @@ public class Memory {
 
   public static long realloc(long address, long size) {
     try {
-      final var ptr = (long) Library.BOP_REALLOC.invokeExact(address, size);
+      final var ptr = (long) CFunctions.BOP_REALLOC.invokeExact(address, size);
       if (ptr == 0L) throw new OutOfMemoryError();
       return ptr;
     } catch (Throwable e) {
@@ -132,7 +182,7 @@ public class Memory {
   public static void dealloc(long ptr) {
     if (ptr == 0L) return;
     try {
-      Library.BOP_DEALLOC.invokeExact(ptr);
+      CFunctions.BOP_DEALLOC.invokeExact(ptr);
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }
@@ -141,7 +191,7 @@ public class Memory {
   public static void deallocSized(long ptr, long size) {
     if (ptr == 0L) return;
     try {
-      Library.BOP_DEALLOC_SIZED.invokeExact(ptr, size);
+      CFunctions.BOP_DEALLOC_SIZED.invokeExact(ptr, size);
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }

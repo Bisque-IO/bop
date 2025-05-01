@@ -1,6 +1,8 @@
 package bop.unsafe;
 
+import bop.c.Memory;
 import java.lang.reflect.Field;
+import java.nio.Buffer;
 import jdk.internal.misc.Unsafe;
 
 public class Danger {
@@ -11,6 +13,7 @@ public class Danger {
   public static final long STRING_HASH_IS_ZERO_OFFSET;
   public static final long OBJECT_ARRAY_BASE;
   public static final long OBJECT_ARRAY_SHIFT_FOR_SCALE;
+  public static final long BUFFER_ADDRESS_OFFSET;
 
   static {
     try {
@@ -37,6 +40,8 @@ public class Danger {
 
       OBJECT_ARRAY_BASE = UNSAFE.arrayBaseOffset(Object[].class);
       OBJECT_ARRAY_SHIFT_FOR_SCALE = calculateShiftForScale(UNSAFE.arrayIndexScale(Object[].class));
+
+      BUFFER_ADDRESS_OFFSET = UNSAFE.objectFieldOffset(Buffer.class.getDeclaredField("address"));
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }
@@ -69,6 +74,10 @@ public class Danger {
     throw new IllegalArgumentException("unknown pointer size for scale=" + scale);
   }
 
+  public static long getAddress(final Buffer buffer) {
+    return UNSAFE.getLong(buffer, BUFFER_ADDRESS_OFFSET);
+  }
+
   public static byte[] getBytes(String s) {
     return (byte[]) UNSAFE.getReference(s, STRING_VALUE_OFFSET);
   }
@@ -79,16 +88,16 @@ public class Danger {
     UNSAFE.putBoolean(s, STRING_HASH_IS_ZERO_OFFSET, false);
   }
 
-  public static long allocate(final int size) {
-    return UNSAFE.allocateMemory(size);
+  public static long alloc(final int size) {
+    return Memory.alloc(size);
   }
 
-  public static long reallocate(final long address, final int size) {
-    return UNSAFE.reallocateMemory(address, size);
+  public static long realloc(final long address, final int size) {
+    return Memory.realloc(address, size);
   }
 
-  public static void deallocate(final long address) {
-    UNSAFE.freeMemory(address);
+  public static void dealloc(final long address) {
+    Memory.dealloc(address);
   }
 
   public static long getLong(final long address) {

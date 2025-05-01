@@ -220,6 +220,20 @@ public class Server {
     }
   }
 
+  public void restart() {
+    try {
+      close();
+    } catch (Throwable e) {
+      log.warn("Server.restart() close", e);
+    }
+
+    try {
+      start();
+    } catch (Throwable e) {
+      log.error("Server.restart() failed", e);
+    }
+  }
+
   private void doClose() {
     if (clusteredService != null) {
       silent(clusteredService::close);
