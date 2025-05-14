@@ -1,9 +1,6 @@
 package bop.c.mdbx;
 
 import bop.bench.Bench;
-import bop.c.LongRef;
-import bop.c.Memory;
-import bop.unsafe.Danger;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -125,7 +122,6 @@ public class MDBXTest {
     final var key = Val.allocate();
     final var data = Val.allocate();
 
-
     err = txn.put(dbi, 9L, "hello world", PutFlags.APPEND);
     Assertions.assertEquals(Error.SUCCESS, err);
 
@@ -140,7 +136,7 @@ public class MDBXTest {
     var dataBytes = data.asBytes();
     var dataStr = data.asString();
 
-//    Assertions.assertEquals("hello world", dataStr);
+    //    Assertions.assertEquals("hello world", dataStr);
 
     final var cursor = Cursor.create();
     err = cursor.bind(txn, dbi);

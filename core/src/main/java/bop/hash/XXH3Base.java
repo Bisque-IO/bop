@@ -173,12 +173,11 @@ abstract class XXH3Base {
     this.secShiftFinal6 = secret07 >>> 24 | secret08 << 40;
     this.secShiftFinal7 = secret08 >>> 24 | secret09 << 40;
 
-    this.secret =
-        new long[] {
-          secret00, secret01, secret02, secret03, secret04, secret05, secret06, secret07,
-          secret08, secret09, secret10, secret11, secret12, secret13, secret14, secret15,
-          secret16, secret17, secret18, secret19, secret20, secret21, secret22, secret23
-        };
+    this.secret = new long[] {
+      secret00, secret01, secret02, secret03, secret04, secret05, secret06, secret07,
+      secret08, secret09, secret10, secret11, secret12, secret13, secret14, secret15,
+      secret16, secret17, secret18, secret19, secret20, secret21, secret22, secret23
+    };
   }
 
   protected static long unsignedLongMulXorFold(final long lhs, final long rhs) {

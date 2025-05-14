@@ -1,9 +1,6 @@
 package bop.bench;
 
 import bop.kernel.Epoch;
-import net.openhft.affinity.Affinity;
-import net.openhft.affinity.AffinityLock;
-
 import java.text.DecimalFormat;
 
 public class Bench {
@@ -143,31 +140,31 @@ public class Bench {
     }
 
     private void run() {
-//      try (var alock = AffinityLock.acquireCore(false)) {
-        int id = this.id;
-        int iterations = this.iterations;
+      //      try (var alock = AffinityLock.acquireCore(false)) {
+      int id = this.id;
+      int iterations = this.iterations;
+      for (int i = 0; i < iterations; i++) {
+        op.run(id, -1, i);
+      }
+      for (int cycle = 0; cycle < cycles; cycle++) {
+        long start = Epoch.nanos();
         for (int i = 0; i < iterations; i++) {
-          op.run(id, -1, i);
+          op.run(id, cycle, i);
         }
-        for (int cycle = 0; cycle < cycles; cycle++) {
-          long start = Epoch.nanos();
-          for (int i = 0; i < iterations; i++) {
-            op.run(id, cycle, i);
-          }
-          long end = Epoch.nanos();
-          long elapsed = end - start;
-          double avg = (double) elapsed / (double) iterations;
-          total += elapsed;
-          max = Math.max(max, avg);
-          min = Math.min(min, avg);
+        long end = Epoch.nanos();
+        long elapsed = end - start;
+        double avg = (double) elapsed / (double) iterations;
+        total += elapsed;
+        max = Math.max(max, avg);
+        min = Math.min(min, avg);
 
-          if (avg > 10000) {
-            System.out.println("what?");
-          }
+        if (avg > 10000) {
+          System.out.println("what?");
         }
-        avg = (double) total / (double) iterations / (double) cycles;
-        opsPerSec = 1_000_000_000.0 / avg;
-//      }
+      }
+      avg = (double) total / (double) iterations / (double) cycles;
+      opsPerSec = 1_000_000_000.0 / avg;
+      //      }
     }
 
     public void begin() {

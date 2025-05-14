@@ -2,11 +2,11 @@ plugins {
     java
     `java-library`
     application
-    kotlin("jvm") version "2.2.0-Beta2"
-    id("me.champeau.jmh") version "0.7.2"
-    id("org.graalvm.buildtools.native") version "0.10.6"
-    id("com.gradleup.shadow") version "9.0.0-beta13"
-    id("com.diffplug.spotless") version "7.0.3"
+    alias(libs.plugins.kotlinJvm)
+    alias(libs.plugins.jmh)
+    alias(libs.plugins.graalNative)
+    alias(libs.plugins.shadow)
+    alias(libs.plugins.spotless)
 }
 
 group = "bop"
@@ -19,11 +19,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly("com.google.googlejavaformat:google-java-format:1.26.0")
-    compileOnly("com.palantir.javaformat:palantir-java-format:2.62.0")
+    compileOnly(libs.google.java.format)
+    compileOnly(libs.palantir.java.format)
 
-//    implementation(kotlin("compiler-embeddable"))
-    implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.2.0-Beta2")
+    implementation(kotlin("compiler-embeddable"))
+//    implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.2.0-Beta2")
 }
 
 tasks {
@@ -48,8 +48,7 @@ spotless {
     java {
         target("src/**/*.java", "build/generated/**/*.java")
         importOrder()
-//        googleJavaFormat("1.25.2").reflowLongStrings()
-        palantirJavaFormat("2.62.0")
+        palantirJavaFormat(libs.palantir.java.format.get().version)
             .formatJavadoc(true)
             .style("GOOGLE")
         formatAnnotations()
@@ -57,10 +56,10 @@ spotless {
 
     kotlin {
         target("src/**/*.kt", "build/generated/**/*.kt")
-        ktlint("1.5.0")
+        ktlint(libs.ktlint.get().version)
         trimTrailingWhitespace()
         endWithNewline()
-        ktfmt("0.54").googleStyle()
+        ktfmt(libs.ktfmt.get().version).googleStyle()
     }
 }
 

@@ -2,13 +2,15 @@ package bop.c.mdbx;
 
 import bop.c.Memory;
 import bop.unsafe.Danger;
-
-import java.lang.foreign.MemoryLayout;
-import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
 
 public record BuildInfo(
-  String datetime, String target, String options, String compiler, String flags, String metadata) {
+    String datetime,
+    String target,
+    String options,
+    String compiler,
+    String flags,
+    String metadata) {
   public static final BuildInfo INSTANCE = load();
 
   public static BuildInfo get() {
@@ -40,17 +42,17 @@ public record BuildInfo(
       final var LIMIT = 4096;
 
       final var datetime =
-        Memory.fromCString(Danger.getLong(address), LIMIT, StandardCharsets.UTF_8);
+          Memory.fromCString(Danger.getLong(address), LIMIT, StandardCharsets.UTF_8);
       final var target =
-        Memory.fromCString(Danger.getLong(address + 8L), LIMIT, StandardCharsets.UTF_8);
+          Memory.fromCString(Danger.getLong(address + 8L), LIMIT, StandardCharsets.UTF_8);
       final var options =
-        Memory.fromCString(Danger.getLong(address + 16L), LIMIT, StandardCharsets.UTF_8);
+          Memory.fromCString(Danger.getLong(address + 16L), LIMIT, StandardCharsets.UTF_8);
       final var compiler =
-        Memory.fromCString(Danger.getLong(address + 24L), LIMIT, StandardCharsets.UTF_8);
+          Memory.fromCString(Danger.getLong(address + 24L), LIMIT, StandardCharsets.UTF_8);
       final var flags =
-        Memory.fromCString(Danger.getLong(address + 32L), LIMIT, StandardCharsets.UTF_8);
+          Memory.fromCString(Danger.getLong(address + 32L), LIMIT, StandardCharsets.UTF_8);
       final var metadata =
-        Memory.fromCString(Danger.getLong(address + 40L), LIMIT, StandardCharsets.UTF_8);
+          Memory.fromCString(Danger.getLong(address + 40L), LIMIT, StandardCharsets.UTF_8);
 
       return new BuildInfo(datetime, target, options, compiler, flags, metadata);
     } finally {

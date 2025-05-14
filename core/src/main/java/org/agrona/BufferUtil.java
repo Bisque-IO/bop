@@ -17,12 +17,11 @@ package org.agrona;
 
 import static org.agrona.BitUtil.isPowerOfTwo;
 
+import bop.unsafe.Danger;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-
-import bop.unsafe.Danger;
 import jdk.internal.misc.Unsafe;
 
 /** Common functions for buffer implementations. */

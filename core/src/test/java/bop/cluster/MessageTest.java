@@ -3,14 +3,9 @@ package bop.cluster;
 import bop.unsafe.Danger;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
-import java.io.OutputStream;
-
 public class MessageTest {
   @Test
-  public void testMessage() {
-
-  }
+  public void testMessage() {}
 
   interface Block {
     int size();
@@ -20,9 +15,7 @@ public class MessageTest {
     T get(int index);
   }
 
-  interface Dictionary<K, V> {
-
-  }
+  interface Dictionary<K, V> {}
 
   interface Header {
     long checksum();
@@ -42,8 +35,11 @@ public class MessageTest {
 
   interface Price {
     double open();
+
     double high();
+
     double low();
+
     double last();
 
     Array<Price> prices();
@@ -53,17 +49,22 @@ public class MessageTest {
 
   interface PriceMut extends Price {
     PriceMut open(double open);
+
     PriceMut high(double high);
+
     PriceMut low(double low);
+
     PriceMut last(double last);
   }
 
   static class MessageBuffer<T> implements Root<T> {
-    @Override public Header header() {
+    @Override
+    public Header header() {
       return null;
     }
 
-    @Override public T root() {
+    @Override
+    public T root() {
       return null;
     }
   }

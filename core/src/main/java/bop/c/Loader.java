@@ -130,8 +130,7 @@ public class Loader {
     private static String resolveOs(final String os) {
       if (check(os, "linux")) {
         return "linux";
-      } else if (check(
-          os, "macos", "macosx", "mac osx", "darwin")) {
+      } else if (check(os, "macos", "macosx", "mac osx", "darwin")) {
         return "macos";
       } else if (check(os, "win", "windows", "windows nt")) {
         return "windows";

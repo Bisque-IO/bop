@@ -1,7 +1,6 @@
 package bop.cluster.impl;
 
 import bop.cluster.message.Event;
-import bop.unsafe.Danger;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -10,7 +9,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
-import jdk.internal.misc.Unsafe;
 
 public class SegmentFile implements AutoCloseable {
   final FileChannel channel;

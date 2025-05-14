@@ -842,7 +842,8 @@ public sealed class EventImpl
           address + pos,
           buffer.remaining());
     } else {
-      U.copyMemory(Danger.getAddress(buffer) + buffer.position(), address + pos, buffer.remaining());
+      U.copyMemory(
+          Danger.getAddress(buffer) + buffer.position(), address + pos, buffer.remaining());
     }
     bodyOffset((char) pos);
     bodySize(buffer.remaining());

@@ -23,15 +23,15 @@ public interface BytesMut extends Bytes {
   BytesMut putByteUnsafe(int offset, byte value);
 
   default BytesMut writeShort(int value) {
-    return writeShort((short)value, IS_BIG_ENDIAN);
+    return writeShort((short) value, IS_BIG_ENDIAN);
   }
 
   default BytesMut writeShortLE(int value) {
-    return writeShort((short)value, false);
+    return writeShort((short) value, false);
   }
 
   default BytesMut writeShortBE(int value) {
-    return writeShort((short)value, true);
+    return writeShort((short) value, true);
   }
 
   BytesMut writeShort(int value, boolean bigEndian);
@@ -91,7 +91,7 @@ public interface BytesMut extends Bytes {
   }
 
   default BytesMut putShortUnsafe(int offset, int value, boolean bigEndian) {
-    return putShortUnsafe(offset, (short)value, bigEndian);
+    return putShortUnsafe(offset, (short) value, bigEndian);
   }
 
   default BytesMut putShortUnsafe(int offset, short value) {
@@ -121,7 +121,7 @@ public interface BytesMut extends Bytes {
   }
 
   default BytesMut writeChar(int value, boolean bigEndian) {
-    return writeChar((char)value, bigEndian);
+    return writeChar((char) value, bigEndian);
   }
 
   default BytesMut putChar(int offset, int value) {
@@ -137,7 +137,7 @@ public interface BytesMut extends Bytes {
   }
 
   default BytesMut putChar(int offset, int value, boolean bigEndian) {
-    return putChar((char)offset, (char)value, bigEndian);
+    return putChar((char) offset, (char) value, bigEndian);
   }
 
   default BytesMut writeChar(char value) {
@@ -181,7 +181,7 @@ public interface BytesMut extends Bytes {
   }
 
   default BytesMut putCharUnsafe(int offset, int value, boolean bigEndian) {
-    return putCharUnsafe(offset, (char)value, bigEndian);
+    return putCharUnsafe(offset, (char) value, bigEndian);
   }
 
   default BytesMut putCharUnsafe(int offset, char value) {

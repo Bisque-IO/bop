@@ -1,12 +1,14 @@
+import java.util.Locale
+
 plugins {
     java
     `java-library`
     application
-    kotlin("jvm") version "2.2.0-Beta2"
-    id("me.champeau.jmh") version "0.7.2"
-    id("org.graalvm.buildtools.native") version "0.10.6"
-    id("com.gradleup.shadow") version "9.0.0-beta13"
-    id("com.diffplug.spotless") version "7.0.3"
+    alias(libs.plugins.kotlinJvm)
+    alias(libs.plugins.jmh)
+    alias(libs.plugins.graalNative)
+    alias(libs.plugins.shadow)
+    alias(libs.plugins.spotless)
 }
 
 group = "bop"
@@ -36,8 +38,8 @@ application {
 }
 
 dependencies {
-    compileOnly("com.google.googlejavaformat:google-java-format:1.26.0")
-    compileOnly("com.palantir.javaformat:palantir-java-format:2.62.0")
+    compileOnly(libs.google.java.format)
+    compileOnly(libs.palantir.java.format)
 
 //    api("org.agrona:agrona:2.1.0")
 //    api("org.openjdk.jol:jol-core:0.17")
@@ -46,47 +48,48 @@ dependencies {
 //    implementation("org.ow2.asm:asm-util:9.7.1")
 //    implementation("net.bytebuddy:byte-buddy-dep:1.15.11")
 //    implementation("net.bytebuddy:byte-buddy-agent:1.15.11")
+
+    api(libs.affinity)
+    api(libs.jspecify)
+
+    api(libs.aeron.client) {
+        exclude("org.agrona")
+    }
+    api(libs.aeron.driver) {
+        exclude("org.agrona")
+    }
+    api(libs.aeron.archive) {
+        exclude("org.agrona")
+    }
+    api(libs.aeron.annotations) {
+        exclude("org.agrona")
+    }
+    api(libs.aeron.cluster) {
+        exclude("org.agrona")
+    }
+
+    compileOnly(libs.lombok)
+    annotationProcessor(libs.lombok)
+    testCompileOnly(libs.lombok)
+    testAnnotationProcessor(libs.lombok)
+
+    annotationProcessor(libs.dagger.compiler)
+    testAnnotationProcessor(libs.dagger.compiler)
+
+    annotationProcessor(libs.auto.service)
+    testAnnotationProcessor(libs.auto.service)
+
+    testImplementation(libs.junit.jupiter.api)
+    testImplementation(platform(libs.junit.bom))
+    testRuntimeOnly(libs.junit.jupiter.engine)
+    testImplementation(libs.junit.jupiter)
+
+    testImplementation(kotlin("test"))
+
     api("org.jctools:jctools-core:4.0.5")
 //    api("com.google.dagger:dagger:2.56.1")
     api("net.openhft:zero-allocation-hashing:0.27ea0")
-    api("net.openhft:affinity:3.27ea0")
-    api("org.jspecify:jspecify:1.0.0")
-
     api("com.dynatrace.hash4j:hash4j:0.22.0")
-
-//    api("com.google.guava:guava:33.4.8-jre")
-    api("io.aeron:aeron-client:1.47.5") {
-        exclude("org.agrona")
-    }
-    api("io.aeron:aeron-driver:1.47.5") {
-        exclude("org.agrona")
-    }
-    api("io.aeron:aeron-archive:1.47.5") {
-        exclude("org.agrona")
-    }
-    api("io.aeron:aeron-annotations:1.47.5") {
-        exclude("org.agrona")
-    }
-    api("io.aeron:aeron-cluster:1.47.5") {
-        exclude("org.agrona")
-    }
-
-    compileOnly("org.projectlombok:lombok:1.18.38")
-    annotationProcessor("com.google.dagger:dagger-compiler:2.56.1")
-    annotationProcessor("org.projectlombok:lombok:1.18.38")
-    annotationProcessor("com.google.auto.service:auto-service:1.1.1")
-
-    testAnnotationProcessor("com.google.dagger:dagger-compiler:2.56.1")
-    testAnnotationProcessor("org.projectlombok:lombok:1.18.38")
-    testAnnotationProcessor("com.google.auto.service:auto-service:1.1.1")
-
-    testCompileOnly("org.projectlombok:lombok:1.18.38")
-    testImplementation("org.junit.jupiter:junit-jupiter-api:5.12.2")
-    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine")
-    testImplementation(platform("org.junit:junit-bom:5.12.2"))
-    testImplementation("org.junit.jupiter:junit-jupiter")
-
-    testImplementation(kotlin("test"))
 }
 
 tasks {
@@ -111,8 +114,7 @@ spotless {
     java {
         target("src/**/*.java", "build/generated/**/*.java")
         importOrder()
-//        googleJavaFormat("1.25.2").reflowLongStrings()
-        palantirJavaFormat("2.62.0")
+        palantirJavaFormat(libs.palantir.java.format.get().version)
             .formatJavadoc(true)
             .style("GOOGLE")
         formatAnnotations()
@@ -120,10 +122,10 @@ spotless {
 
     kotlin {
         target("src/**/*.kt", "build/generated/**/*.kt")
-        ktlint("1.5.0")
+        ktlint(libs.ktlint.get().version)
         trimTrailingWhitespace()
         endWithNewline()
-        ktfmt("0.54").googleStyle()
+        ktfmt(libs.ktfmt.get().version).googleStyle()
     }
 }
 
@@ -135,10 +137,6 @@ tasks["spotlessJavaCheck"].dependsOn("compileJava")
 tasks["spotlessJavaCheck"].dependsOn("compileTestJava")
 tasks["spotlessJavaCheck"].enabled = false
 tasks["spotlessKotlinCheck"].enabled = false
-
-tasks.test {
-    useJUnitPlatform()
-}
 
 allprojects {
     tasks.withType<JavaCompile> {
@@ -198,6 +196,31 @@ allprojects {
             "--add-opens=java.base/java.util.zip=ALL-UNNAMED",
         )
     }
+}
+
+enum class OsName { WINDOWS, MAC, LINUX, UNKNOWN }
+enum class OsArch { X86_32, X86_64, ARM64, UNKNOWN }
+data class OsType(val name: OsName, val arch: OsArch)
+
+val currentOsType = run {
+    val gradleOs = org.gradle.internal.os.OperatingSystem.current()
+    val osName = when {
+        gradleOs.isMacOsX -> OsName.MAC
+        gradleOs.isWindows -> OsName.WINDOWS
+        gradleOs.isLinux -> OsName.LINUX
+        else -> OsName.UNKNOWN
+    }
+
+    val osArch = when (providers.systemProperty("sun.arch.data.model").get()) {
+        "32" -> OsArch.X86_32
+        "64" -> when (providers.systemProperty("os.arch").get().lowercase(Locale.getDefault())) {
+            "aarch64" -> OsArch.ARM64
+            else -> OsArch.X86_64
+        }
+        else -> OsArch.UNKNOWN
+    }
+
+    OsType(osName, osArch)
 }
 
 //jmh {

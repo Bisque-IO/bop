@@ -1,7 +1,6 @@
 package bop.kernel;
 
 import bop.unsafe.Danger;
-import jdk.internal.misc.Unsafe;
 import jdk.internal.vm.annotation.Contended;
 
 public class Signal {

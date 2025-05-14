@@ -1,7 +1,6 @@
 package bop.io;
 
 import bop.unsafe.Danger;
-
 import java.io.InputStream;
 import java.nio.BufferOverflowException;
 import java.nio.charset.Charset;

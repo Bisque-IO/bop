@@ -5,7 +5,6 @@ import java.lang.reflect.Field;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.security.ProtectionDomain;
-
 import jdk.internal.misc.Unsafe;
 
 public class Danger {
@@ -112,7 +111,6 @@ public class Danger {
   public static void put(final long address, final long value) {
     ZONE.putLong(address, value);
   }
-
 
   public static int getInt(Object o, long offset) {
     return ZONE.getInt(o, offset);
@@ -283,16 +281,15 @@ public class Danger {
   }
 
   public static void copyMemory(
-    Object srcBase, long srcOffset, Object destBase, long destOffset, long bytes) {
+      Object srcBase, long srcOffset, Object destBase, long destOffset, long bytes) {
     ZONE.copyMemory(srcBase, srcOffset, destBase, destOffset, bytes);
   }
-  
+
   public static void copySwapMemory(
-    Object srcBase, long srcOffset, Object destBase, long destOffset,
-    long bytes, long elemSize) {
+      Object srcBase, long srcOffset, Object destBase, long destOffset, long bytes, long elemSize) {
     ZONE.copySwapMemory(srcBase, srcOffset, destBase, destOffset, bytes, elemSize);
   }
-  
+
   public static void copySwapMemory(long srcAddress, long destAddress, long bytes, long elemSize) {
     ZONE.copySwapMemory(srcAddress, destAddress, bytes, elemSize);
   }
@@ -354,15 +351,22 @@ public class Danger {
   }
 
   public static Class<?> defineClass(
-    String name, byte[] b, int off, int len, ClassLoader loader,
-    ProtectionDomain protectionDomain) {
+      String name,
+      byte[] b,
+      int off,
+      int len,
+      ClassLoader loader,
+      ProtectionDomain protectionDomain) {
     return ZONE.defineClass(name, b, off, len, loader, protectionDomain);
   }
 
-  
   public static Class<?> defineClass0(
-    String name, byte[] b, int off, int len, ClassLoader loader,
-    ProtectionDomain protectionDomain) {
+      String name,
+      byte[] b,
+      int off,
+      int len,
+      ClassLoader loader,
+      ProtectionDomain protectionDomain) {
     return ZONE.defineClass0(name, b, off, len, loader, protectionDomain);
   }
 
@@ -378,47 +382,42 @@ public class Danger {
     ZONE.throwException(ee);
   }
 
-  
   public static boolean compareAndSetReference(Object o, long offset, Object expected, Object x) {
     return ZONE.compareAndSetReference(o, offset, expected, x);
   }
 
-  
-  public static Object compareAndExchangeReference(Object o, long offset, Object expected, Object x) {
+  public static Object compareAndExchangeReference(
+      Object o, long offset, Object expected, Object x) {
     return ZONE.compareAndExchangeReference(o, offset, expected, x);
   }
 
   public static Object compareAndExchangeReferenceAcquire(
-    Object o, long offset, Object expected,
-    Object x) {
+      Object o, long offset, Object expected, Object x) {
     return ZONE.compareAndExchangeReferenceAcquire(o, offset, expected, x);
   }
 
   public static Object compareAndExchangeReferenceRelease(
-    Object o, long offset, Object expected,
-    Object x) {
+      Object o, long offset, Object expected, Object x) {
     return ZONE.compareAndExchangeReferenceRelease(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetReferencePlain(Object o, long offset, Object expected, Object x) {
+  public static boolean weakCompareAndSetReferencePlain(
+      Object o, long offset, Object expected, Object x) {
     return ZONE.weakCompareAndSetReferencePlain(o, offset, expected, x);
   }
 
   public static boolean weakCompareAndSetReferenceAcquire(
-    Object o, long offset, Object expected,
-    Object x) {
+      Object o, long offset, Object expected, Object x) {
     return ZONE.weakCompareAndSetReferenceAcquire(o, offset, expected, x);
   }
 
   public static boolean weakCompareAndSetReferenceRelease(
-    Object o, long offset, Object expected,
-    Object x) {
+      Object o, long offset, Object expected, Object x) {
     return ZONE.weakCompareAndSetReferenceRelease(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetReference(Object o, long offset, Object expected, Object x) {
+  public static boolean weakCompareAndSetReference(
+      Object o, long offset, Object expected, Object x) {
     return ZONE.weakCompareAndSetReference(o, offset, expected, x);
   }
 
@@ -466,27 +465,22 @@ public class Danger {
     return ZONE.weakCompareAndSetByte(o, offset, expected, x);
   }
 
-  
   public static boolean weakCompareAndSetByteAcquire(Object o, long offset, byte expected, byte x) {
     return ZONE.weakCompareAndSetByteAcquire(o, offset, expected, x);
   }
 
-  
   public static boolean weakCompareAndSetByteRelease(Object o, long offset, byte expected, byte x) {
     return ZONE.weakCompareAndSetByteRelease(o, offset, expected, x);
   }
 
-  
   public static boolean weakCompareAndSetBytePlain(Object o, long offset, byte expected, byte x) {
     return ZONE.weakCompareAndSetBytePlain(o, offset, expected, x);
   }
 
-  
   public static byte compareAndExchangeByteAcquire(Object o, long offset, byte expected, byte x) {
     return ZONE.compareAndExchangeByteAcquire(o, offset, expected, x);
   }
 
-  
   public static byte compareAndExchangeByteRelease(Object o, long offset, byte expected, byte x) {
     return ZONE.compareAndExchangeByteRelease(o, offset, expected, x);
   }
@@ -503,28 +497,28 @@ public class Danger {
     return ZONE.weakCompareAndSetShort(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetShortAcquire(Object o, long offset, short expected, short x) {
+  public static boolean weakCompareAndSetShortAcquire(
+      Object o, long offset, short expected, short x) {
     return ZONE.weakCompareAndSetShortAcquire(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetShortRelease(Object o, long offset, short expected, short x) {
+  public static boolean weakCompareAndSetShortRelease(
+      Object o, long offset, short expected, short x) {
     return ZONE.weakCompareAndSetShortRelease(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetShortPlain(Object o, long offset, short expected, short x) {
+  public static boolean weakCompareAndSetShortPlain(
+      Object o, long offset, short expected, short x) {
     return ZONE.weakCompareAndSetShortPlain(o, offset, expected, x);
   }
 
-  
-  public static short compareAndExchangeShortAcquire(Object o, long offset, short expected, short x) {
+  public static short compareAndExchangeShortAcquire(
+      Object o, long offset, short expected, short x) {
     return ZONE.compareAndExchangeShortAcquire(o, offset, expected, x);
   }
 
-  
-  public static short compareAndExchangeShortRelease(Object o, long offset, short expected, short x) {
+  public static short compareAndExchangeShortRelease(
+      Object o, long offset, short expected, short x) {
     return ZONE.compareAndExchangeShortRelease(o, offset, expected, x);
   }
 
@@ -536,12 +530,10 @@ public class Danger {
     return ZONE.compareAndExchangeChar(o, offset, expected, x);
   }
 
-  
   public static char compareAndExchangeCharAcquire(Object o, long offset, char expected, char x) {
     return ZONE.compareAndExchangeCharAcquire(o, offset, expected, x);
   }
 
-  
   public static char compareAndExchangeCharRelease(Object o, long offset, char expected, char x) {
     return ZONE.compareAndExchangeCharRelease(o, offset, expected, x);
   }
@@ -550,62 +542,54 @@ public class Danger {
     return ZONE.weakCompareAndSetChar(o, offset, expected, x);
   }
 
-  
   public static boolean weakCompareAndSetCharAcquire(Object o, long offset, char expected, char x) {
     return ZONE.weakCompareAndSetCharAcquire(o, offset, expected, x);
   }
 
-  
   public static boolean weakCompareAndSetCharRelease(Object o, long offset, char expected, char x) {
     return ZONE.weakCompareAndSetCharRelease(o, offset, expected, x);
   }
 
-  
   public static boolean weakCompareAndSetCharPlain(Object o, long offset, char expected, char x) {
     return ZONE.weakCompareAndSetCharPlain(o, offset, expected, x);
   }
 
-  
   public static boolean compareAndSetBoolean(Object o, long offset, boolean expected, boolean x) {
     return ZONE.compareAndSetBoolean(o, offset, expected, x);
   }
 
-  
-  public static boolean compareAndExchangeBoolean(Object o, long offset, boolean expected, boolean x) {
+  public static boolean compareAndExchangeBoolean(
+      Object o, long offset, boolean expected, boolean x) {
     return ZONE.compareAndExchangeBoolean(o, offset, expected, x);
   }
 
   public static boolean compareAndExchangeBooleanAcquire(
-    Object o, long offset, boolean expected,
-    boolean x) {
+      Object o, long offset, boolean expected, boolean x) {
     return ZONE.compareAndExchangeBooleanAcquire(o, offset, expected, x);
   }
 
   public static boolean compareAndExchangeBooleanRelease(
-    Object o, long offset, boolean expected,
-    boolean x) {
+      Object o, long offset, boolean expected, boolean x) {
     return ZONE.compareAndExchangeBooleanRelease(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetBoolean(Object o, long offset, boolean expected, boolean x) {
+  public static boolean weakCompareAndSetBoolean(
+      Object o, long offset, boolean expected, boolean x) {
     return ZONE.weakCompareAndSetBoolean(o, offset, expected, x);
   }
 
   public static boolean weakCompareAndSetBooleanAcquire(
-    Object o, long offset, boolean expected,
-    boolean x) {
+      Object o, long offset, boolean expected, boolean x) {
     return ZONE.weakCompareAndSetBooleanAcquire(o, offset, expected, x);
   }
 
   public static boolean weakCompareAndSetBooleanRelease(
-    Object o, long offset, boolean expected,
-    boolean x) {
+      Object o, long offset, boolean expected, boolean x) {
     return ZONE.weakCompareAndSetBooleanRelease(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetBooleanPlain(Object o, long offset, boolean expected, boolean x) {
+  public static boolean weakCompareAndSetBooleanPlain(
+      Object o, long offset, boolean expected, boolean x) {
     return ZONE.weakCompareAndSetBooleanPlain(o, offset, expected, x);
   }
 
@@ -617,28 +601,28 @@ public class Danger {
     return ZONE.compareAndExchangeFloat(o, offset, expected, x);
   }
 
-  
-  public static float compareAndExchangeFloatAcquire(Object o, long offset, float expected, float x) {
+  public static float compareAndExchangeFloatAcquire(
+      Object o, long offset, float expected, float x) {
     return ZONE.compareAndExchangeFloatAcquire(o, offset, expected, x);
   }
 
-  
-  public static float compareAndExchangeFloatRelease(Object o, long offset, float expected, float x) {
+  public static float compareAndExchangeFloatRelease(
+      Object o, long offset, float expected, float x) {
     return ZONE.compareAndExchangeFloatRelease(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetFloatPlain(Object o, long offset, float expected, float x) {
+  public static boolean weakCompareAndSetFloatPlain(
+      Object o, long offset, float expected, float x) {
     return ZONE.weakCompareAndSetFloatPlain(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetFloatAcquire(Object o, long offset, float expected, float x) {
+  public static boolean weakCompareAndSetFloatAcquire(
+      Object o, long offset, float expected, float x) {
     return ZONE.weakCompareAndSetFloatAcquire(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetFloatRelease(Object o, long offset, float expected, float x) {
+  public static boolean weakCompareAndSetFloatRelease(
+      Object o, long offset, float expected, float x) {
     return ZONE.weakCompareAndSetFloatRelease(o, offset, expected, x);
   }
 
@@ -650,37 +634,35 @@ public class Danger {
     return ZONE.compareAndSetDouble(o, offset, expected, x);
   }
 
-  
   public static double compareAndExchangeDouble(Object o, long offset, double expected, double x) {
     return ZONE.compareAndExchangeDouble(o, offset, expected, x);
   }
 
-  
-  public static double compareAndExchangeDoubleAcquire(Object o, long offset, double expected, double x) {
+  public static double compareAndExchangeDoubleAcquire(
+      Object o, long offset, double expected, double x) {
     return ZONE.compareAndExchangeDoubleAcquire(o, offset, expected, x);
   }
 
-  
-  public static double compareAndExchangeDoubleRelease(Object o, long offset, double expected, double x) {
+  public static double compareAndExchangeDoubleRelease(
+      Object o, long offset, double expected, double x) {
     return ZONE.compareAndExchangeDoubleRelease(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetDoublePlain(Object o, long offset, double expected, double x) {
+  public static boolean weakCompareAndSetDoublePlain(
+      Object o, long offset, double expected, double x) {
     return ZONE.weakCompareAndSetDoublePlain(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetDoubleAcquire(Object o, long offset, double expected, double x) {
+  public static boolean weakCompareAndSetDoubleAcquire(
+      Object o, long offset, double expected, double x) {
     return ZONE.weakCompareAndSetDoubleAcquire(o, offset, expected, x);
   }
 
-  
-  public static boolean weakCompareAndSetDoubleRelease(Object o, long offset, double expected, double x) {
+  public static boolean weakCompareAndSetDoubleRelease(
+      Object o, long offset, double expected, double x) {
     return ZONE.weakCompareAndSetDoubleRelease(o, offset, expected, x);
   }
 
-  
   public static boolean weakCompareAndSetDouble(Object o, long offset, double expected, double x) {
     return ZONE.weakCompareAndSetDouble(o, offset, expected, x);
   }
@@ -693,27 +675,22 @@ public class Danger {
     return ZONE.compareAndExchangeLong(o, offset, expected, x);
   }
 
-  
   public static long compareAndExchangeLongAcquire(Object o, long offset, long expected, long x) {
     return ZONE.compareAndExchangeLongAcquire(o, offset, expected, x);
   }
 
-  
   public static long compareAndExchangeLongRelease(Object o, long offset, long expected, long x) {
     return ZONE.compareAndExchangeLongRelease(o, offset, expected, x);
   }
 
-  
   public static boolean weakCompareAndSetLongPlain(Object o, long offset, long expected, long x) {
     return ZONE.weakCompareAndSetLongPlain(o, offset, expected, x);
   }
 
-  
   public static boolean weakCompareAndSetLongAcquire(Object o, long offset, long expected, long x) {
     return ZONE.weakCompareAndSetLongAcquire(o, offset, expected, x);
   }
 
-  
   public static boolean weakCompareAndSetLongRelease(Object o, long offset, long expected, long x) {
     return ZONE.weakCompareAndSetLongRelease(o, offset, expected, x);
   }
@@ -1485,6 +1462,7 @@ public class Danger {
   public static void putLongUnalignedLE(Object o, long offset, long x) {
     ZONE.putLongUnaligned(o, offset, x, false);
   }
+
   public static void putLongUnalignedBE(Object o, long offset, long x) {
     ZONE.putLongUnaligned(o, offset, x, true);
   }
@@ -1512,7 +1490,6 @@ public class Danger {
   public static void putCharUnalignedBE(Object o, long offset, char x) {
     ZONE.putCharUnaligned(o, offset, x, true);
   }
-
 
   public static void invokeCleaner(ByteBuffer directBuffer) {
     ZONE.invokeCleaner(directBuffer);

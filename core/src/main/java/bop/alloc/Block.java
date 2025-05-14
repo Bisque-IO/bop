@@ -1,14 +1,12 @@
 package bop.alloc;
 
-import bop.concurrent.Mpmc;
-import bop.concurrent.Mpsc;
 import org.agrona.BitUtil;
 
-//public class Block<E> extends Mpsc<E> {
+// public class Block<E> extends Mpsc<E> {
 //  public Block(int requestedCapacity) {
 //    super(requestedCapacity);
 //  }
-//}
+// }
 
 public class Block<T> {
   T[] values;
@@ -21,17 +19,17 @@ public class Block<T> {
     values = (T[]) new Object[capacity];
     ridx = 0;
     widx = 0;
-    mask = capacity-1;
+    mask = capacity - 1;
   }
 
   public int size() {
-    return widx-ridx;
+    return widx - ridx;
   }
 
   public boolean offer(T value) {
     var widx = this.widx;
     var ridx = this.ridx;
-    if (widx-ridx >= values.length) {
+    if (widx - ridx >= values.length) {
       return false;
     }
     this.widx++;
@@ -42,10 +40,10 @@ public class Block<T> {
   public T poll() {
     var widx = this.widx;
     var ridx = this.ridx;
-    if (widx-ridx <= 0) {
+    if (widx - ridx <= 0) {
       return null;
     }
     this.ridx++;
     return values[ridx & mask];
   }
- }
+}

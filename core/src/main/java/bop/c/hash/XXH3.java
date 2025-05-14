@@ -1,7 +1,6 @@
 package bop.c.hash;
 
 import bop.unsafe.Danger;
-
 import java.lang.foreign.MemorySegment;
 
 public class XXH3 {
@@ -15,11 +14,8 @@ public class XXH3 {
 
   public static long hash(final byte[] input, int offset, int length) {
     try {
-      return (long)CFunctions.BOP_XXH3_SEGMENT.invokeExact(
-        MemorySegment.ofArray(input),
-        (long)offset,
-        (long)length
-      );
+      return (long) CFunctions.BOP_XXH3_SEGMENT.invokeExact(
+          MemorySegment.ofArray(input), (long) offset, (long) length);
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }
@@ -27,10 +23,7 @@ public class XXH3 {
 
   public static long hash(final long address, long length) {
     try {
-      return (long)CFunctions.BOP_XXH3.invokeExact(
-        address,
-        length
-      );
+      return (long) CFunctions.BOP_XXH3.invokeExact(address, length);
     } catch (Throwable e) {
       throw new RuntimeException(e);
     }
@@ -45,7 +38,7 @@ public class XXH3 {
 
     public static Digest create() {
       try {
-        return new Digest((long)CFunctions.BOP_XXH3_ALLOC.invokeExact());
+        return new Digest((long) CFunctions.BOP_XXH3_ALLOC.invokeExact());
       } catch (Throwable e) {
         throw new RuntimeException(e);
       }
@@ -65,11 +58,7 @@ public class XXH3 {
 
     public void update(final long address, final long length) {
       try {
-        CFunctions.BOP_XXH3_UPDATE.invokeExact(
-          this.address,
-          address,
-          length
-        );
+        CFunctions.BOP_XXH3_UPDATE.invokeExact(this.address, address, length);
       } catch (Throwable e) {
         throw new RuntimeException(e);
       }
@@ -86,11 +75,7 @@ public class XXH3 {
     public void update(final byte[] input, int offset, int length) {
       try {
         CFunctions.BOP_XXH3_UPDATE_SEGMENT.invokeExact(
-          this.address,
-          MemorySegment.ofArray(input),
-          (long)offset,
-          (long)length
-        );
+            this.address, MemorySegment.ofArray(input), (long) offset, (long) length);
       } catch (Throwable e) {
         throw new RuntimeException(e);
       }
@@ -106,11 +91,7 @@ public class XXH3 {
 
     public long updateFinal(final long address, final long length) {
       try {
-        return (long)CFunctions.BOP_XXH3_UPDATE_FINAL.invokeExact(
-          this.address,
-          address,
-          length
-        );
+        return (long) CFunctions.BOP_XXH3_UPDATE_FINAL.invokeExact(this.address, address, length);
       } catch (Throwable e) {
         throw new RuntimeException(e);
       }
@@ -118,12 +99,8 @@ public class XXH3 {
 
     public long updateFinal(final byte[] input, int offset, int length) {
       try {
-        return (long)CFunctions.BOP_XXH3_UPDATE_FINAL_SEGMENT.invokeExact(
-          this.address,
-          MemorySegment.ofArray(input),
-          (long)offset,
-          (long)length
-        );
+        return (long) CFunctions.BOP_XXH3_UPDATE_FINAL_SEGMENT.invokeExact(
+            this.address, MemorySegment.ofArray(input), (long) offset, (long) length);
       } catch (Throwable e) {
         throw new RuntimeException(e);
       }
@@ -131,11 +108,8 @@ public class XXH3 {
 
     public long updateFinalReset(final long address, final long length) {
       try {
-        return (long)CFunctions.BOP_XXH3_UPDATE_FINAL_RESET.invokeExact(
-          this.address,
-          address,
-          length
-        );
+        return (long)
+            CFunctions.BOP_XXH3_UPDATE_FINAL_RESET.invokeExact(this.address, address, length);
       } catch (Throwable e) {
         throw new RuntimeException(e);
       }
@@ -151,12 +125,8 @@ public class XXH3 {
 
     public long updateFinalReset(final byte[] input, int offset, int length) {
       try {
-        return (long)CFunctions.BOP_XXH3_UPDATE_FINAL_RESET_SEGMENT.invokeExact(
-          address,
-          MemorySegment.ofArray(input),
-          (long)offset,
-          (long)length
-        );
+        return (long) CFunctions.BOP_XXH3_UPDATE_FINAL_RESET_SEGMENT.invokeExact(
+            address, MemorySegment.ofArray(input), (long) offset, (long) length);
       } catch (Throwable e) {
         throw new RuntimeException(e);
       }
@@ -164,9 +134,7 @@ public class XXH3 {
 
     public long digest() {
       try {
-        return (long)CFunctions.BOP_XXH3_DIGEST.invokeExact(
-          this.address
-        );
+        return (long) CFunctions.BOP_XXH3_DIGEST.invokeExact(this.address);
       } catch (Throwable e) {
         throw new RuntimeException(e);
       }
@@ -174,9 +142,7 @@ public class XXH3 {
 
     public long digestReset() {
       try {
-        return (long)CFunctions.BOP_XXH3_DIGEST_RESET.invokeExact(
-          this.address
-        );
+        return (long) CFunctions.BOP_XXH3_DIGEST_RESET.invokeExact(this.address);
       } catch (Throwable e) {
         throw new RuntimeException(e);
       }
@@ -184,9 +150,7 @@ public class XXH3 {
 
     public void reset() {
       try {
-        CFunctions.BOP_XXH3_RESET.invokeExact(
-          this.address
-        );
+        CFunctions.BOP_XXH3_RESET.invokeExact(this.address);
       } catch (Throwable e) {
         throw new RuntimeException(e);
       }

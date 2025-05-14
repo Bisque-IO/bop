@@ -2,7 +2,6 @@ package bop.constant;
 
 import bop.hash.Hash;
 import bop.unsafe.Danger;
-
 import java.lang.foreign.MemorySegment;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;

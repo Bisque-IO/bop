@@ -12,7 +12,7 @@ public class RefQueueBenchmark {
   public static void main(String[] args) throws Exception {
     var bg = new Thread(() -> {
       Object o = null;
-      for (;;) {
+      for (; ; ) {
         try {
           Thread.sleep(1000);
         } catch (InterruptedException e) {
@@ -20,14 +20,14 @@ public class RefQueueBenchmark {
         }
         System.gc();
 
-//        for (int i = 0; i < 10_000_000; i++) {
-//          o = new Object();
-//        }
-//        System.out.println(o);
+        //        for (int i = 0; i < 10_000_000; i++) {
+        //          o = new Object();
+        //        }
+        //        System.out.println(o);
       }
     });
     bg.setDaemon(true);
-//    bg.start();
+    //    bg.start();
     System.out.println("Warming up JVM...");
     benchmarkCleaner();
     benchmarkReferenceQueue();
@@ -69,7 +69,7 @@ public class RefQueueBenchmark {
         while (counter.get() < (NUM_OBJECTS)) {
           Reference<?> ref = queue.remove();
           if (ref != null) {
-            refs.remove((PhantomRef)ref);
+            refs.remove((PhantomRef) ref);
             counter.incrementAndGet();
           }
         }
@@ -90,12 +90,10 @@ public class RefQueueBenchmark {
       }
 
       r = null;
-//      TLS.remove();
+      //      TLS.remove();
     }
 
     System.gc();
-
-
 
     processor.join();
 
@@ -112,8 +110,8 @@ public class RefQueueBenchmark {
   private static void printResult(long durationNano, int total) {
     double durationSec = durationNano / 1_000_000_000.0;
     double opsPerSec = total / durationSec;
-    System.out.printf("Processed %d cleanups in %.2f seconds → ~%.2f ops/sec%n",
-      total, durationSec, opsPerSec);
+    System.out.printf(
+        "Processed %d cleanups in %.2f seconds → ~%.2f ops/sec%n", total, durationSec, opsPerSec);
   }
 
   static class MyObject extends PhantomRef {
@@ -125,20 +123,17 @@ public class RefQueueBenchmark {
   static class PhantomRef extends PhantomReference<Object> {
     public final long tid = Thread.currentThread().threadId();
     public final Thread thread = Thread.currentThread();
-    /**
-     * The list of PhantomCleanable; synchronizes insert and remove.
-     */
+    /** The list of PhantomCleanable; synchronizes insert and remove. */
     private final RefList list;
 
     /**
-     * Index of this PhantomCleanable in the list node.
-     * Synchronized by the same lock as the list itself.
+     * Index of this PhantomCleanable in the list node. Synchronized by the same lock as the list
+     * itself.
      */
     int index;
 
     /**
-     * Node for this PhantomCleanable in the list.
-     * Synchronized by the same lock as the list itself.
+     * Node for this PhantomCleanable in the list. Synchronized by the same lock as the list itself.
      */
     RefList.Node node;
 
@@ -151,27 +146,25 @@ public class RefQueueBenchmark {
     }
   }
 
-  /**
-   * A specialized implementation that tracks phantom cleanables.
-   */
+  /** A specialized implementation that tracks phantom cleanables. */
   static final class RefList {
     /**
-     * Capacity for a single node in the list.
-     * This balances memory overheads vs locality vs GC walking costs.
+     * Capacity for a single node in the list. This balances memory overheads vs locality vs GC
+     * walking costs.
      */
     static final int NODE_CAPACITY = 2048;
+
     private final SpinLock lock = new SpinLock();
     /**
-     * Head node. This is the only node where PhantomCleanables are
-     * added to or removed from. This is the only node with variable size,
-     * all other nodes linked from the head are always at full capacity.
+     * Head node. This is the only node where PhantomCleanables are added to or removed from. This
+     * is the only node with variable size, all other nodes linked from the head are always at full
+     * capacity.
      */
     private Node head;
     /**
-     * Cached node instance to provide better behavior near NODE_CAPACITY
-     * threshold: if list size flips around NODE_CAPACITY, it would reuse
-     * the cached node instead of wasting and re-allocating a new node all
-     * the time.
+     * Cached node instance to provide better behavior near NODE_CAPACITY threshold: if list size
+     * flips around NODE_CAPACITY, it would reuse the cached node instead of wasting and
+     * re-allocating a new node all the time.
      */
     private Node cache;
 
@@ -179,9 +172,7 @@ public class RefQueueBenchmark {
       reset();
     }
 
-    /**
-     * Testing support: reset list to initial state.
-     */
+    /** Testing support: reset list to initial state. */
     void reset() {
       lock.lock();
       try {
@@ -206,9 +197,7 @@ public class RefQueueBenchmark {
       }
     }
 
-    /**
-     * Insert this PhantomCleanable in the list.
-     */
+    /** Insert this PhantomCleanable in the list. */
     public void insert(PhantomRef phc) {
       lock.lock();
       try {
@@ -241,8 +230,8 @@ public class RefQueueBenchmark {
     /**
      * Remove this PhantomCleanable from the list.
      *
-     * @return true if Cleanable was removed or false if not because
-     * it had already been removed before
+     * @return true if Cleanable was removed or false if not because it had already been removed
+     *     before
      */
     public boolean remove(PhantomRef phc) {
       lock.lock();
@@ -290,9 +279,7 @@ public class RefQueueBenchmark {
       }
     }
 
-    /**
-     * Segment node.
-     */
+    /** Segment node. */
     static class Node {
       // Array of tracked cleanables, and the amount of elements in it.
       final PhantomRef[] arr = new PhantomRef[NODE_CAPACITY];

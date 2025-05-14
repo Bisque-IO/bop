@@ -1,13 +1,12 @@
 package bop.hash;
 
-import bop.io.Bytes;
 import bop.c.hash.RapidHash;
 import bop.c.hash.XXH3;
+import bop.io.Bytes;
 import bop.unsafe.Danger;
-import org.agrona.DirectBuffer;
-
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
+import org.agrona.DirectBuffer;
 
 public class Hash {
 
@@ -38,7 +37,7 @@ public class Hash {
     }
     final var hb = buf.byteArray();
     if (hb != null) {
-      return RapidHash.hash(hb, (int)buf.addressOffset(), length);
+      return RapidHash.hash(hb, (int) buf.addressOffset(), length);
     }
     final var bb = buf.byteBuffer();
     if (bb != null) {
@@ -48,7 +47,7 @@ public class Hash {
     if (address == 0L) {
       return 0L;
     }
-    return RapidHash.hash(address+offset, length);
+    return RapidHash.hash(address + offset, length);
   }
 
   public static long rapid(ByteBuffer buffer) {
@@ -95,7 +94,7 @@ public class Hash {
     if (address == 0L) {
       return 0L;
     }
-    return RapidHash.hash(address+offset, bytes.size()-offset);
+    return RapidHash.hash(address + offset, bytes.size() - offset);
   }
 
   public static long rapid(final Bytes bytes, int offset, int length) {
@@ -106,7 +105,7 @@ public class Hash {
     if (address == 0L) {
       return 0L;
     }
-    return RapidHash.hash(address+offset, length);
+    return RapidHash.hash(address + offset, length);
   }
 
   public static long rapid(MemorySegment segment) {
@@ -156,9 +155,9 @@ public class Hash {
     final var hb = buf.byteArray();
     if (hb != null) {
       if (length < XXH3_C_THRESHOLD) {
-        return XXH3_64.DEFAULT.hash(hb, (int)buf.addressOffset(), length);
+        return XXH3_64.DEFAULT.hash(hb, (int) buf.addressOffset(), length);
       }
-      return XXH3.hash(hb, (int)buf.addressOffset(), length);
+      return XXH3.hash(hb, (int) buf.addressOffset(), length);
     }
     final var bb = buf.byteBuffer();
     if (bb != null) {
@@ -171,7 +170,7 @@ public class Hash {
     if (length < XXH3_C_THRESHOLD) {
       return XXH3_64.DEFAULT.hash(address, offset, length);
     }
-    return XXH3.hash(address+offset, length);
+    return XXH3.hash(address + offset, length);
   }
 
   public static long xxh3(ByteBuffer buffer) {
@@ -189,7 +188,7 @@ public class Hash {
     if (buffer.hasArray()) {
       buffer.position(limit);
       if (rem < XXH3_C_THRESHOLD) {
-        return XXH3_64.DEFAULT.hash(buffer.array(), (int)buffer.arrayOffset(), rem);
+        return XXH3_64.DEFAULT.hash(buffer.array(), (int) buffer.arrayOffset(), rem);
       }
       return XXH3.hash(buffer.array(), buffer.arrayOffset() + pos, rem);
     } else {
@@ -248,7 +247,7 @@ public class Hash {
     if (length < XXH3_C_THRESHOLD) {
       return XXH3_64.DEFAULT.hash(address, 0, length);
     }
-    return XXH3.hash(address+offset, length);
+    return XXH3.hash(address + offset, length);
   }
 
   public static long xxh3(final Bytes bytes, int offset, int length) {
@@ -262,6 +261,6 @@ public class Hash {
     if (length < XXH3_C_THRESHOLD) {
       return XXH3_64.DEFAULT.hash(address, offset, length);
     }
-    return XXH3.hash(address+offset, length);
+    return XXH3.hash(address + offset, length);
   }
 }
