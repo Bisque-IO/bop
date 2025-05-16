@@ -3,7 +3,8 @@
 
 package lucide
 
-import react.*
+import react.ComponentType
+import react.Props
 
 external interface LucideIconProps : Props {
     var color: String?

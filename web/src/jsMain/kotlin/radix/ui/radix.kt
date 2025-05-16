@@ -5,10 +5,9 @@ import react.PropsWithChildren
 import react.PropsWithClassName
 import react.PropsWithStyle
 
-external interface DefaultProps : PropsWithChildren, PropsWithClassName, PropsWithStyle {}
+external interface DefaultProps : PropsWithChildren, PropsWithClassName, PropsWithStyle
 
-
-external interface AccordionProps : PropsWithChildren {}
+external interface AccordionProps : PropsWithChildren
 
 external interface ButtonProps : PropsWithChildren {
     var asChild: Boolean
@@ -23,7 +22,6 @@ external interface ButtonProps : PropsWithChildren {
 @JsNonModule
 external object AccordionModule {
     val Accordion: FC<AccordionProps>
-
 }
 
 @JsModule("@radix-ui/react-accordion")

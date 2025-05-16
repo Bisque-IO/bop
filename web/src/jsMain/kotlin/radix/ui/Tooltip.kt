@@ -3,7 +3,7 @@
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 /*
 
@@ -57,9 +57,9 @@ external val TooltipTrigger: ComponentType<TooltipTriggerProps>
 // Content
 // ------------------------------
 external interface TooltipContentProps : DefaultProps {
-    var side: String?           // "top" | "right" | "bottom" | "left"
+    var side: String? // "top" | "right" | "bottom" | "left"
     var sideOffset: Int?
-    var align: String?          // "start" | "center" | "end"
+    var align: String? // "start" | "center" | "end"
     var alignOffset: Int?
     var avoidCollisions: Boolean?
     var collisionPadding: Int?

@@ -1,0 +1,21 @@
+package bop.ui
+
+import lucide.CheckIcon
+import radix.ui.CheckboxProps
+import react.FC
+import web.cssom.ClassName
+
+val Checkbox = FC<CheckboxProps>("Checkbox") { props ->
+   radix.ui.Checkbox {
+      dataSlot = "checkbox"
+      className = cn("peer border-input data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground data-[state=checked]:border-primary focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive size-4 shrink-0 rounded-[4px] border shadow-xs transition-shadow outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50", props.className)
+      spread(props, "className")
+      radix.ui.CheckboxIndicator {
+         dataSlot = "checkbox-indicator"
+         className = ClassName("flex items-center justify-center text-current transition-none")
+         CheckIcon {
+            className = "size-3.5"
+         }
+      }
+   }
+}

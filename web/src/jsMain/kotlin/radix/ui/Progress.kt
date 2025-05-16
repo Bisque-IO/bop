@@ -1,9 +1,8 @@
-@file:JsModule("@radix-ui/react-progress")
-@file:JsNonModule
+@file:JsModule("@radix-ui/react-progress") @file:JsNonModule
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 /*
 

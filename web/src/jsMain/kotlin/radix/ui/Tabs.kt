@@ -3,7 +3,7 @@
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 /*
 
@@ -44,7 +44,7 @@ external interface TabsRootProps : DefaultProps {
     var value: String?
     var onValueChange: ((String) -> Unit)?
     var orientation: String? // "horizontal" | "vertical"
-    var dir: String?         // "ltr" | "rtl"
+    var dir: String? // "ltr" | "rtl"
     var activationMode: String? // "automatic" | "manual"
 }
 

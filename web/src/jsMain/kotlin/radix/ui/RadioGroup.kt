@@ -3,7 +3,7 @@
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 /*
 
@@ -45,7 +45,7 @@ external interface RadioGroupProps : DefaultProps {
     var required: Boolean?
     var disabled: Boolean?
     var orientation: String? // "horizontal" | "vertical"
-    var dir: String?         // "ltr" | "rtl"
+    var dir: String? // "ltr" | "rtl"
     var asChild: Boolean?
 }
 

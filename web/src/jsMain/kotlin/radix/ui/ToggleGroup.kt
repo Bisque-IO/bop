@@ -3,7 +3,7 @@
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 /*
 
@@ -43,7 +43,7 @@ external interface ToggleGroupProps : DefaultProps {
     var onValueChange: ((dynamic) -> Unit)?
     var rovingFocus: Boolean?
     var orientation: String? // "horizontal" | "vertical"
-    var dir: String?         // "ltr" | "rtl"
+    var dir: String? // "ltr" | "rtl"
     var loop: Boolean?
     var disabled: Boolean?
     var asChild: Boolean?

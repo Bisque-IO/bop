@@ -1,10 +1,10 @@
-import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
-
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
+    alias(libs.plugins.spotless)
 }
 
 group = "bop"
+
 version = "1.0-SNAPSHOT"
 
 repositories {
@@ -24,7 +24,8 @@ kotlin {
 
             implementation("org.jetbrains.kotlin-wrappers:kotlin-tanstack-table-core:2025.5.6-8.21.3")
 
-//            implementation("org.jetbrains.kotlin-wrappers:kotlin-typescript-js:2025.5.6-5.7.2")
+            //
+            // implementation("org.jetbrains.kotlin-wrappers:kotlin-typescript-js:2025.5.6-5.7.2")
 
             implementation(npm("@dnd-kit/core", "^6.3.1"))
             implementation(npm("@dnd-kit/modifiers", "^9.0.0"))
@@ -65,31 +66,32 @@ kotlin {
             implementation(npm("@tabler/icons-react", "^3.31.0"))
 
             implementation(npm("class-variance-authority", "^0.7.1"))
+            implementation(npm("clsx", "^2.1.1"))
+            implementation(npm("cmdk", "^1.1.1"))
+            implementation(npm("date-fns", "^4.1.0"))
+            implementation(npm("embla-carousel", "^8.6.0"))
+            implementation(npm("embla-carousel-react", "^8.6.0"))
             implementation(npm("input-otp", "^1.4.2"))
             implementation(npm("lucide-react", "^0.474.0"))
-
+            implementation(npm("react-day-picker", "^9.7.0"))
+            implementation(npm("react-resizable-panels", "^3.0.2"))
             implementation(npm("recharts", "^2.15.1"))
             implementation(npm("tailwindcss", "^4.0.7"))
-            implementation(npm("zod", "^3.24.1"))
-            implementation(npm("clsx", "^2.1.1"))
             implementation(npm("tailwind-merge", "^3.3.0"))
+            implementation(npm("vaul", "^1.1.2"))
+            implementation(npm("zod", "^3.24.1"))
         }
-        jsTest.dependencies {
-            implementation(kotlin("test"))
-        }
+        jsTest.dependencies { implementation(kotlin("test")) }
     }
 
     js {
-//        useCommonJs()
         useEsModules()
 
         browser {
             commonWebpackConfig {
                 outputFileName = "bop-bundle.js"
                 showProgress = true
-                cssSupport {
-                    enabled = true
-                }
+                cssSupport { enabled = true }
             }
 
             testTask {
@@ -109,4 +111,22 @@ kotlin {
     }
 }
 
+spotless {
+    kotlin {
+        target("src/**/*.kt", "build/generated/**/*.kt", "**/*.kts")
+        //        ktlint(libs.ktlint.get().version)
+        trimTrailingWhitespace()
+        endWithNewline()
+//    ktfmt(libs.ktfmt.get().version).googleStyle()
+//    ktfmt(libs.ktfmt.get().version).kotlinlangStyle().configure {
+//      it.setBlockIndent(3)
+//      it.setContinuationIndent(3)
+//    }
+    }
+}
 
+tasks["spotlessKotlin"].dependsOn("compileKotlinJs")
+
+tasks["spotlessKotlin"].dependsOn("compileTestKotlinJs")
+
+tasks["spotlessKotlinCheck"].enabled = false

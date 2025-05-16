@@ -3,7 +3,7 @@
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 /*
 
@@ -24,8 +24,9 @@ val MyAspectRatioExample = FC {
 
 // ------------------------------
 // AspectRatio
+// ------------------------------
 external interface AspectRatioProps : DefaultProps {
-    var ratio: Double?       // e.g. 16.0 / 9.0
+    var ratio: Double? // e.g. 16.0 / 9.0
     var asChild: Boolean?
 }
 

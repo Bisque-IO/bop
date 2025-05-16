@@ -3,7 +3,7 @@
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 @JsName("Slot")
 external val Slot: ComponentType<DefaultProps>

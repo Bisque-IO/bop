@@ -3,7 +3,7 @@
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 /*
 
@@ -58,7 +58,7 @@ val MyMenubar = FC {
 // ------------------------------
 external interface MenubarProps : DefaultProps {
     var orientation: String? // "horizontal" | "vertical"
-    var dir: String?         // "ltr" | "rtl"
+    var dir: String? // "ltr" | "rtl"
     var loop: Boolean?
 }
 

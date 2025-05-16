@@ -3,8 +3,8 @@
 
 package radix.ui
 
-import react.*
-import kotlin.js.*
+import react.ComponentType
+import react.Props
 
 /*
 

@@ -3,7 +3,7 @@
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 /*
 
@@ -44,7 +44,7 @@ val MyToolbar = FC {
 // Toolbar Root
 external interface ToolbarProps : DefaultProps {
     var orientation: String? // "horizontal" | "vertical"
-    var dir: String?         // "ltr" | "rtl"
+    var dir: String? // "ltr" | "rtl"
     var loop: Boolean?
     var asChild: Boolean?
 }

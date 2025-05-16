@@ -3,7 +3,7 @@
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 /*
 
@@ -47,7 +47,7 @@ val MyNavigationMenu = FC {
 // Root
 external interface NavigationMenuProps : DefaultProps {
     var orientation: String? // "horizontal" | "vertical"
-    var dir: String?         // "ltr" | "rtl"
+    var dir: String? // "ltr" | "rtl"
     var delayDuration: Int?
     var skipDelayDuration: Int?
     var value: String?

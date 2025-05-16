@@ -1,9 +1,8 @@
-@file:JsModule("@radix-ui/react-accordion")
-@file:JsNonModule
+@file:JsModule("@radix-ui/react-accordion") @file:JsNonModule
 
 package radix.ui
 
-import react.*
+import react.ComponentType
 
 /*
 
@@ -41,25 +40,33 @@ val MyAccordion = FC {
 // Root
 // ------------------------------
 external interface AccordionRootProps : DefaultProps {
-    var type: String // "single" or "multiple"
-    var defaultValue: dynamic /* String or Array<String> */
-    var value: dynamic /* String or Array<String> */
-    var onValueChange: ((dynamic) -> Unit)?
-    var collapsible: Boolean?
-    var disabled: Boolean?
-    var orientation: String? // "vertical" | "horizontal"
-    var dir: String? // "ltr" | "rtl"
+   var type: String // "single" or "multiple"
+   var defaultValue: dynamic /* String or Array<String> */
+   var value: dynamic /* String or Array<String> */
+   var onValueChange: ((dynamic) -> Unit)?
+   var collapsible: Boolean?
+   var disabled: Boolean?
+   var orientation: String? // "vertical" | "horizontal"
+   var dir: String? // "ltr" | "rtl"
 }
 
 @JsName("Root")
 external val AccordionRoot: ComponentType<AccordionRootProps>
 
 // ------------------------------
+// Header
+// ------------------------------
+external interface AccordionHeaderProps : DefaultProps
+
+@JsName("Header")
+external val AccordionHeader: ComponentType<AccordionHeaderProps>
+
+// ------------------------------
 // Item
 // ------------------------------
 external interface AccordionItemProps : DefaultProps {
-    var value: String
-    var disabled: Boolean?
+   var value: String
+   var disabled: Boolean?
 }
 
 @JsName("Item")
@@ -69,7 +76,7 @@ external val AccordionItem: ComponentType<AccordionItemProps>
 // Trigger
 // ------------------------------
 external interface AccordionTriggerProps : DefaultProps {
-    var asChild: Boolean?
+   var asChild: Boolean?
 }
 
 @JsName("Trigger")
@@ -79,8 +86,8 @@ external val AccordionTrigger: ComponentType<AccordionTriggerProps>
 // Content
 // ------------------------------
 external interface AccordionContentProps : DefaultProps {
-    var forceMount: Boolean?
-    var asChild: Boolean?
+   var forceMount: Boolean?
+   var asChild: Boolean?
 }
 
 @JsName("Content")
