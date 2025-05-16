@@ -1,11 +1,31 @@
+import bop.ui.Accordion
 import bop.ui.Alert
 import bop.ui.AlertDescription
 import bop.ui.AlertTitle
 import bop.ui.Button
 import bop.ui.Checkbox
+import bop.ui.Dialog
+import bop.ui.DialogClose
+import bop.ui.DialogContent
+import bop.ui.DialogDescription
+import bop.ui.DialogOverlay
+import bop.ui.DialogPortal
+import bop.ui.DialogTitle
+import bop.ui.DialogTrigger
+import bop.ui.DropdownMenu
+import bop.ui.DropdownMenuContent
+import bop.ui.DropdownMenuGroup
+import bop.ui.DropdownMenuItem
+import bop.ui.DropdownMenuLabel
+import bop.ui.DropdownMenuSeparator
+import bop.ui.DropdownMenuShortcut
+import bop.ui.DropdownMenuTrigger
 import js.objects.unsafeJso
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import lucide.ArrowLeftIcon
-import radix.ui.*
+
 import react.FC
 import react.Props
 import react.createElement
@@ -25,12 +45,10 @@ import web.cssom.ClassName
 import web.cssom.px
 import web.dom.document
 
-val Accordion = AccordionModule.Accordion
-
 val MyDialog = FC {
    val (isOpen, setOpen) = useState(false)
 
-   DialogRoot {
+   Dialog {
       open = isOpen
       onOpenChange = { setOpen(it) }
 
@@ -65,24 +83,50 @@ val MyDialog = FC {
    }
 }
 
-val MySelect = FC {
-   val (selected, setSelected) = useState("apple")
+val DropdownMenuSimple = FC {
+   DropdownMenu {
+      defaultOpen = false
+      DropdownMenuTrigger {
+         asChild = true
 
-   Select {
-      value = selected
-      onValueChange = { setSelected(it) }
-
-      SelectTrigger {
-         className = ClassName("inline-flex items-center justify-between border px-3 py-2 w-48")
-         SelectValue { placeholder = "Select a fruit" }
+         Button {
+            variant = "outline"
+            +"Open"
+         }
       }
 
-      SelectContent {
-         SelectViewport {
-            listOf("apple", "banana", "mango").forEach {
-               SelectItem {
-                  value = it
-                  +it.replaceFirstChar(Char::uppercase)
+      DropdownMenuContent {
+         align = "start"
+         className = ClassName("w-56")
+
+         DropdownMenuLabel {
+            +"MyAccount"
+         }
+         DropdownMenuSeparator {}
+         DropdownMenuGroup {
+            DropdownMenuItem {
+               +"Profile"
+               DropdownMenuShortcut {
+                  +"⇧⌘P"
+               }
+            }
+            DropdownMenuItem {
+               +"Billing"
+               DropdownMenuShortcut {
+                  +"⌘B"
+               }
+            }
+
+            DropdownMenuItem {
+               +"Settings"
+               DropdownMenuShortcut {
+                  +"⌘S"
+               }
+            }
+            DropdownMenuItem {
+               +"Keyboard shortcuts"
+               DropdownMenuShortcut {
+                  +"⌘K"
                }
             }
          }
@@ -154,6 +198,10 @@ val Home = FC {
          style = unsafeJso { margin = 15.px }
       }
 
+      DropdownMenuSimple {}
+
+      DrawerDemo {}
+
       div {
          Alert {
             //                variant = "destructive"
@@ -161,6 +209,8 @@ val Home = FC {
             AlertDescription { +"This is a description about the alert" }
          }
       }
+
+
       //        div { ActivityLogIcon {} }
       //        div { BarChartIcon {} }
       //        div { MySelect {} }
@@ -222,6 +272,13 @@ private val Root = FC<Props> {
 }
 
 fun main() {
+   val scope = MainScope()
+   scope.launch {
+      for (i in 0..1000) {
+         delay(1000)
+         console.log(i.toString())
+      }
+   }
    //    TailwindStyles
    kotlinx.browser.document.addEventListener(
       "DOMContentLoaded",

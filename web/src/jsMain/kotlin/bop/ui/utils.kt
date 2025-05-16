@@ -20,9 +20,17 @@ operator fun <P : Props> P.set(name: String, value: dynamic) {
    asDynamic()[name] = value
 }
 
-var <P : Props> P.dataSlot: String
-   get() = asDynamic()["data-slot"] as String
+var <P : Props> P.dataSlot: String?
+   get() = asDynamic()["data-slot"] as String?
    set(value) { asDynamic()["data-slot"] = value }
+
+var <P : Props> P.dataInset: Boolean?
+   get() = asDynamic()["data-inset"] as Boolean?
+   set(value) { asDynamic()["data-inset"] = value }
+
+var <P : Props> P.dataVariant: String?
+   get() = asDynamic()["data-variant"] as String?
+   set(value) { asDynamic()["data-variant"] = value }
 
 fun <P0 : Any?, P1 : Any?> P0.spread(props: P1, exclude: String = ""): P0 {
    if (this == null || props == null) {
