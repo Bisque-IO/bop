@@ -29,10 +29,10 @@ external interface CarouselProps : DefaultProps {
 external interface CarouselContextProps : CarouselProps {
    var carouselRef: dynamic
    var api: dynamic
-   var scrollPrev: () -> Unit
-   var scrollNext: () -> Unit
-   var canScrollPrev: Boolean
-   var canScrollNext: Boolean
+   var scrollPrev: (() -> Unit)?
+   var scrollNext: (() -> Unit)?
+   var canScrollPrev: Boolean?
+   var canScrollNext: Boolean?
 }
 
 val CarouselContext = react.createContext<CarouselContextProps>()
@@ -44,6 +44,7 @@ fun useCarousel(): CarouselContextProps {
    }
    return context
 }
+
 
 val Carousel = FC<CarouselProps>("Carousel") { props ->
    val result = useEmblaCarousel(unsafeJso {
@@ -63,8 +64,12 @@ val Carousel = FC<CarouselProps>("Carousel") { props ->
       }
    }
 
-   val scrollPrev = useCallback(api) { api?.scrollPrev(false) }
-   val scrollNext = useCallback(api) { api?.scrollNext(false) }
+   val scrollPrev = useCallback(api) {
+      api?.scrollPrev(false) ?: Unit
+   }
+   val scrollNext = useCallback(api) {
+      api?.scrollNext(false) ?: Unit
+   }
 
    val handleKeyDown = useCallback(scrollPrev, scrollNext) { event: KeyboardEvent<HTMLDivElement> ->
       if (event.key == "ArrowLeft") {
@@ -94,22 +99,22 @@ val Carousel = FC<CarouselProps>("Carousel") { props ->
 
    CarouselContext.Provider {
       value = unsafeJso {
-         carouselRef
-         api
-         opts
-         orientation = if (opts.axis == "y") "vertical" else "horizontal"
-         scrollPrev
-         scrollNext
-         canScrollPrev
-         canScrollNext
+         this.carouselRef = carouselRef
+         this.api = api
+         this.opts = opts
+         this.orientation = if (opts.axis == "y") "vertical" else "horizontal"
+         this.scrollPrev = scrollPrev
+         this.scrollNext = scrollNext
+         this.canScrollPrev = canScrollPrev
+         this.canScrollNext = canScrollNext
       }
       div {
+         spread(props, "className")
          onKeyDownCapture = { handleKeyDown(it) }
          className = cn("relative", props.className)
          role = AriaRole.region
          ariaRoleDescription = "carousel"
          dataSlot = "carousel"
-         spread(props)
       }
    }
 }

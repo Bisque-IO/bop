@@ -7,29 +7,31 @@ import react.ComponentType
 
 /*
 
-val MyLabelExample = FC {
-    Label {
-        htmlFor = "email"
-        className = "block mb-1 font-semibold"
-        +"Email Address"
-    }
+Anatomy
+Import the component.
 
-    input {
-        id = "email"
-        type = "email"
-        className = "border p-2 w-full"
-    }
-}
+import { Label } from "radix-ui";
+
+export default () => <Label.Root />;
+
+
+Accessibility
+This component is based on the native label element, it will automatically apply
+the correct labelling when wrapping controls or using the htmlFor attribute.
+For your own custom controls to work correctly, ensure they use native elements
+such as button or input as a base.
 
 */
 
-// ------------------------------
-// Label
-// ------------------------------
-external interface LabelProps : DefaultProps {
+/**
+ * @see LabelRoot
+ */
+external interface LabelRootProps : DefaultProps, PropsWithAsChild {
+    /**
+     * The id of the element the label is associated with.
+     */
     var htmlFor: String?
-    var asChild: Boolean?
 }
 
 @JsName("Root")
-external val Label: ComponentType<LabelProps>
+external val LabelRoot: ComponentType<LabelRootProps>

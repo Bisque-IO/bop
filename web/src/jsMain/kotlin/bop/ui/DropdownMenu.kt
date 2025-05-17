@@ -6,7 +6,6 @@ import radix.ui.CircleIcon
 import radix.ui.DropdownMenuCheckboxItemProps
 import radix.ui.DropdownMenuContentProps
 import radix.ui.DropdownMenuGroupProps
-import radix.ui.DropdownMenuLabelProps
 import radix.ui.DropdownMenuPortalProps
 import radix.ui.DropdownMenuRadioGroupProps
 import radix.ui.DropdownMenuRadioItemProps
@@ -120,6 +119,10 @@ val DropdownMenuRadioItem = FC<DropdownMenuRadioItemProps>("DropdownMenuRadioIte
 
       +props.children
    }
+}
+
+external interface DropdownMenuLabelProps : radix.ui.DropdownMenuLabelProps {
+   var inset: dynamic
 }
 
 val DropdownMenuLabel = FC<DropdownMenuLabelProps>("DropdownMenuLabel") { props ->

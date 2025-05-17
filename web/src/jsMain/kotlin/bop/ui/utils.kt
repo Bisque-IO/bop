@@ -32,6 +32,10 @@ var <P : Props> P.dataVariant: String?
    get() = asDynamic()["data-variant"] as String?
    set(value) { asDynamic()["data-variant"] = value }
 
+var <P : Props> P.dataActive: Boolean?
+   get() = asDynamic()["data-active"] as Boolean?
+   set(value) { asDynamic()["data-active"] = value }
+
 fun <P0 : Any?, P1 : Any?> P0.spread(props: P1, exclude: String = ""): P0 {
    if (this == null || props == null) {
       return this

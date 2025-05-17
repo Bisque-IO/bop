@@ -20,6 +20,7 @@ import bop.ui.DropdownMenuLabel
 import bop.ui.DropdownMenuSeparator
 import bop.ui.DropdownMenuShortcut
 import bop.ui.DropdownMenuTrigger
+import bop.ui.InputOTP
 import js.objects.unsafeJso
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
@@ -150,6 +151,7 @@ val Home = FC {
       }
 
       div {
+         className = ClassName("pt-6")
          Button {
             variant = "outline"
             className = ClassName("p-2")
@@ -198,11 +200,17 @@ val Home = FC {
          style = unsafeJso { margin = 15.px }
       }
 
-      DropdownMenuSimple {}
-
-      DrawerDemo {}
+      div {
+         DropdownMenuSimple {}
+      }
 
       div {
+         className = ClassName("pt-6")
+         DrawerDemo {}
+      }
+
+      div {
+         className = ClassName("pt-6")
          Alert {
             //                variant = "destructive"
             AlertTitle { +"Alert Title" }
@@ -211,11 +219,13 @@ val Home = FC {
       }
 
 
+      InputOTPDemo {}
       //        div { ActivityLogIcon {} }
       //        div { BarChartIcon {} }
       //        div { MySelect {} }
    }
 }
+
 
 val About = FC {
    div { +"About Page" }

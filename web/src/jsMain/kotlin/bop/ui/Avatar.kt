@@ -5,7 +5,7 @@ import radix.ui.AvatarImageProps
 import react.FC
 
 val Avatar = FC<DefaultProps>("Avatar") { props ->
-   radix.ui.Avatar {
+   radix.ui.AvatarRoot {
       this["data-slot"] = "avatar"
       className = cn("relative flex size-8 shrink-0 overflow-hidden rounded-full", props.className)
       spread(props, "className")

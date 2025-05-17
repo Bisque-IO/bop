@@ -1,150 +1,313 @@
-@file:JsModule("@radix-ui/react-dialog")
-@file:JsNonModule
+@file:JsModule("@radix-ui/react-dialog") @file:JsNonModule
 
 package radix.ui
 
 import react.ComponentType
 import web.events.Event
+import web.html.HTMLElement
+import web.uievents.KeyboardEvent
 
 /*
 
-val ControlledDialog = FC {
-    val (isOpen, setOpen) = useState(false)
+Anatomy
+Import all parts and piece them together.
 
-    DialogRoot {
-        open = isOpen
-        onOpenChange = { setOpen(it) }
+import { Dialog } from "radix-ui";
 
-        DialogTrigger {
-            button {
-                +"Open Dialog"
-            }
-        }
+export default () => (
+	<Dialog.Root>
+		<Dialog.Trigger />
+		<Dialog.Portal>
+			<Dialog.Overlay />
+			<Dialog.Content>
+				<Dialog.Title />
+				<Dialog.Description />
+				<Dialog.Close />
+			</Dialog.Content>
+		</Dialog.Portal>
+	</Dialog.Root>
+);
 
-        DialogPortal {
-            DialogOverlay {
-                className = ClassName("fixed inset-0 bg-black bg-opacity-50")
-            }
+Examples
 
-            DialogContent {
-                className = ClassName("fixed top-1/2 left-1/2 bg-white p-6 rounded-md transform -translate-x-1/2 -translate-y-1/2 w-[300px]")
+Close after asynchronous form submission
+Use the controlled props to programmatically close the Dialog after an async operation has completed.
 
-                DialogTitle {
-                    className = ClassName("text-lg font-bold mb-2")
-                    +"Controlled Dialog"
-                }
+import * as React from "react";
+import { Dialog } from "radix-ui";
 
-                DialogDescription {
-                    className = ClassName("mb-4")
-                    +"Dialog is open: $isOpen"
-                }
+const wait = () => new Promise((resolve) => setTimeout(resolve, 1000));
 
-                DialogClose {
-                    button {
-                        className = ClassName("mt-2 bg-blue-500 text-white px-4 py-2 rounded")
-                        +"Close"
-                    }
-                }
-            }
-        }
-    }
+export default () => {
+	const [open, setOpen] = React.useState(false);
+
+	return (
+		<Dialog.Root open={open} onOpenChange={setOpen}>
+			<Dialog.Trigger>Open</Dialog.Trigger>
+			<Dialog.Portal>
+				<Dialog.Overlay />
+				<Dialog.Content>
+					<form
+						onSubmit={(event) => {
+							wait().then(() => setOpen(false));
+							event.preventDefault();
+						}}
+					>
+						{/** some inputs */}
+						<button type="submit">Submit</button>
+					</form>
+				</Dialog.Content>
+			</Dialog.Portal>
+		</Dialog.Root>
+	);
+};
+Scrollable overlay
+Move the content inside the overlay to render a dialog with overflow.
+
+// index.jsx
+import { Dialog } from "radix-ui";
+import "./styles.css";
+
+export default () => {
+	return (
+		<Dialog.Root>
+			<Dialog.Trigger />
+			<Dialog.Portal>
+				<Dialog.Overlay className="DialogOverlay">
+					<Dialog.Content className="DialogContent">...</Dialog.Content>
+				</Dialog.Overlay>
+			</Dialog.Portal>
+		</Dialog.Root>
+	);
+};
+/* styles.css */
+.DialogOverlay {
+	background: rgba(0 0 0 / 0.5);
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	display: grid;
+	place-items: center;
+	overflow-y: auto;
 }
+
+.DialogContent {
+	min-width: 300px;
+	background: white;
+	padding: 30px;
+	border-radius: 4px;
+}
+Custom portal container
+Customise the element that your dialog portals into.
+
+import * as React from "react";
+import { Dialog } from "radix-ui";
+
+export default () => {
+	const [container, setContainer] = React.useState(null);
+	return (
+		<div>
+			<Dialog.Root>
+				<Dialog.Trigger />
+				<Dialog.Portal container={container}>
+					<Dialog.Overlay />
+					<Dialog.Content>...</Dialog.Content>
+				</Dialog.Portal>
+			</Dialog.Root>
+
+			<div ref={setContainer} />
+		</div>
+	);
+};
+
+
+Keyboard Interactions
+
+Key	         Description
+---------------------------------------------------------------------
+Space          Opens/closes the dialog.
+Enter          Opens/closes the dialog.
+Tab            Moves focus to the next focusable element.
+Shift+Tab      Moves focus to the previous focusable element.
+Esc            Closes the dialog and moves focus to Dialog.Trigger.
 
 */
 
-// ------------------------------
-// Root
-// ------------------------------
+/**
+ * @see DialogRoot
+ */
 external interface DialogRootProps : DefaultProps {
-    var open: Boolean?
-    var defaultOpen: Boolean?
-    var onOpenChange: ((Boolean) -> Unit)?
-    var modal: Boolean? // Optional in Radix v1+
+   /**
+    * The open state of the dialog when it is initially rendered.
+    * Use when you do not need to control its open state.
+    */
+   var defaultOpen: Boolean?
+
+   /**
+    * The controlled open state of the dialog. Must be used in conjunction with onOpenChange.
+    */
+   var open: Boolean?
+
+   /**
+    * Event handler called when the open state of the dialog changes.
+    */
+   var onOpenChange: ((open: Boolean) -> Unit)?
+
+   /**
+    * The modality of the dialog. When set to true, interaction with outside elements
+    * will be disabled and only dialog content will be visible to screen readers.
+    */
+   var modal: Boolean? // Optional in Radix v1+
 }
 
-// Root Dialog component
+/**
+ * Contains all the parts of a dialog.
+ */
 @JsName("Root")
 external val DialogRoot: ComponentType<DialogRootProps>
 
-// ------------------------------
-// Trigger
-// ------------------------------
-external interface DialogTriggerProps : DefaultProps {
-    var asChild: Boolean?
+/**
+ * @see DialogTrigger
+ */
+external interface DialogTriggerProps : DefaultProps, PropsWithAsChild {
+   @JsName("data-state")
+   var dataState: String? // "open" | "closed"
 }
 
-// Trigger (e.g., button to open)
+/**
+ * The button that opens the dialog.
+ */
 @JsName("Trigger")
 external val DialogTrigger: ComponentType<DialogTriggerProps>
 
-// ------------------------------
-// Portal
-// ------------------------------
+/**
+ * @see DialogPortal
+ */
 external interface DialogPortalProps : DefaultProps {
-    var forceMount: Boolean?
-    var container: dynamic // HTMLElement or null
+   /**
+    * Used to force mounting when more control is needed. Useful when controlling
+    * animation with React animation libraries. If used on this part, it will be
+    * inherited by DialogOverlay and DialogContent.
+    */
+   var forceMount: Boolean?
+
+   /**
+    * Specify a container element to portal the content into.
+    */
+   var container: HTMLElement?
 }
 
-// Portal (optional wrapper for rendering in body)
+/**
+ * When used, portals your overlay and content parts into the body.
+ */
 @JsName("Portal")
 external val DialogPortal: ComponentType<DialogPortalProps>
 
-// ------------------------------
-// Overlay
-// ------------------------------
-external interface DialogOverlayProps : DefaultProps {
-    var asChild: Boolean?
-    var forceMount: Boolean?
+/**
+ * @see DialogOverlay
+ */
+external interface DialogOverlayProps : DefaultProps, PropsWithAsChild {
+   /**
+    * Used to force mounting when more control is needed. Useful when controlling
+    * animation with React animation libraries. It inherits from DialogPortal.
+    */
+   var forceMount: Boolean?
 }
 
-// Overlay (background)
+/**
+ * A layer that covers the inert portion of the view when the dialog is open.
+ */
 @JsName("Overlay")
 external val DialogOverlay: ComponentType<DialogOverlayProps>
 
-// ------------------------------
-// Content
-// ------------------------------
-external interface DialogContentProps : DefaultProps {
-    var asChild: Boolean?
-    var forceMount: Boolean?
-    var onEscapeKeyDown: ((Event) -> Unit)?
-    var onPointerDownOutside: ((Event) -> Unit)?
-    var onFocusOutside: ((Event) -> Unit)?
-    var onInteractOutside: ((Event) -> Unit)?
+/**
+ * @see DialogContent
+ */
+external interface DialogContentProps : DefaultProps, PropsWithAsChild {
+   /**
+    * Used to force mounting when more control is needed. Useful when controlling
+    * animation with React animation libraries. It inherits from DialogPortal.
+    */
+   var forceMount: Boolean?
+
+   /**
+    * Event handler called when focus moves into the component after opening.
+    * It can be prevented by calling event.preventDefault.
+    */
+   var onOpenAutoFocus: ((Event) -> Unit)?
+
+   /**
+    * Event handler called when focus moves to the trigger after closing.
+    * It can be prevented by calling event.preventDefault.
+    */
+   var onCloseAutoFocus: ((Event) -> Unit)?
+
+   /**
+    * Event handler called when the escape key is down.
+    * It can be prevented by calling event.preventDefault.
+    */
+   var onEscapeKeyDown: ((KeyboardEvent) -> Unit)?
+
+   /**
+    * Event handler called when a pointer event occurs outside the bounds of
+    * the component. It can be prevented by calling event.preventDefault.
+    */
+   var onPointerDownOutside: ((Event) -> Unit)?
+
+   /**
+    * Event handler called when an interaction (pointer or focus event) happens outside
+    * the bounds of the component. It can be prevented by calling event.preventDefault.
+    */
+   var onInteractOutside: ((Event) -> Unit)?
+
+   @JsName("data-state")
+   var dataState: String? // "open" | "closed"
 }
 
-// Content (the dialog itself)
+/**
+ * Contains content to be rendered in the open dialog.
+ */
 @JsName("Content")
 external val DialogContent: ComponentType<DialogContentProps>
 
-// ------------------------------
-// Title
-// ------------------------------
-external interface DialogTitleProps : DefaultProps {
-    var asChild: Boolean?
-}
+/**
+ * @see DialogClose
+ */
+external interface DialogCloseProps : DefaultProps, PropsWithAsChild
 
-// Title and Description
+/**
+ * The button that closes the dialog.
+ */
+@JsName("Close")
+external val DialogClose: ComponentType<DialogCloseProps>
+
+/**
+ * @see DialogTitle
+ */
+external interface DialogTitleProps : DefaultProps, PropsWithAsChild
+
+/**
+ * An accessible title to be announced when the dialog is opened.
+ *
+ * If you want to hide the title, wrap it inside our Visually Hidden
+ * utility like this <VisuallyHidden asChild>.
+ */
 @JsName("Title")
 external val DialogTitle: ComponentType<DialogTitleProps>
 
-// ------------------------------
-// Description
-// ------------------------------
-external interface DialogDescriptionProps : DefaultProps {
-    var asChild: Boolean?
-}
+/**
+ * @see DialogDescription
+ */
+external interface DialogDescriptionProps : DefaultProps, PropsWithAsChild
 
+/**
+ * An optional accessible description to be announced when the dialog is opened.
+ *
+ * If you want to hide the description, wrap it inside our Visually Hidden utility
+ * like this <VisuallyHidden asChild>. If you want to remove the description entirely,
+ * remove this part and pass aria-describedby={undefined} to DialogContent.
+ */
 @JsName("Description")
 external val DialogDescription: ComponentType<DialogDescriptionProps>
-
-// ------------------------------
-// Close
-// ------------------------------
-external interface DialogCloseProps : DefaultProps {
-    var asChild: Boolean?
-}
-
-// Close button
-@JsName("Close")
-external val DialogClose: ComponentType<DialogCloseProps>

@@ -1,5 +1,4 @@
-@file:JsModule("@radix-ui/react-aspect-ratio")
-@file:JsNonModule
+@file:JsModule("@radix-ui/react-aspect-ratio") @file:JsNonModule
 
 package radix.ui
 
@@ -7,28 +6,24 @@ import react.ComponentType
 
 /*
 
-val MyAspectRatioExample = FC {
-    AspectRatio {
-        ratio = 16.0 / 9.0
-        className = ClassName("bg-gray-200")
+import { AspectRatio } from "radix-ui";
 
-        img {
-            src = "https://via.placeholder.com/800x450"
-            alt = "Aspect Ratio Example"
-            className = ClassName("object-cover w-full h-full")
-        }
-    }
-}
+export default () => <AspectRatio.Root />;
 
 */
 
-// ------------------------------
-// AspectRatio
-// ------------------------------
-external interface AspectRatioProps : DefaultProps {
-    var ratio: Double? // e.g. 16.0 / 9.0
-    var asChild: Boolean?
+/**
+ * @see AspectRatioRoot
+ */
+external interface AspectRatioProps : DefaultProps, PropsWithAsChild {
+   /**
+    * The desired ratio.
+    */
+   var ratio: Double? // e.g. 16.0 / 9.0
 }
 
+/**
+ * Contains the content you want to constrain to a given ratio.
+ */
 @JsName("Root")
-external val AspectRatio: ComponentType<AspectRatioProps>
+external val AspectRatioRoot: ComponentType<AspectRatioProps>

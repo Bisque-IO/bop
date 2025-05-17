@@ -344,7 +344,6 @@ external interface DropdownMenuGroupProps : DefaultProps {
      * Read our Composition guide for more details.
      */
     var asChild: Boolean?
-    var inset: Boolean?
 }
 
 /**
@@ -363,7 +362,6 @@ external interface DropdownMenuLabelProps : DefaultProps {
      * Read our Composition guide for more details.
      */
     var asChild: Boolean?
-    var inset: Boolean?
 }
 
 @JsName("Label")
@@ -574,7 +572,6 @@ external interface DropdownMenuSubTriggerProps : DefaultProps {
      * Read our Composition guide for more details.
      */
     var asChild: Boolean?
-    var inset: Boolean?
 
     /**
      * When true, prevents the user from interacting with the item.

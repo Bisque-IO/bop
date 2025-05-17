@@ -6,7 +6,7 @@ import react.FC
 import react.dom.html.ReactHTML.div
 
 val AlertDialog = FC<DefaultProps>("AlertDialog") { props ->
-   radix.ui.AlertDialog {
+   radix.ui.AlertRootDialog {
       dataSlot = "alert-dialog"
       spread(props)
    }

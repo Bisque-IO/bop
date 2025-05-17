@@ -1,5 +1,4 @@
-@file:JsModule("@radix-ui/react-avatar")
-@file:JsNonModule
+@file:JsModule("@radix-ui/react-avatar") @file:JsNonModule
 
 package radix.ui
 
@@ -7,52 +6,73 @@ import react.ComponentType
 
 /*
 
-val MyAvatar = FC {
-    Avatar {
-        className = ClassName("inline-block w-12 h-12 rounded-full overflow-hidden border")
+Examples
 
-        AvatarImage {
-            src = "https://example.com/avatar.png"
-            alt = "User"
-            className = ClassName("object-cover w-full h-full")
-        }
+Clickable Avatar with tooltip
+You can compose the Avatar with a Tooltip to display extra information.
 
-        AvatarFallback {
-            className = ClassName("flex items-center justify-center w-full h-full bg-gray-200 text-gray-600")
-            +"JD"
-        }
-    }
-}
+import { Avatar, Tooltip } from "radix-ui";
+
+export default () => (
+	<Tooltip.Root>
+		<Tooltip.Trigger>
+			<Avatar.Root>…</Avatar.Root>
+		</Tooltip.Trigger>
+
+		<Tooltip.Content side="top">
+			Tooltip content
+			<Tooltip.Arrow />
+		</Tooltip.Content>
+	</Tooltip.Root>
+);
 
 */
 
-// ------------------------------
-// Avatar Root
-external interface AvatarProps : DefaultProps {
-    var asChild: Boolean?
-}
+/**
+ * @see AvatarRoot
+ */
+external interface AvatarRootProps : DefaultProps, PropsWithAsChild
 
+/**
+ * Contains all the parts of an avatar.
+ */
 @JsName("Root")
-external val Avatar: ComponentType<AvatarProps>
+external val AvatarRoot: ComponentType<AvatarRootProps>
 
-// ------------------------------
-// Avatar Image
-external interface AvatarImageProps : DefaultProps {
-    var src: String?
-    var alt: String?
-    var onLoadingStatusChange: ((String) -> Unit)? // "idle" | "loading" | "loaded" | "error"
-    var asChild: Boolean?
+/**
+ * @see AvatarImage
+ */
+external interface AvatarImageProps : DefaultProps, PropsWithAsChild {
+   /**
+    * A callback providing information about the loading status of the image.
+    * This is useful in case you want to control more precisely what to render
+    * as the image is loading.
+    */
+   var onLoadingStatusChange: ((String) -> Unit)? // "idle" | "loading" | "loaded" | "error"
 }
 
+/**
+ * The image to render. By default, it will only render when it has loaded. You can use
+ * the onLoadingStatusChange handler if you need more control.
+ */
 @JsName("Image")
 external val AvatarImage: ComponentType<AvatarImageProps>
 
-// ------------------------------
-// Avatar Fallback
-external interface AvatarFallbackProps : DefaultProps {
-    var delayMs: Int?
-    var asChild: Boolean?
+/**
+ * @see AvatarFallback
+ */
+external interface AvatarFallbackProps : DefaultProps, PropsWithAsChild {
+   /**
+    * Useful for delaying rendering so it only appears for those with slower connections.
+    */
+   var delayMs: Int?
 }
 
+/**
+ * An element that renders when the image hasn't loaded. This means whilst it's loading,
+ * or if there was an error. If you notice a flash during loading, you can provide a
+ * delayMs prop to delay its rendering so it only renders for those with slower connections.
+ * For more control, use the onLoadingStatusChange handler on Avatar.Image.
+ */
 @JsName("Fallback")
 external val AvatarFallback: ComponentType<AvatarFallbackProps>

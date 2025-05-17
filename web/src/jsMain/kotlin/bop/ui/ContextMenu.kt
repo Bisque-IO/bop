@@ -1,22 +1,8 @@
 package bop.ui
 
 import lucide.CheckIcon
-import radix.ui.ChevronRightIcon
-import radix.ui.CircleIcon
-import radix.ui.ContextMenuCheckboxItemProps
-import radix.ui.ContextMenuContentProps
-import radix.ui.ContextMenuGroupProps
+import radix.ui.*
 import radix.ui.ContextMenuItemProps
-import radix.ui.ContextMenuLabelProps
-import radix.ui.ContextMenuPortalProps
-import radix.ui.ContextMenuRadioGroupProps
-import radix.ui.ContextMenuRadioItemProps
-import radix.ui.ContextMenuRootProps
-import radix.ui.ContextMenuSeparatorProps
-import radix.ui.ContextMenuSubContentProps
-import radix.ui.ContextMenuSubProps
-import radix.ui.ContextMenuSubTriggerProps
-import radix.ui.ContextMenuTriggerProps
 import react.FC
 import react.dom.html.ReactHTML.span
 import web.cssom.ClassName
@@ -63,11 +49,18 @@ val ContextMenuRadioGroup = FC<ContextMenuRadioGroupProps>("ContextMenuRadioGrou
    }
 }
 
+external interface ContextMenuSubTriggerProps : radix.ui.ContextMenuSubTriggerProps {
+   var inset: Int?
+}
+
 val ContextMenuSubTrigger = FC<ContextMenuSubTriggerProps>("ContextMenuSubTrigger") { props ->
    radix.ui.ContextMenuSubTrigger {
       dataSlot = "context-menu-sub-trigger"
       this["data-inset"] = props.inset
-      className = cn("focus:bg-accent focus:text-accent-foreground data-[state=open]:bg-accent data-[state=open]:text-accent-foreground flex cursor-default items-center rounded-sm px-2 py-1.5 text-sm outline-hidden select-none data-[inset]:pl-8 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4", props.className)
+      className = cn(
+         "focus:bg-accent focus:text-accent-foreground data-[state=open]:bg-accent data-[state=open]:text-accent-foreground flex cursor-default items-center rounded-sm px-2 py-1.5 text-sm outline-hidden select-none data-[inset]:pl-8 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+         props.className
+      )
       spread(props, "className", "children")
       +props.children
       ChevronRightIcon {
@@ -79,7 +72,10 @@ val ContextMenuSubTrigger = FC<ContextMenuSubTriggerProps>("ContextMenuSubTrigge
 val ContextMenuSubContent = FC<ContextMenuSubContentProps>("ContextMenuSubContent") { props ->
    radix.ui.ContextMenuSubContent {
       dataSlot = "context-menu-sub-content"
-      className = cn("bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] origin-(--radix-context-menu-content-transform-origin) overflow-hidden rounded-md border p-1 shadow-lg", props.className)
+      className = cn(
+         "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] origin-(--radix-context-menu-content-transform-origin) overflow-hidden rounded-md border p-1 shadow-lg",
+         props.className
+      )
       spread(props, "className")
    }
 }
@@ -88,13 +84,16 @@ val ContextMenuContent = FC<ContextMenuContentProps>("ContextMenuContent") { pro
    radix.ui.ContextMenuPortal {
       radix.ui.ContextMenuContent {
          dataSlot = "context-menu-content"
-         className = cn("bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 max-h-(--radix-context-menu-content-available-height) min-w-[8rem] origin-(--radix-context-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-md border p-1 shadow-md", props.className)
+         className = cn(
+            "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 max-h-(--radix-context-menu-content-available-height) min-w-[8rem] origin-(--radix-context-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-md border p-1 shadow-md",
+            props.className
+         )
          spread(props, "className")
       }
    }
 }
 
-external interface ContextMenuItemProps : radix.ui.ContextMenuItemProps {
+external interface ContextMenuItemProps : ContextMenuItemProps {
    var inset: Boolean?
    var variant: String? // "default" | "destructive"
 }
@@ -102,7 +101,10 @@ external interface ContextMenuItemProps : radix.ui.ContextMenuItemProps {
 val ContextMenuItem = FC<ContextMenuItemProps>("ContextMenuItem") { props ->
    radix.ui.ContextMenuItem {
       dataSlot = "context-menu-item"
-      className = cn("focus:bg-accent focus:text-accent-foreground data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10 dark:data-[variant=destructive]:focus:bg-destructive/20 data-[variant=destructive]:focus:text-destructive data-[variant=destructive]:*:[svg]:!text-destructive [&_svg:not([class*='text-'])]:text-muted-foreground relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[inset]:pl-8 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4", props.className)
+      className = cn(
+         "focus:bg-accent focus:text-accent-foreground data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10 dark:data-[variant=destructive]:focus:bg-destructive/20 data-[variant=destructive]:focus:text-destructive data-[variant=destructive]:*:[svg]:!text-destructive [&_svg:not([class*='text-'])]:text-muted-foreground relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[inset]:pl-8 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+         props.className
+      )
       spread(props, "className")
    }
 }
@@ -110,7 +112,10 @@ val ContextMenuItem = FC<ContextMenuItemProps>("ContextMenuItem") { props ->
 val ContextMenuCheckboxItem = FC<ContextMenuCheckboxItemProps>("ContextMenuCheckboxItem") { props ->
    radix.ui.ContextMenuCheckboxItem {
       dataSlot = "context-menu-checkbox-item"
-      className = cn("focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center gap-2 rounded-sm py-1.5 pr-2 pl-8 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4", props.className)
+      className = cn(
+         "focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center gap-2 rounded-sm py-1.5 pr-2 pl-8 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+         props.className
+      )
       spread(props, "className", "children")
       checked = props.checked
 
@@ -130,7 +135,10 @@ val ContextMenuCheckboxItem = FC<ContextMenuCheckboxItemProps>("ContextMenuCheck
 val ContextMenuRadioItem = FC<ContextMenuRadioItemProps>("ContextMenuRadioItem") { props ->
    radix.ui.ContextMenuRadioItem {
       dataSlot = "context-menu-radio-item"
-      className = cn("focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center gap-2 rounded-sm py-1.5 pr-2 pl-8 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4", props.className)
+      className = cn(
+         "focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center gap-2 rounded-sm py-1.5 pr-2 pl-8 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+         props.className
+      )
       spread(props, "className", "children")
 
       span {
@@ -144,6 +152,10 @@ val ContextMenuRadioItem = FC<ContextMenuRadioItemProps>("ContextMenuRadioItem")
 
       +props.children
    }
+}
+
+external interface ContextMenuLabelProps : radix.ui.ContextMenuLabelProps {
+   var inset: Int?
 }
 
 val ContextMenuLabel = FC<ContextMenuLabelProps>("ContextMenuLabel") { props ->
