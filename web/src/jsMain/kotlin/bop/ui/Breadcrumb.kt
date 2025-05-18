@@ -1,8 +1,8 @@
 package bop.ui
 
-import lucide.MoreHorizontalIcon
-import radix.ui.ChevronRightIcon
-import radix.ui.Slot
+import lib.lucide.ChevronRightIcon
+import lib.lucide.MoreHorizontalIcon
+import lib.radix.Slot
 import react.FC
 import react.PropsWithClassName
 import react.dom.aria.AriaRole
@@ -14,47 +14,47 @@ import web.cssom.ClassName
 
 val Breadcrumb = FC<DefaultProps>("Breadcrumb") { props ->
    nav {
-      ariaLabel = "breadcrumb"
-      this["data-slot"] = "breadcrumb"
       spread(props)
+      dataSlot = "breadcrumb"
+      ariaLabel = "breadcrumb"
    }
 }
 
 val BreadcrumbList = FC<DefaultProps>("BreadcrumbList") { props ->
    li {
-      this["data-slot"] = "breadcrumb-list"
+      spread(props, "className")
+      dataSlot = "breadcrumb-list"
       className = cn(
          "text-muted-foreground flex flex-wrap items-center gap-1.5 text-sm break-words sm:gap-2.5",
          props.className,
       )
-      spread(props, "className")
    }
 }
 
 val BreadcrumbItem = FC<DefaultProps>("BreadcrumbItem") { props ->
    li {
-      this["data-slot"] = "breadcrumb-item"
-      className = cn("inline-flex items-center gap-1.5", props.className)
       spread(props, "className")
+      dataSlot = "breadcrumb-item"
+      className = cn("inline-flex items-center gap-1.5", props.className)
    }
 }
 
 val BreadcrumbLink = FC<AsChildProps>("BreadcrumbLink") { props ->
    val component = if (props.asChild == true) Slot else a
    component {
-      this["data-slot"] = "breadcrumb-link"
-      className = cn("hover:text-foreground transition-colors", props.className)
       spread(props, "className")
+      dataSlot = "breadcrumb-link"
+      className = cn("hover:text-foreground transition-colors", props.className)
    }
 }
 
 val BreadcrumbSeparator = FC<AsChildProps>("BreadcrumbSeparator") { props ->
    li {
-      this["data-slot"] = "breadcrumb-separator"
+      spread(props, ExcludeSets.CLASS_NAME_CHILDREN)
+      dataSlot = "breadcrumb-separator"
       role = AriaRole.presentation
       ariaHidden = true
       className = cn("[&>svg]:size-3.5", props.className)
-      spread(props, ExcludeSets.CLASS_NAME_CHILDREN)
       if (props.children != null) {
          +props.children
       } else {
@@ -65,11 +65,11 @@ val BreadcrumbSeparator = FC<AsChildProps>("BreadcrumbSeparator") { props ->
 
 val BreadcrumbEllipsis = FC<PropsWithClassName>("BreadcrumbEllipsis") { props ->
    li {
-      this["data-slot"] = "breadcrumb-ellipsis"
+      spread(props, ExcludeSets.CLASS_NAME_CHILDREN)
+      dataSlot = "breadcrumb-ellipsis"
       role = AriaRole.presentation
       ariaHidden = true
       className = cn("flex size-9 items-center justify-center", props.className)
-      spread(props, ExcludeSets.CLASS_NAME_CHILDREN)
       MoreHorizontalIcon {}
       span {
          className = ClassName("sr-only")

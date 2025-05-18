@@ -1,7 +1,7 @@
 package bop.ui
 
 import js.objects.unsafeJso
-import radix.ui.Slot
+import lib.radix.Slot
 import react.FC
 import react.dom.html.HTMLAttributes
 import react.dom.html.ReactHTML.button
@@ -54,8 +54,8 @@ val Button = FC<ButtonProps>("Button") { props ->
    }
 
    component {
-      this["data-slot"] = "button"
-      className = cn(buttonVariants(variants), props.className)
       spread(props, exclude)
+      dataSlot = "button"
+      className = cn(buttonVariants(variants), props.className)
    }
 }

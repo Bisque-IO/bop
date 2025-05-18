@@ -3,6 +3,9 @@ package bop.msg
 import bop.bench.Bench
 import bop.io.BytesMut
 import bop.io.DirectBytes
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import java.lang.invoke.MethodHandles
 import java.lang.reflect.Modifier
@@ -346,7 +349,14 @@ class MessageTest2 {
         Bench.printFooter()
     }
 
-
+    @Test
+    fun coroutineTest() = runBlocking {
+        launch {
+            delay(1000)
+            println("World!")
+        }
+        println("Hello,")
+    }
     /* Header
 
   -8   u64      hash

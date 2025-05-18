@@ -1,8 +1,10 @@
 package bop.ui
 
-import inputotp.OTPInputProps
-import js.objects.unsafeJso
-import radix.ui.MinusIcon
+import lib.inputotp.OTPInput
+import lib.inputotp.OTPInputContext
+import lib.inputotp.OTPInputProps
+import lib.inputotp.SlotProps
+import lib.lucide.MinusIcon
 import react.FC
 import react.Props
 import react.dom.aria.AriaRole
@@ -10,31 +12,32 @@ import react.dom.html.ReactHTML.div
 import web.cssom.ClassName
 
 val InputOTP = FC<OTPInputProps>("InputOTP") { props ->
-   inputotp.OTPInput {
+   OTPInput {
+      spread(props, "className", "containerClassName")
       dataSlot = "input-otp"
       containerClassName = cn("flex items-center gap-2 has-disabled:opacity-50", props.containerClassName)
       className = cn("disabled:cursor-not-allowed", props.className)
-      spread(props, "className", "containerClassName")
    }
 }
 
 val InputOTPGroup = FC<DefaultProps>("InputOTPGroup") { props ->
    div {
+      spread(props, "className")
       dataSlot = "input-otp-group"
       className = cn("flex items-center", props.className)
-      spread(props, "className")
    }
 }
 
-external interface InputOTPSlotProps : inputotp.SlotProps {
+external interface InputOTPSlotProps : SlotProps {
    var index: Int?
+
    @JsName("aria-invalid")
    var ariaInvalid: Boolean?
 }
 
 private val EXCLUDE = setOf("className", "children", "hasFakeCaret", "isActive")
 val InputOTPSlot = FC<InputOTPSlotProps>("InputOTPSlot") { props ->
-   val inputOTPContext = react.use(inputotp.OTPInputContext)
+   val inputOTPContext = react.use(OTPInputContext)
    if (props.index == null) throw IllegalArgumentException("InputOTPSlotProps.index must be non-null.")
    val slot = inputOTPContext.slots[props.index!!]
 
@@ -63,9 +66,9 @@ val InputOTPSlot = FC<InputOTPSlotProps>("InputOTPSlot") { props ->
 
 val InputOTPSeparator = FC<Props>("InputOTPSeparator") { props ->
    div {
+      spread(props, "role")
       dataSlot = "input-otp-separator"
       role = AriaRole.separator
-      spread(props, "role")
       MinusIcon {}
    }
 }

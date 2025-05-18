@@ -2,8 +2,8 @@ package bop.ui
 
 import js.objects.unsafeJso
 import react.FC
-import react.dayPicker.DayPicker
-import react.dayPicker.DayPickerProps
+import lib.dayPicker.DayPicker
+import lib.dayPicker.DayPickerProps
 
 external interface CalendarProps : DayPickerProps
 
@@ -49,8 +49,8 @@ val Calendar = FC<CalendarProps>("Calendar") { props ->
    classes.spread(props.classNames)
 
    DayPicker {
+      spread(props, setOf("className", "classNames"))
       className = cn("p-3", props.className)
       classNames = classes
-      spread(props, setOf("className", "classNames"))
    }
 }

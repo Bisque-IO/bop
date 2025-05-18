@@ -27,28 +27,28 @@ external interface AlertProps : PropsWithChildren, PropsWithClassName {
 
 val Alert = FC<AlertProps>("Alert") { props ->
    div {
-      this["data-slot"] = "alert"
+      spread(props, "className")
+      dataSlot = "alert"
       role = AriaRole.alert
       className = cn(alertVariants(unsafeJso { variant = props.variant ?: "default" }), props.className)
-      spread(props, "className")
    }
 }
 
 val AlertTitle = FC<DefaultProps>("AlertTitle") { props ->
    div {
-      this["data-slot"] = "alert-title"
-      className = cn("col-start-2 line-clamp-1 min-h-4 font-medium tracking-tight", props.className)
       spread(props, "className")
+      dataSlot = "alert-title"
+      className = cn("col-start-2 line-clamp-1 min-h-4 font-medium tracking-tight", props.className)
    }
 }
 
 val AlertDescription = FC<DefaultProps>("AlertDescription") { props ->
    div {
-      this["data-slot"] = "alert-description"
+      spread(props, "className")
+      dataSlot = "alert-description"
       className = cn(
          "text-muted-foreground col-start-2 grid justify-items-start gap-1 text-sm [&_p]:leading-relaxed",
          props.className,
       )
-      spread(props, "className")
    }
 }

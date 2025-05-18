@@ -52,6 +52,8 @@ dependencies {
     api(libs.affinity)
     api(libs.jspecify)
 
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+
     api(libs.aeron.client) {
         exclude("org.agrona")
     }
@@ -86,6 +88,7 @@ dependencies {
 
     testImplementation(kotlin("test"))
 
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     api("org.jctools:jctools-core:4.0.5")
 //    api("com.google.dagger:dagger:2.56.1")
     api("net.openhft:zero-allocation-hashing:0.27ea0")

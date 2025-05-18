@@ -85,7 +85,8 @@ kotlin {
     }
 
     js {
-        useEsModules()
+//        useEsModules()
+        useCommonJs()
 
         browser {
             commonWebpackConfig {

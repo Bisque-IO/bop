@@ -1,9 +1,9 @@
 package bop.ui
 
-import embla.carousel.EmblaCarouselPlugin
-import embla.carousel.EmblaCarouselType
-import embla.carousel.EmblaOptionsType
-import embla.carousel.useEmblaCarousel
+import lib.embla.carousel.EmblaCarouselPlugin
+import lib.embla.carousel.EmblaCarouselType
+import lib.embla.carousel.EmblaOptionsType
+import lib.embla.carousel.useEmblaCarousel
 import js.objects.unsafeJso
 import react.FC
 import react.RefCallback
@@ -110,11 +110,11 @@ val Carousel = FC<CarouselProps>("Carousel") { props ->
       }
       div {
          spread(props, "className")
+         dataSlot = "carousel"
          onKeyDownCapture = { handleKeyDown(it) }
          className = cn("relative", props.className)
          role = AriaRole.region
          ariaRoleDescription = "carousel"
-         dataSlot = "carousel"
       }
    }
 }
