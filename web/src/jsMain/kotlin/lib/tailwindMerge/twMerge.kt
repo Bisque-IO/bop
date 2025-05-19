@@ -1,6 +1,6 @@
 @file:JsModule("tailwind-merge") @file:JsNonModule
 
-package bop.ui
+package lib.tailwindMerge
 
 @JsName("twMerge")
 external fun twMerge(vararg classNames: dynamic): dynamic

@@ -7,7 +7,7 @@ import web.html.HTMLInputElement
 
 val Input = FC<InputHTMLAttributes<HTMLInputElement>>("input") { props ->
    input {
-      spread(props, "className")
+      +props
       type = props.type
       dataSlot = "input"
       className = cn(

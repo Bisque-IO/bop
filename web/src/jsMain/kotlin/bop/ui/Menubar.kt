@@ -10,7 +10,7 @@ import web.cssom.ClassName
 
 val Menubar = FC<MenubarRootProps>("Menubar") { props ->
    MenubarPrimitiveRoot {
-      spread(props, "className")
+      +props
       dataSlot = "menubar"
       className = cn("bg-background flex h-9 items-center gap-1 rounded-md border p-1 shadow-xs", props.className)
    }
@@ -18,35 +18,35 @@ val Menubar = FC<MenubarRootProps>("Menubar") { props ->
 
 val MenubarMenu = FC<MenubarMenuProps>("MenubarMenu") { props ->
    MenubarPrimitiveMenu {
-      spread(props)
+      +props
       dataSlot = "menubar-menu"
    }
 }
 
 val MenubarGroup = FC<MenubarGroupProps>("MenubarGroupMenu") { props ->
    MenubarPrimitiveGroup {
-      spread(props)
+      +props
       dataSlot = "menubar-group"
    }
 }
 
 val MenubarPortal = FC<MenubarPortalProps>("MenubarPortal") { props ->
    MenubarPrimitivePortal {
-      spread(props)
+      +props
       dataSlot = "menubar-portal"
    }
 }
 
 val MenubarRadioGroup = FC<MenubarRadioGroupProps>("MenubarRadioGroup") { props ->
    MenubarPrimitiveRadioGroup {
-      spread(props)
+      +props
       dataSlot = "menubar-radio-group"
    }
 }
 
 val MenubarTrigger = FC<MenubarTriggerProps>("MenubarTrigger") { props ->
    MenubarPrimitiveTrigger {
-      spread(props, "className")
+      +props
       dataSlot = "menubar-trigger"
       className = cn(
          "focus:bg-accent focus:text-accent-foreground data-[state=open]:bg-accent data-[state=open]:text-accent-foreground flex items-center rounded-sm px-2 py-1 text-sm font-medium outline-hidden select-none",
@@ -80,7 +80,7 @@ external interface MenubarItemProps : lib.radix.MenubarItemProps {
 
 val MenubarItem = FC<MenubarItemProps>("MenubarItem") { props ->
    MenubarPrimitiveItem {
-      spread(props, "className")
+      +props
       dataSlot = "menubar-content"
       dataInset = props.inset ?: false
       dataVariant = props.variant ?: "default"
@@ -93,7 +93,8 @@ val MenubarItem = FC<MenubarItemProps>("MenubarItem") { props ->
 
 val MenubarCheckboxItem = FC<MenubarCheckboxItemProps>("MenubarCheckboxItem") { props ->
    MenubarPrimitiveCheckboxItem {
-      spread(props, "className", "children")
+      +props
+      children = null
       dataSlot = "menubar-checkbox-item"
       className = cn(
          "focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center gap-2 rounded-xs py-1.5 pr-2 pl-8 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
@@ -116,7 +117,8 @@ val MenubarCheckboxItem = FC<MenubarCheckboxItemProps>("MenubarCheckboxItem") { 
 
 val MenubarRadioItem = FC<MenubarRadioItemProps>("MenubarRadioItem") { props ->
    MenubarPrimitiveRadioItem {
-      spread(props, "className", "children")
+      +props
+      children = null
       dataSlot = "menubar-radio-item"
       className = cn(
          "focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center gap-2 rounded-xs py-1.5 pr-2 pl-8 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
@@ -142,7 +144,7 @@ external interface MenubarLabelProps : lib.radix.MenubarLabelProps {
 
 val MenubarLabel = FC<MenubarLabelProps>("MenubarLabel") { props ->
    MenubarPrimitiveLabel {
-      spread(props, "className")
+      +props
       dataSlot = "menubar-label"
       dataInset = props.inset ?: false
       className = cn(
@@ -153,7 +155,7 @@ val MenubarLabel = FC<MenubarLabelProps>("MenubarLabel") { props ->
 
 val MenubarSeparator = FC<MenubarSeparatorProps>("MenubarSeparator") { props ->
    MenubarPrimitiveSeparator {
-      spread(props, "className")
+      +props
       dataSlot = "menubar-separator"
       className = cn(
          "bg-border -mx-1 my-1 h-px", props.className
@@ -163,7 +165,7 @@ val MenubarSeparator = FC<MenubarSeparatorProps>("MenubarSeparator") { props ->
 
 val MenubarShortcut = FC<DefaultProps>("MenubarShortcut") { props ->
    span {
-      spread(props, "className")
+      +props
       dataSlot = "menubar-shortcut"
       className = cn(
          "text-muted-foreground ml-auto text-xs tracking-widest", props.className
@@ -173,7 +175,7 @@ val MenubarShortcut = FC<DefaultProps>("MenubarShortcut") { props ->
 
 val MenubarSub = FC<MenubarSubProps>("MenubarSub") { props ->
    MenubarPrimitiveSub {
-      spread(props)
+      +props
       dataSlot = "menubar-sub"
    }
 }
@@ -184,7 +186,8 @@ external interface MenubarSubTriggerProps : lib.radix.MenubarSubTriggerProps {
 
 val MenubarSubTrigger = FC<MenubarSubTriggerProps>("MenubarSubTrigger") { props ->
    MenubarPrimitiveSubTrigger {
-      spread(props, "className", "children")
+      +props
+      children = null
       dataSlot = "menubar-sub-trigger"
       dataInset = props.inset ?: false
       className = cn(
@@ -201,7 +204,7 @@ val MenubarSubTrigger = FC<MenubarSubTriggerProps>("MenubarSubTrigger") { props 
 
 val MenubarSubContent = FC<MenubarSubContentProps>("MenubarSubContent") { props ->
    MenubarPrimitiveSubContent {
-      spread(props, "className")
+      +props
       dataSlot = "menubar-sub-content"
       className = cn(
          "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] origin-(--radix-menubar-content-transform-origin) overflow-hidden rounded-md border p-1 shadow-lg",

@@ -19,7 +19,7 @@ val DropdownMenuSimple = FC {
          asChild = true
 
          Button {
-            variant = "outline"
+            variant = "secondary"
             +"Open"
          }
       }

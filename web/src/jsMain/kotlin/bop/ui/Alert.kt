@@ -1,6 +1,7 @@
 package bop.ui
 
 import js.objects.unsafeJso
+import lib.cva.cva
 import react.FC
 import react.PropsWithChildren
 import react.PropsWithClassName
@@ -21,13 +22,13 @@ val alertVariants = cva(
    },
 )
 
-external interface AlertProps : PropsWithChildren, PropsWithClassName {
+external interface AlertProps : DefaultProps, PropsWithChildren, PropsWithClassName {
    var variant: String?
 }
 
 val Alert = FC<AlertProps>("Alert") { props ->
    div {
-      spread(props, "className")
+      +props
       dataSlot = "alert"
       role = AriaRole.alert
       className = cn(alertVariants(unsafeJso { variant = props.variant ?: "default" }), props.className)
@@ -36,7 +37,7 @@ val Alert = FC<AlertProps>("Alert") { props ->
 
 val AlertTitle = FC<DefaultProps>("AlertTitle") { props ->
    div {
-      spread(props, "className")
+      +props
       dataSlot = "alert-title"
       className = cn("col-start-2 line-clamp-1 min-h-4 font-medium tracking-tight", props.className)
    }
@@ -44,7 +45,7 @@ val AlertTitle = FC<DefaultProps>("AlertTitle") { props ->
 
 val AlertDescription = FC<DefaultProps>("AlertDescription") { props ->
    div {
-      spread(props, "className")
+      +props
       dataSlot = "alert-description"
       className = cn(
          "text-muted-foreground col-start-2 grid justify-items-start gap-1 text-sm [&_p]:leading-relaxed",

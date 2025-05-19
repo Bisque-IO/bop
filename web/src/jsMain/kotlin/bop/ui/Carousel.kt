@@ -1,5 +1,6 @@
 package bop.ui
 
+import js.objects.Object
 import lib.embla.carousel.EmblaCarouselPlugin
 import lib.embla.carousel.EmblaCarouselType
 import lib.embla.carousel.EmblaOptionsType
@@ -109,7 +110,7 @@ val Carousel = FC<CarouselProps>("Carousel") { props ->
          this.canScrollNext = canScrollNext
       }
       div {
-         spread(props, "className")
+         +props
          dataSlot = "carousel"
          onKeyDownCapture = { handleKeyDown(it) }
          className = cn("relative", props.className)

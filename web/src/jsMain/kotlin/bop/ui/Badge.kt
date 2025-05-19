@@ -1,6 +1,7 @@
 package bop.ui
 
 import js.objects.unsafeJso
+import lib.cva.cva
 import lib.radix.Slot
 import react.FC
 import react.dom.html.ReactHTML.span
@@ -29,7 +30,7 @@ external interface BadgeProps : DefaultProps {
 val Badge = FC<BadgeProps>("Badge") { props ->
    val component = if (props.asChild == true) Slot else span
    component {
-      spread(props, "className")
+      +props
       dataSlot = "badge"
       className = cn(badgeVariants(unsafeJso { variant = props.variant }, props.className))
    }

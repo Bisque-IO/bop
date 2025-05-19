@@ -4,75 +4,154 @@
 package lib.radix
 
 import react.ComponentType
+import react.dom.html.HTMLAttributes
 
 /*
 
-val MyRadioGroup = FC {
-    val (selected, setSelected) = useState("option1")
+Anatomy
+Import all parts and piece them together.
 
-    RadioGroup {
-        value = selected
-        onValueChange = setSelected
+import { RadioGroup } from "radix-ui";
 
-        RadioGroupItem {
-            value = "option1"
-            + "Option 1"
-            RadioGroupIndicator {
-                +"•"
-            }
-        }
+export default () => (
+	<RadioGroup.Root>
+		<RadioGroup.Item>
+			<RadioGroup.Indicator />
+		</RadioGroup.Item>
+	</RadioGroup.Root>
+);
 
-        RadioGroupItem {
-            value = "option2"
-            + "Option 2"
-            RadioGroupIndicator {
-                +"•"
-            }
-        }
-    }
-}
+Accessibility
+Adheres to the Radio Group WAI-ARIA design pattern and uses roving tabindex to manage focus movement among radio items.
+
+Keyboard Interactions
+Key	          Description
+Tab             Moves focus to either the checked radio item or the first radio item in the group.
+Space           When focus is on an unchecked radio item, checks it.
+ArrowDown       Moves focus and checks the next radio item in the group.
+ArrowRight      Moves focus and checks the next radio item in the group.
+ArrowUp         Moves focus to the previous radio item in the group.
+ArrowLeft       Moves focus to the previous radio item in the group.
 
 */
 
-// ------------------------------
-// Root
-// ------------------------------
-external interface RadioGroupProps : RadixProps {
-    var value: String?
+/**
+ * @see RadioGroupPrimitiveRoot
+ */
+external interface RadioGroupProps : RadixProps, PropsWithAsChild {
+    /**
+     * The value of the radio item that should be checked when initially rendered.
+     * Use when you do not need to control the state of the radio items.
+     */
     var defaultValue: String?
-    var onValueChange: ((String) -> Unit)?
+
+    /**
+     * The controlled value of the radio item to check. Should be used in conjunction with onValueChange.
+     */
+    var value: String?
+
+    /**
+     * Event handler called when the value changes.
+     */
+    var onValueChange: ((value: String) -> Unit)?
+
+    /**
+     * When true, prevents the user from interacting with radio items.
+     */
+    var disabled: Boolean?
+
+    /**
+     * The name of the group. Submitted with its owning form as part of a name/value pair.
+     */
     var name: String?
+
+    /**
+     * When true, indicates that the user must check a radio item before the owning form can be submitted.
+     */
     var required: Boolean?
-    var disabled: Boolean?
+
+    /**
+     * The orientation of the component.
+     */
     var orientation: String? // "horizontal" | "vertical"
+
+    /**
+     * The reading direction of the radio group. If omitted, inherits globally from
+     * DirectionProvider or assumes LTR (left-to-right) reading mode.
+     */
     var dir: String? // "ltr" | "rtl"
-    var asChild: Boolean?
+
+    /**
+     * When true, keyboard navigation will loop from last item to first, and vice versa.
+     */
+    var loop: Boolean?
+
+    @JsName("data-disabled")
+    var dataDisabled: Boolean?
 }
 
+/**
+ * Contains all the parts of a radio group.
+ */
 @JsName("Root")
-external val RadioGroup: ComponentType<RadioGroupProps>
+external val RadioGroupPrimitiveRoot: ComponentType<RadioGroupProps>
 
-// ------------------------------
-// Item (Radio Button)
-// ------------------------------
-external interface RadioGroupItemProps : RadixProps {
-    var value: String
+/**
+ * @see RadioGroupPrimitiveItem
+ */
+external interface RadioGroupItemProps : RadixProps, PropsWithAsChild {
+    /**
+     * The value given as data when submitted with a name.
+     */
+    var value: String?
+
+    /**
+     * When true, prevents the user from interacting with the radio item.
+     */
     var disabled: Boolean?
+
+    /**
+     * When true, indicates that the user must check the radio item before the
+     * owning form can be submitted.
+     */
     var required: Boolean?
+
     var id: String?
-    var asChild: Boolean?
+
+    @JsName("data-state")
+    var dataState: String? // "checked" | "unchecked"
+
+    @JsName("data-disabled")
+    var dataDisabled: Boolean?
 }
 
+/**
+ * An item in the group that can be checked. An input will also render when
+ * used within a form to ensure events propagate correctly.
+ */
 @JsName("Item")
-external val RadioGroupItem: ComponentType<RadioGroupItemProps>
+external val RadioGroupPrimitiveItem: ComponentType<RadioGroupItemProps>
 
-// ------------------------------
-// Indicator (the inner dot)
-// ------------------------------
-external interface RadioGroupIndicatorProps : RadixProps {
-    var asChild: Boolean?
+/**
+ * @see RadioGroupPrimitiveIndicator
+ */
+external interface RadioGroupIndicatorProps : RadixProps, PropsWithAsChild {
+    /**
+     * Used to force mounting when more control is needed. Useful when
+     * controlling animation with React animation libraries.
+     */
     var forceMount: Boolean?
+
+    @JsName("data-state")
+    var dataState: String? // "checked" | "unchecked"
+
+    @JsName("data-disabled")
+    var dataDisabled: Boolean?
 }
 
+/**
+ * Renders when the radio item is in a checked state. You can style this element
+ * directly, or you can use it as a wrapper to put an icon into, or both.
+ */
 @JsName("Indicator")
-external val RadioGroupIndicator: ComponentType<RadioGroupIndicatorProps>
+external val RadioGroupPrimitiveIndicator: ComponentType<RadioGroupIndicatorProps>

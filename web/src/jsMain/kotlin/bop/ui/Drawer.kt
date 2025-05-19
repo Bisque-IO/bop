@@ -12,37 +12,39 @@ import lib.vaul.DrawerTitleProps
 import lib.vaul.DrawerTriggerProps
 import web.cssom.ClassName
 
+typealias DrawerDirection = lib.vaul.DrawerDirection
+
 val Drawer = FC<DrawerRootProps>("Drawer") { props ->
    Drawer.Root {
-      spread(props)
+      +props
       dataSlot = "drawer"
    }
 }
 
 val DrawerTrigger = FC<DrawerTriggerProps>("DrawerTrigger") { props ->
    Drawer.Trigger {
-      spread(props)
+      +props
       dataSlot = "drawer-trigger"
    }
 }
 
 val DrawerPortal = FC<DrawerRootProps>("DrawerPortal") { props ->
    Drawer.Portal {
-      spread(props)
+      +props
       dataSlot = "drawer-portal"
    }
 }
 
 val DrawerClose = FC<DrawerCloseProps>("DrawerClose") { props ->
    Drawer.Close {
-      spread(props)
+      +props
       dataSlot = "drawer-close"
    }
 }
 
 val DrawerOverlay = FC<DrawerOverlayProps>("DrawerOverlay") { props ->
    Drawer.Overlay {
-      spread(props, "className")
+      +props
       dataSlot = "drawer-overlay"
       className = cn(
          "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 fixed inset-0 z-50 bg-black/50",
@@ -55,7 +57,8 @@ val DrawerContent = FC<DrawerContentProps>("DrawerContent") { props ->
    DrawerPortal {
       DrawerOverlay {
          Drawer.Content {
-            spread(props, "className", "children")
+            +props
+            children = null
             dataSlot = "drawer-content"
             className = cn(
                "group/drawer-content bg-background fixed z-50 flex h-auto flex-col",
@@ -79,7 +82,7 @@ val DrawerContent = FC<DrawerContentProps>("DrawerContent") { props ->
 
 val DrawerHeader = FC<DefaultProps>("DrawerHeader") { props ->
    div {
-      spread(props, "className")
+      +props
       dataSlot = "drawer-header"
       className = cn("flex flex-col gap-1.5 p-4", props.className)
    }
@@ -87,7 +90,7 @@ val DrawerHeader = FC<DefaultProps>("DrawerHeader") { props ->
 
 val DrawerFooter = FC<DefaultProps>("DrawerFooter") { props ->
    div {
-      spread(props, "className")
+      +props
       dataSlot = "drawer-footer"
       className = cn("mt-auto flex flex-col gap-2 p-4", props.className)
    }
@@ -95,7 +98,7 @@ val DrawerFooter = FC<DefaultProps>("DrawerFooter") { props ->
 
 val DrawerTitle = FC<DrawerTitleProps>("DrawerTitle") { props ->
    Drawer.Title {
-      spread(props, "className")
+      +props
       dataSlot = "drawer-title"
       className = cn("text-foreground font-semibold", props.className)
    }
@@ -103,7 +106,7 @@ val DrawerTitle = FC<DrawerTitleProps>("DrawerTitle") { props ->
 
 val DrawerDescription = FC<DrawerDescriptionProps>("DrawerDescription") { props ->
    Drawer.Description {
-      spread(props, "className")
+      +props
       dataSlot = "drawer-description"
       className = cn("text-muted-foreground text-sm", props.className)
    }

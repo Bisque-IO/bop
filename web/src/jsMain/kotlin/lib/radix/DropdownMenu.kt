@@ -190,7 +190,7 @@ external interface DropdownMenuContentProps : RadixProps, PropsWithAsChild {
      * The element used as the collision boundary. By default, this is the viewport, though
      * you can provide additional element(s) to be included in this check.
      */
-    var collisionBoundary: dynamic // Element | null | Array<Element | null>
+    var collisionBoundary: CollisionBoundary? // Element | null | Array<Element | null>
 
     /**
      * The distance in pixels from the boundary edges where collision detection should occur.
@@ -202,7 +202,7 @@ external interface DropdownMenuContentProps : RadixProps, PropsWithAsChild {
      *    left = 20
      * }
      */
-    var collisionPadding: dynamic // number | Partial<Record<Side, number>>
+    var collisionPadding: CollisionPadding? // number | Partial<Record<Side, number>>
 
     /**
      * The padding between the arrow and the edges of the content. If your content has
@@ -585,7 +585,7 @@ external interface DropdownMenuSubContentProps : RadixProps, PropsWithAsChild {
      * The element used as the collision boundary. By default, this is the viewport, though
      * you can provide additional element(s) to be included in this check.
      */
-    var collisionBoundary: dynamic // Element | null | Array<Element | null>
+    var collisionBoundary: CollisionBoundary? // Element | null | Array<Element | null>
 
     /**
      * The distance in pixels from the boundary edges where collision detection should occur.
@@ -597,7 +597,7 @@ external interface DropdownMenuSubContentProps : RadixProps, PropsWithAsChild {
      *    left = 20
      * }
      */
-    var collisionPadding: dynamic // number | Partial<Record<Side, number>>
+    var collisionPadding: CollisionPadding? // number | Partial<Record<Side, number>>
 
     /**
      * The padding between the arrow and the edges of the content. If your content has

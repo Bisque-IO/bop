@@ -7,83 +7,147 @@ import react.ComponentType
 
 /*
 
-val MyScrollArea = FC {
-    ScrollArea {
-        className = "w-64 h-40 border"
+Anatomy
+Import all parts and piece them together.
 
-        ScrollAreaViewport {
-            div {
-                repeat(50) {
-                    div { +"Item #$it" }
-                }
-            }
-        }
+import { ScrollArea } from "radix-ui";
 
-        ScrollAreaScrollbar {
-            ScrollAreaThumb()
-        }
+export default () => (
+	<ScrollArea.Root>
+		<ScrollArea.Viewport />
+		<ScrollArea.Scrollbar orientation="horizontal">
+			<ScrollArea.Thumb />
+		</ScrollArea.Scrollbar>
+		<ScrollArea.Scrollbar orientation="vertical">
+			<ScrollArea.Thumb />
+		</ScrollArea.Scrollbar>
+		<ScrollArea.Corner />
+	</ScrollArea.Root>
+);
 
-        ScrollAreaScrollbar {
-            orientation = "horizontal"
-            ScrollAreaThumb()
-        }
+Accessibility
+In most cases, it's best to rely on native scrolling and work with the customization
+options available in CSS. When that isn't enough, ScrollArea provides additional
+customizability while maintaining the browser's native scroll behavior (as well as
+accessibility features, like keyboard scrolling).
 
-        ScrollAreaCorner()
-    }
-}
+Keyboard Interactions
+Scrolling via keyboard is supported by default because the component relies on native
+scrolling. Specific keyboard interactions may differ between platforms, so we do not
+specify them here or add specific event listeners to handle scrolling via key events.
 
 */
 
-// ------------------------------
-// Root
-// ------------------------------
-external interface ScrollAreaProps : RadixProps {
+/**
+ * @see ScrollAreaPrimitiveRoot
+ */
+external interface ScrollAreaRootProps : RadixProps, PropsWithAsChild {
+    /**
+     * Describes the nature of scrollbar visibility, similar to how the scrollbar
+     * preferences in macOS control visibility of native scrollbars.
+     *
+     * "auto" means that scrollbars are visible when content is overflowing on the
+     * corresponding orientation.
+     *
+     * "always" means that scrollbars are always visible regardless of whether the
+     * content is overflowing.
+     *
+     * "scroll" means that scrollbars are visible when the user is scrolling along
+     * its corresponding orientation.
+     *
+     * "hover" when the user is scrolling along its corresponding orientation and
+     * when the user is hovering over the scroll area.
+     */
     var type: String? // "auto", "always", "scroll", "hover"
+
+    /**
+     * If type is set to either "scroll" or "hover", this prop determines the length
+     * of time, in milliseconds, before the scrollbars are hidden after the user
+     * stops interacting with scrollbars.
+     */
     var scrollHideDelay: Int?
-    var asChild: Boolean?
+
+    /**
+     * The reading direction of the scroll area. If omitted, inherits globally from
+     * DirectionProvider or assumes LTR (left-to-right) reading mode.
+     */
+    var dir: String? // "ltr" | "rtl"
+
+    /**
+     * An optional nonce attribute that is passed to the inline styles for use in
+     * CSP-enabled environments that use strict rules to enhance security.
+     */
+    var nonce: String?
 }
 
+/**
+ * Contains all the parts of a scroll area.
+ */
 @JsName("Root")
-external val ScrollArea: ComponentType<ScrollAreaProps>
+external val ScrollAreaPrimitiveRoot: ComponentType<ScrollAreaRootProps>
 
-// ------------------------------
-// Viewport
-// ------------------------------
-external interface ScrollAreaViewportProps : RadixProps {
-    var asChild: Boolean?
-}
+/**
+ * @see ScrollAreaPrimitiveViewport
+ */
+external interface ScrollAreaViewportProps : RadixProps, PropsWithAsChild
 
+/**
+ * The viewport area of the scroll area.
+ */
 @JsName("Viewport")
-external val ScrollAreaViewport: ComponentType<ScrollAreaViewportProps>
+external val ScrollAreaPrimitiveViewport: ComponentType<ScrollAreaViewportProps>
 
-// ------------------------------
-// Scrollbar
-// ------------------------------
-external interface ScrollAreaScrollbarProps : RadixProps {
-    var orientation: String? // "horizontal" | "vertical"
+/**
+ * @see ScrollAreaPrimitiveScrollbar
+ */
+external interface ScrollAreaScrollbarProps : RadixProps, PropsWithAsChild {
+    /**
+     * Used to force mounting when more control is needed. Useful when controlling
+     * animation with React animation libraries.
+     */
     var forceMount: Boolean?
-    var asChild: Boolean?
+
+    /**
+     * The orientation of the scrollbar.
+     *
+     * "horizontal" | "vertical"
+     */
+    var orientation: String? // "horizontal" | "vertical"
+
+    @JsName("data-state")
+    var dataState: String? // "visible" | "hidden"
+
+    @JsName("data-orientation")
+    var dataOrientation: String? // "horizontal" | "vertical"
 }
 
+/**
+ * The vertical scrollbar. Add a second Scrollbar with an orientation prop to enable horizontal scrolling.
+ */
 @JsName("Scrollbar")
-external val ScrollAreaScrollbar: ComponentType<ScrollAreaScrollbarProps>
+external val ScrollAreaPrimitiveScrollbar: ComponentType<ScrollAreaScrollbarProps>
 
-// ------------------------------
-// Thumb
-// ------------------------------
-external interface ScrollAreaThumbProps : RadixProps {
-    var asChild: Boolean?
+/**
+ * @see ScrollAreaPrimitiveThumb
+ */
+external interface ScrollAreaThumbProps : RadixProps, PropsWithAsChild {
+    @JsName("data-state")
+    var dataState: String? // "visible" | "hidden"
 }
 
+/**
+ * The thumb to be used in ScrollAreaScrollbar.
+ */
 @JsName("Thumb")
-external val ScrollAreaThumb: ComponentType<ScrollAreaThumbProps>
+external val ScrollAreaPrimitiveThumb: ComponentType<ScrollAreaThumbProps>
 
-// ------------------------------
-// Corner (intersection of scrollbars)
-// ------------------------------
-external interface ScrollAreaCornerProps : RadixProps {
-    var asChild: Boolean?
-}
+/**
+ * @see ScrollAreaPrimitiveCorner
+ */
+external interface ScrollAreaCornerProps : RadixProps, PropsWithAsChild
 
+/**
+ * The corner where both vertical and horizontal scrollbars meet.
+ */
 @JsName("Corner")
-external val ScrollAreaCorner: ComponentType<ScrollAreaCornerProps>
+external val ScrollAreaPrimitiveCorner: ComponentType<ScrollAreaCornerProps>

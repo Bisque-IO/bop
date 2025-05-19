@@ -8,21 +8,21 @@ import react.FC
 
 val Collapsible = FC<CollapsibleRootProps>("Collapsible") { props ->
    CollapsiblePrimitiveRoot {
-      spread(props)
+      +props
       dataSlot = "collapsible"
    }
 }
 
 val CollapsibleTrigger = FC<CollapsibleRootProps>("CollapsibleTrigger") { props ->
    CollapsiblePrimitiveTrigger {
-      spread(props)
+      +props
       dataSlot = "collapsible-trigger"
    }
 }
 
 val CollapsibleContent = FC<CollapsibleRootProps>("CollapsibleContent") { props ->
    CollapsiblePrimitiveContent {
-      spread(props)
+      +props
       dataSlot = "collapsible-content"
    }
 }

@@ -5,14 +5,14 @@ import react.FC
 
 val HoverCard = FC<HoverCardRootProps>("hoverCard") { props ->
    HoverCardPrimitiveRoot {
-      spread(props)
+      +props
       dataSlot = "hover-card"
    }
 }
 
 val HoverCardTrigger = FC<HoverCardTriggerProps>("hoverCardTrigger") { props ->
    HoverCardPrimitiveTrigger {
-      spread(props)
+      +props
       dataSlot = "hover-card-trigger"
    }
 }

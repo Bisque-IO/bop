@@ -7,13 +7,12 @@ import react.dom.html.ReactHTML.h4
 import react.dom.html.ReactHTML.p
 import react.useCallback
 import react.useState
-import web.cssom.ClassName
 import kotlin.math.max
 import kotlin.math.min
 
 val DrawerDemo = FC {
    div {
-      className = ClassName("flex flex-wrap items-start gap-4")
+      className = cn("flex flex-wrap items-start gap-4")
       DrawerBottom {}
       DrawerScrollableContent {}
    }
@@ -38,7 +37,7 @@ val DrawerBottom = FC {
 
       DrawerContent {
          div {
-            className = ClassName("mx-auto w-full max-w-sm")
+            className = cn("mx-auto w-full max-w-sm")
 
             DrawerHeader {
                DrawerTitle {
@@ -55,7 +54,7 @@ val DrawerBottom = FC {
 
 val DrawerScrollableContent = FC {
    Drawer {
-      direction = "right"
+      direction = DrawerDirection.left
       DrawerTrigger {
          asChild = true
 
@@ -67,7 +66,7 @@ val DrawerScrollableContent = FC {
       DrawerContent {
          DrawerHeader {
             DrawerTitle {
-               className = ClassName("text-lg")
+               className = cn("text-lg")
                +"Move Goal"
             }
             DrawerDescription {
@@ -75,13 +74,13 @@ val DrawerScrollableContent = FC {
             }
          }
          div {
-            className = ClassName("overflow-y-auto px-4 text-sm")
+            className = cn("overflow-y-auto px-4 text-sm")
             h4 {
-               className = ClassName("mb-4 text-md leading-none font-normal")
+               className = cn("mb-4 text-md leading-none font-normal")
                repeat(15) {
                   p {
                      key = it.toString()
-                     className = ClassName("mb-4 leading-normal")
+                     className = cn("mb-4 leading-normal")
                      +"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do\n"
                      +"eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut\n"
                      +"enim ad minim veniam, quis nostrud exercitation ullamco laboris\n"
@@ -95,7 +94,6 @@ val DrawerScrollableContent = FC {
          }
          DrawerFooter {
             Button {
-               variant = "secondary"
                +"Submit"
             }
             DrawerClose {

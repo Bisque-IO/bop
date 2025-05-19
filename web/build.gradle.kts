@@ -1,3 +1,5 @@
+import org.gradle.kotlin.dsl.support.kotlinCompilerOptions
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.spotless)
@@ -15,6 +17,10 @@ repositories {
 
 kotlin {
     sourceSets {
+        jsMain.languageSettings {
+            optIn("kotlin.RequiresOptIn")
+            compilerOptions.freeCompilerArgs.add("-Xcontext-parameters")
+        }
         jsMain.dependencies {
             implementation("org.jetbrains.kotlin-wrappers:kotlin-react:2025.5.6-19.1.0")
             implementation("org.jetbrains.kotlin-wrappers:kotlin-react-dom:2025.5.6-19.1.0")
@@ -85,8 +91,8 @@ kotlin {
     }
 
     js {
-//        useEsModules()
-        useCommonJs()
+        useEsModules()
+//        useCommonJs()
 
         browser {
             commonWebpackConfig {

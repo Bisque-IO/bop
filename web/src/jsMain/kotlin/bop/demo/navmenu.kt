@@ -1,14 +1,6 @@
 package bop.demo
 
-import bop.ui.DefaultProps
-import bop.ui.NavMenu
-import bop.ui.NavMenuContent
-import bop.ui.NavMenuItem
-import bop.ui.NavMenuLink
-import bop.ui.NavMenuList
-import bop.ui.NavMenuTrigger
-import bop.ui.navigationMenuTriggerStyle
-import bop.ui.spread
+import bop.ui.*
 import js.objects.unsafeJso
 import kotlinx.browser.window
 import lib.lucide.CircleIcon
@@ -41,7 +33,8 @@ var components: Array<ComponentDesc> = arrayOf(
    unsafeJso {
       title = "Progress"
       href = "/docs/primitives/progress"
-      description = "Displays an indicator showing the completion progress of a task, typically displayed as a progress bar."
+      description =
+         "Displays an indicator showing the completion progress of a task, typically displayed as a progress bar."
    },
    unsafeJso {
       title = "Scroll-area"
@@ -56,7 +49,8 @@ var components: Array<ComponentDesc> = arrayOf(
    unsafeJso {
       title = "Tooltip"
       href = "/docs/primitives/tooltip"
-      description = "A popup that displays information related to an element when the element receives keyboard focus or the mouse hovers over it."
+      description =
+         "A popup that displays information related to an element when the element receives keyboard focus or the mouse hovers over it."
    },
 )
 
@@ -80,7 +74,8 @@ val NavMenuDemo = FC {
                            asChild = true
 
                            a {
-                              className = ClassName("from-muted/50 to-muted flex h-full w-full flex-col justify-end rounded-md bg-linear-to-b p-6 no-underline outline-hidden select-none focus:shadow-md")
+                              className =
+                                 ClassName("from-muted/50 to-muted flex h-full w-full flex-col justify-end rounded-md bg-linear-to-b p-6 no-underline outline-hidden select-none focus:shadow-md")
                               href = "/"
 
                               div {
@@ -305,16 +300,18 @@ val NavMenuDemo = FC {
 
 val Link = FC<DefaultProps>("Link") { props ->
    a {
-      spread(props)
+      +props
    }
 }
 
 external interface ListItemProps : DefaultProps {
    var href: String?
 }
+
 val ListItem = FC<ListItemProps>("ListItem") { props ->
    li {
-      spread(props, "children")
+      +props
+      children = null
       NavMenuLink {
          asChild = true
          Link {

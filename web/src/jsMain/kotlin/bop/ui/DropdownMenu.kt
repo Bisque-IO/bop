@@ -10,21 +10,21 @@ import web.cssom.ClassName
 
 val DropdownMenu = FC<DropdownMenuRootProps>("DropdownMenu") { props ->
    DropdownMenuPrimitiveRoot {
-      spread(props)
+      +props
       dataSlot = "dropdown-menu"
    }
 }
 
 val DropdownMenuPortal = FC<DropdownMenuPortalProps>("DropdownMenuPortal") { props ->
    DropdownMenuPrimitivePortal {
-      spread(props)
+      +props
       dataSlot = "dropdown-menu-portal"
    }
 }
 
 val DropdownMenuTrigger = FC<DropdownMenuTriggerProps>("DropdownMenuTrigger") { props ->
    DropdownMenuPrimitiveTrigger {
-      spread(props)
+      +props
       dataSlot = "dropdown-menu-trigger"
    }
 }
@@ -32,7 +32,7 @@ val DropdownMenuTrigger = FC<DropdownMenuTriggerProps>("DropdownMenuTrigger") { 
 val DropdownMenuContent = FC<DropdownMenuContentProps>("DropdownMenuContent") { props ->
    DropdownMenuPrimitivePortal {
       DropdownMenuPrimitiveContent {
-         spread(props, "className")
+         +props
          dataSlot = "dropdown-menu-content"
          className = cn(
             "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 max-h-(--radix-dropdown-menu-content-available-height) min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-md border p-1 shadow-md",
@@ -45,7 +45,7 @@ val DropdownMenuContent = FC<DropdownMenuContentProps>("DropdownMenuContent") { 
 
 val DropdownMenuGroup = FC<DropdownMenuGroupProps>("DropdownMenuGroup") { props ->
    DropdownMenuPrimitiveGroup {
-      spread(props)
+      +props
       dataSlot = "dropdown-menu-group"
    }
 }
@@ -57,7 +57,7 @@ external interface DropdownMenuItemProps : lib.radix.DropdownMenuItemProps {
 
 val DropdownMenuItem = FC<DropdownMenuItemProps>("DropdownMenuItem") { props ->
    DropdownMenuPrimitiveItem {
-      spread(props, "className")
+      +props
       dataSlot = "dropdown-menu-item"
       dataInset = props.inset
       dataVariant = props.variant ?: "default"
@@ -70,7 +70,8 @@ val DropdownMenuItem = FC<DropdownMenuItemProps>("DropdownMenuItem") { props ->
 
 val DropdownMenuCheckboxItem = FC<DropdownMenuCheckboxItemProps>("DropdownMenuCheckboxItem") { props ->
    DropdownMenuPrimitiveCheckboxItem {
-      spread(props, "className", "children")
+      +props
+      children = null
       dataSlot = "dropdown-menu-checkbox-item"
       className = cn(
          "focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center gap-2 rounded-sm py-1.5 pr-2 pl-8 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
@@ -94,14 +95,15 @@ val DropdownMenuCheckboxItem = FC<DropdownMenuCheckboxItemProps>("DropdownMenuCh
 
 val DropdownMenuRadioGroup = FC<DropdownMenuRadioGroupProps>("DropdownMenuRadioGroup") { props ->
    DropdownMenuPrimitiveRadioGroup {
-      spread(props)
+      +props
       dataSlot = "dropdown-menu-radio-group"
    }
 }
 
 val DropdownMenuRadioItem = FC<DropdownMenuRadioItemProps>("DropdownMenuRadioItem") { props ->
    DropdownMenuPrimitiveCheckboxItem {
-      spread(props, "className", "children")
+      +props
+      children = null
       dataSlot = "dropdown-menu-radio-item"
       className = cn(
          "focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center gap-2 rounded-sm py-1.5 pr-2 pl-8 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
@@ -128,7 +130,7 @@ external interface DropdownMenuLabelProps : lib.radix.DropdownMenuLabelProps {
 
 val DropdownMenuLabel = FC<DropdownMenuLabelProps>("DropdownMenuLabel") { props ->
    DropdownMenuPrimitiveLabel {
-      spread(props, "className")
+      +props
       dataSlot = "dropdown-menu-label"
       dataInset = props.inset
       className = cn("px-2 py-1.5 text-sm font-medium data-[inset]:pl-8", props.className)
@@ -137,7 +139,7 @@ val DropdownMenuLabel = FC<DropdownMenuLabelProps>("DropdownMenuLabel") { props 
 
 val DropdownMenuSeparator = FC<DropdownMenuSeparatorProps>("DropdownMenuSeparator") { props ->
    DropdownMenuPrimitiveSeparator {
-      spread(props, "className")
+      +props
       dataSlot = "dropdown-menu-separator"
       className = cn("bg-border -mx-1 my-1 h-px", props.className)
    }
@@ -145,7 +147,7 @@ val DropdownMenuSeparator = FC<DropdownMenuSeparatorProps>("DropdownMenuSeparato
 
 val DropdownMenuShortcut = FC<DefaultProps>("DropdownMenuShortcut") { props ->
    span {
-      spread(props, "className")
+      +props
       dataSlot = "dropdown-menu-shortcut"
       className = cn("text-muted-foreground ml-auto text-xs tracking-widest", props.className)
    }
@@ -153,14 +155,15 @@ val DropdownMenuShortcut = FC<DefaultProps>("DropdownMenuShortcut") { props ->
 
 val DropdownMenuSub = FC<DropdownMenuSubProps>("DropdownMenuSub") { props ->
    DropdownMenuPrimitiveSub {
-      spread(props)
+      +props
       dataSlot = "dropdown-menu-sub"
    }
 }
 
 val DropdownMenuSubTrigger = FC<DropdownMenuSubTriggerProps>("DropdownMenuSubTrigger") { props ->
    DropdownMenuPrimitiveSubTrigger {
-      spread(props, "className", "children")
+      +props
+      children = null
       dataSlot = "dropdown-menu-sub-trigger"
       className = cn(
          "focus:bg-accent focus:text-accent-foreground data-[state=open]:bg-accent data-[state=open]:text-accent-foreground flex cursor-default items-center rounded-sm px-2 py-1.5 text-sm outline-hidden select-none data-[inset]:pl-8",
@@ -176,7 +179,7 @@ val DropdownMenuSubTrigger = FC<DropdownMenuSubTriggerProps>("DropdownMenuSubTri
 
 val DropdownMenuSubContent = FC<DropdownMenuSubContentProps>("DropdownMenuSubContent") { props ->
    DropdownMenuPrimitiveSubContent {
-      spread(props, "className")
+      +props
       dataSlot = "dropdown-menu-sub-content"
       className = cn(
          "bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-hidden rounded-md border p-1 shadow-lg",

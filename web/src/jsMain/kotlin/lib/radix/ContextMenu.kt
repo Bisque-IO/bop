@@ -3,6 +3,7 @@
 package lib.radix
 
 import react.*
+import web.cssom.Padding
 import web.events.Event
 import web.html.HTMLElement
 import web.uievents.KeyboardEvent
@@ -440,7 +441,7 @@ external interface ContextMenuContentProps : RadixProps, PropsWithAsChild {
     * The element used as the collision boundary. By default, this is the viewport,
     * though you can provide additional element(s) to be included in this check.
     */
-   var collisionBoundary: dynamic /* HTMLElement | Array<HTMLElement> */
+   var collisionBoundary: CollisionBoundary? /* HTMLElement | Array<HTMLElement> */
 
    /**
     * The distance in pixels from the boundary edges where collision detection should occur.
@@ -454,7 +455,7 @@ external interface ContextMenuContentProps : RadixProps, PropsWithAsChild {
     *
     * Int | { top: Int, right: Int, bottom: Int, left: Int }
     */
-   var collisionPadding: dynamic // Int | { top: Int, right: Int, bottom: Int, left: Int }
+   var collisionPadding: CollisionPadding? // Int | { top: Int, right: Int, bottom: Int, left: Int }
 
    /**
     * The sticky behavior on the align axis. "partial" will keep the content in the boundary
@@ -832,7 +833,7 @@ external interface ContextMenuSubContentProps : RadixProps, PropsWithAsChild {
     * The element used as the collision boundary. By default, this is the viewport,
     * though you can provide additional element(s) to be included in this check.
     */
-   var collisionBoundary: dynamic // HTMLElement | Array<HTMLElement>
+   var collisionBoundary: CollisionBoundary? // HTMLElement | Array<HTMLElement>
 
    /**
     * The distance in pixels from the boundary edges where collision detection should occur.
@@ -847,7 +848,7 @@ external interface ContextMenuSubContentProps : RadixProps, PropsWithAsChild {
     *
     * Int | { top: Int, right: Int, bottom: Int, left: Int }
     */
-   var collisionPadding: dynamic // Int | { top: Int, right: Int, bottom: Int, left: Int }
+   var collisionPadding: CollisionPadding? // Int | { top: Int, right: Int, bottom: Int, left: Int }
 
    /**
     * The padding between the arrow and the edges of the content. If your content has border-radius,

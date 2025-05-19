@@ -5,14 +5,14 @@ import react.FC
 
 val Popover = FC<PopoverRootProps>("Popover") { props ->
    PopoverPrimitiveRoot {
-      spread(props)
+      +props
       dataSlot = "popover"
    }
 }
 
 val PopoverTrigger = FC<PopoverTriggerProps>("PopoverTrigger") { props ->
    PopoverPrimitiveTrigger {
-      spread(props)
+      +props
       dataSlot = "popover-trigger"
    }
 }
@@ -20,7 +20,7 @@ val PopoverTrigger = FC<PopoverTriggerProps>("PopoverTrigger") { props ->
 val PopoverContent = FC<PopoverContentProps>("PopoverContent") { props ->
    PopoverPrimitivePortal {
       PopoverPrimitiveContent {
-         spread(props, "className")
+         +props
          dataSlot = "popover-content"
          align = props.align ?: "center"
          sideOffset = props.sideOffset ?: 4
@@ -34,7 +34,7 @@ val PopoverContent = FC<PopoverContentProps>("PopoverContent") { props ->
 
 val PopoverAnchor = FC<PopoverAnchorProps>("PopoverAnchor") { props ->
    PopoverPrimitiveAnchor {
-      spread(props)
+      +props
       dataSlot = "popover-anchor"
    }
 }

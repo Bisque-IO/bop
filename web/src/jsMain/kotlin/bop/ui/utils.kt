@@ -20,34 +20,40 @@ operator fun <P : Props> P.set(name: String, value: dynamic) {
    asDynamic()[name] = value
 }
 
-var <P : Props> P.dataSlot: String?
+inline var <P : Props> P.dataSlot: String?
    get() = asDynamic()["data-slot"] as String?
    set(value) {
       asDynamic()["data-slot"] = value
    }
 
-var <P : Props> P.dataInset: Boolean?
-   get() = asDynamic()["data-inset"] as Boolean?
+inline var <P : Props> P.dataInset: Boolean?
+   get() = if (asDynamic()["data-inset"] == null) null else asDynamic()["data-inset"].toString() == "true"
    set(value) {
-      asDynamic()["data-inset"] = value
+      asDynamic()["data-inset"] = value?.toString()
    }
 
-var <P : Props> P.dataVariant: String?
+inline var <P : Props> P.dataVariant: String?
    get() = asDynamic()["data-variant"] as String?
    set(value) {
       asDynamic()["data-variant"] = value
    }
 
-var <P : Props> P.dataActive: Boolean?
+inline var <P : Props> P.dataActive: Boolean?
    get() = asDynamic()["data-active"] as Boolean?
    set(value) {
       asDynamic()["data-active"] = value
    }
 
-var <P : Props> P.dataViewport: Boolean?
-   get() = asDynamic()["data-viewport"] as Boolean?
+inline var <P : Props> P.dataViewport: Boolean?
+   get() = if (asDynamic()["data-viewport"] == null) null else asDynamic()["data-viewport"].toString() == "true"
    set(value) {
-      asDynamic()["data-viewport"] = value
+      asDynamic()["data-viewport"] = value?.toString()
+   }
+
+inline var <P : Props> P.dataSize: String?
+   get() = asDynamic()["data-size"] as String?
+   set(value) {
+      asDynamic()["data-size"] = value
    }
 
 fun <P0 : Any?, P1 : Any?> P0.spread(props: P1, exclude: String = ""): P0 {

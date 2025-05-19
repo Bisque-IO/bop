@@ -2,6 +2,8 @@ package bop.demo
 
 import bop.ui.*
 import js.objects.unsafeJso
+import lib.lucide.ArrowLeftIcon
+import lib.lucide.HomeIcon
 import react.FC
 import react.Props
 import react.createElement
@@ -19,64 +21,21 @@ import web.cssom.px
 import web.dom.document
 import web.html.InputType
 
-
 val Home = FC {
    val data = useLoaderData()
-   val navigate = useNavigate()
 
    div {
-//      div {
-//         +"Home Page: Loaded message: $data"
-//      }
-//
-//      div {
-//         Checkbox {}
-//      }
-//
-//      div {
-//         className = ClassName("pt-6")
-//         Button {
-//            variant = "outline"
-//            className = ClassName("p-2")
-//            onClick = { navigate("/about") }
-//            +"Outline!!"
-//         }
-//         Button {
-//            variant = "ghost"
-//            onClick = { navigate("/about") }
-//            +"Ghost"
-//         }
-//         Button {
-//            variant = "destructive"
-//            onClick = { navigate("/about") }
-//            +"Destructive"
-//         }
-//         Button {
-//            variant = "secondary"
-//            onClick = { navigate("/about") }
-//            +"Secondary"
-//         }
-//         Button {
-//            variant = "link"
-//            className = ClassName("m-6")
-//            onClick = { navigate("/about") }
-//            +".Link"
-//         }
-//         Button {
-//            variant = "outline"
-//            onClick = { navigate("/about") }
-//            HomeIcon {}
-//            +".Home"
-//         }
-//
-//         Button {
-//            variant = "outline"
-//            size = "lg"
-//            onClick = { navigate("/about") }
-//            ArrowLeftIcon {}
-//            +"Go Back!"
-//         }
-//      }
+      div {
+         +"Home Page: Loaded message: $data"
+      }
+
+      div {
+         Checkbox {}
+      }
+
+      div {
+         ButtonDemo {}
+      }
 
       p {
          className = cn("p-10")
@@ -85,6 +44,11 @@ val Home = FC {
 
       div {
          DropdownMenuSimple {}
+      }
+
+      div {
+         className = ClassName("pt-6")
+         CommandDemo {}
       }
 
       div {
@@ -111,24 +75,41 @@ val Home = FC {
 
       div {
          className = ClassName("pt-6")
+         SelectDemo {}
+      }
+
+      div {
+         className = ClassName("pt-6")
 
          MenubarDemo {}
       }
 
       div {
          className = ClassName("pt-6")
-
          NavMenuDemo {}
       }
 
       div {
          className = ClassName("pt-6")
-
          PopoverDemo {}
       }
-      //        div { ActivityLogIcon {} }
-      //        div { BarChartIcon {} }
-      //        div { MySelect {} }
+
+      div {
+         className = ClassName("pt-6")
+         ProgressDemo {}
+      }
+
+      div {
+         className = ClassName("pt-6")
+         RadioGroupDemo {}
+      }
+
+      div {
+         className = ClassName("pt-6")
+         ScrollAreaDemo {}
+      }
+
+
    }
 }
 
@@ -163,7 +144,7 @@ val BrowserRouter = createBrowserRouter(
 
 private val App = FC<Props> {
    div {
-      className = ClassName("py-4 p-6 bg-black-900 text-white rounded")
+      className = cn("py-6 p-6")
       +"App"
       Outlet
       RouterProvider { router = BrowserRouter }
@@ -187,7 +168,11 @@ fun main() {
    //    TailwindStyles
    kotlinx.browser.document.addEventListener(
       "DOMContentLoaded",
+
       {
+//         console.log(document.body.className)
+//         document.body.className += document.body.className + "theme-bop"
+//         console.log(document.body.className)
          //        val root = document.createElement("div")
          //        document.body.appendChild(root)
          //        console.log("router", .BrowserRouter)

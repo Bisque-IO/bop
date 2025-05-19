@@ -62,7 +62,8 @@ external interface TooltipContentProps : RadixProps {
     var align: String? // "start" | "center" | "end"
     var alignOffset: Int?
     var avoidCollisions: Boolean?
-    var collisionPadding: Int?
+    var collisionBoundary: CollisionBoundary?
+    var collisionPadding: CollisionPadding?
     var asChild: Boolean?
     var forceMount: Boolean?
     var onEscapeKeyDown: ((dynamic) -> Unit)?

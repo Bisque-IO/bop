@@ -268,7 +268,7 @@ external interface HoverCardContentProps : RadixProps, PropsWithAsChild {
      *
      * Element | null | Array<Element | null>
      */
-    var collisionBoundary: dynamic // Element | null | Array<Element | null>
+    var collisionBoundary: CollisionBoundary? // Element | null | Array<Element | null>
 
     /**
      * The distance in pixels from the boundary edges where collision detection should occur.
@@ -283,7 +283,7 @@ external interface HoverCardContentProps : RadixProps, PropsWithAsChild {
      *    bottom = 20
      * }
      */
-    var collisionPadding: dynamic // number | Partial<Record<Side, number>>
+    var collisionPadding: CollisionPadding? // number | Partial<Record<Side, number>>
 
     /**
      * The padding between the arrow and the edges of the content. If your content

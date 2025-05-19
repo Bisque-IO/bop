@@ -14,7 +14,7 @@ import web.cssom.ClassName
 
 val Breadcrumb = FC<DefaultProps>("Breadcrumb") { props ->
    nav {
-      spread(props)
+      +props
       dataSlot = "breadcrumb"
       ariaLabel = "breadcrumb"
    }
@@ -22,7 +22,7 @@ val Breadcrumb = FC<DefaultProps>("Breadcrumb") { props ->
 
 val BreadcrumbList = FC<DefaultProps>("BreadcrumbList") { props ->
    li {
-      spread(props, "className")
+      +props
       dataSlot = "breadcrumb-list"
       className = cn(
          "text-muted-foreground flex flex-wrap items-center gap-1.5 text-sm break-words sm:gap-2.5",
@@ -33,7 +33,7 @@ val BreadcrumbList = FC<DefaultProps>("BreadcrumbList") { props ->
 
 val BreadcrumbItem = FC<DefaultProps>("BreadcrumbItem") { props ->
    li {
-      spread(props, "className")
+      +props
       dataSlot = "breadcrumb-item"
       className = cn("inline-flex items-center gap-1.5", props.className)
    }
@@ -42,7 +42,7 @@ val BreadcrumbItem = FC<DefaultProps>("BreadcrumbItem") { props ->
 val BreadcrumbLink = FC<AsChildProps>("BreadcrumbLink") { props ->
    val component = if (props.asChild == true) Slot else a
    component {
-      spread(props, "className")
+      +props
       dataSlot = "breadcrumb-link"
       className = cn("hover:text-foreground transition-colors", props.className)
    }
@@ -50,7 +50,8 @@ val BreadcrumbLink = FC<AsChildProps>("BreadcrumbLink") { props ->
 
 val BreadcrumbSeparator = FC<AsChildProps>("BreadcrumbSeparator") { props ->
    li {
-      spread(props, ExcludeSets.CLASS_NAME_CHILDREN)
+      +props
+      children = null
       dataSlot = "breadcrumb-separator"
       role = AriaRole.presentation
       ariaHidden = true
@@ -65,7 +66,8 @@ val BreadcrumbSeparator = FC<AsChildProps>("BreadcrumbSeparator") { props ->
 
 val BreadcrumbEllipsis = FC<PropsWithClassName>("BreadcrumbEllipsis") { props ->
    li {
-      spread(props, ExcludeSets.CLASS_NAME_CHILDREN)
+      +props
+      children = null
       dataSlot = "breadcrumb-ellipsis"
       role = AriaRole.presentation
       ariaHidden = true

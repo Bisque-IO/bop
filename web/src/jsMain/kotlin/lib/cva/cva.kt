@@ -1,6 +1,6 @@
 @file:JsModule("class-variance-authority") @file:JsNonModule
 
-package bop.ui
+package lib.cva
 
 import js.array.ReadonlyArray
 import js.objects.Record

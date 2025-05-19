@@ -6,7 +6,7 @@ import react.FC
 
 val AspectRatio = FC<AspectRatioProps>("AspectRatio") { props ->
    AspectRatioPrimitiveRoot {
-      spread(props)
+      +props
       dataSlot = "aspect-ratio"
    }
 }

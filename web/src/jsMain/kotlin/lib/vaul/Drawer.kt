@@ -53,9 +53,9 @@ external interface DrawerRootProps : PropsWithChildren, PropsWithClassName, Prop
    var container: HTMLElement?
 
    /**
-    * Direction of the drawer. This adjust the animations and the drag direction.
+    * Direction of the drawer. This adjusts the animations and the drag direction.
     */
-   var direction: String? // "top" | "right" | "bottom" | "left"
+   var direction: DrawerDirection? // "top" | "right" | "bottom" | "left"
 
    /**
     * Gets triggered after the open or close animation ends, it receives an open

@@ -9,11 +9,10 @@ import react.FC
 import react.Props
 import react.dom.aria.AriaRole
 import react.dom.html.ReactHTML.div
-import web.cssom.ClassName
 
 val InputOTP = FC<OTPInputProps>("InputOTP") { props ->
    OTPInput {
-      spread(props, "className", "containerClassName")
+      +props
       dataSlot = "input-otp"
       containerClassName = cn("flex items-center gap-2 has-disabled:opacity-50", props.containerClassName)
       className = cn("disabled:cursor-not-allowed", props.className)
@@ -22,7 +21,7 @@ val InputOTP = FC<OTPInputProps>("InputOTP") { props ->
 
 val InputOTPGroup = FC<DefaultProps>("InputOTPGroup") { props ->
    div {
-      spread(props, "className")
+      +props
       dataSlot = "input-otp-group"
       className = cn("flex items-center", props.className)
    }
@@ -53,10 +52,10 @@ val InputOTPSlot = FC<InputOTPSlotProps>("InputOTPSlot") { props ->
       +slot.char
       if (slot.hasFakeCaret) {
          div {
-            className = ClassName("pointer-events-none absolute inset-0 flex items-center justify-center")
+            className = cn("pointer-events-none absolute inset-0 flex items-center justify-center")
 
             div {
-               className = ClassName("animate-caret-blink bg-foreground h-6 w-px pr-1 duration-1000")
+               className = cn("animate-caret-blink bg-foreground h-6 w-px pr-1 duration-1000")
                +"|"
             }
          }
@@ -66,7 +65,7 @@ val InputOTPSlot = FC<InputOTPSlotProps>("InputOTPSlot") { props ->
 
 val InputOTPSeparator = FC<Props>("InputOTPSeparator") { props ->
    div {
-      spread(props, "role")
+      +props
       dataSlot = "input-otp-separator"
       role = AriaRole.separator
       MinusIcon {}

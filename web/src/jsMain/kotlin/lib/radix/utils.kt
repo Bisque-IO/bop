@@ -1,6 +1,15 @@
 package lib.radix
 
+import js.objects.unsafeJso
+import js.reflect.unsafeCast
 import react.Props
+import react.PropsWithChildren
+import react.PropsWithClassName
+import react.PropsWithStyle
+import web.cssom.Length
+import web.cssom.LengthProperty
+import web.dom.Element
+import web.html.HTMLElement
 
 /*
 
@@ -123,4 +132,91 @@ external interface PropsWithAsChild : Props {
     * Read our Composition guide for more details.
     */
    var asChild: Boolean?
+}
+
+external interface RadixProps : PropsWithChildren, PropsWithClassName, PropsWithStyle
+
+external interface CollisionBoundary
+
+inline fun CollisionBoundary(element: Element) = unsafeCast<CollisionBoundary>(element)
+
+inline fun CollisionBoundary(vararg elements: Element) = unsafeCast<CollisionBoundary>(elements)
+
+inline fun CollisionBoundary(elements: Array<Element>) = unsafeCast<CollisionBoundary>(elements)
+
+external interface CollisionPadding {
+   var top: Int
+   var left: Int
+   var bottom: Int
+   var right: Int
+}
+
+inline fun CollisionPadding(
+   padding: Int,
+) = CollisionPadding(padding, padding, padding, padding)
+
+inline fun CollisionPadding(
+   top: Int,
+   right: Int,
+   bottom: Int,
+   left: Int,
+): CollisionPadding =
+   unsafeJso {
+      this.top = top
+      this.right = right
+      this.bottom = bottom
+      this.left = left
+   }
+
+sealed interface Direction {
+   companion object {
+      val ltr: Direction = unsafeCast("ltr")
+      val rtl: Direction = unsafeCast("rtl")
+   }
+}
+
+sealed interface OpenOrClosed {
+   companion object {
+      val open: OpenOrClosed = unsafeCast("open")
+      val closed: OpenOrClosed = unsafeCast("closed")
+   }
+}
+
+sealed interface CheckboxState {
+   companion object {
+      val checked: CheckboxState = unsafeCast("checked")
+      val unchecked: CheckboxState = unsafeCast("unchecked")
+      val indeterminate: CheckboxState = unsafeCast("indeterminate")
+   }
+}
+
+sealed interface Side {
+   companion object {
+      val top: Side = unsafeCast("top")
+      val right: Side = unsafeCast("right")
+      val bottom: Side = unsafeCast("bottom")
+      val left: Side = unsafeCast("left")
+   }
+}
+
+sealed interface SelectPosition {
+   companion object {
+      val itemAligned: Side = unsafeCast("item-aligned")
+      val popper: Side = unsafeCast("popper")
+   }
+}
+
+sealed interface Align {
+   companion object {
+      val start: Align = unsafeCast("start")
+      val center: Align = unsafeCast("center")
+      val end: Align = unsafeCast("end")
+   }
+}
+
+sealed interface Sticky {
+   companion object {
+      val partial: Sticky = unsafeCast("partial")
+      val always: Sticky = unsafeCast("always")
+   }
 }

@@ -540,7 +540,7 @@ external interface MenubarContentProps : RadixProps, PropsWithAsChild {
      *
      * Element | null | Array<Element | null>
      */
-    var collisionBoundary: dynamic // Element | null | Array<Element | null>
+    var collisionBoundary: CollisionBoundary? // Element | null | Array<Element | null>
 
     /**
      * The distance in pixels from the boundary edges where collision detection should occur.
@@ -557,7 +557,7 @@ external interface MenubarContentProps : RadixProps, PropsWithAsChild {
      *
      * number | Padding
      */
-    var collisionPadding: dynamic // number | Padding
+    var collisionPadding: CollisionPadding? // number | Padding
 
     /**
      * The padding between the arrow and the edges of the content. If your content
@@ -937,7 +937,7 @@ external interface MenubarSubContentProps : RadixProps, PropsWithAsChild {
      *
      * Element | null | Array<Element | null>
      */
-    var collisionBoundary: dynamic // Element | null | Array<Element | null>
+    var collisionBoundary: CollisionBoundary? // Element | null | Array<Element | null>
 
     /**
      * The distance in pixels from the boundary edges where collision detection should occur.
@@ -954,7 +954,7 @@ external interface MenubarSubContentProps : RadixProps, PropsWithAsChild {
      *
      * number | Padding
      */
-    var collisionPadding: dynamic // number | Padding
+    var collisionPadding: CollisionPadding? // number | Padding
 
     /**
      * The padding between the arrow and the edges of the content. If your content
