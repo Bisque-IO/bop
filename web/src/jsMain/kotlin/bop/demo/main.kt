@@ -4,6 +4,8 @@ import bop.ui.*
 import js.objects.unsafeJso
 import lib.lucide.ArrowLeftIcon
 import lib.lucide.HomeIcon
+import lib.sonner.ToastMessage
+import lib.sonner.toast
 import react.FC
 import react.Props
 import react.createElement
@@ -20,6 +22,7 @@ import web.cssom.ClassName
 import web.cssom.px
 import web.dom.document
 import web.html.InputType
+import web.timers.setTimeout
 
 val Home = FC {
    val data = useLoaderData()
@@ -86,6 +89,11 @@ val Home = FC {
 
       div {
          className = ClassName("pt-6")
+         CalendarDemo {}
+      }
+
+      div {
+         className = ClassName("pt-6")
          NavMenuDemo {}
       }
 
@@ -148,6 +156,7 @@ private val App = FC<Props> {
       +"App"
       Outlet
       RouterProvider { router = BrowserRouter }
+      Toaster { position = "bottom-right" }
    }
 }
 
@@ -179,6 +188,17 @@ fun main() {
          createRoot(
             document.body, RootOptions()
          ).render(createElement(Root))
+
+//         val HiToast = FC {
+//            +"Hi Toast"
+//            Button {
+//               variant = "secondary"
+//               +"Click me"
+//            }
+//         }
+//         setTimeout({
+//            toast(ToastMessage(HiToast), unsafeJso())
+//         }, 1000)
       },
    )
 }

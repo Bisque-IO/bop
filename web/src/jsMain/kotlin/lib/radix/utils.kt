@@ -138,11 +138,11 @@ external interface RadixProps : PropsWithChildren, PropsWithClassName, PropsWith
 
 external interface CollisionBoundary
 
-inline fun CollisionBoundary(element: Element) = unsafeCast<CollisionBoundary>(element)
+fun CollisionBoundary(element: Element) = unsafeCast<CollisionBoundary>(element)
 
-inline fun CollisionBoundary(vararg elements: Element) = unsafeCast<CollisionBoundary>(elements)
+fun CollisionBoundary(vararg elements: Element) = unsafeCast<CollisionBoundary>(elements)
 
-inline fun CollisionBoundary(elements: Array<Element>) = unsafeCast<CollisionBoundary>(elements)
+fun CollisionBoundary(elements: Array<Element>) = unsafeCast<CollisionBoundary>(elements)
 
 external interface CollisionPadding {
    var top: Int
@@ -151,11 +151,11 @@ external interface CollisionPadding {
    var right: Int
 }
 
-inline fun CollisionPadding(
+fun CollisionPadding(
    padding: Int,
 ) = CollisionPadding(padding, padding, padding, padding)
 
-inline fun CollisionPadding(
+fun CollisionPadding(
    top: Int,
    right: Int,
    bottom: Int,

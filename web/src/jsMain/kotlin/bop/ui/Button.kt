@@ -53,6 +53,7 @@ aria-invalid:border-destructive bg-secondary text-secondary-foreground shadow-xs
 external interface ButtonProps : HTMLAttributes<HTMLButtonElement> {
    var variant: String?
    var size: String?
+   var disabled: Boolean?
    var asChild: Boolean?
 }
 
