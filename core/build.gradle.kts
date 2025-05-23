@@ -266,9 +266,9 @@ graalvmNative {
         asCompileOptions().verbose.set(true)
 
 
-        buildArgs.add("-H:+UnlockExperimentalVMOptions")
-        val reflectConfigPath = buildscript.sourceFile?.toPath()?.parent?.resolve("reflectconfig.json")?.toAbsolutePath()
-        buildArgs.add("-H:ReflectionConfigurationFiles=$reflectConfigPath")
+//        buildArgs.add("-H:+UnlockExperimentalVMOptions")
+//        val reflectConfigPath = buildscript.sourceFile?.toPath()?.parent?.resolve("reflectconfig.json")?.toAbsolutePath()
+//        buildArgs.add("-H:ReflectionConfigurationFiles=$reflectConfigPath")
         buildArgs.add("-H:+UnlockExperimentalVMOptions")
         buildArgs.add("-H:+ForeignAPISupport")
 //        buildArgs.add("-H:+BuildReport")

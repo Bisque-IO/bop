@@ -6,10 +6,7 @@ import react.Props
 import react.PropsWithChildren
 import react.PropsWithClassName
 import react.PropsWithStyle
-import web.cssom.Length
-import web.cssom.LengthProperty
 import web.dom.Element
-import web.html.HTMLElement
 
 /*
 
@@ -136,6 +133,8 @@ external interface PropsWithAsChild : Props {
 
 external interface RadixProps : PropsWithChildren, PropsWithClassName, PropsWithStyle
 
+external interface StringOr
+
 external interface CollisionBoundary
 
 fun CollisionBoundary(element: Element) = unsafeCast<CollisionBoundary>(element)
@@ -168,10 +167,10 @@ fun CollisionPadding(
       this.left = left
    }
 
-sealed interface Direction {
+sealed interface TextDirection {
    companion object {
-      val ltr: Direction = unsafeCast("ltr")
-      val rtl: Direction = unsafeCast("rtl")
+      val ltr: TextDirection = unsafeCast("ltr")
+      val rtl: TextDirection = unsafeCast("rtl")
    }
 }
 
@@ -218,5 +217,12 @@ sealed interface Sticky {
    companion object {
       val partial: Sticky = unsafeCast("partial")
       val always: Sticky = unsafeCast("always")
+   }
+}
+
+sealed interface HorizontalOrVertical {
+   companion object {
+      val horizontal: HorizontalOrVertical = unsafeCast("horizontal")
+      val vertical: HorizontalOrVertical = unsafeCast("vertical")
    }
 }

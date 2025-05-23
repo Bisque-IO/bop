@@ -1,5 +1,3 @@
-import org.gradle.kotlin.dsl.support.kotlinCompilerOptions
-
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.spotless)
@@ -22,13 +20,19 @@ kotlin {
             compilerOptions.freeCompilerArgs.add("-Xcontext-parameters")
         }
         jsMain.dependencies {
-            implementation("org.jetbrains.kotlin-wrappers:kotlin-react:2025.5.6-19.1.0")
-            implementation("org.jetbrains.kotlin-wrappers:kotlin-react-dom:2025.5.6-19.1.0")
+            implementation("org.jetbrains.kotlin-wrappers:kotlin-react:2025.5.8-19.1.0")
+            implementation("org.jetbrains.kotlin-wrappers:kotlin-react-dom:2025.5.8-19.1.0")
 
-            implementation("org.jetbrains.kotlin-wrappers:kotlin-react-router-dom:2025.1.6-6.28.0")
-            implementation("org.jetbrains.kotlin-wrappers:kotlin-remix-run-router:2025.1.6-1.21.0")
+            implementation("org.jetbrains.kotlin-wrappers:kotlin-react-router:2025.5.8-6.28.2")
+            implementation("org.jetbrains.kotlin-wrappers:kotlin-css-js:2025.5.8")
+//            implementation("org.jetbrains.kotlin-wrappers:kotlin-remix-run-router:2025.1.6-1.21.0")
 
-            implementation("org.jetbrains.kotlin-wrappers:kotlin-tanstack-table-core:2025.5.6-8.21.3")
+            implementation("org.jetbrains.kotlin-wrappers:kotlin-react-use:2025.5.8")
+
+            implementation("org.jetbrains.kotlin-wrappers:kotlin-tanstack-react-table:2025.5.8-8.21.3")
+            implementation("org.jetbrains.kotlin-wrappers:kotlin-tanstack-react-virtual:2025.5.8-3.13.8")
+//            implementation("org.jetbrains.kotlin-wrappers:kotlin-tanstack-table-core:2025.5.8-8.21.3")
+//            implementation("org.jetbrains.kotlin-wrappers:kotlin-tanstack-table-virtual-core:2025.5.8-3.13.8")
 
             //
             // implementation("org.jetbrains.kotlin-wrappers:kotlin-typescript-js:2025.5.6-5.7.2")
@@ -78,7 +82,7 @@ kotlin {
             implementation(npm("embla-carousel-react", "^8.6.0"))
             implementation(npm("input-otp", "^1.4.2"))
             implementation(npm("lucide-react", "^0.474.0"))
-            implementation(npm("react-day-picker", "^9.5.0"))
+            implementation(npm("react-day-picker", "^9.7.0"))
             implementation(npm("react-resizable-panels", "^3.0.2"))
             implementation(npm("recharts", "^2.15.1"))
             implementation(npm("sonner", "^2.0.3"))
@@ -103,15 +107,14 @@ kotlin {
 
             testTask {
                 enabled = true
-                useKarma {
-                    useIe()
-                    useSafari()
-                    useFirefox()
-                    useChrome()
-                    useChromeCanary()
-                    useChromeHeadless()
-                    useOpera()
-                }
+                debug = true
+//                useKarma {
+//                    enabled = true
+//                }
+//                useMocha {
+//                    enabled = true
+//                    debug = true
+//                }
             }
         }
         binaries.executable()

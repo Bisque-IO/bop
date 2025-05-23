@@ -91,6 +91,7 @@ public class Server {
     }
     final var server = Server.create(config);
     server.start();
+//    server.close();
     Thread.sleep(TimeUnit.HOURS.toMillis(24));
   }
 

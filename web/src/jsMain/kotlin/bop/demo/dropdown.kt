@@ -1,20 +1,10 @@
 package bop.demo
 
-import bop.ui.Button
-import bop.ui.DropdownMenu
-import bop.ui.DropdownMenuContent
-import bop.ui.DropdownMenuGroup
-import bop.ui.DropdownMenuItem
-import bop.ui.DropdownMenuLabel
-import bop.ui.DropdownMenuSeparator
-import bop.ui.DropdownMenuShortcut
-import bop.ui.DropdownMenuTrigger
+import bop.ui.*
 import react.FC
-import web.cssom.ClassName
 
 val DropdownMenuSimple = FC {
    DropdownMenu {
-      defaultOpen = false
       DropdownMenuTrigger {
          asChild = true
 
@@ -23,10 +13,9 @@ val DropdownMenuSimple = FC {
             +"Open"
          }
       }
-
       DropdownMenuContent {
          align = "start"
-         className = ClassName("w-56")
+         className = cn("w-56")
 
          DropdownMenuLabel {
             +"MyAccount"
@@ -45,7 +34,6 @@ val DropdownMenuSimple = FC {
                   +"⌘B"
                }
             }
-
             DropdownMenuItem {
                +"Settings"
                DropdownMenuShortcut {

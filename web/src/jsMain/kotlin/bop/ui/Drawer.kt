@@ -1,6 +1,5 @@
 package bop.ui
 
-import lib.vaul.Drawer
 import react.FC
 import react.dom.html.ReactHTML.div
 import lib.vaul.DrawerCloseProps
@@ -15,35 +14,35 @@ import web.cssom.ClassName
 typealias DrawerDirection = lib.vaul.DrawerDirection
 
 val Drawer = FC<DrawerRootProps>("Drawer") { props ->
-   Drawer.Root {
+   lib.vaul.Drawer.Root {
       +props
       dataSlot = "drawer"
    }
 }
 
 val DrawerTrigger = FC<DrawerTriggerProps>("DrawerTrigger") { props ->
-   Drawer.Trigger {
+   lib.vaul.Drawer.Trigger {
       +props
       dataSlot = "drawer-trigger"
    }
 }
 
 val DrawerPortal = FC<DrawerRootProps>("DrawerPortal") { props ->
-   Drawer.Portal {
+   lib.vaul.Drawer.Portal {
       +props
       dataSlot = "drawer-portal"
    }
 }
 
 val DrawerClose = FC<DrawerCloseProps>("DrawerClose") { props ->
-   Drawer.Close {
+   lib.vaul.Drawer.Close {
       +props
       dataSlot = "drawer-close"
    }
 }
 
 val DrawerOverlay = FC<DrawerOverlayProps>("DrawerOverlay") { props ->
-   Drawer.Overlay {
+   lib.vaul.Drawer.Overlay {
       +props
       dataSlot = "drawer-overlay"
       className = cn(
@@ -56,7 +55,7 @@ val DrawerOverlay = FC<DrawerOverlayProps>("DrawerOverlay") { props ->
 val DrawerContent = FC<DrawerContentProps>("DrawerContent") { props ->
    DrawerPortal {
       DrawerOverlay {
-         Drawer.Content {
+         lib.vaul.Drawer.Content {
             +props
             children = null
             dataSlot = "drawer-content"
@@ -97,7 +96,7 @@ val DrawerFooter = FC<DefaultProps>("DrawerFooter") { props ->
 }
 
 val DrawerTitle = FC<DrawerTitleProps>("DrawerTitle") { props ->
-   Drawer.Title {
+   lib.vaul.Drawer.Title {
       +props
       dataSlot = "drawer-title"
       className = cn("text-foreground font-semibold", props.className)
@@ -105,7 +104,7 @@ val DrawerTitle = FC<DrawerTitleProps>("DrawerTitle") { props ->
 }
 
 val DrawerDescription = FC<DrawerDescriptionProps>("DrawerDescription") { props ->
-   Drawer.Description {
+   lib.vaul.Drawer.Description {
       +props
       dataSlot = "drawer-description"
       className = cn("text-muted-foreground text-sm", props.className)

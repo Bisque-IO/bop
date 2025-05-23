@@ -109,6 +109,11 @@ val Home = FC {
 
       div {
          className = ClassName("pt-6")
+         ResizableDemo {}
+      }
+
+      div {
+         className = ClassName("pt-6")
          RadioGroupDemo {}
       }
 

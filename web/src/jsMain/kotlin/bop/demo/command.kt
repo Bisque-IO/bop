@@ -8,6 +8,7 @@ import bop.ui.CommandItem
 import bop.ui.CommandList
 import bop.ui.CommandShortcut
 import bop.ui.cn
+import js.objects.unsafeJso
 import lib.lucide.CalculatorIcon
 import lib.lucide.CalendarIcon
 import lib.lucide.CreditCardIcon
@@ -21,6 +22,7 @@ import react.dom.html.ReactHTML.p
 import react.dom.html.ReactHTML.span
 import react.useEffectWithCleanup
 import react.useState
+import web.cssom.px
 import web.dom.document
 import web.events.EventType
 import web.events.addEventListener
@@ -50,14 +52,20 @@ val CommandDemo = FC {
    Fragment {
       p {
          className = cn("text-muted-foreground text-sm")
-         +"Press "
+         +"press "
          kbd {
-            className = cn("bg-muted text-muted-foreground pointer-events-none inline-flex h-5 items-center gap-1 rounded border px-1.5 font-mono text-[10px] font-medium opacity-100 select-none")
+            className = cn("bg-muted text-muted-foreground pointer-events-none inline-flex h-6 items-center gap-1 rounded border px-1.5 font-mono text-[10px] font-medium opacity-100 select-none")
             span {
-               className = cn("text-xs")
+               className = cn("text-xs pt-1")
                +"⌘"
             }
-            +"J"
+            span {
+               className = cn("text-md")
+               style = unsafeJso {
+                  fontSize = 13.px
+               }
+               +"J"
+            }
          }
       }
       CommandDialog {

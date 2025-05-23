@@ -159,6 +159,9 @@ external val GlobeIcon: ComponentType<LucideIconProps>
 @JsName("Grid")
 external val GridIcon: ComponentType<LucideIconProps>
 
+@JsName("GripVertical")
+external val GripVerticalIcon: ComponentType<LucideIconProps>
+
 @JsName("Heart")
 external val HeartIcon: ComponentType<LucideIconProps>
 

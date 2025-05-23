@@ -7,31 +7,54 @@ import react.ComponentType
 
 /*
 
-val MyToggle = FC {
-    val (pressed, setPressed) = useState(false)
+Anatomy
+Import the component.
 
-    Toggle {
-        this.pressed = pressed
-        onPressedChange = setPressed
-        className = ClassName("px-3 py-1 rounded border bg-white data-[state=on]:bg-blue-500 text-sm")
-        +"Toggle Me"
-    }
-}
+import { Toggle } from "radix-ui";
+
+export default () => <Toggle.Root />;
+
+Accessibility
+Keyboard Interactions
+Key	  Description
+Space   Activates/deactivates the toggle.
+Enter   Activates/deactivates the toggle.
 
 */
 
-// ------------------------------
-// Toggle
-external interface ToggleProps : RadixProps {
-    var pressed: Boolean?
+/**
+ * @see TogglePrimitiveRoot
+ */
+external interface ToggleProps : RadixProps, PropsWithAsChild {
+    /**
+     * The pressed state of the toggle when it is initially rendered.
+     * Use when you do not need to control its pressed state.
+     */
     var defaultPressed: Boolean?
-    var onPressedChange: ((Boolean) -> Unit)?
+
+    /**
+     * The controlled pressed state of the toggle. Must be used in conjunction with onPressedChange.
+     */
+    var pressed: Boolean?
+
+    /**
+     * Event handler called when the pressed state of the toggle changes.
+     */
+    var onPressedChange: ((pressed: Boolean) -> Unit)?
+
+    /**
+     * When true, prevents the user from interacting with the toggle.
+     */
     var disabled: Boolean?
-    var required: Boolean?
-    var name: String?
-    var value: String?
-    var asChild: Boolean?
+
+    @JsName("data-state")
+    var dataState: String? // "on" | "off"
+    @JsName("data-disabled")
+    var dataDisabled: Boolean?
 }
 
+/**
+ * The toggle.
+ */
 @JsName("Root")
-external val Toggle: ComponentType<ToggleProps>
+external val TogglePrimitiveRoot: ComponentType<ToggleProps>
