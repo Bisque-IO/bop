@@ -63,7 +63,7 @@ public class BenchHash {
       sb.append('a');
     }
     final String str = sb.toString();
-    final var buf = DirectBytes.allocate(str.length());
+    final var buf = DirectBytes.allocateDirect(str.length());
     buf.writeString(str);
     final var bytes = Danger.getBytes(str);
 
@@ -74,7 +74,7 @@ public class BenchHash {
         1,
         CYCLES,
         ITERS,
-        (threadId, cycle, iteration) -> result[0] = RapidHash.hash(buf.address(), length));
+        (threadId, cycle, iteration) -> result[0] = RapidHash.hash(buf.getAddress(), length));
     //    Bench.threaded(
     //      "crc32 - NativeBuffer(" + length + ")", 1, CYCLES, ITERS, (threadId, cycle, iteration)
     // -> Crc32.INSTANCE.compute(buf.address(), 0, length));
@@ -88,13 +88,13 @@ public class BenchHash {
         1,
         CYCLES,
         ITERS,
-        (threadId, cycle, iteration) -> result[0] = xxh3.hash(buf.address(), 0, length));
+        (threadId, cycle, iteration) -> result[0] = xxh3.hash(buf.getAddress(), 0, length));
     Bench.threaded(
         "XXH3 - native(" + length + ")",
         1,
         CYCLES,
         ITERS,
-        (threadId, cycle, iteration) -> result[0] = XXH3.hash(buf.address(), length));
+        (threadId, cycle, iteration) -> result[0] = XXH3.hash(buf.getAddress(), length));
 
     System.out.println(result[0]);
   }

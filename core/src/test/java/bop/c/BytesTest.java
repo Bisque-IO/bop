@@ -28,12 +28,12 @@ public class BytesTest {
 
       buf.writeInt(2).writeLong(3L).writeChar(4).writeShort(5).writeByte(6);
 
-      final var strOffset = buf.size();
+      final var strOffset = buf.getSize();
       buf.writeString("hello everybody in the world");
       buf.writeShort(10);
-      System.out.println(buf.capacity());
-      System.out.println(buf.getString(strOffset, buf.size() - 2 - strOffset));
-      System.out.println(buf.getShort(buf.size() - 2));
+      System.out.println(buf.getCapacity());
+      System.out.println(buf.getString(strOffset, buf.getSize() - 2 - strOffset));
+      System.out.println(buf.getShort(buf.getSize() - 2));
     }
   }
 }

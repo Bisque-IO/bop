@@ -204,7 +204,7 @@ class Buffer(
 }
 
 fun Buffer.isOutOfBounds(offset: Int, size: Int): Boolean {
-    return bytes.size() < offset + size
+    return bytes.getSize() < offset + size
 }
 
 fun readPrice(p: Price) {
@@ -247,7 +247,7 @@ object StackFrameTraverser {
 class MessageTest2 {
     @Test
     fun testMessage() {
-        val buf = Buffer(DirectBytes.allocate(128))
+        val buf = Buffer(DirectBytes.allocateDirect(128))
         var x: Double = 0.0
         var price: Price = PriceSliceBC(buf, 128)
 

@@ -19,6 +19,7 @@ affinity = "3.27ea0"
 ktfmt = "0.54"
 ktlint = "1.5.0"
 undercouch = "5.6.0"
+power-assert = "2.0.0"
 
 [libraries]
 google-java-format = { module = "com.google.googlejavaformat:google-java-format", version.ref = "google-java-format" }
@@ -38,6 +39,7 @@ junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", vers
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit-jupiter" }
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
 kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
+kotlinx-coroutines = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 logback = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
 affinity = { module = "net.openhft:affinity", version.ref = "affinity" }
@@ -49,6 +51,7 @@ kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 jmh = { id = "me.champeau.jmh", version.ref = "jmh" }
 graalNative = { id = "org.graalvm.buildtools.native", version.ref = "graal-native" }
+powerAssert = { id = "plugin.power-assert", version.ref = "kotlin" }
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
 spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
 undercouchDownload = { id = "de.undercouch.download", version.ref = "undercouch" }

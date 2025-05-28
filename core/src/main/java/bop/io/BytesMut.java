@@ -10,9 +10,13 @@ public interface BytesMut extends Bytes {
 
   BytesMut writeByte(int value);
 
+  BytesMut writeUByte(int value);
+
   BytesMut writeByte(byte value);
 
   BytesMut putByte(int offset, int value);
+
+  BytesMut putUByte(int offset, int value);
 
   BytesMut putByte(int offset, byte value);
 
@@ -212,6 +216,14 @@ public interface BytesMut extends Bytes {
 
   BytesMut writeInt(int value, boolean bigEndian);
 
+  BytesMut writeIntLE(int value, int length);
+
+  default BytesMut writeInt24LE(int value) {
+    return writeIntLE(value, 3);
+  }
+
+  BytesMut putInt24LE(int offset, int value);
+
   default BytesMut putInt(int offset, int value) {
     return putInt(offset, value, IS_BIG_ENDIAN);
   }
@@ -253,6 +265,46 @@ public interface BytesMut extends Bytes {
   }
 
   BytesMut writeLong(long value, boolean bigEndian);
+
+  BytesMut writeLongLE(long value, int length);
+
+  BytesMut putLongLE(int offset, long value, int length);
+
+  BytesMut writeLong24LE(long value);
+
+  BytesMut putLong24LE(int offset, long value);
+
+  BytesMut writeLong40LE(long value);
+
+  BytesMut putLong40LE(int offset, long value);
+
+  BytesMut writeLong48LE(long value);
+
+  BytesMut putLong48LE(int offset, long value);
+
+  BytesMut writeLong56LE(long value);
+
+  BytesMut putLong56LE(int offset, long value);
+
+  BytesMut writeLongBE(long value, int length);
+
+  BytesMut putLongBE(int offset, long value, int length);
+
+  BytesMut writeLong24BE(long value);
+
+  BytesMut putLong24BE(int offset, long value);
+
+  BytesMut writeLong40BE(long value);
+
+  BytesMut putLong40BE(int offset, long value);
+
+  BytesMut writeLong48BE(long value);
+
+  BytesMut putLong48BE(int offset, long value);
+
+  BytesMut writeLong56BE(long value);
+
+  BytesMut putLong56BE(int offset, long value);
 
   default BytesMut putLong(int offset, long value) {
     return putLong(offset, value, IS_BIG_ENDIAN);
@@ -368,6 +420,8 @@ public interface BytesMut extends Bytes {
 
   BytesMut writeString(String value);
 
+  BytesMut writeCString(String value);
+
   BytesMut putString(int offset, String value);
 
   BytesMut putBytes(int offset, byte[] value, int valueOffset, int length);
@@ -377,4 +431,10 @@ public interface BytesMut extends Bytes {
   BytesMut putBuffer(int offset, Bytes bytes, int bufferOffset, int length);
 
   BytesMut putUnsafe(int offset, long srcAddress, int length);
+
+  default BytesMut writeBytes(byte[] bytes) {
+    return writeBytes(bytes, 0, bytes.length);
+  }
+
+  BytesMut writeBytes(byte[] bytes, int offset, int length);
 }

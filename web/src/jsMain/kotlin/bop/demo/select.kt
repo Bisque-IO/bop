@@ -5,10 +5,7 @@ import js.objects.unsafeJso
 import lib.lucide.ChartBarIcon
 import lib.lucide.ChartLineIcon
 import lib.lucide.ChartPieIcon
-import lib.radix.BarChartIcon
 import lib.radix.CircleBackslashIcon
-import lib.radix.IconJarLogoIcon
-import lib.radix.PieChartIcon
 import react.FC
 import react.Fragment
 import react.createElement
@@ -42,7 +39,7 @@ val SelectDemo = FC {
          }
          SelectContent {
             SelectGroup {
-               SelectLabel { +"Fruits"}
+               SelectLabel { +"Fruits" }
                SelectItem {
                   value = "apple"
                   +"Apple"
@@ -96,7 +93,7 @@ val SelectDemo = FC {
          }
          SelectContent {
             SelectGroup {
-               SelectLabel { +"Fruits"}
+               SelectLabel { +"Fruits" }
                SelectItem {
                   value = "apple"
                   +"Apple"

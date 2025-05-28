@@ -79,29 +79,29 @@ public class Hash {
     if (bytes == null) {
       return 0L;
     }
-    final var address = bytes.address();
+    final var address = bytes.getAddress();
     if (address == 0L) {
       return 0L;
     }
-    return RapidHash.hash(address, bytes.size());
+    return RapidHash.hash(address, bytes.getSize());
   }
 
   public static long rapid(final Bytes bytes, int offset) {
     if (bytes == null) {
       return 0L;
     }
-    final var address = bytes.address();
+    final var address = bytes.getAddress();
     if (address == 0L) {
       return 0L;
     }
-    return RapidHash.hash(address + offset, bytes.size() - offset);
+    return RapidHash.hash(address + offset, bytes.getSize() - offset);
   }
 
   public static long rapid(final Bytes bytes, int offset, int length) {
     if (bytes == null) {
       return 0L;
     }
-    final var address = bytes.address();
+    final var address = bytes.getAddress();
     if (address == 0L) {
       return 0L;
     }
@@ -225,25 +225,25 @@ public class Hash {
     if (bytes == null) {
       return 0L;
     }
-    final var address = bytes.address();
+    final var address = bytes.getAddress();
     if (address == 0L) {
       return 0L;
     }
-    if (bytes.size() < XXH3_C_THRESHOLD) {
-      return XXH3_64.DEFAULT.hash(address, 0, bytes.size());
+    if (bytes.getSize() < XXH3_C_THRESHOLD) {
+      return XXH3_64.DEFAULT.hash(address, 0, bytes.getSize());
     }
-    return XXH3.hash(address, bytes.size());
+    return XXH3.hash(address, bytes.getSize());
   }
 
   public static long xxh3(final Bytes bytes, int offset) {
     if (bytes == null) {
       return 0L;
     }
-    final var address = bytes.address();
+    final var address = bytes.getAddress();
     if (address == 0L) {
       return 0L;
     }
-    final int length = bytes.size() - offset;
+    final int length = bytes.getSize() - offset;
     if (length < XXH3_C_THRESHOLD) {
       return XXH3_64.DEFAULT.hash(address, 0, length);
     }
@@ -254,7 +254,7 @@ public class Hash {
     if (bytes == null) {
       return 0L;
     }
-    final var address = bytes.address();
+    final var address = bytes.getAddress();
     if (address == 0L) {
       return 0L;
     }

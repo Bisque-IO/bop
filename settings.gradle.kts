@@ -18,5 +18,6 @@ dependencyResolutionManagement {
 }
 
 include(":core")
+include(":mysql")
 include(":k2")
 include(":web")

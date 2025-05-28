@@ -1,6 +1,8 @@
 package bop.io;
 
 import bop.unsafe.Danger;
+
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.BufferOverflowException;
 import java.nio.charset.Charset;
@@ -11,32 +13,40 @@ public interface Bytes extends AutoCloseable {
   boolean UNALIGNED_ACCESS = Danger.unalignedAccess();
 
   static Bytes allocate(int size) {
-    return DirectBytes.allocate(size);
+    return DirectBytes.allocateDirect(size);
   }
 
   default boolean isSlice() {
-    return rootAddress() != address();
+    return getRootAddress() != getAddress();
   }
 
   InputStream asInputStream();
 
-  long rootAddress();
+  Object getBase();
 
-  long address();
+  int getRemaining();
 
-  int position();
+  int getAvailable();
 
-  Bytes position(int newPosition);
+  long getRootAddress();
+
+  Bytes reset();
+
+  long getAddress();
+
+  int getPosition();
+
+  Bytes setPosition(int newPosition);
 
   Bytes skip(int length);
 
-  int size();
+  int getSize();
 
-  Bytes size(int newSize);
+  Bytes setSize(int newSize);
 
-  int capacity();
+  int getCapacity();
 
-  boolean owned();
+  boolean isOwned();
 
   int sliceCount();
 
@@ -46,11 +56,19 @@ public interface Bytes extends AutoCloseable {
 
   boolean outOfBounds(int offset, int length);
 
+  int peek() throws BufferOverflowException;
+
   byte getByte(int offset);
+
+  int getUByte(int offset);
 
   byte getByteVolatile(int offset);
 
   byte readByte() throws BufferOverflowException;
+
+  default int readUByte() throws BufferOverflowException {
+    return (int)readByte() & 0xFF;
+  }
 
   byte getByteUnsafe(int offset);
 
@@ -166,6 +184,22 @@ public interface Bytes extends AutoCloseable {
 
   int getIntUnsafe(int offset, boolean bigEndian);
 
+  int getIntLE(int offset, int length);
+
+  int readIntLE(int length) throws BufferOverflowException;
+
+  int getInt24LE(int offset);
+
+  int readInt24LE() throws BufferOverflowException;
+
+  int getIntBE(int offset, int length);
+
+  int readIntBE(int length) throws BufferOverflowException;
+
+  int getInt24BE(int offset);
+
+  int readInt24BE() throws BufferOverflowException;
+
   default int readInt() throws BufferOverflowException {
     return readInt(IS_BIG_ENDIAN);
   }
@@ -207,6 +241,46 @@ public interface Bytes extends AutoCloseable {
   }
 
   long getLongUnsafe(int offset, boolean bigEndian);
+
+  long getLongLE(int offset, int length);
+
+  long readLongLE(int length) throws BufferOverflowException;
+
+  long getLong24LE(int offset);
+
+  long getLong40LE(int offset);
+
+  long getLong48LE(int offset);
+
+  long getLong56LE(int offset);
+
+  long readLong24LE() throws BufferOverflowException;
+
+  long readLong40LE() throws BufferOverflowException;
+
+  long readLong48LE() throws BufferOverflowException;
+
+  long readLong56LE() throws BufferOverflowException;
+
+  long getLongBE(int offset, int length);
+
+  long readLongBE(int length) throws BufferOverflowException;
+
+  long getLong24BE(int offset);
+
+  long getLong40BE(int offset);
+
+  long getLong48BE(int offset);
+
+  long getLong56BE(int offset);
+
+  long readLong24BE() throws BufferOverflowException;
+
+  long readLong40BE() throws BufferOverflowException;
+
+  long readLong48BE() throws BufferOverflowException;
+
+  long readLong56BE() throws BufferOverflowException;
 
   default long readLong() throws BufferOverflowException {
     return readLong(IS_BIG_ENDIAN);
@@ -312,7 +386,19 @@ public interface Bytes extends AutoCloseable {
 
   String getString(int offset, int length, Charset charset);
 
+  String readCString();
+
   void getBytes(int offset, byte[] value, int valueOffset, int length);
+
+  byte[] readBytes(int length);
+
+  default int readBytes(byte[] bytes) {
+    return readBytes(bytes, 0, bytes.length);
+  }
+
+  int readBytes(byte[] bytes, int offset, int length);
+
+  int indexOf(byte b, int offset, int length);
 
   Bytes slice(int offset, int length);
 
