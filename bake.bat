@@ -1,0 +1,1 @@
+xmake l bake.lua %*

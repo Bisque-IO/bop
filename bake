@@ -1,0 +1,75 @@
+#!/usr/bin/env sh
+
+if [ "$(command -v xmake)" ]; then
+  xmake l bake.lua "$@"
+  exit
+else
+  echo "xmake not installed!"
+  echo "installing OS packages..."
+
+  if [ "$(command -v apt)" ]; then
+    sudo apt update
+    sudo apt upgrade -y
+    sudo apt install -y build-essential cmake ninja-build clang clangd pipx curl zip openssl
+    pipx install conan
+    curl -s "https://get.sdkman.io" | bash
+    reset
+    sdk install java 23.0.0-open
+  elif [ "$(command -v dnf)" ]; then
+    sudo dnf install gcc gcc-c++ libstdc++-devel cmake ninja-build clang-tools-extra pipx curl zip openssl
+    pipx install conan
+    curl -s "https://get.sdkman.io" | bash
+    reset
+    sdk install java 23.0.0-open
+  elif [[ "$OSTYPE" == "darwin"* ]]; then
+    if ! [ "$(command -v brew)" ]; then
+      echo "installing homebrew..."
+      bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    fi
+    brew install python3
+    xcode-select --install
+    brew install cmake curl llvm gcc
+    brew install --cask graalvm-jdk
+    brew install openjdk@23
+    pip3 install cmake-format clang-format
+    pip3 install conan
+  else
+    echo "no supported package manager found"
+    echo "install gcc libstdc++ cmake pipx curl zip openssl"
+    exit
+  fi
+
+  if [ "$(command -v curl)" ]; then
+    echo "installing xmake..."
+    curl -fsSL https://xmake.io/shget.text | bash
+    reset
+    xmake l bake.lua "$@"
+  elif [ "$(command -v wget)" ]; then
+    echo "installing xmake..."
+    wget https://xmake.io/shget.text -O - | bash
+    reset
+    xmake l bake.lua "$@"
+  else
+    echo "install curl or wget"
+    exit
+  fi
+#  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+#    echo "linux"
+#  elif [[ "$OSTYPE" == "darwin"* ]]; then
+#    echo "darwin"
+#  elif [[ "$OSTYPE" == "cygwin" ]]; then
+#    echo "cygwin"
+#  elif [[ "$OSTYPE" == "msys" ]]; then
+#    echo "msys"
+#  elif [[ "$OSTYPE" == "win32" ]]; then
+#    echo "win32"
+#  elif [[ "$OSTYPE" == "freebsd"* ]]; then
+#    echo "freebsd"
+#  elif [[ "$OSTYPE" == "netbsd"* ]]; then
+#    echo "netbsd"
+#  elif [[ "$OSTYPE" == "openbsd"* ]]; then
+#    echo "openbsd"
+#  else
+#    echo "unknown"
+#  fi
+fi
