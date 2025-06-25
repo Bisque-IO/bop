@@ -35,6 +35,22 @@ class buffer {
 
 public:
     /**
+     * Allocate a new memory buffer with given size with a shared_ptr.
+     *
+     * @param size Size of memory to allocate.
+     * @return buffer instance.
+     */
+    static buffer* alloc_unique(const size_t size);
+
+    /**
+     * Allocate the shared_ptr for a unique buffer instance by taking ownership.
+     *
+     * @param buf
+     * @return
+     */
+    static ptr<buffer> make_shared(buffer* buf);
+
+    /**
      * Allocate a new memory buffer with given size.
      *
      * @param size Size of memory to allocate.

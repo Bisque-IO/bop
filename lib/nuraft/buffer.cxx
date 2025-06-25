@@ -87,33 +87,64 @@ limitations under the License.
 namespace nuraft {
 
 static void free_buffer(buffer* buf) {
-    // static stat_elem& num_active = *stat_mgr::get_instance()->create_stat
-    //     (stat_elem::COUNTER, "num_active_buffers");
-    // static stat_elem& amount_active = *stat_mgr::get_instance()->create_stat
-    //     (stat_elem::COUNTER, "amount_active_buffers");
-    //
-    // num_active--;
-    // amount_active -= buf->container_size();
+    static stat_elem& num_active = *stat_mgr::get_instance()->create_stat
+        (stat_elem::COUNTER, "num_active_buffers");
+    static stat_elem& amount_active = *stat_mgr::get_instance()->create_stat
+        (stat_elem::COUNTER, "amount_active_buffers");
+
+    num_active--;
+    amount_active -= buf->container_size();
 
     delete[] reinterpret_cast<char*>(buf);
 }
 
+buffer* buffer::alloc_unique(const size_t size) {
+    static stat_elem& num_allocs = *stat_mgr::get_instance()->create_stat
+    (stat_elem::COUNTER, "num_buffer_allocs");
+    static stat_elem& amount_allocs = *stat_mgr::get_instance()->create_stat
+        (stat_elem::COUNTER, "amount_buffer_allocs");
+    static stat_elem& num_active = *stat_mgr::get_instance()->create_stat
+        (stat_elem::COUNTER, "num_active_buffers");
+    static stat_elem& amount_active = *stat_mgr::get_instance()->create_stat
+        (stat_elem::COUNTER, "amount_active_buffers");
+
+    if (size >= 0x80000000) {
+        throw std::out_of_range( "size exceed the max size that "
+                                 "nuraft::buffer could support" );
+    }
+    num_allocs++;
+    num_active++;
+
+    size_t len = size + sizeof(uint) * 2;
+    buffer* buf = reinterpret_cast<buffer*>(new char[len]);
+
+    amount_allocs += len;
+    amount_active += len;
+
+    __init_b_block(buf, size);
+    return buf;
+}
+
+ptr<buffer> buffer::make_shared(buffer* buf) {
+    return ptr<buffer>(buf, &free_buffer);
+}
+
 ptr<buffer> buffer::alloc(const size_t size) {
-    // static stat_elem& num_allocs = *stat_mgr::get_instance()->create_stat
-    //     (stat_elem::COUNTER, "num_buffer_allocs");
-    // static stat_elem& amount_allocs = *stat_mgr::get_instance()->create_stat
-    //     (stat_elem::COUNTER, "amount_buffer_allocs");
-    // static stat_elem& num_active = *stat_mgr::get_instance()->create_stat
-    //     (stat_elem::COUNTER, "num_active_buffers");
-    // static stat_elem& amount_active = *stat_mgr::get_instance()->create_stat
-    //     (stat_elem::COUNTER, "amount_active_buffers");
-    //
-    // if (size >= 0x80000000) {
-    //     throw std::out_of_range( "size exceed the max size that "
-    //                              "nuraft::buffer could support" );
-    // }
-    // num_allocs++;
-    // num_active++;
+    static stat_elem& num_allocs = *stat_mgr::get_instance()->create_stat
+        (stat_elem::COUNTER, "num_buffer_allocs");
+    static stat_elem& amount_allocs = *stat_mgr::get_instance()->create_stat
+        (stat_elem::COUNTER, "amount_buffer_allocs");
+    static stat_elem& num_active = *stat_mgr::get_instance()->create_stat
+        (stat_elem::COUNTER, "num_active_buffers");
+    static stat_elem& amount_active = *stat_mgr::get_instance()->create_stat
+        (stat_elem::COUNTER, "amount_active_buffers");
+
+    if (size >= 0x80000000) {
+        throw std::out_of_range( "size exceed the max size that "
+                                 "nuraft::buffer could support" );
+    }
+    num_allocs++;
+    num_active++;
 
     // if (size >= 0x8000) {
     //     size_t len = size + sizeof(uint) * 2;
@@ -141,8 +172,8 @@ ptr<buffer> buffer::alloc(const size_t size) {
     size_t len = size + sizeof(uint) * 2;
     ptr<buffer> buf( reinterpret_cast<buffer*>(new char[len]),
                      &free_buffer );
-    // amount_allocs += len;
-    // amount_active += len;
+    amount_allocs += len;
+    amount_active += len;
 
     any_ptr ptr = reinterpret_cast<any_ptr>( buf.get() );
     __init_b_block(ptr, size);

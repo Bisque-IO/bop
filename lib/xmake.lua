@@ -121,16 +121,16 @@ local target_of = function(kind)
 
 --     add_ldflags("-fPIC")
     if kind == "shared" then
-        add_rules("utils.symbols.export_all", {export_classes = true})
+        --add_rules("utils.symbols.export_all", {export_classes = true})
         if is_plat("linux") then
             --add_cxflags("-static")
             add_shflags("-static-libgcc", "-static-libstdc++")
         end
     end
-    -- if kind == "static" then
-    --     set_policy("build.merge_archive", true)
-    -- end
-    set_policy("build.merge_archive", true)
+    if kind == "static" then
+         set_policy("build.merge_archive", true)
+    end
+    --set_policy("build.merge_archive", true)
 
     target_end()
 end

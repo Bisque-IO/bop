@@ -6,17 +6,14 @@ extern "C" {
 //    #define SQLITE_API BOP_API
 #include <mdbx.h>
 #include <sqlite3.h>
-#include "./hash/rapidhash.h"
-#include "./hash/xxh3.h"
+#include "../hash/rapidhash.h"
+#include "../hash/xxh3.h"
 
 #ifdef _WIN32
 #define BOP_API __declspec(dllexport)
 #else
 #define BOP_API
 #endif
-
-BOP_API void bop_hello() {
-}
 
 BOP_API void bop_stub() {
 }

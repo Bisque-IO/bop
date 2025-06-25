@@ -182,8 +182,9 @@ int init_raft(server_stuff& stuff) {
 
     // Start ASIO service.
     asio_service::options asio_opt;
-    asio_opt.thread_pool_size_ = 4;
+    asio_opt.thread_pool_size_ = 1;
     asio_opt.streaming_mode_ = true;
+    asio_opt.replicate_log_timestamp_ = true;
     stuff.asio_svc_ = cs_new<asio_service>(asio_opt, stuff.raft_logger_);
 
     stuff.asio_listener_ =
@@ -194,6 +195,9 @@ int init_raft(server_stuff& stuff) {
 
     // Set parameters and start Raft server.
     raft_params params;
+    params.max_log_gap_in_stream_ = 5;
+    params.max_bytes_in_flight_in_stream_ = 1024*1024*1024;
+    params.max_append_size_ = 1024*64;
     params.heart_beat_interval_ = 500;
     params.election_timeout_lower_bound_ = 1000;
     params.election_timeout_upper_bound_ = 2000;
