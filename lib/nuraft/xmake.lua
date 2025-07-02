@@ -19,6 +19,7 @@ local target_of = function(kind)
         add_cxflags("-O3")
         set_optimize("aggressive")
         add_defines("USE_BOOST_ASIO")
+        add_defines("BOOST_ASIO_USE_WOLFSSL=1")
         --add_includedirs("../../src", { public = false })
 
         if is_plat("linux") then
@@ -37,6 +38,7 @@ local target_of = function(kind)
         add_packages(
 --             "snmalloc",
             "openssl3",
+            "wolfssl",
 --             "zlib",
 --             "zstd"
             "boost"

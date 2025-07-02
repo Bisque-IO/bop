@@ -434,44 +434,44 @@ void free_ssl_context(SSL_CTX *ssl_context) {
     SSL_CTX_free(ssl_context);
 }
 
-EVP_PKEY *load_dhparams(const char *filename) {
-    EVP_PKEY *pkey = EVP_PKEY_new();
-    if (!pkey)
-        return NULL;
-
-    BIO *bio = BIO_new_file(filename, "r");
-    if (!bio) {
-        EVP_PKEY_free(pkey);
-        return NULL;
-    }
-
-    OSSL_DECODER_CTX *dctx = OSSL_DECODER_CTX_new_for_pkey(
-        &pkey,                     // Pre-created EVP_PKEY to populate
-        "PEM",                    // Input encoding
-        NULL,                     // Input structure (auto-detect)
-        "DH",                     // Key type
-        EVP_PKEY_KEY_PARAMETERS,  // We're loading DH parameters
-        NULL,                     // libctx
-        NULL                      // propquery
-    );
-
-    if (!dctx) {
-        BIO_free(bio);
-        EVP_PKEY_free(pkey);
-        return NULL;
-    }
-
-    if (!OSSL_DECODER_from_bio(dctx, bio)) {
-        OSSL_DECODER_CTX_free(dctx);
-        BIO_free(bio);
-        EVP_PKEY_free(pkey);
-        return NULL;
-    }
-
-    OSSL_DECODER_CTX_free(dctx);
-    BIO_free(bio);
-    return pkey;  // now contains DH parameters
-}
+// EVP_PKEY *load_dhparams(const char *filename) {
+//     EVP_PKEY *pkey = EVP_PKEY_new();
+//     if (!pkey)
+//         return NULL;
+//
+//     BIO *bio = BIO_new_file(filename, "r");
+//     if (!bio) {
+//         EVP_PKEY_free(pkey);
+//         return NULL;
+//     }
+//
+//     OSSL_DECODER_CTX *dctx = OSSL_DECODER_CTX_new_for_pkey(
+//         &pkey,                     // Pre-created EVP_PKEY to populate
+//         "PEM",                    // Input encoding
+//         NULL,                     // Input structure (auto-detect)
+//         "DH",                     // Key type
+//         EVP_PKEY_KEY_PARAMETERS,  // We're loading DH parameters
+//         NULL,                     // libctx
+//         NULL                      // propquery
+//     );
+//
+//     if (!dctx) {
+//         BIO_free(bio);
+//         EVP_PKEY_free(pkey);
+//         return NULL;
+//     }
+//
+//     if (!OSSL_DECODER_from_bio(dctx, bio)) {
+//         OSSL_DECODER_CTX_free(dctx);
+//         BIO_free(bio);
+//         EVP_PKEY_free(pkey);
+//         return NULL;
+//     }
+//
+//     OSSL_DECODER_CTX_free(dctx);
+//     BIO_free(bio);
+//     return pkey;  // now contains DH parameters
+// }
 
 /* This function should take any options and return SSL_CTX - which has to be free'd with
  * our destructor function - free_ssl_context() */
@@ -533,45 +533,45 @@ SSL_CTX *create_ssl_context_from_options(struct us_socket_context_options_t opti
 
     if (options.dh_params_file_name) {
         /* Set up ephemeral DH parameters. */
-        
-        // DH *dh_2048 = NULL;
-        // FILE *paramfile;
-        // paramfile = fopen(options.dh_params_file_name, "r");
 
-        // if (paramfile) {
-        //     // dh_2048 = PEM_read_DHparams(paramfile, NULL, NULL, NULL);
-        //     dh_2048 = PEM_read_bio_DHparams(paramfile, NULL, NULL, NULL);
-        //     fclose(paramfile);
-        // } else {
+        DH *dh_2048 = NULL;
+        FILE *paramfile;
+        paramfile = fopen(options.dh_params_file_name, "r");
+
+        if (paramfile) {
+            dh_2048 = PEM_read_DHparams(paramfile, NULL, NULL, NULL);
+            // dh_2048 = PEM_read_bio_DHparams(paramfile, NULL, NULL, NULL);
+            fclose(paramfile);
+        } else {
+            free_ssl_context(ssl_context);
+            return NULL;
+        }
+
+        if (dh_2048 == NULL) {
+            free_ssl_context(ssl_context);
+            return NULL;
+        }
+
+        const long set_tmp_dh = SSL_CTX_set_tmp_dh(ssl_context, dh_2048);
+        DH_free(dh_2048);
+
+        // EVP_PKEY* dh_2048 = load_dhparams(options.dh_params_file_name);
+        // if (!dh_2048) {
         //     free_ssl_context(ssl_context);
         //     return NULL;
         // }
-
-        // if (dh_2048 == NULL) {
+        // const int set_tmp_dh = SSL_CTX_set0_tmp_dh_pkey(ssl_context, dh_2048);  // Transfers ownership
+        //
+        // if (set_tmp_dh != 1) {
         //     free_ssl_context(ssl_context);
         //     return NULL;
         // }
-
-        // const long set_tmp_dh = SSL_CTX_set_tmp_dh(ssl_context, dh_2048);
-        // DH_free(dh_2048);
-
-        EVP_PKEY* dh_2048 = load_dhparams(options.dh_params_file_name);
-        if (!dh_2048) {
-            free_ssl_context(ssl_context);
-            return NULL;
-        }
-        const int set_tmp_dh = SSL_CTX_set0_tmp_dh_pkey(ssl_context, dh_2048);  // Transfers ownership
-
-        if (set_tmp_dh != 1) {
-            free_ssl_context(ssl_context);
-            return NULL;
-        }
-
-        /* OWASP Cipher String 'A+' (https://www.owasp.org/index.php/TLS_Cipher_String_Cheat_Sheet) */
-        if (SSL_CTX_set_cipher_list(ssl_context, "DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256") != 1) {
-            free_ssl_context(ssl_context);
-            return NULL;
-        }
+        //
+        // /* OWASP Cipher String 'A+' (https://www.owasp.org/index.php/TLS_Cipher_String_Cheat_Sheet) */
+        // if (SSL_CTX_set_cipher_list(ssl_context, "DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256") != 1) {
+        //     free_ssl_context(ssl_context);
+        //     return NULL;
+        // }
     }
 
     if (options.ssl_ciphers) {
@@ -588,7 +588,7 @@ SSL_CTX *create_ssl_context_from_options(struct us_socket_context_options_t opti
 /* Returns a servername's userdata if any */
 void *us_internal_ssl_socket_context_find_server_name_userdata(struct us_internal_ssl_socket_context_t *context, const char *hostname_pattern) {
     printf("finding %s\n", hostname_pattern);
-    
+
     /* We can use sni_find because looking up a "wildcard pattern" will match the exact literal "wildcard pattern" first,
      * before it matches by the very wildcard itself, so it works fine (exact match is the only thing we care for here) */
     SSL_CTX *ssl_context = sni_find(context->sni, hostname_pattern);
@@ -618,7 +618,7 @@ void us_internal_ssl_socket_context_add_server_name(struct us_internal_ssl_socke
         }
 
         /* We do not want to hold any nullptr's in our SNI tree */
-    
+
         if (sni_add(context->sni, hostname_pattern, ssl_context)) {
             /* If we already had that name, ignore */
             free_ssl_context(ssl_context);

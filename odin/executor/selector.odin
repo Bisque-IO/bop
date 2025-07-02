@@ -1,4 +1,4 @@
-package scheduler
+package executor
 
 import "base:intrinsics"
 import "core:crypto"

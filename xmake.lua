@@ -10,8 +10,6 @@ set_languages("c++23", "c23")
 --set_warnings("all")
 add_rules("mode.debug", "mode.release")
 
-
-
 add_requires("conan::zstd/1.5.7", {
     alias = "zstd",
     configs = {
@@ -51,15 +49,17 @@ end
 
 add_requires("zig ~0.14.0")
 
-add_requires("conan::openssl/3.5.0", {
+add_requires("openssl3 ~3.3.2", {
+    -- add_requires("conan::openssl/3.5.0", {
     alias = "openssl3",
     configs = {
         fPIC = true,
-        shared = false
+        shared = false,
+        static = true
     }
 })
 
-add_requires("boost ~1.87.0", {
+add_requires("boost ~1.88.0", {
     alias = "boost",
     configs = {
         asio = true,
@@ -78,7 +78,10 @@ add_requires("boost ~1.87.0", {
         thread = false,
         timer = false,
         test = false,
-        url = true
+        url = true,
+        zlib = true,
+        zstd = true,
+        header_only = false
     }
 })
 
@@ -90,8 +93,19 @@ add_requires("conan::libuv/1.49.2", {
     }
 })
 
+add_requires("wolfssl ~5.7.2", {
+    alias = "wolfssl",
+    configs = {
+        shared = false,
+        asio = true,
+        fPIC = true,
+        openssl_all = true,
+        openssl_extra = true
+    }
+})
+
 add_requires(
-    -- "onnxruntime ~1.19.2",
+-- "onnxruntime ~1.19.2",
 --     "ftxui ~5.0.0",
     "cli11 ~2.5.0",
     "doctest ~2.4.11",

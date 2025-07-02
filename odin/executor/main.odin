@@ -1,4 +1,4 @@
-package scheduler
+package executor
 
 import "base:intrinsics"
 import "base:runtime"
@@ -11,7 +11,6 @@ import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
-
 
 
 find_first_set_bit_x8 :: proc(bitmap: []simd.u64x8) -> int {
@@ -139,17 +138,29 @@ main :: proc() {
 	signal := Signal(&value)
 	signal_39 := signal^
 
-	benchmark(1, 10, 1000000, value, proc(data: u64, thread_num: int, cycle_num: int, iterations: int) {
-		signal_nearest_branchless(data, 41)
-		signal_nearest_branchless(data, 15)
-		signal_nearest_branchless(data, 63)
-	})
+	benchmark(
+		1,
+		10,
+		1000000,
+		value,
+		proc(data: u64, thread_num: int, cycle_num: int, iterations: int) {
+			signal_nearest_branchless(data, 41)
+			signal_nearest_branchless(data, 15)
+			signal_nearest_branchless(data, 63)
+		},
+	)
 
-	benchmark(1, 10, 1000000, value, proc(data: u64, thread_num: int, cycle_num: int, iterations: int) {
-		signal_nearest(data, 41)
-		signal_nearest(data, 15)
-		signal_nearest(data, 63)
-	})
+	benchmark(
+		1,
+		10,
+		1000000,
+		value,
+		proc(data: u64, thread_num: int, cycle_num: int, iterations: int) {
+			signal_nearest(data, 41)
+			signal_nearest(data, 15)
+			signal_nearest(data, 63)
+		},
+	)
 }
 
 main1 :: proc() #no_bounds_check {
@@ -161,9 +172,15 @@ main1 :: proc() #no_bounds_check {
 		fmt.println(selector_next(&selector))
 	}
 
-	benchmark(1, 10, 5000000, &selector, proc(data: ^Selector, thread_num: int, cycle_num: int, iterations: int) {
-		selector_next(data)
-	})
+	benchmark(
+		1,
+		10,
+		5000000,
+		&selector,
+		proc(data: ^Selector, thread_num: int, cycle_num: int, iterations: int) {
+			selector_next(data)
+		},
+	)
 
 	fmt.println(selector)
 
@@ -174,25 +191,22 @@ main1 :: proc() #no_bounds_check {
 
 	fmt.println("count_trailing_zeroes", intrinsics.count_trailing_zeros(bitmap[15]))
 	fmt.println("count_trailing_zeroes", intrinsics.count_leading_zeros(bitmap[15]))
-	fmt.println("reduce_min", intrinsics.simd_reduce_min(intrinsics.count_leading_zeros(bitmap[15])))
+	fmt.println(
+		"reduce_min",
+		intrinsics.simd_reduce_min(intrinsics.count_leading_zeros(bitmap[15])),
+	)
 	fmt.println("abs_index", find_first_set_bit_x8_2(bitmap))
 
-	benchmark(
-		3,
-		10,
-		5000000,
-		bitmap,
-		proc(data: []simd.u64x8, tid: int, cid: int, iter: int) {
-			data := (cast(^[16]simd.u64x8)raw_data(data))
-			block_index, _, _ := find_first_set_bit_x8_16(16, data)
-			if tid == 0 {
-				simd.to_array_ptr(&data[15])[7] = u64(iter) + 1
-			}
-			if block_index != 15 {
-				panic("x != 15")
-			}
-		},
-	)
+	benchmark(3, 10, 5000000, bitmap, proc(data: []simd.u64x8, tid: int, cid: int, iter: int) {
+		data := (cast(^[16]simd.u64x8)raw_data(data))
+		block_index, _, _ := find_first_set_bit_x8_16(16, data)
+		if tid == 0 {
+			simd.to_array_ptr(&data[15])[7] = u64(iter) + 1
+		}
+		if block_index != 15 {
+			panic("x != 15")
+		}
+	})
 
 	bitmap_x8x16 := [16]simd.u64x8 {
 		ZERO_U64X8,
@@ -308,22 +322,26 @@ main1 :: proc() #no_bounds_check {
 }
 
 
-
-
 main2 :: proc() {
-//	fmt.println("u64x8 -> find index 9")
-//	bitmap := make([]simd.u64x8, 16)
-//	bitmap[9] = simd.u64x8{0, 0, 1, 0, 0, 0, 0, 0}
-//
-//	benchmark(1, 10, 500, bitmap, proc(data: []simd.u64x8, thread_num: int, cycle_num: int, iterations: int) {
-//		fmt.println(find_first_set_bit_x8(data))
-//	})
+	//	fmt.println("u64x8 -> find index 9")
+	//	bitmap := make([]simd.u64x8, 16)
+	//	bitmap[9] = simd.u64x8{0, 0, 1, 0, 0, 0, 0, 0}
+	//
+	//	benchmark(1, 10, 500, bitmap, proc(data: []simd.u64x8, thread_num: int, cycle_num: int, iterations: int) {
+	//		fmt.println(find_first_set_bit_x8(data))
+	//	})
 
 	mu: sync.Atomic_Mutex
-	benchmark(1, 10, 10000000, &mu, proc(data: ^sync.Atomic_Mutex, thread_num: int, cycle_num: int, iterations: int) {
-		sync.lock(data)
-		sync.unlock(data)
-	})
+	benchmark(
+		1,
+		10,
+		10000000,
+		&mu,
+		proc(data: ^sync.Atomic_Mutex, thread_num: int, cycle_num: int, iterations: int) {
+			sync.lock(data)
+			sync.unlock(data)
+		},
+	)
 
 	fmt.println("")
 
@@ -388,16 +406,16 @@ main2 :: proc() {
 	//		},
 	//	)
 
-//	benchmark(
-//		1,
-//		5,
-//		10000000,
-//		core,
-//		proc(data: ^Slot, thread: int, cycles: int, iterations: int) {
-//			//		time.tick_now()
-////			x := intrinsics.read_cycle_counter()
-//		},
-//	)
+	//	benchmark(
+	//		1,
+	//		5,
+	//		10000000,
+	//		core,
+	//		proc(data: ^Slot, thread: int, cycles: int, iterations: int) {
+	//			//		time.tick_now()
+	////			x := intrinsics.read_cycle_counter()
+	//		},
+	//	)
 
 	fmt.println("benching vcore_execute")
 	benchmark(
@@ -412,17 +430,21 @@ main2 :: proc() {
 	)
 
 	stop: bool
-	th := thread.create_and_start_with_poly_data2(slot, &stop, proc(core: ^Slot, stop: ^bool) {
+	th := thread.create_and_start_with_poly_data2(
+	slot,
+	&stop,
+	proc(core: ^Slot, stop: ^bool) {
 		for !stop^ {
 			if signal_acquire(core.signal, core.index) {
 				slot_execute(core)
 			} else {
-//				intrinsics.cpu_relax()
+				//				intrinsics.cpu_relax()
 			}
 
-//			vcore_execute(core)
+			//			vcore_execute(core)
 		}
-	})
+	},
+	)
 
 	sw: time.Stopwatch
 	time.stopwatch_start(&sw)
@@ -432,9 +454,9 @@ main2 :: proc() {
 		100000000,
 		slot,
 		proc(data: ^Slot, thread: int, cycles: int, iterations: int) {
-//			if ! {
-//				intrinsics.cpu_relax()
-//			}
+			//			if ! {
+			//				intrinsics.cpu_relax()
+			//			}
 
 			slot_schedule(data)
 		},
@@ -443,7 +465,7 @@ main2 :: proc() {
 
 	stop = true
 	dur := time.stopwatch_duration(sw)
-//	intrinsics.atomic_store(&stop, true)
+	//	intrinsics.atomic_store(&stop, true)
 	thread.join(th)
 	thread.destroy(th)
 
@@ -511,13 +533,6 @@ Executor_256_NonBlocking :: Executor(256, false)
 Executor_512_NonBlocking :: Executor(512, false)
 Executor_1024_NonBlocking :: Executor(1024, false)
 
-
-
-
-
-
-
-
 Bench_Result :: struct {}
 
 benchmark :: proc(
@@ -548,13 +563,23 @@ benchmark :: proc(
 				op(data, 0, c, i)
 			}
 			time.stopwatch_stop(&sw)
-			intrinsics.atomic_store_explicit(&cycles[c][0].value, u64(time.stopwatch_duration(sw)), .Seq_Cst)
+			intrinsics.atomic_store_explicit(
+				&cycles[c][0].value,
+				u64(time.stopwatch_duration(sw)),
+				.Seq_Cst,
+			)
 		} else {
 			producers: [THREADS]^thread.Thread
 
 			for i in 0 ..< THREADS {
 				producers[i] = thread.create_and_start_with_poly_data(
-					Thread_Data{data = data, cycle_num = c, thread_num = i, op = op, counter = &cycles[c][i]},
+					Thread_Data {
+						data = data,
+						cycle_num = c,
+						thread_num = i,
+						op = op,
+						counter = &cycles[c][i],
+					},
 					proc(data: Thread_Data) {
 						op := data.op
 						sw: time.Stopwatch
@@ -640,9 +665,6 @@ benchmark :: proc(
 	fmt.println("avg: ", avg_per_op, "  ops per sec: ", u64(per_op_count_per_sec) * u64(THREADS))
 }
 
-
-
-
 global_trace_ctx: trace.Context
 
 debug_trace_assertion_failure_proc :: proc(prefix, message: string, loc := #caller_location) -> ! {
@@ -695,4 +717,3 @@ test_find_first :: proc(t: ^testing.T) {
 	index := find_first_set_bit_x8(bitmap)
 	fmt.println(index)
 }
-

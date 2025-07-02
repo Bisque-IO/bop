@@ -1,4 +1,4 @@
-package scheduler
+package executor
 
 import "base:intrinsics"
 import "core:sync"
@@ -13,18 +13,18 @@ Waker :: struct #align (CACHE_LINE_SIZE) {
 }
 
 waker_await :: #force_inline proc "contextless" (self: ^Waker) {
-    if intrinsics.atomic_load_explicit(&self.counter, .Acquire) == 0 {
+    if atomic_load(&self.counter, .Acquire) == 0 {
         sync.atomic_cond_wait(&self.cond, &self.mu)
     }
 }
 
 waker_incr :: #force_inline proc "contextless" (non_zero: ^Waker) {
-    if intrinsics.atomic_add_explicit(&non_zero.counter, 1, .Release) == 0 {
+    if atomic_add(&non_zero.counter, 1, .Release) == 0 {
         // signal all waiting threads
         sync.atomic_cond_broadcast(&non_zero.cond)
     }
 }
 
 waker_decr :: #force_inline proc "contextless" (nz: ^Waker) {
-    intrinsics.atomic_sub_explicit(&nz.counter, 1, .Seq_Cst)
+    atomic_sub(&nz.counter, 1, .Seq_Cst)
 }

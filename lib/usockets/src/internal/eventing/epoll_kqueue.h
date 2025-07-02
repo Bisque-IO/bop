@@ -26,6 +26,7 @@
 #include <sys/eventfd.h>
 #define LIBUS_SOCKET_READABLE EPOLLIN
 #define LIBUS_SOCKET_WRITABLE EPOLLOUT
+#else
 #include <sys/event.h>
 /* Kqueue's EVFILT_ is NOT a bitfield, you cannot OR together them.
  * We therefore have our own bitfield we then translate in every call */
