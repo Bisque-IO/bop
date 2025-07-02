@@ -1,0 +1,263 @@
+# # We'll use defaults from the LLVM style, but with 4 columns indentation.
+# # BasedOnStyle: Google
+Language: Cpp
+# Force pointers to the type for C++.
+# DerivePointerAlignment: false
+PointerAlignment: Left
+AlignAfterOpenBracket: BlockIndent
+AlignArrayOfStructures: Left
+# AlignConsecutiveAssignments: Consecutive
+# AlignConsecutiveBitFields: Consecutive
+# AlignConsecutiveDeclarations: Consecutive
+# AlignConsecutiveDeclarations: AcrossEmptyLines
+# AlignConsecutiveMacros:
+#   Enabled: true
+#   AcrossEmptyLines: true
+#   AcrossComments: true
+# AlignConsecutiveShortCaseStatements:
+#   Enabled: true
+#   AcrossEmptyLines: true
+#   AcrossComments: true
+#   AlignCaseColons: false
+AllowAllArgumentsOnNextLine: true
+AllowAllConstructorInitializersOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowBreakBeforeNoexceptSpecifier: OnlyWithParen
+AllowShortBlocksOnASingleLine: Always
+AllowShortCaseExpressionOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortCompoundRequirementOnASingleLine: true
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: Inline
+AllowShortLoopsOnASingleLine: false
+AlwaysBreakBeforeMultilineStrings: true
+AlignEscapedNewlines: Right
+AlignOperands: AlignAfterOperator
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 1
+BinPackArguments: false
+# BinPackParameters: AlwaysOnePerLine
+# BitFieldColonSpacing: Both
+# BreakBeforeBraces: Custom
+# BraceWrapping:
+#   AfterEnum: false
+#   AfterStruct: false
+#   AfterFunction: false
+#   SplitEmptyFunction: false
+#   AfterNamespace: false
+#   BeforeLambdaBody: true
+#   IndentBraces: false
+
+BracedInitializerIndentWidth: 2
+# BreakAdjacentStringLiterals: true
+# BreakAfterAttributes: Always
+# BreakAfterReturnType: Always
+BreakBeforeConceptDeclarations: Always
+BreakBeforeTernaryOperators: true
+# BreakConstructorInitializers: BeforeComma
+PackConstructorInitializers: CurrentLine
+BreakInheritanceList: AfterComma
+# BreakStringLiterals: true
+ColumnLimit: 100
+# CompactNamespaces: true
+# Cpp11BracedListStyle: true
+# UseTab: Always
+IndentWidth: 4
+TabWidth: 0
+ContinuationIndentWidth: 4
+InsertBraces: false
+InsertNewlineAtEOF: true
+LambdaBodyIndentation: Signature
+LineEnding: CRLF
+QualifierAlignment: Left
+ReferenceAlignment: Left
+# # RemoveParentheses: Never
+# RequiresClausePosition: OwnLine
+# RequiresExpressionIndentation: OuterScope
+# SeparateDefinitionBlocks: Always
+# SortIncludes: CaseInsensitive
+# SortUsingDeclarations: Never
+# SpaceAfterCStyleCast: false
+# SpaceAroundPointerQualifiers: Before
+# SpaceBeforeCaseColon: false
+# SpaceBeforeCpp11BracedList: false
+# SpaceBeforeCtorInitializerColon: true
+# SpaceBeforeJsonColon: false
+# SpaceBeforeParens: ControlStatementsExceptControlMacros
+# SpaceBeforeAssignmentOperators: true
+# SpacesInAngles: Never
+# SpacesInContainerLiterals: true
+
+# BreakBeforeBraces: Custom
+# BreakBeforeConceptDeclarations: Always
+# BreakBeforeInlineASMColon: Never
+# BreakBeforeTernaryOperators: true
+# BreakBinaryOperations: Never
+# BreakConstructorInitializers: BeforeColon
+# BreakFunctionDefinitionParameters: false
+# BreakInheritanceList: BeforeColon
+# BreakStringLiterals: true
+BreakTemplateDeclarations: Yes
+
+Cpp11BracedListStyle: true
+# DerivePointerAlignment: true
+# EmptyLineAfterAccessModifier: Always
+# EmptyLineBeforeAccessModifier: Always
+IndentAccessModifiers: false
+IndentRequiresClause: false
+
+#PPIndentWidth: 2
+RemoveParentheses: MultipleParentheses
+RemoveSemicolon: true
+RequiresClausePosition: WithPreceding
+RequiresExpressionIndentation: OuterScope
+SeparateDefinitionBlocks: Always
+
+CommentPragmas: "^ IWYU pragma:"
+
+# ---
+# Language: Cpp
+# # BasedOnStyle:  Mozilla
+# AccessModifierOffset: -4
+# AlignAfterOpenBracket: BlockIndent
+# AlignArrayOfStructures: Left
+# AlignConsecutiveMacros: None
+# AlignConsecutiveAssignments: Consecutive
+# AlignConsecutiveDeclarations: Consecutive
+# AlignConsecutiveShortCaseStatements:
+#   Enabled: true
+#   AcrossEmptyLines: true
+#   AcrossComments: true
+#   AlignCaseColons: false
+# AlignEscapedNewlines: Right
+# AlignOperands: Align
+# AlignTrailingComments:
+#   Kind: Always
+#   OverEmptyLines: 2
+# AllowAllArgumentsOnNextLine: true
+# AllowAllConstructorInitializersOnNextLine: true
+# AllowAllParametersOfDeclarationOnNextLine: true
+# AllowShortBlocksOnASingleLine: Empty
+# AllowShortCaseLabelsOnASingleLine: true
+# AllowShortFunctionsOnASingleLine: All
+# AllowShortLambdasOnASingleLine: None
+# AllowShortIfStatementsOnASingleLine: Never
+# AllowShortLoopsOnASingleLine: false
+# AlwaysBreakAfterDefinitionReturnType: None
+# AlwaysBreakAfterReturnType: None
+# AlwaysBreakBeforeMultilineStrings: false
+# AlwaysBreakTemplateDeclarations: Yes
+# BinPackArguments: true
+# BinPackParameters: true
+# BraceWrapping:
+#   AfterCaseLabel: false
+#   AfterClass: false
+#   AfterControlStatement: Never
+#   AfterEnum: false
+#   AfterFunction: false
+#   AfterNamespace: false
+#   AfterObjCDeclaration: false
+#   AfterStruct: false
+#   AfterUnion: false
+#   AfterExternBlock: true
+#   BeforeCatch: false
+#   BeforeElse: false
+#   IndentBraces: false
+#   SplitEmptyFunction: false
+#   SplitEmptyRecord: false
+#   SplitEmptyNamespace: false
+# BreakBeforeBinaryOperators: None
+# BreakBeforeBraces: Custom
+# BreakBeforeInheritanceComma: false
+# BreakInheritanceList: BeforeColon
+# BreakBeforeTernaryOperators: true
+# BreakConstructorInitializersBeforeComma: true
+# BreakConstructorInitializers: AfterColon
+# BreakAfterJavaFieldAnnotations: false
+# BreakStringLiterals: true
+# ColumnLimit: 80
+# CommentPragmas: "^ IWYU pragma:"
+# CompactNamespaces: false
+# ConstructorInitializerAllOnOneLineOrOnePerLine: true
+# ConstructorInitializerIndentWidth: 2
+# ContinuationIndentWidth: 2
+# Cpp11BracedListStyle: true
+# DeriveLineEnding: true
+# DerivePointerAlignment: false
+# DisableFormat: false
+# ExperimentalAutoDetectBinPacking: false
+# FixNamespaceComments: false
+# ForEachMacros:
+#   - foreach
+#   - Q_FOREACH
+#   - BOOST_FOREACH
+# IncludeBlocks: Preserve
+# IncludeCategories:
+#   - Regex: '^"(llvm|llvm-c|clang|clang-c)/'
+#     Priority: 2
+#     SortPriority: 0
+#   - Regex: '^(<|"(gtest|gmock|isl|json)/)'
+#     Priority: 3
+#     SortPriority: 0
+#   - Regex: ".*"
+#     Priority: 1
+#     SortPriority: 0
+# IncludeIsMainRegex: "(Test)?$"
+# IncludeIsMainSourceRegex: ""
+# IndentCaseLabels: true
+# IndentGotoLabels: true
+# IndentPPDirectives: BeforeHash
+# IndentWidth: 2
+# IndentWrappedFunctionNames: false
+# JavaScriptQuotes: Leave
+# JavaScriptWrapImports: true
+# KeepEmptyLinesAtTheStartOfBlocks: true
+# MacroBlockBegin: ""
+# MacroBlockEnd: ""
+# MaxEmptyLinesToKeep: 2
+# NamespaceIndentation: None
+# ObjCBinPackProtocolList: Auto
+# ObjCBlockIndentWidth: 2
+# ObjCSpaceAfterProperty: true
+# ObjCSpaceBeforeProtocolList: false
+# PenaltyBreakAssignment: 4
+# PenaltyBreakBeforeFirstCallParameter: 19
+# PenaltyBreakComment: 300
+# PenaltyBreakFirstLessLess: 120
+# PenaltyBreakString: 1000
+# PenaltyBreakTemplateDeclaration: 10
+# PenaltyExcessCharacter: 1000000
+# PenaltyReturnTypeOnItsOwnLine: 200
+# PointerAlignment: Left
+# ReflowComments: true
+# SortIncludes: Never
+# SortUsingDeclarations: true
+# SpaceAfterCStyleCast: false
+# SpaceAfterLogicalNot: false
+# SpaceAfterTemplateKeyword: false
+# SpaceBeforeAssignmentOperators: true
+# SpaceBeforeCpp11BracedList: false
+# SpaceBeforeCtorInitializerColon: true
+# SpaceBeforeInheritanceColon: true
+# SpaceBeforeParens: ControlStatements
+# SpaceBeforeRangeBasedForLoopColon: true
+# SpaceInEmptyBlock: false
+# SpaceInEmptyParentheses: false
+# SpacesBeforeTrailingComments: 1
+# SpacesInAngles: Never
+# SpacesInConditionalStatement: false
+# SpacesInContainerLiterals: true
+# SpacesInCStyleCastParentheses: false
+# SpacesInParentheses: false
+# SpacesInSquareBrackets: false
+# SpaceBeforeSquareBrackets: false
+# Standard: Latest
+# StatementMacros:
+#   - Q_UNUSED
+#   - QT_REQUIRE_VERSION
+# TabWidth: 3
+# UseCRLF: false
+# UseTab: Never
