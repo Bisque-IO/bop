@@ -13,10 +13,10 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 		LIB_PATH :: "../../build/windows/x64/release/bop.lib"
 	} else {
 		@(private)
-		LIB_PATH :: "../../build/windows/x64/release/bop-static.lib"
+		LIB_PATH :: "../../build/windows/x64/debug/bop-static.lib"
 	}
 
-	when #config(BOP_DEBUG, 0) == 1 {
+	when #config(BOP_DEBUG, 1) == 1 {
 		@(private)
 		MSVCRT_NAME :: "system:msvcrtd.lib"
 	} else {
@@ -278,7 +278,17 @@ foreign lib {
 
 	raft_srv_config_ptr_make :: proc(config: ^Raft_Srv_Config) -> ^Raft_Srv_Config_Ptr ---
 	raft_srv_config_ptr_delete :: proc(config_ptr: ^Raft_Srv_Config_Ptr) ---
-	raft_srv_config_free :: proc(config: ^Raft_Srv_Config) ---
+	raft_srv_config_make :: proc(
+		id: i32,
+		dc_id: i32,
+		endpoint: [^]byte,
+		endpoint_size: uintptr,
+		aux: [^]byte,
+		aux_size: uintptr,
+		learner: bool,
+		priority: i32,
+	) -> ^Raft_Srv_Config ---
+	raft_srv_config_delete :: proc(config: ^Raft_Srv_Config) ---
 	raft_srv_config_id :: proc(config: ^Raft_Srv_Config) -> i32 ---
 	raft_srv_config_dc_id :: proc(config: ^Raft_Srv_Config) -> i32 ---
 	raft_srv_config_endpoint :: proc(config: ^Raft_Srv_Config) -> cstring ---
@@ -437,9 +447,13 @@ foreign lib {
 	raft_server_peer_info_vec_size :: proc(vec: ^Raft_Server_Peer_Info_Vec) -> uintptr ---
 	raft_server_peer_info_vec_get :: proc(vec: ^Raft_Server_Peer_Info_Vec, index: uintptr) -> ^Raft_Server_Peer_Info ---
 
+	raft_params_make :: proc() -> ^Raft_Params ---
+	raft_params_delete :: proc(params: ^Raft_Params) ---
+
 	raft_server_launch :: proc(
 		user_data: rawptr,
 		fsm: ^Raft_FSM_Ptr,
+		state_mgr: ^Raft_State_Mgr_Ptr,
 		logger: ^Raft_Logger_Ptr,
 		port_number: i32,
 		asio_service: ^Raft_Asio_Service_Ptr,
@@ -1121,6 +1135,37 @@ foreign lib {
 	raft_server_get_last_snapshot_idx :: proc(
 		rs: ^Raft_Server,
 	) -> u64 ---
+
+	raft_mdbx_state_mgr_open :: proc(
+		my_srv_config: ^Raft_Srv_Config_Ptr,
+		dir: [^]byte,
+		dir_size: uintptr,
+		logger: ^Raft_Logger_Ptr,
+		size_lower: uintptr,
+		size_now: uintptr,
+		size_upper: uintptr,
+		growth_step: uintptr,
+		shirnk_threshold: uintptr,
+		page_size: uintptr,
+		flags: u32,
+		mode: u16,
+		log_store: ^Raft_Log_Store_Ptr,
+	) -> ^Raft_State_Mgr_Ptr ---
+
+	raft_mdbx_log_store_open :: proc(
+		dir: [^]byte,
+		dir_size: uintptr,
+		logger: ^Raft_Logger_Ptr,
+		size_lower: uintptr,
+		size_now: uintptr,
+		size_upper: uintptr,
+		growth_step: uintptr,
+		shirnk_threshold: uintptr,
+		page_size: uintptr,
+		flags: u32,
+		mode: u16,
+		compact_batch_size: uintptr,
+	) -> ^Raft_Log_Store_Ptr ---
 }
 
 main :: proc() {

@@ -164,9 +164,20 @@ BOP_API size_t bop_raft_srv_config_vec_size(bop_raft_srv_config_vec *vec);
 
 BOP_API bop_raft_srv_config *bop_raft_srv_config_vec_get(bop_raft_srv_config_vec *vec, size_t idx);
 
-BOP_API bop_raft_srv_config_ptr *bop_raft_srv_config_ptr_create(bop_raft_srv_config *config);
+BOP_API bop_raft_srv_config_ptr *bop_raft_srv_config_ptr_make(bop_raft_srv_config *config);
 
 BOP_API void bop_raft_srv_config_ptr_delete(const bop_raft_srv_config_ptr *config);
+
+BOP_API bop_raft_srv_config* bop_raft_srv_config_make(
+    int32_t id,
+    int32_t dc_id,
+    const char *endpoint,
+    size_t endpoint_size,
+    const char *aux,
+    size_t aux_size,
+    bool learner,
+    int32_t priority
+);
 
 BOP_API void bop_raft_srv_config_delete(const bop_raft_srv_config *config);
 
@@ -199,18 +210,22 @@ BOP_API size_t bop_raft_srv_config_aux_size(bop_raft_srv_config *cfg);
  */
 BOP_API bool bop_raft_srv_config_is_learner(bop_raft_srv_config *cfg);
 
+BOP_API void bop_raft_srv_config_set_is_learner(bop_raft_srv_config *cfg, bool learner);
+
 /**
  * `true` if this node is a new joiner, but not yet fully synced.
  * New joiner will not
  * initiate or participate in leader election.
  */
 BOP_API bool bop_raft_srv_config_is_new_joiner(bop_raft_srv_config *cfg);
+BOP_API void bop_raft_srv_config_set_new_joiner(bop_raft_srv_config *cfg, bool new_joiner);
 
 /**
  * Priority of this node.
  * 0 will never be a leader.
  */
 BOP_API int32_t bop_raft_srv_config_priority(bop_raft_srv_config *cfg);
+BOP_API void bop_raft_srv_config_set_priority(bop_raft_srv_config *cfg, int32_t priority);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::svr_state
@@ -927,7 +942,7 @@ struct bop_raft_params {
 
 struct bop_raft_params_ptr;
 
-BOP_API bop_raft_params *bop_raft_params_default_alloc();
+BOP_API bop_raft_params *bop_raft_params_make();
 
 BOP_API void bop_raft_params_delete(const bop_raft_params *params);
 
@@ -2190,6 +2205,37 @@ BOP_API void bop_raft_server_schedule_snapshot_creation(
  * @return Log index number of the last snapshot. `0` if snapshot does not exist.
  */
 BOP_API uint64_t bop_raft_server_get_last_snapshot_idx(const bop_raft_server *rs);
+
+BOP_API bop_raft_state_mgr_ptr* bop_raft_mdbx_state_mgr_open(
+    bop_raft_srv_config_ptr* my_srv_config,
+    const char* dir,
+    size_t dir_size,
+    bop_raft_logger_ptr* logger,
+    size_t size_lower,
+    size_t size_now,
+    size_t size_upper,
+    size_t growth_step,
+    size_t shrink_threshold,
+    size_t pagesize,
+    uint32_t flags, // MDBX_env_flags_t
+    uint16_t mode, // mdbx_mode_t
+    bop_raft_log_store_ptr* log_store
+);
+
+BOP_API bop_raft_log_store_ptr* bop_raft_mdbx_log_store_open(
+    const char* path,
+    size_t path_size,
+    bop_raft_logger_ptr* logger,
+    size_t size_lower,
+    size_t size_now,
+    size_t size_upper,
+    size_t growth_step,
+    size_t shrink_threshold,
+    size_t pagesize,
+    uint32_t flags,
+    uint16_t mode,
+    size_t compact_batch_size
+);
 
 #ifdef __cplusplus
 }

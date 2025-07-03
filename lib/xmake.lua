@@ -78,8 +78,8 @@ local target_of = function(kind)
     -- add_files("../lmdb/midl.c", { languages = "c99", includedirs = "../lmdb" })
 
     -- mdbx
-    -- add_includedirs("mdbx", { public = true })
-    -- add_files("mdbx/mdbx.c", { languages = "c23", includedirs = "include", cflags = "-O3" })
+    add_includedirs("mdbx", { public = true })
+    add_files("mdbx/mdbx.c", { languages = "c23", includedirs = "include", cflags = "-O3" })
 
     -- sqlite
     -- add_includedirs("../lib/sqlite", { public = true })
@@ -128,7 +128,7 @@ local target_of = function(kind)
     --             "libcurl"
     )
 
-    -- set_symbols("debug")
+    set_symbols("debug")
     --set_strip("all")
 
     --     add_ldflags("-fPIC")

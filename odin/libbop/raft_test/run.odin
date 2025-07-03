@@ -9,6 +9,8 @@ import "core:os"
 import "core:thread"
 
 import bop "../"
+import os2 "core:os/os2"
+import strings "core:strings"
 
 Logger_Ctx :: struct {
     ctx: runtime.Context,
@@ -67,7 +69,7 @@ run_raft :: proc() {
     wire_log_store()
     wire_state_mgr()
 
-
+    run_raft_server()
 }
 
 run_raft_server :: proc() {
@@ -85,12 +87,146 @@ run_raft_server :: proc() {
 		cb_func: rawptr
     */
 
-    params: bop.Raft_Params
-    params.heart_beat_interval = 1000
+    context.logger = log.create_console_logger(.Debug)
+    logger_ctx := new(Logger_Ctx)
+    logger_ctx.ctx = context
+    logger := bop.raft_logger_make(
+        rawptr(logger_ctx),
+        proc "c" (
+            user_data: rawptr,
+            level: bop.Raft_Log_Level,
+            source_file: cstring,
+            func_name: cstring,
+            line_number: uintptr,
+            log_line: [^]byte,
+            log_line_size: uintptr,
+        ) {
+            context = (cast(^Logger_Ctx)user_data).ctx
+            log.log(
+            bop.Raft_Log_Level_To_Odin_Level[level],
+            string(log_line[0:log_line_size]),
+            location = runtime.Source_Code_Location {
+                file_path = string(source_file),
+                line = i32(line_number),
+                procedure = string(func_name),
+                column = 0,
+            },
+            )
+        },
+    )
 
-//    bop.raft_server_launch(
-//
-//    )
+    user_data : rawptr = nil
+
+    asio_options := bop.Raft_Asio_Options{}
+    asio_options.thread_pool_size = 2
+    asio_options.invoke_req_cb_on_empty_meta = true
+    asio_options.invoke_resp_cb_on_empty_meta = true
+    fmt.println("creating asio service...")
+    asio_service := bop.raft_asio_service_make(&asio_options, logger)
+
+    endpoint := "127.0.0.1:15001"
+
+//    os.make_directory(state_dir, 0655)
+
+    srv_config := bop.raft_srv_config_make(
+        i32(1),
+        i32(1),
+        raw_data(endpoint), uintptr(len(endpoint)),
+        nil, 0,
+        false,
+        i32(1)
+    )
+
+    srv_config_ptr := bop.raft_srv_config_ptr_make(srv_config)
+    defer bop.raft_srv_config_ptr_delete(srv_config_ptr)
+
+
+    dir := "." + os2.Path_Separator_String + "data"
+//    state_dir := "./data"
+//    logs_dir := "./data"
+
+    log_store := bop.raft_mdbx_log_store_open(
+        raw_data(dir),
+        uintptr(len(dir)),
+        logger,
+        1024*1024*64,
+        1024*1024*64,
+        1024*1024*1024,
+        1024*1024*64,
+        1024*1024*64,
+        4096,
+        0,
+        655,
+        10000,
+    )
+
+    ensure(log_store != nil, "log_store is nil")
+
+    state_mgr := bop.raft_mdbx_state_mgr_open(
+        srv_config_ptr,
+        raw_data(dir),
+        uintptr(len(dir)),
+        logger,
+        1024*64,
+        1024*64,
+        1024*64*16,
+        1024*64,
+        1024*64*4,
+        4096,
+        0,
+        655,
+        log_store,
+    )
+
+    ensure(state_mgr != nil, "state_mgr is nil")
+
+    current_conf : ^bop.Raft_Cluster_Config = nil
+    rollback_conf : ^bop.Raft_Cluster_Config = nil
+    fsm := bop.raft_fsm_make(
+        user_data = user_data,
+        current_conf = current_conf,
+        rollback_conf = rollback_conf,
+        commit = fsm_commit,
+        commit_config = fsm_commit_config,
+        pre_commit = fsm_pre_commit,
+        rollback = fsm_rollback,
+        rollback_config = fsm_rollback_config,
+        get_next_batch_size_hint_in_bytes = fsm_get_next_batch_size_hint_in_bytes,
+        save_snapshot = fsm_save_snapshot,
+        apply_snapshot = fsm_apply_snapshot,
+        read_snapshot = fsm_read_snapshot,
+        free_snapshot_user_ctx = fsm_free_user_snapshot_ctx,
+        last_snapshot = fsm_last_snapshot,
+        last_commit_index = fsm_last_commit_index,
+        create_snapshot = fsm_create_snapshot,
+        chk_create_snapshot = fsm_chk_create_snapshot,
+        allow_leadership_transfer = fsm_allow_leadership_transfer,
+        adjust_commit_index = fsm_adjust_commit_index
+    )
+
+    ensure(fsm != nil, "raft_fsm_make returned nil")
+
+    params := bop.raft_params_make()
+
+    raft_server := bop.raft_server_launch(
+        user_data,
+        fsm,
+        state_mgr,
+        logger,
+        15001,
+        asio_service,
+        params,
+        false,
+        true,
+        false,
+        nil
+    )
+
+    bop.raft_server_stop(raft_server, 5)
+
+    bop.raft_log_store_delete(log_store)
+    bop.raft_state_mgr_delete(state_mgr)
+    bop.raft_logger_delete(logger)
 }
 
 setup_options :: proc() {
@@ -147,6 +283,10 @@ setup_options :: proc() {
 }
 
 main :: proc() {
+    run_raft_server()
+}
+
+main0 :: proc() {
     setup_options()
 
     user_data : rawptr = nil

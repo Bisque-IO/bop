@@ -423,7 +423,7 @@ struct bop_raft_srv_config_ptr {
     }
 };
 
-BOP_API bop_raft_srv_config_ptr *bop_raft_srv_config_ptr_create(bop_raft_srv_config *config) {
+BOP_API bop_raft_srv_config_ptr *bop_raft_srv_config_ptr_make(bop_raft_srv_config *config) {
     return new bop_raft_srv_config_ptr(
         nuraft::ptr<nuraft::srv_config>(reinterpret_cast<nuraft::srv_config *>(config))
     );
@@ -432,6 +432,28 @@ BOP_API bop_raft_srv_config_ptr *bop_raft_srv_config_ptr_create(bop_raft_srv_con
 BOP_API void bop_raft_srv_config_ptr_delete(const bop_raft_srv_config_ptr *config) {
     if (config)
         delete config;
+}
+
+BOP_API bop_raft_srv_config *bop_raft_srv_config_make(
+    int32_t id,
+    int32_t dc_id,
+    const char *endpoint,
+    size_t endpoint_size,
+    const char *aux,
+    size_t aux_size,
+    bool learner,
+    int32_t priority
+) {
+    return reinterpret_cast<bop_raft_srv_config *>(
+        new nuraft::srv_config(
+            id,
+            dc_id,
+            std::string(endpoint, endpoint_size),
+            std::string(aux, aux_size),
+            learner,
+            priority
+        )
+    );
 }
 
 BOP_API void bop_raft_srv_config_delete(const bop_raft_srv_config *config) {
@@ -479,6 +501,10 @@ BOP_API bool bop_raft_srv_config_is_learner(bop_raft_srv_config *cfg) {
     return reinterpret_cast<nuraft::srv_config *>(cfg)->is_learner();
 }
 
+BOP_API void bop_raft_srv_config_set_is_learner(bop_raft_srv_config *cfg, bool learner) {
+    reinterpret_cast<nuraft::srv_config *>(cfg)->set_learner(learner);
+}
+
 /**
  * `true` if this node is a new joiner, but not yet fully synced.
  * New joiner will not
@@ -488,12 +514,20 @@ BOP_API bool bop_raft_srv_config_is_new_joiner(bop_raft_srv_config *cfg) {
     return reinterpret_cast<nuraft::srv_config *>(cfg)->is_new_joiner();
 }
 
+BOP_API void bop_raft_srv_config_set_new_joiner(bop_raft_srv_config *cfg, bool new_joiner) {
+    reinterpret_cast<nuraft::srv_config *>(cfg)->set_new_joiner(new_joiner);
+}
+
 /**
  * Priority of this node.
  * 0 will never be a leader.
  */
 BOP_API int32_t bop_raft_srv_config_priority(bop_raft_srv_config *cfg) {
     return reinterpret_cast<nuraft::srv_config *>(cfg)->get_priority();
+}
+
+BOP_API void bop_raft_srv_config_set_priority(bop_raft_srv_config *cfg, int32_t priority) {
+    reinterpret_cast<nuraft::srv_config *>(cfg)->set_priority(priority);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1122,7 +1156,7 @@ static_assert(
 
 static_assert(sizeof(nuraft::raft_params) == sizeof(bop_raft_params));
 
-BOP_API bop_raft_params *bop_raft_params_alloc() {
+BOP_API bop_raft_params *bop_raft_params_make() {
     nuraft::raft_params params{};
     bop_raft_params *result = new bop_raft_params;
     *result = *reinterpret_cast<bop_raft_params *>(&params);
@@ -3662,5 +3696,2663 @@ bop_raft_cb_get_resp_msg(bop_raft_cb_req_resp *req_resp, bop_raft_cb_resp_msg *r
     resp_msg->ctx = reinterpret_cast<bop_raft_buffer *>(resp->get_ctx().get());
     resp_msg->peer = reinterpret_cast<bop_raft_cb_resp_peer *>(resp->get_peer().get());
     resp_msg->result_code = static_cast<bop_raft_cmd_result_code>(resp->get_result_code());
+}
+}
+
+
+#include <libnuraft/nuraft.hxx>
+#include <tracer.hxx>
+#include <expected>
+#include <filesystem>
+#include <format>
+#include <memory>
+#include <mutex>
+#include "./raft.h"
+
+extern "C" {
+#include <mdbx.h>
+}
+
+template<typename F>
+struct privDefer {
+    F f;
+
+    explicit privDefer(F f) : f(f) {
+    }
+
+    ~privDefer() {
+        f();
+    }
+};
+
+template<typename F>
+privDefer<F> defer_func(F f) {
+    return privDefer<F>(f);
+}
+
+#define DEFER_1(x, y) x##y
+#define DEFER_2(x, y) DEFER_1(x, y)
+#define DEFER_3(x) DEFER_2(x, __COUNTER__)
+#define DEFER(code) auto DEFER_3(_defer_) = defer_func([&]() { code; })
+
+#if _WIN32
+#define INLINE inline
+#define FORCE_INLINE
+#else
+#define INLINE __attribute__((always_inline))
+#define FORCE_INLINE INLINE inline
+#endif
+
+// #if (defined(_MSC_VER) && _MSVC_LANG>= 202002L)
+// #define LIKELY(x) (x) [[likely]]
+// #else
+// #define LIKELY(x) (__builtin_expect(!!(x), 1))
+// #endif
+//
+// #if (defined(_MSC_VER) && _MSVC_LANG>= 202002L)// || __cplusplus >= 202002L
+// #define UNLIKELY(x) (x) [[unlikely]]
+// #else
+// #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
+// #endif
+
+#if defined(__x86_64__)
+#define X86_64
+#endif
+#if defined(__i386__)
+#define p_i386
+#endif
+#if defined(__aarch64__)
+#define ARM64
+#endif
+#if defined(__arm__)
+#define ARM
+#endif
+
+#define REMOVE_COPY_CAPABILITY(clazz)                                                              \
+  private:                                                                                         \
+    clazz(const clazz&) = delete;                                                                  \
+    clazz& operator=(const clazz&) = delete;
+
+#define REMOVE_MOVE_CAPABILITY(clazz)                                                              \
+  private:                                                                                         \
+    clazz(const clazz&&) = delete;                                                                 \
+    auto operator=(const clazz&&) = delete;
+
+#define REMOVE_COPY_AND_MOVE_CAPABILITY(clazz)                                                     \
+  private:                                                                                         \
+    clazz(const clazz&) = delete;                                                                  \
+    clazz& operator=(const clazz&) = delete;                                                       \
+    clazz(const clazz&&) = delete;                                                                 \
+    auto operator=(const clazz&&) = delete;
+
+
+#define BISQUE_LOG(logger, severity, format_str, ...) \
+
+
+#define BISQUE_TRACE(logger, format_str, ...)                                  \
+if (logger && logger->get_level() >= 6) \
+logger->put_details(6, __FILE__, __func__, __LINE__, std::format(format_str __VA_OPT__(, ) __VA_ARGS__));
+
+#define BISQUE_DEBUG(format_str, ...)                                          \
+if (logger && logger->get_level() >= 5) \
+logger->put_details(5, __FILE__, __func__, __LINE__, std::format(format_str __VA_OPT__(, ) __VA_ARGS__));
+
+#define BISQUE_INFO(logger, format_str, ...)                                   \
+if (logger && logger->get_level() >= 4) \
+logger->put_details(4, __FILE__, __func__, __LINE__, std::format(format_str __VA_OPT__(, ) __VA_ARGS__));
+
+#define BISQUE_WARN(logger, format_str, ...)                                   \
+if (logger && logger->get_level() >= 3) \
+logger->put_details(3, __FILE__, __func__, __LINE__, std::format(format_str __VA_OPT__(, ) __VA_ARGS__));
+
+#define BISQUE_ERR(logger, format_str, ...)                                    \
+if (logger && logger->get_level() >= 2) \
+logger->put_details(2, __FILE__, __func__, __LINE__, std::format(format_str __VA_OPT__(, ) __VA_ARGS__));
+
+#define BISQUE_CRITICAL(logger, format_str, ...)                               \
+if (logger && logger->get_level() >= 1) \
+logger->put_details(1, __FILE__, __func__, __LINE__, std::format(format_str __VA_OPT__(, ) __VA_ARGS__));
+
+#define BISQUE_FATAL(logger, format_str, ...)                                  \
+if (logger && logger->get_level() >= 1) \
+logger->put_details(1, __FILE__, __func__, __LINE__, std::format(format_str __VA_OPT__(, ) __VA_ARGS__));
+
+
+constexpr static uint64_t CLUSTER_CONFIG_KEY = 1;
+constexpr static uint64_t SRV_STATE_KEY = 2;
+
+static inline nuraft::ulong size_of_log_entry(nuraft::ptr<nuraft::log_entry> &entry) {
+    return sizeof(nuraft::ptr<nuraft::buffer>) + sizeof(nuraft::log_entry) +
+           sizeof(nuraft::ptr<nuraft::buffer>) + sizeof(nuraft::buffer) + entry->get_buf().size();
+}
+
+class Log_Store : public nuraft::log_store {
+public:
+    Log_Store(
+        MDBX_env *env,
+        MDBX_dbi dbi,
+        nuraft::ptr<nuraft::logger> logger,
+        uint64_t start_index,
+        uint64_t last_index,
+        nuraft::ptr<nuraft::log_entry> &last_entry,
+        std::size_t compact_batch_size);
+
+    ~Log_Store() override;
+
+    REMOVE_COPY_CAPABILITY(Log_Store);
+
+public:
+    /**
+     * The first available slot of the store, starts with 1
+     *
+     * @return Last log index number + 1
+     */
+    nuraft::ulong next_slot() const override;
+
+    /**
+     * The start index of the log store, at the very beginning, it must be 1.
+     * However, after some compact actions, this could be anything equal to or
+     * greater than or equal to one
+     */
+    nuraft::ulong start_index() const override;
+
+    /**
+     * The last log entry in store.
+     *
+     * @return If no log entry exists: a dummy constant entry with
+     *         value set to null and term set to zero.
+     */
+    nuraft::ptr<nuraft::log_entry> last_entry() const override;
+
+    /**
+     * Append a log entry to store.
+     *
+     * @param entry Log entry
+     * @return Log index number.
+     */
+    nuraft::ulong append(nuraft::ptr<nuraft::log_entry> &entry) override;
+
+    /**
+     * Overwrite a log entry at the given `index`.
+     * This API should make sure that all log entries
+     * after the given `index` should be truncated (if exist),
+     * as a result of this function call.
+     *
+     * @param index Log index number to overwrite.
+     * @param entry New log entry to overwrite.
+     */
+    void write_at(nuraft::ulong index, nuraft::ptr<nuraft::log_entry> &entry) override;
+
+    /**
+     * Invoked after a batch of logs is written as a part of
+     * a single append_entries request.
+     *
+     * @param start The start log index number (inclusive)
+     * @param cnt The number of log entries written.
+     */
+    void end_of_append_batch(nuraft::ulong start, nuraft::ulong cnt) override;
+
+    /**
+     * Get log entries with index [start, end).
+     *
+     * Return nullptr to indicate error if any log entry within the requested
+     * range could not be retrieved (e.g. due to external log truncation).
+     *
+     * @param start The start log index number (inclusive).
+     * @param end The end log index number (exclusive).
+     * @return The log entries between [start, end).
+     */
+    nuraft::ptr<std::vector<nuraft::ptr<nuraft::log_entry> > >
+    log_entries(nuraft::ulong start, nuraft::ulong end) override;
+
+    /**
+     * (Optional)
+     * Get log entries with index [start, end).
+     *
+     * The total size of the returned entries is limited by batch_size_hint.
+     *
+     * Return nullptr to indicate error if any log entry within the requested
+     * range could not be retrieved (e.g. due to external log truncation).
+     *
+     * @param start The start log index number (inclusive).
+     * @param end The end log index number (exclusive).
+     * @param batch_size_hint_in_bytes Total size (in bytes) of the returned
+     * entries, see the detailed comment at
+     *        `state_machine::get_next_batch_size_hint_in_bytes()`.
+     * @return The log entries between [start, end) and limited by the total size
+     *         given by the batch_size_hint_in_bytes.
+     */
+    nuraft::ptr<std::vector<nuraft::ptr<nuraft::log_entry> > > log_entries_ext(
+        nuraft::ulong start,
+        nuraft::ulong end,
+        nuraft::int64 batch_size_hint_in_bytes = 0) override;
+
+    /**
+     * Get the log entry at the specified log index number.
+     *
+     * @param index Should be equal to or greater than 1.
+     * @return The log entry or null if index >= this->next_slot().
+     */
+    nuraft::ptr<nuraft::log_entry> entry_at(nuraft::ulong index) override;
+
+    /**
+     * Get the term for the log entry at the specified index.
+     * Suggest to stop the system if the index >= this->next_slot()
+     *
+     * @param index Should be equal to or greater than 1.
+     * @return The term for the specified log entry, or
+     *         0 if index < this->start_index().
+     */
+    nuraft::ulong term_at(nuraft::ulong index) override;
+
+    /**
+     * Pack the given number of log items starting from the given index.
+     *
+     * @param index The start log index number (inclusive).
+     * @param cnt The number of logs to pack.
+     * @return Packed (encoded) logs.
+     */
+    nuraft::ptr<nuraft::buffer> pack(nuraft::ulong index, nuraft::int32 cnt) override;
+
+    /**
+     * Apply the log pack to current log store, starting from index.
+     *
+     * @param index The start log index number (inclusive).
+     * @param Packed logs.
+     */
+    void apply_pack(nuraft::ulong index, nuraft::buffer &pack) override;
+
+    /**
+     * Compact the log store by purging all log entries,
+     * including the given log index number.
+     *
+     * If current maximum log index is smaller than given `last_log_index`,
+     * set start log index to `last_log_index + 1`.
+     *
+     * @param last_log_index Log index number that will be purged up to
+     * (inclusive).
+     * @return `true` on success.
+     */
+    bool compact(nuraft::ulong last_log_index) override;
+
+    /**
+     * Compact the log store by purging all log entries,
+     * including the given log index number.
+     *
+     * Unlike `compact`, this API allows to execute the log compaction in
+     * background asynchronously, aiming at reducing the client-facing latency
+     * caused by the log compaction.
+     *
+     * This function call may return immediately, but after this function
+     * call, following `start_index` should return `last_log_index + 1` even
+     * though the log compaction is still in progress. In the meantime, the
+     * actual job incurring disk IO can run in background. Once the job is done,
+     * `when_done` should be invoked.
+     *
+     * @param last_log_index Log index number that will be purged up to
+     * (inclusive).
+     * @param when_done Callback function that will be called after
+     *                  the log compaction is done.
+     */
+    void compact_async(
+        nuraft::ulong last_log_index,
+        const nuraft::async_result<bool>::handler_type &when_done) override;
+
+    /**
+     * Synchronously flush all log entries in this log store to the backing
+     * storage so that all log entries are guaranteed to be durable upon process
+     * crash.
+     *
+     * @return `true` on success.
+     */
+    bool flush() override;
+
+    /**
+     * Synchronously flush all log entries in this log store to the backing
+     * storage so that all log entries are guaranteed to be durable upon process
+     * crash.
+     *
+     * @return `true` on success.
+     */
+    bool flush(bool sync);
+
+    /**
+     * (Experimental)
+     * This API is used only when `raft_params::parallel_log_appending_` flag is
+     * set. Please refer to the comment of the flag.
+     *
+     * @return The last durable log index.
+     */
+    nuraft::ulong last_durable_index() override;
+
+    inline bool out_of_range(nuraft::ulong index) noexcept {
+        return index < start_index() || index > last_durable_index();
+    }
+
+public:
+    static const nuraft::ptr<nuraft::log_entry> ZERO_ENTRY;
+
+    MDBX_env *env() const noexcept {
+        return env_;
+    }
+
+    MDBX_dbi dbi() const noexcept {
+        return logs_dbi_;
+    }
+
+    nuraft::ptr<nuraft::logger> &logger() noexcept {
+        return logger_;
+    }
+
+private:
+    nuraft::ulong last_index() const noexcept {
+        return last_index_.load(std::memory_order_relaxed);
+    }
+
+protected:
+    MDBX_env *env_;
+    MDBX_dbi logs_dbi_;
+    nuraft::ptr<nuraft::logger> logger_;
+    std::atomic<nuraft::ulong> start_index_;
+    std::atomic<nuraft::ulong> last_index_;
+    nuraft::ptr<nuraft::log_entry> last_entry_;
+    mutable std::mutex last_entry_mutex_;
+    std::atomic<nuraft::ulong> last_durable_index_;
+    uint64_t compact_batch_size_;
+    mutable std::mutex write_mutex_;
+    // std::unique_ptr<tail_cache> tail_cache_;
+
+    std::vector<nuraft::ptr<nuraft::log_entry> > append_;
+    std::vector<nuraft::ptr<nuraft::log_entry> > tail_;
+    std::vector<nuraft::ptr<nuraft::log_entry> > write_buf_;
+    nuraft::ulong append_start_index_;
+    mutable std::mutex tail_mutex_;
+    nuraft::ulong tail_start_index_;
+    bool write_at_;
+};
+
+class State_Mgr : public nuraft::state_mgr {
+public:
+    /*
+     nuraft::ptr<nuraft::srv_config> my_srv_config_;
+     std::string dir_;
+     std::string path_;
+     std::string lck_path_;
+     std::string logs_path_;
+     std::string logs_lck_path_;
+     MDBX_env* env_;
+     MDBX_dbi dbi_;
+     nuraft::ptr<spdlog::logger> logger_;
+     nuraft::ptr<log_store> log_store_;
+     std::mutex config_mutex_;
+     nuraft::ptr<nuraft::cluster_config> cluster_config_;
+     nuraft::ptr<nuraft::srv_state> srv_state_;
+    */
+    // State_Mgr(
+    // 	nuraft::ptr<nuraft::srv_config> &my_srv_config,
+    // 	std::string &dir,
+    // 	std::string &path,
+    // 	std::string &lck_path,
+    // 	std::string &logs_path,
+    // 	std::string &logs_lck_path,
+    // 	MDBX_env *env,
+    // 	MDBX_dbi dbi,
+    // 	nuraft::ptr<nuraft::logger> logger,
+    // 	nuraft::ptr<nuraft::cluster_config> &cluster_config,
+    // 	nuraft::ptr<nuraft::srv_state> &srv_state,
+    // 	nuraft::ptr<Log_Store> &log_store);
+
+    State_Mgr() = default;
+
+    ~State_Mgr() override;
+
+public:
+    [[nodiscard]] inline nuraft::ptr<nuraft::log_store> get_log_store() const {
+        return log_store_;
+    }
+
+    /**
+     * Load the last saved cluster config.
+     * This function will be invoked on initialization of
+     * Raft server.
+     *
+     * Even at the very first initialization, it should
+     * return proper initial cluster config, not `nullptr`.
+     * The initial cluster config must include the server itself.
+     *
+     * @return Cluster config.
+     */
+    nuraft::ptr<nuraft::cluster_config> load_config() override;
+
+    /**
+     * Save given cluster config.
+     *
+     * @param config Cluster config to save.
+     */
+    void save_config(const nuraft::cluster_config &config) override;
+
+    /**
+     * Save given server state.
+     *
+     * @param state Server state to save.
+     */
+    void save_state(const nuraft::srv_state &state) override;
+
+    /**
+     * Load the last saved server state.
+     * This function will be invoked on initialization of
+     * Raft server
+     *
+     * At the very first initialization, it should return
+     * `nullptr`.
+     *
+     * @param Server state.
+     */
+    nuraft::ptr<nuraft::srv_state> read_state() override;
+
+    /**
+     * Get instance of user-defined Raft log store.
+     *
+     * @param Raft log store instance.
+     */
+    nuraft::ptr<nuraft::log_store> load_log_store() override;
+
+    /**
+     * Get ID of this Raft server.
+     *
+     * @return Server ID.
+     */
+    nuraft::int32 server_id() override;
+
+    /**
+     * System exit handler. This function will be invoked on
+     * abnormal termination of Raft server.
+     *
+     * @param exit_code Error code.
+     */
+    void system_exit(int exit_code) override;
+
+public:
+    nuraft::ptr<nuraft::srv_config> my_srv_config_{};
+    std::string dir_{};
+    std::string path_{};
+    std::string lck_path_{};
+    MDBX_env *env_{};
+    MDBX_dbi dbi_{};
+    nuraft::ptr<nuraft::logger> logger_{};
+    nuraft::ptr<nuraft::log_store> log_store_{};
+    std::mutex config_mutex_{};
+    nuraft::ptr<nuraft::cluster_config> cluster_config_{};
+    nuraft::ptr<nuraft::srv_state> srv_state_{};
+};
+
+constexpr static uint8_t CURRENT_VERSION = 1;
+
+enum state_mgr_open_error {
+};
+
+static nuraft::ptr<State_Mgr> raft_state_mgr_open(
+    nuraft::ptr<nuraft::srv_config> my_srv_config,
+    std::string dir,
+    nuraft::ptr<nuraft::logger> logger,
+    size_t size_lower,
+    size_t size_now,
+    size_t size_upper,
+    size_t growth_step,
+    size_t shrink_threshold,
+    size_t pagesize,
+    uint32_t flags, // MDBX_env_flags_t
+    uint16_t mode, // mdbx_mode_t
+    nuraft::ptr<nuraft::log_store> log_store
+) {
+    if (!logger) {
+        return nullptr;
+        // logger = std::move(bisque::get_logger("raft::state"));
+    }
+
+    if (my_srv_config == nullptr) {
+        BISQUE_CRITICAL(logger, "my_srv_config was null");
+        return nullptr;
+    }
+
+    if (!std::filesystem::is_directory(dir)) {
+        if (std::filesystem::is_regular_file(dir)) {
+            BISQUE_CRITICAL(logger, "supplied directory path is a file: {}", dir);
+            return nullptr;
+        }
+        if (std::filesystem::is_character_file(dir)) {
+            BISQUE_CRITICAL(logger, "supplied directory path is a character file: {}", dir);
+            return nullptr;
+        }
+        if (std::filesystem::is_socket(dir)) {
+            BISQUE_CRITICAL(logger, "supplied directory path is a socket: {}", dir);
+            return nullptr;
+        }
+        if (std::filesystem::is_block_file(dir)) {
+            BISQUE_CRITICAL(logger, "supplied directory path is a block file: {}", dir);
+            return nullptr;
+        }
+        if (std::filesystem::is_fifo(dir)) {
+            BISQUE_CRITICAL(logger, "supplied directory path is a fifo file: {}", dir);
+            return nullptr;
+        }
+        if (!std::filesystem::create_directories(dir)) {
+            BISQUE_CRITICAL(logger, "std::filesystem::create_directories({}) returned false", dir);
+            return nullptr;
+        }
+        BISQUE_INFO(logger, "successfully created directories for: {}", dir);
+    } else {
+        BISQUE_INFO(logger, "directory found: {}", dir);
+    }
+
+    std::string state_path = (std::filesystem::path(dir) / std::filesystem::path("raft_state.db")).string();
+    std::string state_lck_path =
+            (std::filesystem::path(dir) / std::filesystem::path("raft_state.db-lck")).string();
+    auto log_store_path = (std::filesystem::path(dir) / std::filesystem::path("raft_logs.db")).string();
+    std::string log_store_lck_path =
+            (std::filesystem::path(dir) / std::filesystem::path("raft_logs.db-lck")).string();
+
+    bool state_exists = std::filesystem::exists(state_path);
+    //	bool state_lck_exists = std::filesystem::exists(state_lck_path);
+    //	bool logs_exists = std::filesystem::exists(logs_path);
+    //	bool logs_lck_exists = std::filesystem::exists(logs_lck_path);
+
+    MDBX_env *env;
+    int err = mdbx_env_create(&env);
+    if (err != MDBX_SUCCESS) {
+        // return std::unexpected(mdbx_strerror(err));
+        return nullptr;
+    }
+
+    err = mdbx_env_set_geometry(
+        env,
+        static_cast<intptr_t>(size_lower),
+        static_cast<intptr_t>(size_now),
+        static_cast<intptr_t>(size_upper),
+        static_cast<intptr_t>(growth_step),
+        static_cast<intptr_t>(shrink_threshold),
+        static_cast<intptr_t>(pagesize)
+    );
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+        // return std::unexpected(mdbx_strerror(err));
+        return nullptr;
+    }
+
+    err = mdbx_env_set_maxdbs(env, 2);
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+        // return std::unexpected(mdbx_strerror(err));
+        return nullptr;
+    }
+    err = mdbx_env_set_maxreaders(env, 64);
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+        // return std::unexpected(mdbx_strerror(err));
+        return nullptr;
+    }
+
+    flags = MDBX_NOSTICKYTHREADS | MDBX_NOSUBDIR | MDBX_NOMEMINIT |
+                             MDBX_SYNC_DURABLE | MDBX_LIFORECLAIM | MDBX_WRITEMAP;
+
+    BISQUE_DEBUG("opening mdbx state_mgr at {}", state_path);
+    err = mdbx_env_open(env, state_path.c_str(), static_cast<MDBX_env_flags_t>(MDBX_NOSTICKYTHREADS | MDBX_NOSUBDIR | MDBX_NOMEMINIT |
+                             MDBX_SYNC_DURABLE | MDBX_LIFORECLAIM | MDBX_WRITEMAP), mode);
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+
+        if (!state_exists) {
+            mdbx_env_delete(state_path.c_str(), MDBX_ENV_JUST_DELETE);
+        }
+
+        BISQUE_CRITICAL(
+            logger,
+            "mdbx_env_open({}, {}, {}) err: {} reason: {}", state_path, static_cast<int>(flags),
+            static_cast<int>(mode), err, mdbx_strerror(err));
+
+        switch (err) {
+            // The version of the MDBX library doesn't match
+            // the version that created the database environment.
+            case MDBX_VERSION_MISMATCH:
+                break;
+
+            // The environment file headers are corrupted.
+            case MDBX_INVALID:
+                break;
+
+            // The directory specified by the path parameter doesn't exist.
+            case MDBX_ENOFILE:
+                break;
+
+            // The user didn't have permission to access the environment
+            // files.
+            case MDBX_EACCESS:
+                break;
+
+            // The environment was locked by another process.
+            case EAGAIN:
+                break;
+
+            // The \ref MDBX_EXCLUSIVE flag was specified and the
+            // environment is in use by another process,
+            // or the current process tries to open environment
+            // more than once.
+            case MDBX_BUSY:
+                break;
+
+            // Environment is already opened by another process,
+            // but with different set of \ref MDBX_SAFE_NOSYNC,
+            // \ref MDBX_UTTERLY_NOSYNC flags.
+            // Or if the database is already exist and parameters
+            // specified early by \ref mdbx_env_set_geometry()
+            // are incompatible (i.e. different pagesize, etc).
+            case MDBX_INCOMPATIBLE:
+                break;
+
+            // The \ref MDBX_RDONLY flag was specified but
+            // read-write access is required to rollback
+            // inconsistent state after a system crash.
+            case MDBX_WANNA_RECOVERY:
+                break;
+
+            case MDBX_ENOMEM:
+                break;
+
+            // Database is too large for this process,
+            // i.e. 32-bit process tries to open >4Gb database.
+            case MDBX_TOO_LARGE:
+                break;
+
+            default:
+                break;
+        }
+
+        // return std::unexpected(mdbx_strerror(err));
+        return nullptr;
+    }
+
+    MDBX_txn *tx = nullptr;
+    err = mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &tx);
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+        // return std::unexpected(mdbx_strerror(err));
+        BISQUE_CRITICAL(
+            logger,
+            "mdbx_txn_begin() err: {} reason: {}", err, mdbx_strerror(err));
+        return nullptr;
+    }
+
+    MDBX_dbi dbi;
+    err = mdbx_dbi_open(tx, "state", MDBX_INTEGERKEY | MDBX_CREATE, &dbi);
+    if (err != MDBX_SUCCESS) {
+        mdbx_txn_abort(tx);
+        mdbx_env_close(env);
+        BISQUE_CRITICAL(
+            logger,
+            "mdbx_dbi_open() err: {} reason: {}", err, mdbx_strerror(err));
+        // return std::unexpected(mdbx_strerror(err));
+        return nullptr;
+    }
+
+    uint64_t id = CLUSTER_CONFIG_KEY;
+    MDBX_val key;
+    key.iov_base = reinterpret_cast<void *>(&id);
+    key.iov_len = 8;
+    MDBX_val value;
+
+    nuraft::ptr<nuraft::cluster_config> cluster_config(nullptr);
+
+    err = mdbx_get(tx, dbi, &key, &value);
+    if (err != MDBX_SUCCESS) {
+        if (err != MDBX_NOTFOUND && err != MDBX_ENODATA) {
+            mdbx_txn_abort(tx);
+            mdbx_env_close(env);
+            // return std::unexpected(mdbx_strerror(err));
+            BISQUE_CRITICAL(
+                logger,
+                "mdbx_get() err: {} reason: {}", err, mdbx_strerror(err)
+            );
+            return nullptr;
+        }
+
+        // create cluster_config.
+        cluster_config = nuraft::cs_new<nuraft::cluster_config>();
+        cluster_config->get_servers().push_back(my_srv_config);
+    } else {
+        // deserialize cluster_config
+        nuraft::ptr<nuraft::buffer> buf = nuraft::buffer::alloc(value.iov_len);
+        memcpy((void *) buf->data(), value.iov_base, value.iov_len);
+        nuraft::buffer_serializer bs(buf);
+        cluster_config = nuraft::cluster_config::deserialize(bs);
+    }
+
+    id = SRV_STATE_KEY;
+    key.iov_base = static_cast<void *>(&id);
+    key.iov_len = 8;
+    value.iov_base = nullptr;
+    value.iov_len = 0;
+
+    nuraft::ptr<nuraft::srv_state> srv_state(nullptr);
+
+    err = mdbx_get(tx, dbi, &key, &value);
+    if (err != MDBX_SUCCESS) {
+        if (err != MDBX_NOTFOUND && err != MDBX_ENODATA) {
+            mdbx_txn_abort(tx);
+            mdbx_env_close(env);
+            BISQUE_CRITICAL(
+                logger,
+                "mdbx_get() err: {} reason: {}", err, mdbx_strerror(err)
+            );
+            return nullptr;
+        }
+
+        // first initialization srv_state should be a nullptr
+    } else {
+        // deserialize srv_state
+        nuraft::ptr<nuraft::buffer> buf = nuraft::buffer::alloc(value.iov_len);
+        memcpy((void *) buf->data(), value.iov_base, value.iov_len);
+        srv_state = nuraft::srv_state::deserialize_v1p(*buf);
+    }
+
+    err = mdbx_txn_commit(tx);
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+        BISQUE_CRITICAL(
+            logger,
+            "mdbx_txn_commit() err: {} reason: {}", err, mdbx_strerror(err)
+        );
+        return nullptr;
+    }
+
+    auto state_mgr = nuraft::cs_new<State_Mgr>();
+    state_mgr->my_srv_config_ = my_srv_config;
+    state_mgr->dir_ = dir;
+    state_mgr->path_ = state_path;
+    state_mgr->lck_path_ = state_lck_path;
+    state_mgr->env_ = env;
+    state_mgr->dbi_ = dbi;
+    state_mgr->logger_ = logger;
+    state_mgr->cluster_config_ = cluster_config;
+    state_mgr->srv_state_ = srv_state;
+    state_mgr->log_store_ = log_store;
+    return state_mgr;
+}
+
+State_Mgr::~State_Mgr() {
+    BISQUE_WARN(logger_, "begin");
+    log_store_ = nullptr;
+    if (env_ != nullptr) {
+        int err = mdbx_env_close(env_);
+        env_ = nullptr;
+        if (err != MDBX_SUCCESS) {
+            BISQUE_CRITICAL(logger_, "mdbx_env_close failed reason: {}", mdbx_strerror(err));
+        }
+    }
+    BISQUE_WARN(logger_, "done");
+}
+
+/**
+ * Load the last saved cluster config.
+ * This function will be invoked on initialization of
+ * Raft server.
+ *
+ * Even at the very first initialization, it should
+ * return proper initial cluster config, not `nullptr`.
+ * The initial cluster config must include the server itself.
+ *
+ * @return Cluster config.
+ */
+nuraft::ptr<nuraft::cluster_config> State_Mgr::load_config() {
+    std::lock_guard guard(config_mutex_);
+    return cluster_config_;
+}
+
+/**
+ * Save given cluster config.
+ *
+ * @param config Cluster config to save.
+ */
+void State_Mgr::save_config(const nuraft::cluster_config &config) {
+    BISQUE_TRACE(logger_, "state_mgr::save_config");
+
+    auto serialized = config.serialize();
+    auto clone = nuraft::cluster_config::deserialize(*serialized);
+
+    MDBX_txn *tx = nullptr;
+    int err = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &tx);
+    if (err != MDBX_SUCCESS) {
+        BISQUE_CRITICAL(logger_, "mdbx_txn_begin failure reason: {}", mdbx_strerror(err))
+        std::lock_guard<std::mutex>
+                guard(config_mutex_);
+        cluster_config_ = clone;
+        return;
+    }
+
+    uint64_t id = CLUSTER_CONFIG_KEY;
+    MDBX_val key;
+    key.iov_base = static_cast<void *>(&id);
+    key.iov_len = 8;
+    MDBX_val value;
+    value.iov_len = serialized->size();
+
+    err = mdbx_put(tx, dbi_, &key, &value, MDBX_UPSERT | MDBX_RESERVE);
+    if (err != MDBX_SUCCESS) {
+        mdbx_txn_abort(tx);
+        BISQUE_CRITICAL(logger_,
+                        "mdbx_put(CLUSTER_CONFIG_KEY, MDBX_UPSERT|MDBX_RESERVE) failure "
+                        "reason: {}",
+                        mdbx_strerror(err))
+        std::lock_guard<std::mutex>
+                guard(config_mutex_);
+        cluster_config_ = clone;
+        return;
+    }
+
+    if (value.iov_len != serialized->size()) {
+        mdbx_txn_abort(tx);
+        BISQUE_CRITICAL(logger_,
+                        "mdbx_put(CLUSTER_CONFIG_KEY, MDBX_UPSERT|MDBX_RESERVE) reserved an "
+                        "incorrect number of bytes: expected {} != {}",
+                        (uint64_t)serialized->size(), (uint64_t)value.iov_len)
+        std::lock_guard<std::mutex>
+                guard(config_mutex_);
+        cluster_config_ = clone;
+        return;
+    }
+
+    memcpy(value.iov_base, (void *) serialized->data(), value.iov_len);
+    MDBX_commit_latency latency{};
+    err = mdbx_txn_commit_ex(tx, &latency);
+    if (err != MDBX_SUCCESS) {
+        BISQUE_CRITICAL(logger_, "mdbx_txn_commit_ex failure reason: {}", mdbx_strerror(err))
+    }
+    std::lock_guard<std::mutex> guard(config_mutex_);
+    cluster_config_ = clone;
+}
+
+/**
+ * Save given server state.
+ *
+ * @param state Server state to save.
+ */
+void State_Mgr::save_state(const nuraft::srv_state &state) {
+    BISQUE_TRACE(logger_, "state_mgr::save_state")
+
+    nuraft::ptr<nuraft::buffer>
+            serialized = state.serialize_v1p(CURRENT_VERSION);
+    nuraft::ptr<nuraft::srv_state> clone = nuraft::srv_state::deserialize_v1p(*serialized);
+
+    MDBX_txn *tx = nullptr;
+    int err = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &tx);
+    if (err != MDBX_SUCCESS) {
+        BISQUE_CRITICAL(logger_, "mdbx_txn_begin failure reason: {}", mdbx_strerror(err))
+        std::lock_guard<std::mutex>
+                guard(config_mutex_);
+        srv_state_ = clone;
+        return;
+    }
+
+    uint64_t id = SRV_STATE_KEY;
+    MDBX_val key{(void *) &id, 8};
+    MDBX_val value{nullptr, serialized->size()};
+
+    err = mdbx_put(tx, dbi_, &key, &value, MDBX_UPSERT | MDBX_RESERVE);
+    if (err != MDBX_SUCCESS) {
+        mdbx_txn_abort(tx);
+        BISQUE_CRITICAL(logger_,
+                        "mdbx_put(SRV_STATE_KEY, MDBX_UPSERT|MDBX_RESERVE) failure reason: "
+                        "{}",
+                        mdbx_strerror(err))
+        std::lock_guard<std::mutex>
+                guard(config_mutex_);
+        srv_state_ = clone;
+        return;
+    }
+
+    if (value.iov_len != serialized->size()) {
+        mdbx_txn_abort(tx);
+        BISQUE_CRITICAL(logger_,
+                        "mdbx_put(SRV_STATE_KEY, MDBX_UPSERT|MDBX_RESERVE) reserved an "
+                        "incorrect number of bytes: expected {} != {}",
+                        (uint64_t)serialized->size(), (uint64_t)value.iov_len)
+        std::lock_guard<std::mutex>
+                guard(config_mutex_);
+        srv_state_ = clone;
+        return;
+    }
+
+    memcpy(value.iov_base, (void *) serialized->data(), value.iov_len);
+    MDBX_commit_latency latency{};
+    err = mdbx_txn_commit_ex(tx, &latency);
+    if (err != MDBX_SUCCESS) {
+        BISQUE_CRITICAL(logger_, "mdbx_txn_commit_ex failure reason: {}", mdbx_strerror(err))
+    }
+    std::lock_guard<std::mutex> guard(config_mutex_);
+    srv_state_ = clone;
+}
+
+/**
+ * Load the last saved server state.
+ * This function will be invoked on initialization of
+ * Raft server
+ *
+ * At the very first initialization, it should return
+ * `nullptr`.
+ *
+ * @param Server state.
+ */
+nuraft::ptr<nuraft::srv_state> State_Mgr::read_state() {
+    std::lock_guard guard(config_mutex_);
+    return srv_state_;
+}
+
+/**
+ * Get instance of user-defined Raft log store.
+ *
+ * @param Raft log store instance.
+ */
+nuraft::ptr<nuraft::log_store> State_Mgr::load_log_store() {
+    return log_store_;
+}
+
+/**
+ * Get ID of this Raft server.
+ *
+ * @return Server ID.
+ */
+int32_t State_Mgr::server_id() {
+    return my_srv_config_->get_id();
+}
+
+/**
+ * System exit handler. This function will be invoked on
+ * abnormal termination of Raft server.
+ *
+ * @param exit_code Error code.
+ */
+void State_Mgr::system_exit(const int exit_code) {
+    BISQUE_TRACE(logger_, "system_exit({})", exit_code);
+}
+
+
+constexpr static size_t LOG_ENTRY_HEADER_SIZE = 24;
+
+using log_entry_ptr = nuraft::ptr<nuraft::log_entry>;
+
+FORCE_INLINE static void serialize_entry(log_entry_ptr &entry, void *to, size_t to_len) {
+    *(nuraft::ulong *) to = entry->get_term();
+    *(uint64_t *) (((uint8_t *) to) + 8) = entry->get_timestamp();
+    *(uint32_t *) (((uint8_t *) to) + 16) = entry->get_crc32();
+    *(uint8_t *) (((uint8_t *) to) + 20) = entry->has_crc32() ? 1 : 0;
+    *(uint8_t *) (((uint8_t *) to) + 21) = (uint8_t) entry->get_val_type();
+    memcpy(
+        (void *) (((uint8_t *) to) + LOG_ENTRY_HEADER_SIZE),
+        (void *) entry->get_buf().data(),
+        entry->get_buf().size()
+    );
+}
+
+FORCE_INLINE static auto deserialize_entry(void *from, size_t from_len) -> log_entry_ptr {
+    nuraft::ulong term = *(nuraft::ulong *) from;
+    uint64_t timestamp = *(uint64_t *) (((uint8_t *) from) + 8);
+    uint32_t crc32 = *(uint32_t *) (((uint8_t *) from) + 16);
+    bool has_crc32 = ((uint8_t) *(((uint8_t *) from) + 20)) > 0;
+    auto t = (nuraft::log_val_type) *(((uint8_t *) from) + 21);
+    // pad (uint16_t)
+    nuraft::ptr<nuraft::buffer> data = nuraft::buffer::alloc(from_len - LOG_ENTRY_HEADER_SIZE);
+    memcpy((void *) data->data(), (void *) (((uint8_t *) from) + LOG_ENTRY_HEADER_SIZE), data->size());
+    return cs_new<nuraft::log_entry>(term, std::move(data), t, timestamp, has_crc32, crc32, true);
+}
+
+const log_entry_ptr Log_Store::ZERO_ENTRY =
+        cs_new<nuraft::log_entry>(0, nuraft::buffer::alloc(0));
+
+static nuraft::ptr<Log_Store> mdbx_log_store_open(
+    std::string path,
+    nuraft::ptr<nuraft::logger> logger,
+    intptr_t size_lower,
+    intptr_t size_now,
+    intptr_t size_upper,
+    intptr_t growth_step,
+    intptr_t shrink_threshold,
+    intptr_t pagesize,
+    MDBX_env_flags_t flags,
+    mdbx_mode_t mode,
+    std::size_t compact_batch_size
+) {
+    if (!logger) {
+        BISQUE_CRITICAL(
+            logger,
+            "logger was nil"
+        );
+        return nullptr;
+    }
+
+    flags = MDBX_NOSTICKYTHREADS | MDBX_NOSUBDIR | MDBX_NOMEMINIT | MDBX_SYNC_DURABLE | MDBX_LIFORECLAIM | MDBX_WRITEMAP;
+
+    auto dir = std::filesystem::path(path);
+    auto db_path = (std::filesystem::path(dir) / std::filesystem::path("raft_logs.db"));
+    auto lck_path = (std::filesystem::path(dir) / std::filesystem::path("raft_logs.db-lck"));
+
+    bool dir_exists = std::filesystem::is_directory(dir);
+    if (!dir_exists) {
+        std::filesystem::create_directories(dir);
+    }
+
+    bool db_exists = std::filesystem::exists(db_path);
+    bool lck_exists = std::filesystem::exists(lck_path);
+
+    MDBX_env *env = nullptr;
+    int err = mdbx_env_create(&env);
+
+    if (err != MDBX_SUCCESS) {
+        BISQUE_CRITICAL(logger, "mdbx_env_create() err: {}", mdbx_strerror(err));
+        return nullptr;
+    }
+
+    err = mdbx_env_set_geometry(
+        env,
+        size_lower,
+        size_now,
+        size_upper,
+        growth_step,
+        shrink_threshold,
+        pagesize
+    );
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+        BISQUE_CRITICAL(logger, "mdbx_env_set_geometry() err: {}", mdbx_strerror(err));
+        return nullptr;
+    }
+
+    err = mdbx_env_set_maxdbs(env, 2);
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+        BISQUE_CRITICAL(logger, "mdbx_env_set_maxdbs() err: {}", mdbx_strerror(err));
+        return nullptr;
+    }
+    err = mdbx_env_set_maxreaders(env, 64);
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+        BISQUE_CRITICAL(logger, "mdbx_env_set_maxreaders() err: {}", mdbx_strerror(err));
+        return nullptr;
+    }
+
+    BISQUE_DEBUG("mdbx log_store opening at {}", db_path.string());
+    err = mdbx_env_open(env, db_path.string().c_str(), flags, mode);
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+
+        if (!db_exists) {
+            mdbx_env_delete(db_path.string().c_str(), MDBX_ENV_JUST_DELETE);
+        }
+        BISQUE_CRITICAL(
+            logger,
+            "mdbx_env_open({}, {}, {}) err: {} reason: {}",
+            db_path.string(),
+            static_cast<int>(flags),
+            static_cast<int>(mode),
+            err,
+            mdbx_strerror(err)
+        );
+
+        switch (err) {
+            // The version of the MDBX library doesn't match
+            // the version that created the database environment.
+            case MDBX_VERSION_MISMATCH: break;
+
+            // The environment file headers are corrupted.
+            case MDBX_INVALID: break;
+
+            // The directory specified by the path parameter
+            // doesn't exist.
+            case MDBX_ENOFILE: break;
+
+            // The user didn't have permission to access the
+            // environment files.
+            case MDBX_EACCESS: break;
+
+            // The environment was locked by another process.
+            case EAGAIN: break;
+
+            // The \ref MDBX_EXCLUSIVE flag was specified and the
+            // environment is in use by another process,
+            // or the current process tries to open environment
+            // more than once.
+            case MDBX_BUSY: break;
+
+            // Environment is already opened by another process,
+            // but with different set of \ref MDBX_SAFE_NOSYNC,
+            // \ref MDBX_UTTERLY_NOSYNC flags.
+            // Or if the database is already exist and parameters
+            // specified early by \ref mdbx_env_set_geometry()
+            // are incompatible (i.e. different pagesize, etc).
+            case MDBX_INCOMPATIBLE: break;
+
+            // The \ref MDBX_RDONLY flag was specified but
+            // read-write access is required to rollback
+            // inconsistent state after a system crash.
+            case MDBX_WANNA_RECOVERY: break;
+
+            case MDBX_ENOMEM: break;
+
+            // Database is too large for this process,
+            // i.e. 32-bit process tries to open >4Gb database.
+            case MDBX_TOO_LARGE: break;
+        }
+
+        return nullptr;
+    }
+
+    MDBX_txn *tx = nullptr;
+    err = mdbx_txn_begin(env, nullptr, MDBX_TXN_READWRITE, &tx);
+    if (err != MDBX_SUCCESS) {
+        mdbx_env_close(env);
+        BISQUE_CRITICAL(logger, "mdbx_txn_begin() err: {} reason: {}", err, mdbx_strerror(err));
+        return nullptr;
+    }
+
+    MDBX_dbi dbi = 0;
+    err = mdbx_dbi_open(tx, "logs", MDBX_INTEGERKEY | MDBX_CREATE, &dbi);
+    if (err != MDBX_SUCCESS) {
+        mdbx_txn_abort(tx);
+        mdbx_env_close(env);
+        BISQUE_CRITICAL(logger, "mdbx_dbi_open() err: {} reason: {}", err, mdbx_strerror(err));
+        return nullptr;
+    }
+
+    // Load first.
+    MDBX_cursor *cur = nullptr;
+    err = mdbx_cursor_open(tx, dbi, &cur);
+    if (err != MDBX_SUCCESS) {
+        mdbx_txn_abort(tx);
+        mdbx_env_close(env);
+        BISQUE_CRITICAL(logger, "mdbx_cursor_open() err: {} reason: {}", err, mdbx_strerror(err));
+        return nullptr;
+    }
+
+    nuraft::ulong start_index = 0;
+    nuraft::ulong last_index = 0;
+    log_entry_ptr last_entry = Log_Store::ZERO_ENTRY;
+    MDBX_val key;
+    MDBX_val value;
+    err = mdbx_cursor_get(cur, &key, &value, MDBX_FIRST);
+    if (err == MDBX_SUCCESS) {
+        if (key.iov_len == 8) {
+            start_index = *static_cast<nuraft::ulong *>(key.iov_base);
+        }
+
+        err = mdbx_cursor_get(cur, &key, &value, MDBX_LAST);
+        if (err != MDBX_SUCCESS) {
+            mdbx_cursor_close(cur);
+            mdbx_txn_abort(tx);
+            mdbx_env_close(env);
+            BISQUE_CRITICAL(logger, "mdbx_cursor_get() err: {} reason: {}", err, mdbx_strerror(err));
+            return nullptr;
+        }
+
+        if (key.iov_len == 8) {
+            last_index = *static_cast<nuraft::ulong *>(key.iov_base);
+        } else {
+            BISQUE_CRITICAL(
+                logger, "last entry key size is invalid: {} != {}", (uint64_t)key.iov_len, 8
+            );
+            mdbx_cursor_close(cur);
+            mdbx_txn_abort(tx);
+            mdbx_env_close(env);
+            return nullptr;
+        }
+
+        if (value.iov_len >= LOG_ENTRY_HEADER_SIZE) {
+            last_entry = deserialize_entry(value.iov_base, value.iov_len);
+        } else {
+            BISQUE_CRITICAL(
+                logger,
+                "last entry at: {} has an invalid data size: {}",
+                last_index,
+                (uint64_t)value.iov_len
+            );
+            mdbx_cursor_close(cur);
+            mdbx_txn_abort(tx);
+            mdbx_env_close(env);
+            return nullptr;
+        }
+        mdbx_cursor_close(cur);
+        err = mdbx_txn_abort(tx);
+        if (err != MDBX_SUCCESS) {
+            mdbx_env_close(env);
+            BISQUE_CRITICAL(logger, "mdbx_txn_abort() err: {} reason: {}", err, mdbx_strerror(err));
+            return nullptr;
+        }
+    } else if (err == MDBX_NOTFOUND || err == MDBX_ENODATA) {
+        start_index = 0;
+
+        err = mdbx_txn_commit(tx);
+        if (err != MDBX_SUCCESS) {
+            mdbx_env_close(env);
+            BISQUE_CRITICAL(logger, "mdbx_txn_commit() err: {} reason: {}", err, mdbx_strerror(err));
+            return nullptr;
+        }
+    } else {
+        mdbx_cursor_close(cur);
+        mdbx_txn_abort(tx);
+        mdbx_env_close(env);
+        BISQUE_CRITICAL(logger, "mdbx_txn_begin() err: {} reason: {}", err, mdbx_strerror(MDBX_CORRUPTED));
+        return nullptr;
+    }
+
+    return cs_new<Log_Store>(
+        env,
+        dbi,
+        std::move(logger),
+        (uint64_t) start_index,
+        (uint64_t) last_index,
+        last_entry,
+        compact_batch_size
+    );
+}
+
+Log_Store::Log_Store(
+    MDBX_env *env, MDBX_dbi dbi, nuraft::ptr<nuraft::logger> logger, uint64_t start_index,
+    uint64_t last_index, log_entry_ptr &last_entry, size_t compact_batch_size
+)
+    : env_(env),
+      logs_dbi_(dbi),
+      logger_(std::move(logger)),
+      start_index_{start_index},
+      last_index_{last_index},
+      last_entry_(last_entry),
+      compact_batch_size_(compact_batch_size),
+      append_start_index_{0},
+      tail_start_index_{0},
+      write_at_{false} {
+    last_durable_index_.store(last_index, std::memory_order_relaxed);
+    tail_.reserve(4096);
+    append_.reserve(4096);
+}
+
+Log_Store::~Log_Store() {
+    BISQUE_WARN(logger_, "begin");
+    if (env_) {
+        int err = mdbx_env_close(env_);
+        if (err != MDBX_SUCCESS) {
+            BISQUE_ERR(logger_, "mdbx_env_close() failed reason: {}", mdbx_strerror(err));
+        }
+        env_ = nullptr;
+    }
+    BISQUE_WARN(logger_, "done");
+}
+
+/**
+ * The first available slot of the store, starts with 1
+ *
+ * @return Last log index
+ * number
+
+
+ */
+FORCE_INLINE auto Log_Store::next_slot() const -> nuraft::ulong {
+    return last_index_.load(std::memory_order_relaxed) + 1;
+}
+
+/**
+ * The start index of the log store, at the very beginning, it must be 1.
+ * However,
+ * after
+
+ * * some compact actions,
+ * this could be anything equal to or
+ * greater than one
+
+ */
+FORCE_INLINE auto Log_Store::start_index() const -> nuraft::ulong {
+    return start_index_.load(std::memory_order_relaxed);
+}
+
+/**
+ * The last log entry in store.
+ *
+ * @return If no log entry exists: a dummy
+ * constant
+ *
+ *
+ * with value set to null and
+ * term set to zero.
+ */
+auto Log_Store::last_entry() const -> log_entry_ptr {
+    std::lock_guard<std::mutex> guard(last_entry_mutex_);
+    return last_entry_;
+}
+
+/**
+ * Append a log entry to store.
+ *
+ * @param entry Log entry
+ * @return Log index
+ * number.
+ */
+auto Log_Store::append(log_entry_ptr &entry) -> nuraft::ulong {
+    nuraft::ulong index = last_index() + 1;
+    BISQUE_TRACE(logger_, "append() index={}", index);
+
+    std::lock_guard<std::mutex> lock(tail_mutex_);
+    last_index_.store(index, std::memory_order_relaxed);
+    // log_entry_ptr new_entry = entry;
+    append_.push_back(entry);
+    if (append_.size() == 1) {
+        append_start_index_ = index;
+    }
+    return index;
+}
+
+/**
+ * Overwrite a log entry at the given `index`.
+ * This API should make sure that all
+ * log
+ *
+ * entries
+ * after the given
+ * `index` should be truncated (if exist),
+ * as a
+ * result of this
+
+ * * function call.
+ *
+ * @param index Log index number to
+ * overwrite.
+ *
+ * @param entry New log
+
+ * * entry to overwrite.
+ */
+void Log_Store::write_at(nuraft::ulong index, log_entry_ptr &entry) {
+    BISQUE_TRACE(logger_, "write_at(index={})", index);
+
+    std::lock_guard<std::mutex> lock(tail_mutex_);
+    write_at_ = true;
+    last_index_.store(index, std::memory_order_relaxed);
+    append_.push_back(entry);
+    if (append_.size() == 1) {
+        append_start_index_ = index;
+    }
+}
+
+/**
+ * Invoked after a batch of logs is written as a part of
+ * a single append_entries
+ *
+ * request.
+
+ * *
+ * @param start The
+ * start log index number (inclusive)
+ * @param cnt The
+ *
+ * number of log
+ * entries written.
+ */
+void Log_Store::end_of_append_batch(nuraft::ulong start, nuraft::ulong cnt) {
+    BISQUE_TRACE(logger_, "end_of_append_batch(start={}, cnt={})", start, cnt);
+
+    bool is_write_at = false; {
+        std::lock_guard<std::mutex> lock(tail_mutex_);
+        is_write_at = write_at_;
+        tail_.swap(append_);
+        tail_start_index_ = append_start_index_;
+        append_.clear();
+        append_start_index_ = 0;
+        write_at_ = false;
+    }
+
+    MDBX_txn *txn = nullptr;
+    MDBX_cursor *cur = nullptr;
+    MDBX_val key = {nullptr, 0};
+    MDBX_val value = {nullptr, 0};
+
+    int err = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &txn);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_txn_begin(MDBX_TXN_READWRITE) err: {} "
+            "reason: {}",
+            err,
+            mdbx_strerror(err)
+        );
+        return;
+    }
+
+    err = mdbx_cursor_open(txn, logs_dbi_, &cur);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        mdbx_txn_abort(txn);
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_cursor_open(LOGS_DBI) err: {} "
+            "reason: {}",
+            err,
+            mdbx_strerror(err)
+        );
+        return;
+    }
+    DEFER(mdbx_cursor_close(cur));
+
+    if (is_write_at) {
+        key.iov_base = (void *) &start;
+        key.iov_len = sizeof(nuraft::ulong);
+        err = mdbx_cursor_get(cur, &key, &value, MDBX_SET_LOWERBOUND);
+        if (err != MDBX_SUCCESS) [[unlikely]] {
+            if (err != MDBX_NOTFOUND && err != MDBX_ENODATA) {
+                mdbx_txn_abort(txn);
+                BISQUE_CRITICAL(
+                    logger_,
+                    "mdbx_cursor_get(MDBX_LAST) err: {} "
+                    "reason: {}",
+                    err,
+                    mdbx_strerror(err)
+                );
+                return;
+            }
+        }
+
+        // Delete tail from "start" index.
+        err = MDBX_SUCCESS;
+        while (err == MDBX_SUCCESS) {
+            err = mdbx_cursor_del(cur, MDBX_CURRENT);
+            if (err != MDBX_SUCCESS) [[unlikely]] {
+                if (err != MDBX_NOTFOUND && err != MDBX_ENODATA) {
+                    mdbx_txn_abort(txn);
+                    BISQUE_CRITICAL(
+                        logger_,
+                        "mdbx_cursor_del(MDBX_CURRENT) err: {} "
+                        "reason: {}",
+                        err,
+                        mdbx_strerror(err)
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    err = mdbx_cursor_get(cur, &key, &value, MDBX_LAST);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        if (err != MDBX_NOTFOUND && err != MDBX_ENODATA) {
+            mdbx_txn_abort(txn);
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_get(MDBX_LAST) err: {} "
+                "reason: {}",
+                err,
+                mdbx_strerror(err)
+            );
+            return;
+        }
+    }
+
+    // if (appending_.size() != cnt) {
+    //     l_critical("appending cnt not match expected cnt: {} != {}", appending_.size(),
+    //     cnt);
+    // }
+    for (nuraft::ulong i = 0; i < tail_.size(); i++) {
+        auto entry = tail_[i];
+        nuraft::ulong index = start + i;
+
+        key.iov_base = (void *) &index;
+        key.iov_len = sizeof(index);
+        value.iov_len = (size_t) LOG_ENTRY_HEADER_SIZE + entry->get_buf().size();
+        err = mdbx_cursor_put(cur, &key, &value, MDBX_APPEND | MDBX_RESERVE);
+        if (err != MDBX_SUCCESS) [[unlikely]] {
+            last_index_.store(last_durable_index(), std::memory_order_relaxed);
+            int abort_err = mdbx_txn_abort(txn);
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_put({}, MDBX_APPEND) with size: {} err: {} "
+                "reason: {}",
+                index,
+                (uint64_t)value.iov_len,
+                err,
+                mdbx_strerror(err)
+            );
+            if (abort_err != MDBX_SUCCESS) {
+                BISQUE_CRITICAL(
+                    logger_, "mdbx_txn_abort() err: {} reason: {}", err, mdbx_strerror(err)
+                );
+            }
+            return;
+        }
+
+        if (value.iov_len < (size_t) LOG_ENTRY_HEADER_SIZE + entry->get_buf().size()) [[unlikely]] {
+            mdbx_txn_abort(txn);
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_put short write buffer {} expected {}",
+                (uint64_t)value.iov_len,
+                (uint64_t)((size_t)LOG_ENTRY_HEADER_SIZE + entry->get_buf().size())
+            );
+            return;
+        }
+
+        serialize_entry(entry, value.iov_base, value.iov_len);
+    }
+
+    err = mdbx_txn_commit(txn);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        mdbx_txn_abort(txn);
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_txn_commit() err: {} "
+            "reason: {}",
+            err,
+            mdbx_strerror(err)
+        );
+        return;
+    } {
+        // std::lock_guard<decltype(last_entry_mutex_)> guard(last_entry_mutex_);
+        // last_entry_ = tail_[tail_.size() - 1];
+    }
+
+    std::lock_guard<decltype(tail_mutex_)> guard(tail_mutex_);
+    tail_.clear();
+
+    last_durable_index_.store(start + cnt - 1);
+}
+
+/**
+ * Get log entries with index [start, end).
+ *
+ * Return nullptr to indicate error if
+ * any
+ * log
+ * entry within the
+ * requested range
+ * could not be retrieved (e.g. due to
+ * external
+ * log
+ * truncation).
+ *
+ * @param start The start log
+ * index number
+ * (inclusive).
+ * @param
+ * end The
+ * end log index number (exclusive).
+ * @return The log
+ * entries between
+ * [start,
+ * end).
+ */
+auto Log_Store::log_entries(nuraft::ulong start, nuraft::ulong end)
+    -> nuraft::ptr<std::vector<log_entry_ptr> > {
+    BISQUE_TRACE(logger_, "log_entries(start={}, end={})", start, end);
+    return log_entries_ext(start, end, 1024 * 1024 * 128);
+}
+
+/**
+ * (Optional)
+ * Get log entries with index [start, end).
+ *
+ * The total size of the
+ *
+ *
+ * returned entries is limited by
+ * batch_size_hint.
+ *
+ * Return nullptr to indicate
+ * error if
+
+ * * any log entry within the requested range
+ * could not be
+ * retrieved (e.g.
+ * due to external
+
+ * * log truncation).
+ *
+ * @param start The start log index number
+ * (inclusive).
+ * @param
+ *
+ * end
+ * The end log index number (exclusive).
+ * @param
+ * batch_size_hint_in_bytes Total size (in
+ * bytes)
+ * of the returned
+ * entries,
+ * see the
+ * detailed comment at
+ *
+ *
+ * `state_machine::get_next_batch_size_hint_in_bytes()`.
+ *
+
+ * * @return The log entries between
+ *
+ * [start, end) and limited by the total size
+ * given
+ * by the
+ * batch_size_hint_in_bytes.
+ */
+auto Log_Store::log_entries_ext(
+    nuraft::ulong start, nuraft::ulong end, nuraft::int64 batch_size_hint_in_bytes
+) -> nuraft::ptr<std::vector<log_entry_ptr> > {
+    BISQUE_TRACE(
+        logger_,
+        "log_entries_ext(start={}, end={}, "
+        "batch_size_hint_in_bytes={})",
+        start,
+        end,
+        batch_size_hint_in_bytes
+    );
+
+    MDBX_txn *txn = nullptr;
+
+    int err = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_txn_begin(MDBX_TXN_READWRITE) err: {} "
+            "reason: {}",
+            err,
+            mdbx_strerror(err)
+        );
+        return nullptr;
+    }
+
+    DEFER(mdbx_txn_abort(txn));
+
+    MDBX_cursor *cur;
+    err = mdbx_cursor_open(txn, logs_dbi_, &cur);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_cursor_open(logs_dbi) err: {} "
+            "reason: {}",
+            err,
+            mdbx_strerror(err)
+        );
+        return nullptr;
+    }
+    DEFER(mdbx_cursor_close(cur));
+
+    auto result = nuraft::cs_new<std::vector<log_entry_ptr> >();
+    result->reserve(end - start);
+
+    MDBX_val key;
+    MDBX_val value;
+
+    err = mdbx_cursor_get(cur, &key, &value, MDBX_SET_RANGE);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        if (err == MDBX_NOTFOUND || err == MDBX_ENODATA) [[likely]] {
+            return result;
+        }
+        BISQUE_CRITICAL(
+            logger_, "mdbx_cursor_get({}, MDBX_SET_RANGE) failed: {}", start, mdbx_strerror(err)
+        );
+        return nullptr;
+    }
+
+    uint64_t id = *(uint64_t *) key.iov_base;
+    if (id >= end || id < start) [[unlikely]] {
+        return result;
+    }
+    nuraft::int64 size_in_bytes = (nuraft::int64) value.iov_len;
+
+    do {
+        if (size_in_bytes + value.iov_len > (size_t) batch_size_hint_in_bytes) {
+            return result;
+        }
+        if (value.iov_len >= LOG_ENTRY_HEADER_SIZE) [[likely]] {
+            result->push_back(deserialize_entry(value.iov_base, value.iov_len));
+        } else {
+            BISQUE_CRITICAL(
+                logger_,
+                "log_entry at: {} was too small {} is not at "
+                "least {}",
+                id,
+                value.iov_len,
+                LOG_ENTRY_HEADER_SIZE
+            );
+        }
+
+        err = mdbx_cursor_get(cur, &key, &value, MDBX_NEXT_NODUP);
+        if (err != MDBX_SUCCESS) [[unlikely]] {
+            // Reached the end?
+            if (err == MDBX_NOTFOUND || err == MDBX_ENODATA) [[likely]] {
+                return result;
+            }
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_get({}, MDBX_NEXT_NODUP) failed: {}",
+                start,
+                mdbx_strerror(err)
+            );
+            return result;
+        }
+
+        id = *(uint64_t *) key.iov_base;
+        size_in_bytes += (nuraft::int64) value.iov_len;
+    } while (id < end && size_in_bytes <= batch_size_hint_in_bytes);
+
+    return result;
+}
+
+/**
+ * Get the log entry at the specified log index number.
+ *
+ * @param index Should be
+ * equal
+ * to
+ * or greater than 1.
+ *
+ * @return The log entry or null if index >=
+ * this->next_slot().
+
+ */
+log_entry_ptr Log_Store::entry_at(nuraft::ulong index) {
+    BISQUE_TRACE(logger_, "entry_at(index={})", index); {
+        std::lock_guard<std::mutex> lock(tail_mutex_);
+        if (index >= tail_start_index_ && tail_start_index_ > 0) {
+            if (index < tail_start_index_ + tail_.size()) {
+                auto result = std::move(tail_[index - tail_start_index_]);
+                if (result != nullptr) {
+                    return result;
+                }
+            }
+        }
+        if (index >= append_start_index_ && append_start_index_ > 0) {
+            if (index < append_start_index_ + append_.size()) {
+                return append_[index - append_start_index_];
+            }
+        }
+    }
+
+    BISQUE_TRACE(logger_, "entry_at(index={}) slow path", index);
+
+    log_entry_ptr result = nullptr;
+    MDBX_txn *txn = nullptr;
+
+    int err = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_txn_begin(MDBX_TXN_READWRITE) err: {} "
+            "reason: {}",
+            err,
+            mdbx_strerror(err)
+        );
+        return nullptr;
+    }
+
+    DEFER(mdbx_txn_abort(txn));
+
+    MDBX_val key;
+    key.iov_base = (void *) &index;
+    key.iov_len = sizeof(nuraft::ulong);
+    MDBX_val value;
+    err = mdbx_get(txn, logs_dbi_, &key, &value);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        if (err != MDBX_NOTFOUND && err != MDBX_ENODATA) {
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_get() err: {} "
+                "reason: {}",
+                err,
+                mdbx_strerror(err)
+            );
+        }
+        return nullptr;
+    }
+
+    if (value.iov_len >= LOG_ENTRY_HEADER_SIZE) [[likely]] {
+        result = deserialize_entry(value.iov_base, value.iov_len);
+    } else {
+        uint64_t iov_len = (uint64_t) value.iov_len;
+        BISQUE_CRITICAL(
+            logger_,
+            "log_entry at: {} was too small {} is not at least "
+            "{}",
+            index,
+            iov_len,
+            LOG_ENTRY_HEADER_SIZE
+        );
+    }
+
+    return result;
+}
+
+/**
+ * Get the term for the log entry at the specified index.
+ * Suggest to stop the
+ * system if
+ *
+ * the index >=
+ * this->next_slot()
+ *
+ * @param index Should be equal to or
+ * greater than 1.
+ *
+
+ * * @return The term for the specified log
+ * entry, or
+ *         0 if
+ * index <
+ *
+ * this->start_index().
+ */
+nuraft::ulong Log_Store::term_at(nuraft::ulong index) {
+    BISQUE_TRACE(logger_, "term_at(index={})", index); {
+        std::lock_guard<decltype(last_entry_mutex_)> lock(last_entry_mutex_);
+        if (index == this->last_index()) {
+            if (last_entry_ != nullptr && last_entry_ != ZERO_ENTRY) {
+                return last_entry_->get_term();
+            }
+        }
+    } {
+        std::lock_guard<decltype(tail_mutex_)> lock(tail_mutex_);
+        if (append_.size() > 0 && append_start_index_ <= index &&
+            index < append_start_index_ + append_.size()) {
+            return append_[index - append_start_index_]->get_term();
+        }
+        if (tail_.size() > 0 && tail_start_index_ <= index &&
+            index < tail_start_index_ + tail_.size()) {
+            return tail_[index - tail_start_index_]->get_term();
+        }
+    }
+
+    MDBX_txn *txn;
+    MDBX_val key;
+    MDBX_val value;
+
+    int err = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        if (err != MDBX_NOTFOUND && err != MDBX_ENODATA) {
+            BISQUE_CRITICAL(
+                logger_, "mdbx_txn_begin(RDONLY) error: {} {}", err, mdbx_strerror(err)
+            );
+        }
+        return 0;
+    }
+    DEFER(mdbx_txn_abort(txn));
+
+    key.iov_base = (void *) &index;
+    key.iov_len = sizeof(nuraft::ulong);
+
+    err = mdbx_get(txn, logs_dbi_, &key, &value);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        if (err != MDBX_NOTFOUND && err != MDBX_ENODATA) {
+            BISQUE_CRITICAL(
+                logger_, "mdbx_txn_begin(RDONLY) error: {} {}", err, mdbx_strerror(err)
+            );
+        }
+        return 0;
+    }
+
+    nuraft::ulong term = value.iov_len >= 8 ? *(nuraft::ulong *) value.iov_base : (nuraft::ulong) 0;
+    return term;
+}
+
+/**
+ * Pack the given number of log items starting from the given index.
+ *
+ * @param
+ * index The
+
+ * * start log index number
+ * (inclusive).
+ * @param cnt The number of logs to
+ * pack.
+ * @return
+
+ * * Packed (encoded) logs.
+ */
+nuraft::ptr<nuraft::buffer> Log_Store::pack(nuraft::ulong index, nuraft::int32 cnt) {
+    BISQUE_TRACE(logger_, "pack(index={}, cnt={})", index, cnt);
+
+    MDBX_txn *txn = nullptr;
+
+    int err = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_txn_begin(MDBX_TXN_READWRITE) err: {} "
+            "reason: {}",
+            err,
+            mdbx_strerror(err)
+        );
+        return nullptr;
+    }
+
+    DEFER(mdbx_txn_abort(txn));
+
+    MDBX_cursor *cur;
+    err = mdbx_cursor_open(txn, logs_dbi_, &cur);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_cursor_open(logs_dbi) err: {} "
+            "reason: {}",
+            err,
+            mdbx_strerror(err)
+        );
+        return nullptr;
+    }
+    DEFER(mdbx_cursor_close(cur));
+
+    nuraft::ulong first_index = index;
+    MDBX_val key;
+    key.iov_base = (void *) &index;
+    key.iov_len = 8;
+    MDBX_val value;
+
+    err = mdbx_cursor_get(cur, &key, &value, MDBX_SET_RANGE);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        if (err == MDBX_NOTFOUND || err == MDBX_ENODATA) [[likely]] {
+            return nullptr;
+        }
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_cursor_get({}, MDBX_SET_RANGE) failed "
+            "reason: {}",
+            index,
+            mdbx_strerror(err)
+        );
+        return 0;
+    }
+
+    if (key.iov_len != 8) [[unlikely]] {
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_cursor_get({}, MDBX_SET_RANGE) invalid key "
+            "length {} != 8",
+            index,
+            (uint64_t)key.iov_len
+        );
+        return nullptr;
+    }
+
+    index = *(nuraft::ulong *) key.iov_base;
+    nuraft::int32 count = 1;
+    std::size_t buf_size = value.iov_len + 4 + 4 + LOG_ENTRY_HEADER_SIZE;
+
+    if (first_index < index) {
+        BISQUE_WARN(
+            logger_, "log_store::pack({}, {}) actual first index: {}", first_index, cnt, index
+        )
+    }
+
+    do {
+        err = mdbx_cursor_get(cur, &key, &value, MDBX_NEXT_NODUP);
+        if (err != MDBX_SUCCESS) [[unlikely]] {
+            if (err == MDBX_NOTFOUND || err == MDBX_ENODATA) [[likely]] {
+                goto after_calc;
+            }
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_get({}, MDBX_NEXT_NODUP) failed "
+                "reason: {}",
+                index,
+                mdbx_strerror(err)
+            );
+            goto after_calc;
+        }
+
+        if (key.iov_len != 8) [[unlikely]] {
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_get({}, MDBX_NEXT_NODUP) invalid "
+                "key length {} != "
+                "8",
+                index,
+                (uint64_t)key.iov_len
+            );
+            goto after_calc;
+        }
+
+        if (index + 1 != *(nuraft::ulong *) key.iov_base) [[unlikely]] {
+            BISQUE_WARN(
+                logger_,
+                "log_entry gap {}-{}: mdbx_cursor_get({}, "
+                "MDBX_NEXT_NODUP) "
+                "next "
+                "key is {}",
+                index,
+                *(nuraft::ulong*)key.iov_base,
+                index,
+                *(nuraft::ulong*)key.iov_base
+            );
+        }
+        index = *(nuraft::ulong *) key.iov_base;
+        count++;
+        buf_size += value.iov_len + 4 + LOG_ENTRY_HEADER_SIZE;
+    } while (count < cnt);
+
+after_calc:
+    // Reset to first index again.
+    key.iov_base = (void *) &first_index;
+    key.iov_len = 8;
+    err = mdbx_cursor_get(cur, &key, &value, MDBX_SET_RANGE);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        if (err == MDBX_NOTFOUND || err == MDBX_ENODATA) [[likely]] {
+            return nullptr;
+        }
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_cursor_get({}, MDBX_SET_RANGE) failed "
+            "reason: {}",
+            index,
+            mdbx_strerror(err)
+        );
+        return 0;
+    }
+
+    index = *(nuraft::ulong *) key.iov_base;
+    count = 1;
+
+    BISQUE_TRACE(
+        logger_,
+        "log_store::pack({}, {}) allocating buffer sized: {} "
+        "containing {} "
+        "entries",
+        first_index,
+        cnt,
+        (uint64_t)buf_size,
+        count
+    );
+
+    nuraft::ptr<nuraft::buffer> buf = nuraft::buffer::alloc(buf_size);
+    nuraft::buffer_serializer ser(buf);
+    ser.put_u32((uint32_t) count);
+    ser.put_u32((uint32_t) value.iov_len);
+    ser.put_bytes(value.iov_base, value.iov_len);
+
+    do {
+        err = mdbx_cursor_get(cur, &key, &value, MDBX_NEXT_NODUP);
+        if (err != MDBX_SUCCESS) [[unlikely]] {
+            if (err == MDBX_NOTFOUND || err == MDBX_ENODATA) [[likely]] {
+                return buf;
+            }
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_get({}, MDBX_NEXT_NODUP) failed "
+                "reason: {}",
+                index,
+                mdbx_strerror(err)
+            );
+
+            return nullptr;
+        }
+        if (key.iov_len != 8) [[unlikely]] {
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_get({}, MDBX_NEXT_NODUP) invalid "
+                "key length {} != "
+                "8",
+                index,
+                (uint64_t)key.iov_len
+            );
+            return buf;
+        }
+
+        if (index + 1 != *(nuraft::ulong *) key.iov_base) [[unlikely]] {
+            BISQUE_WARN(
+                logger_,
+                "log_entry gap {}-{}: mdbx_cursor_get({}, "
+                "MDBX_NEXT_NODUP) "
+                "next "
+                "key is {}",
+                index,
+                *(nuraft::ulong*)key.iov_base,
+                index,
+                *(nuraft::ulong*)key.iov_base
+            );
+        }
+        ser.put_u32((uint32_t) value.iov_len);
+        ser.put_bytes(value.iov_base, value.iov_len);
+        index = *((nuraft::ulong *) key.iov_base);
+        count++;
+    } while (count < cnt);
+
+    return buf;
+}
+
+/**
+ * Apply the log pack to current log store, starting from index.
+ *
+ * @param index
+ * The
+ * start
+ * log index number
+ * (inclusive).
+ * @param Packed logs.
+ */
+void Log_Store::apply_pack(nuraft::ulong index, nuraft::buffer &pack) {
+    BISQUE_TRACE(logger_, "apply_pack(index={}, pack_size:{})", index, (uint64_t)pack.size());
+
+    MDBX_txn *txn = nullptr;
+
+    int err = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_txn_begin(MDBX_TXN_READWRITE) err: {} "
+            "reason: {}",
+            err,
+            mdbx_strerror(err)
+        );
+        return;
+    }
+
+    MDBX_cursor *cur;
+    err = mdbx_cursor_open(txn, logs_dbi_, &cur);
+    if (err != MDBX_SUCCESS) [[unlikely]] {
+        mdbx_txn_abort(txn);
+        BISQUE_CRITICAL(
+            logger_,
+            "mdbx_cursor_open(logs_dbi) err: {} "
+            "reason: {}",
+            err,
+            mdbx_strerror(err)
+        );
+        return;
+    }
+    DEFER(mdbx_cursor_close(cur));
+
+    MDBX_val key;
+    key.iov_base = (void *) &index;
+    key.iov_len = 8;
+    MDBX_val value;
+
+    err = mdbx_cursor_get(cur, &key, &value, MDBX_SET_RANGE);
+    if (err != MDBX_SUCCESS) [[likely]] {
+        if (err != MDBX_NOTFOUND && err != MDBX_ENODATA) [[unlikely]] {
+            mdbx_txn_abort(txn);
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_get({}, MDBX_SET_RANGE) failed "
+                "reason: {}",
+                index,
+                mdbx_strerror(err)
+            );
+            return;
+        }
+    } else {
+        do {
+            err = mdbx_cursor_del(cur, MDBX_CURRENT);
+        } while (err == MDBX_SUCCESS);
+
+        if (err != MDBX_NOTFOUND && err != MDBX_ENODATA) [[unlikely]] {
+            mdbx_txn_abort(txn);
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_del(MDBX_CURRENT) err: {} reason: "
+                "{}",
+                err,
+                mdbx_strerror(err)
+            );
+            return;
+        }
+    }
+
+    nuraft::buffer_serializer bs(pack);
+    if (pack.size() < 8) {
+        mdbx_txn_abort(txn);
+        BISQUE_CRITICAL(logger_, "log_store::apply_pack short pack buffer");
+        return;
+    }
+    nuraft::ulong end_index = index + (nuraft::ulong) bs.get_u32();
+    // uint32_t      count = 1;
+    std::size_t size;
+    void *entry;
+
+    while (true) {
+        if ((bs.size() - bs.pos()) < 4) [[unlikely]] {
+            mdbx_txn_abort(txn);
+            BISQUE_CRITICAL(
+                logger_,
+                "log_store::apply_pack short buffer: {} "
+                "remaining when "
+                "expecting "
+                "at least {}",
+                (uint64_t)bs.size(),
+                4
+            );
+            return;
+        }
+        size = (std::size_t) bs.get_u32();
+        if ((bs.size() - bs.pos()) < size) [[unlikely]] {
+            mdbx_txn_abort(txn);
+            BISQUE_CRITICAL(
+                logger_,
+                "log_store::apply_pack short buffer: {} "
+                "remaining when "
+                "expecting "
+                "at least {}",
+                (uint64_t)bs.size(),
+                (uint64_t)size
+            );
+            return;
+        }
+
+        key.iov_base = (void *) &index;
+        key.iov_len = 8;
+        value.iov_len = size;
+        err = mdbx_cursor_put(cur, &key, &value, MDBX_APPEND | MDBX_RESERVE);
+        if (err != MDBX_SUCCESS) [[unlikely]] {
+            mdbx_txn_abort(txn);
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_put({}, MDBX_APPEND|MDBX_RESERVE) "
+                "failed reason: "
+                "{}",
+                index,
+                mdbx_strerror(err)
+            );
+            return;
+        }
+
+        if (value.iov_len == size) [[likely]] {
+            entry = bs.get_bytes(size);
+            memcpy(key.iov_base, entry, size);
+        } else {
+            mdbx_txn_abort(txn);
+            BISQUE_CRITICAL(
+                logger_,
+                "log_store::apply_pack invalid MDBX buffer size: "
+                "{} != {}",
+                (uint64_t)value.iov_len,
+                (uint64_t)size
+            );
+            return;
+        }
+
+        index++;
+
+        if (index >= end_index) {
+            auto cloned = deserialize_entry(entry, size);
+
+            MDBX_commit_latency commit_latency;
+            err = mdbx_txn_commit_ex(txn, &commit_latency);
+
+            if (err != MDBX_SUCCESS) [[unlikely]] {
+                BISQUE_CRITICAL(
+                    logger_, "mdbx_txn_commit err: {} reason: {}", err, mdbx_strerror(err)
+                );
+            } else {
+                last_index_.store(index - 1, std::memory_order_relaxed);
+                last_durable_index_.store(index - 1, std::memory_order_relaxed);
+                std::lock_guard<std::mutex> guard(last_entry_mutex_);
+                last_entry_ = cloned;
+            }
+            return;
+        }
+    }
+}
+
+/**
+ * Compact the log store by purging all log entries,
+ * including the given log index
+ *
+ *
+ * number.
+ *
+ * If current
+ * maximum log index is smaller than given `last_log_index`,
+
+ * * set
+
+ * * start log index to `last_log_index + 1`.
+ *
+ *
+ * @param last_log_index Log index
+ * number
+ * that
+ * will be purged up to (inclusive).
+ * @return `true` on success.
+ */
+bool Log_Store::compact(nuraft::ulong last_log_index) {
+    BISQUE_TRACE(logger_, "compact(last_log_index={})", last_log_index);
+
+    auto start_index = this->start_index();
+
+    while (start_index <= last_log_index) {
+        MDBX_txn *tx = nullptr;
+
+        int err = mdbx_txn_begin(env_, nullptr, MDBX_TXN_READWRITE, &tx);
+        if (err != MDBX_SUCCESS) [[unlikely]] {
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_txn_begin(MDBX_TXN_RDONLY) failed reason: "
+                "{}",
+                mdbx_strerror(err)
+            );
+            return false;
+        }
+
+        MDBX_cursor *cur = nullptr;
+        err = mdbx_cursor_open(tx, logs_dbi_, &cur);
+        if (err != MDBX_SUCCESS) [[unlikely]] {
+            mdbx_txn_abort(tx);
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_txn_begin(MDBX_TXN_RDONLY) failed reason: "
+                "{}",
+                mdbx_strerror(err)
+            );
+            return false;
+        }
+
+        MDBX_val key;
+        nuraft::ulong index = 0;
+        MDBX_val value;
+        err = mdbx_cursor_get(cur, &key, &value, MDBX_FIRST);
+        if (err != MDBX_SUCCESS) [[unlikely]] {
+            mdbx_cursor_close(cur);
+            mdbx_txn_abort(tx);
+            if (err == MDBX_NOTFOUND || err == MDBX_ENODATA) [[likely]] {
+                BISQUE_TRACE(
+                    logger_, "mdbx_cursor_get(MDBX_FIRST) failed reason: {}", mdbx_strerror(err)
+                );
+                return true;
+            }
+            BISQUE_CRITICAL(
+                logger_, "mdbx_cursor_get(MDBX_FIRST) failed reason: {}", mdbx_strerror(err)
+            );
+            return false;
+        }
+
+        if (key.iov_len != 8) [[unlikely]] {
+            mdbx_cursor_close(cur);
+            mdbx_txn_abort(tx);
+            BISQUE_CRITICAL(
+                logger_,
+                "mdbx_cursor_get(MDBX_FIRST) returned an invalid "
+                "key_len: {} "
+                "!= "
+                "{}",
+                (uint64_t)key.iov_len,
+                8
+            );
+            return false;
+        }
+
+        index = *(nuraft::ulong *) key.iov_base;
+
+        // Is the first key greater than last log index?
+        if (index > last_log_index) {
+            // Cancel and return
+            mdbx_cursor_close(cur);
+            mdbx_txn_abort(tx);
+            return true;
+        }
+
+        nuraft::ulong last_index = index + compact_batch_size_ > last_log_index
+                                       ? last_log_index
+                                       : index + compact_batch_size_;
+
+        // calculate remaining entries to delete with
+        // last_log_index inclusive
+        // (+1).
+        nuraft::ulong remaining = last_index - index + 1;
+        bool no_more = false;
+
+        while (remaining > 0) {
+            err = mdbx_cursor_del(cur, MDBX_CURRENT);
+            if (err != MDBX_SUCCESS) [[unlikely]] {
+                if (err != MDBX_ENODATA && err != MDBX_NOTFOUND) [[unlikely]] {
+                    BISQUE_CRITICAL(
+                        logger_,
+                        "mdbx_cursor_del(MDBX_CURRENT) failed "
+                        "reason: {}",
+                        mdbx_strerror(err)
+                    );
+                    BISQUE_CRITICAL(
+                        logger_,
+                        "unexpected end: expected to delete {} more "
+                        "entries",
+                        remaining
+                    );
+                    remaining = 0;
+                    no_more = true;
+                } else {
+                    BISQUE_TRACE(
+                        logger_,
+                        "mdbx_cursor_del(MDBX_CURRENT) failed "
+                        "reason: {}",
+                        mdbx_strerror(err)
+                    );
+                    BISQUE_TRACE(
+                        logger_,
+                        "unexpected end: expected to delete {} more "
+                        "entries",
+                        remaining
+                    );
+                    remaining = 0;
+                    no_more = true;
+                }
+            } else {
+                remaining--;
+            }
+        }
+
+        mdbx_cursor_close(cur);
+        MDBX_commit_latency commit_latency;
+        err = mdbx_txn_commit_ex(tx, &commit_latency);
+        if (err != MDBX_SUCCESS) [[unlikely]] {
+            BISQUE_CRITICAL(logger_, "mdbx_txn_commit failed reason: {}", mdbx_strerror(err));
+        }
+        if (no_more) {
+            start_index_.store(last_index + 1, std::memory_order_relaxed);
+            return true;
+        }
+        start_index = last_index + 1;
+        start_index_.store(start_index, std::memory_order_relaxed);
+    }
+
+    start_index_.store(start_index, std::memory_order_relaxed);
+    return true;
+}
+
+/**
+ * Compact the log store by purging all log entries,
+ * including the given log index
+ *
+ *
+ * number.
+ *
+ * Unlike
+ * `compact`, this API allows to execute the log compaction in
+ *
+ *
+ * background
+ * asynchronously, aiming at reducing the
+ * client-facing latency caused by
+ * the
+
+ * *
+ * log compaction.
+ *
+ * This function call may return immediately, but after
+ *
+ * this
+ * function
+ *
+ * call, following `start_index` should return `last_log_index + 1` even
+
+ * * though
+ * the log
+ * compaction
+ * is still in progress. In the meantime, the
+ * actual job
+ * incurring
+ * disk IO can
+ * run in background. Once the job is
+ * done,
+ * `when_done` should
+ * be invoked.
+
+ * *
+ * @param
+ * last_log_index Log index number that will be purged up to
+ *
+ * (inclusive).
+ *
+ * @param when_done
+ * Callback function that will be called after
+ * the log
+ * compaction
+ * is
+ * done.
+ */
+void Log_Store::compact_async(
+    nuraft::ulong last_log_index, const nuraft::async_result<bool>::handler_type &when_done
+) {
+    BISQUE_TRACE(logger_, "compact_async(last_log_index={})", last_log_index);
+    // Run compact on a background thread.
+    std::thread t([this, last_log_index, when_done]() {
+        BISQUE_TRACE(logger_, "compact_async(last_log_index={}) thread started", last_log_index);
+        bool result = false;
+        nuraft::ptr<std::exception> exp(nullptr);
+        try {
+            result = this->compact(last_log_index);
+        } catch (const std::exception &ex) { exp = nuraft::cs_new<std::exception>(ex); }
+        when_done(result, exp);
+    });
+    t.detach();
+
+    // bool result = false;
+
+    // nuraft::ptr<std::exception> exp(nullptr);
+    // try {
+    //     result = this->compact(last_log_index);
+    // } catch (const std::exception& ex) {
+    //     exp = cs_new<std::exception>(ex);
+    // }
+    // when_done(result, exp);
+}
+
+/**
+ * Synchronously flush all log entries in this log store to the backing storage
+ * so
+ * that
+ *
+ * all log entries are
+ * guaranteed to be durable upon process crash.
+ *
+ * @return
+ * `true` on
+ *
+ * success.
+ */
+bool Log_Store::flush() {
+    return flush(true);
+}
+
+/**
+ * Synchronously flush all log entries in this log store to the backing storage
+ * so
+ * that
+ *
+ * all log entries are
+ * guaranteed to be durable upon process crash.
+ *
+ * @return
+ * `true` on
+ *
+ * success.
+ */
+bool Log_Store::flush(bool sync) {
+    BISQUE_TRACE(logger_, "flush()");
+    nuraft::ulong begin = 0;
+    nuraft::ulong cnt = 0; {
+        std::lock_guard<std::mutex> lock(tail_mutex_);
+        begin = append_start_index_;
+        cnt = append_.size();
+    }
+    if (cnt > 0) {
+        end_of_append_batch(begin, cnt);
+    }
+    if (sync) {
+        mdbx_env_sync(env_);
+    }
+    return true;
+}
+
+/**
+ * (Experimental)
+ * This API is used only when `raft_params::parallel_log_appending_`
+ * flag
+
+ * * is set.
+ * Please refer
+ * to the comment of the flag.
+ *
+ * @return The last
+ * durable log
+ *
+ * index.
+ */
+FORCE_INLINE nuraft::ulong Log_Store::last_durable_index() {
+    // l_trace("last_durable_index()");
+    return last_durable_index_.load(std::memory_order_relaxed);
+}
+
+extern "C" {
+BOP_API bop_raft_state_mgr_ptr *bop_raft_mdbx_state_mgr_open(
+    bop_raft_srv_config_ptr *my_srv_config,
+    const char *dir,
+    size_t dir_size,
+    bop_raft_logger_ptr *logger,
+    size_t size_lower,
+    size_t size_now,
+    size_t size_upper,
+    size_t growth_step,
+    size_t shrink_threshold,
+    size_t pagesize,
+    uint32_t flags, // MDBX_env_flags_t
+    uint16_t mode, // mdbx_mode_t
+    bop_raft_log_store_ptr *log_store
+) {
+    if (!log_store || !log_store->log_store) return nullptr;
+    auto result = raft_state_mgr_open(
+        my_srv_config->config,
+        std::string(dir, dir + dir_size),
+        logger->logger,
+        size_lower, size_now, size_upper,
+        growth_step, shrink_threshold, pagesize,
+        flags, mode, log_store->log_store
+    );
+    if (!result) {
+        return nullptr;
+    }
+    return new bop_raft_state_mgr_ptr(result);
+}
+
+BOP_API bop_raft_log_store_ptr *bop_raft_mdbx_log_store_open(
+    const char *path,
+    size_t path_size,
+    bop_raft_logger_ptr *logger,
+    size_t size_lower,
+    size_t size_now,
+    size_t size_upper,
+    size_t growth_step,
+    size_t shrink_threshold,
+    size_t pagesize,
+    uint32_t flags,
+    uint16_t mode,
+    size_t compact_batch_size
+) {
+    if (!logger || !logger->logger) return nullptr;
+    auto log_store = mdbx_log_store_open(
+        std::string(path, path_size),
+        logger->logger,
+        static_cast<intptr_t>(size_lower),
+        static_cast<intptr_t>(size_now),
+        static_cast<intptr_t>(size_upper),
+        static_cast<intptr_t>(growth_step),
+        static_cast<intptr_t>(shrink_threshold),
+        static_cast<intptr_t>(pagesize),
+        static_cast<MDBX_env_flags_t>(flags), mode, compact_batch_size
+    );
+    if (!log_store) return nullptr;
+    return new bop_raft_log_store_ptr(log_store);
 }
 }
