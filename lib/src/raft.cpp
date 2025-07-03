@@ -4191,7 +4191,7 @@ constexpr static uint8_t CURRENT_VERSION = 1;
 enum state_mgr_open_error {
 };
 
-static nuraft::ptr<State_Mgr> raft_state_mgr_open(
+static nuraft::ptr<State_Mgr> raft_mdbx_state_mgr_open(
     nuraft::ptr<nuraft::srv_config> my_srv_config,
     std::string dir,
     nuraft::ptr<nuraft::logger> logger,
@@ -4707,7 +4707,7 @@ FORCE_INLINE static auto deserialize_entry(void *from, size_t from_len) -> log_e
 const log_entry_ptr Log_Store::ZERO_ENTRY =
         cs_new<nuraft::log_entry>(0, nuraft::buffer::alloc(0));
 
-static nuraft::ptr<Log_Store> mdbx_log_store_open(
+static nuraft::ptr<Log_Store> raft_mdbx_log_store_open(
     std::string path,
     nuraft::ptr<nuraft::logger> logger,
     intptr_t size_lower,
@@ -6312,7 +6312,7 @@ BOP_API bop_raft_state_mgr_ptr *bop_raft_mdbx_state_mgr_open(
     bop_raft_log_store_ptr *log_store
 ) {
     if (!log_store || !log_store->log_store) return nullptr;
-    auto result = raft_state_mgr_open(
+    auto result = raft_mdbx_state_mgr_open(
         my_srv_config->config,
         std::string(dir, dir + dir_size),
         logger->logger,
@@ -6341,7 +6341,7 @@ BOP_API bop_raft_log_store_ptr *bop_raft_mdbx_log_store_open(
     size_t compact_batch_size
 ) {
     if (!logger || !logger->logger) return nullptr;
-    auto log_store = mdbx_log_store_open(
+    auto log_store = raft_mdbx_log_store_open(
         std::string(path, path_size),
         logger->logger,
         static_cast<intptr_t>(size_lower),

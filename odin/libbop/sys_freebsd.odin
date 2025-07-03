@@ -1,0 +1,4 @@
+#+build freebsd
+package libbop
+
+
