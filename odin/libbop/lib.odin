@@ -163,8 +163,8 @@ into the code docs/AddressSpace.md provides a good overview of the allocation an
 @(link_prefix = "bop_")
 @(default_calling_convention = "c")
 foreign lib {
-	alloc :: proc(size: uintptr) -> rawptr ---
-	zalloc :: proc(size: uintptr) -> rawptr ---
+	alloc :: proc(size: c.size_t) -> rawptr ---
+	zalloc :: proc(size: c.size_t) -> rawptr ---
 	dealloc :: proc(p: rawptr) ---
 }
 
@@ -239,6 +239,8 @@ foreign lib {
     */
 	mdbx_strerror :: proc(err: Mdbx_Error) -> cstring ---
 
+	mdbx_liberr2str :: proc(err: Mdbx_Error) -> cstring ---
+
 	/*
 	Create an MDBX environment instance.
 
@@ -281,7 +283,7 @@ foreign lib {
     */
 	mdbx_env_get_option :: proc(env: ^Mdbx_Env, option: Mdbx_Option, value: ^u64) -> Mdbx_Error ---
 
-	/** \brief Open an environment instance.
+	/*\brief Open an environment instance.
 
     Indifferently this function will fails or not, the \ref mdbx_env_close() must
     be called later to discard the \ref MDBX_env handle and release associated
@@ -508,7 +510,7 @@ foreign lib {
 
     \returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_env_stat_ex :: proc(env: ^Mdbx_Env, txn: ^Mdbx_Txn, stat: ^Mdbx_Stat, bytes: uintptr) -> Mdbx_Error ---
+	mdbx_env_stat_ex :: proc(env: ^Mdbx_Env, txn: ^Mdbx_Txn, stat: ^Mdbx_Stat, bytes: c.size_t) -> Mdbx_Error ---
 
 	/*
 	Return information about the MDBX environment.
@@ -531,7 +533,7 @@ foreign lib {
 
     \returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_env_info_ex :: proc(env: ^Mdbx_Env, txn: ^Mdbx_Txn, info: ^Mdbx_Env_Info, bytes: uintptr) -> Mdbx_Error ---
+	mdbx_env_info_ex :: proc(env: ^Mdbx_Env, txn: ^Mdbx_Txn, info: ^Mdbx_Env_Info, bytes: c.size_t) -> Mdbx_Error ---
 
 	/*
 	Flush the environment data buffers to disk.
@@ -920,12 +922,12 @@ foreign lib {
    	*/
 	mdbx_env_set_geometry :: proc(
 		env: ^Mdbx_Env,
-		size_lower: i64,
-		size_now: i64,
-		size_upper: i64,
-		growth_step: i64,
-		shrink_threshold: i64,
-		page_size: i64,
+		size_lower: c.ssize_t,
+		size_now: c.ssize_t,
+		size_upper: c.ssize_t,
+		growth_step: c.ssize_t,
+		shrink_threshold: c.ssize_t,
+		page_size: c.ssize_t,
 	) -> Mdbx_Error ---
 
 	/*
@@ -944,17 +946,17 @@ foreign lib {
 	                           open environment by \ref mdbx_env_open().
 	\retval Otherwise the error code.
 	*/
-	mdbx_is_readahead_reasonable :: proc(volume: uintptr, redundancy: i64) -> Mdbx_Error ---
+	mdbx_is_readahead_reasonable :: proc(volume: c.size_t, redundancy: i64) -> Mdbx_Error ---
 
 	/*
 	Returns the minimal database page size in bytes for a given page size.
 	*/
-	mdbx_limits_dbsize_min :: proc(page_size: uintptr) -> i64 ---
+	mdbx_limits_dbsize_min :: proc(page_size: c.size_t) -> i64 ---
 
 	/*
 	Returns the maximal database page size in bytes for a given page size.
 	*/
-	mdbx_limits_dbsize_max :: proc(page_size: uintptr) -> i64 ---
+	mdbx_limits_dbsize_max :: proc(page_size: c.size_t) -> i64 ---
 
 	/*
 	Returns basic information about system RAM.
@@ -1064,7 +1066,7 @@ foreign lib {
 		ctx: rawptr
 	) -> Mdbx_Error ---
 
-	/** \brief Sets application information associated (a context pointer) with the
+	/*\brief Sets application information associated (a context pointer) with the
 	transaction.
 	\see mdbx_txn_get_userctx()
 
@@ -1563,7 +1565,7 @@ foreign lib {
                                   by current thread.
     \retval MDBX_EINVAL   An invalid parameter was specified.
     */
-	mdbx_dbi_stat :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, stat: ^Mdbx_Stat, bytes: uintptr) -> Mdbx_Error ---
+	mdbx_dbi_stat :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, stat: ^Mdbx_Stat, bytes: c.size_t) -> Mdbx_Error ---
 
 	/*
 	Retrieve depth (bitmask) information of nested dupsort (multi-value)
@@ -1712,7 +1714,7 @@ foreign lib {
 		txn: ^Mdbx_Txn,
 		dbi: Mdbx_DBI,
 		key, value: ^Mdbx_Val,
-		values_count: ^uintptr,
+		values_count: ^c.size_t,
 	) -> Mdbx_Error ---
 
 	/*
@@ -2314,6 +2316,672 @@ foreign lib {
 		start_op, turn_op: Mdbx_Cursor_Op,
 		arg: rawptr,
 	) -> Mdbx_Error ---
+
+	/*
+	Scans a table using the passed predicate, starting with the passed key-value pair,
+	reducing the associated overhead.
+
+    The function takes a cursor, which must be bound to some transaction
+	and a DBI table handle, performs initial cursor positioning
+	specified by the `from_op` argument, as well as the `from_key` and
+	`from_value` arguments. It then evaluates each key-value pair using the
+	`predicate` predicate function you provide, and then, if necessary,
+	moves on to the next element using the `turn_op` operation, until one
+	of four events occurs:
+     - end of data reached;
+     - an error will occur when positioning the cursor;
+     - the evaluation function will return \ref MDBX_RESULT_TRUE, signaling
+       the need to stop further scanning;
+     - the evaluation function will return a value different from
+       \ref MDBX_RESULT_FALSE and \ref MDBX_RESULT_TRUE signaling an error.
+
+    \param [in,out] cursor    A cursor for performing a scan operation,
+    						  associated with an active transaction and a
+    						  DBI handle to the table. For example, a cursor
+    						  created via \ref mdbx_cursor_open().
+    \param [in] predicate     Predictive function for evaluating iterable
+    						  key-value pairs, For more details see
+    						  \ref MDBX_predicate_func.
+    \param [in,out] context   A pointer to a context with the information needed
+    						  for the assessment, which is entirely prepared and
+    						  controlled by you.
+    \param [in] from_op       Operation of positioning the cursor to the initial
+							  position, for more details see
+                              \ref MDBX_cursor_op.
+                              Acceptable values \ref MDBX_GET_BOTH,
+                              \ref MDBX_GET_BOTH_RANGE, \ref MDBX_SET_KEY,
+                              \ref MDBX_SET_LOWERBOUND, \ref MDBX_SET_UPPERBOUND,
+                              \ref MDBX_TO_KEY_LESSER_THAN,
+                              \ref MDBX_TO_KEY_LESSER_OR_EQUAL,
+                              \ref MDBX_TO_KEY_EQUAL,
+                              \ref MDBX_TO_KEY_GREATER_OR_EQUAL,
+                              \ref MDBX_TO_KEY_GREATER_THAN,
+                              \ref MDBX_TO_EXACT_KEY_VALUE_LESSER_THAN,
+                              \ref MDBX_TO_EXACT_KEY_VALUE_LESSER_OR_EQUAL,
+                              \ref MDBX_TO_EXACT_KEY_VALUE_EQUAL,
+                              \ref MDBX_TO_EXACT_KEY_VALUE_GREATER_OR_EQUAL,
+                              \ref MDBX_TO_EXACT_KEY_VALUE_GREATER_THAN,
+                              \ref MDBX_TO_PAIR_LESSER_THAN,
+                              \ref MDBX_TO_PAIR_LESSER_OR_EQUAL,
+                              \ref MDBX_TO_PAIR_EQUAL,
+                              \ref MDBX_TO_PAIR_GREATER_OR_EQUAL,
+                              \ref MDBX_TO_PAIR_GREATER_THAN,
+                              and also \ref MDBX_GET_MULTIPLE.
+    \param [in,out] from_key  A pointer to a key used for both initial positioning
+    						  and subsequent iterations of the transition.
+    \param [in,out] from_value Pointer to a value used for both the initial positioning
+    						   and subsequent iterations of the transition.
+    \param [in] turn_op       The operation of positioning the cursor to move to the next
+    						  element. Valid values
+                              \ref MDBX_NEXT, \ref MDBX_NEXT_DUP,
+                              \ref MDBX_NEXT_NODUP, \ref MDBX_PREV,
+                              \ref MDBX_PREV_DUP, \ref MDBX_PREV_NODUP, and also
+                              \ref MDBX_NEXT_MULTIPLE и \ref MDBX_PREV_MULTIPLE.
+    \param [in,out] arg       An additional argument to the predicate function,
+							  which is entirely prepared and controlled by you.
+
+    \note When using \ref MDBX_GET_MULTIPLE, \ref MDBX_NEXT_MULTIPLE
+		  or \ref MDBX_PREV_MULTIPLE, carefully consider the batch specifics
+		  of passing values ​​through the parameters of the predictive function.
+
+    \see MDBX_predicate_func
+    \see mdbx_cursor_scan
+
+    \returns The result of the scanning operation, or an error code.
+
+    \retval MDBX_RESULT_TRUE if a key-value pair is found for which the predictive
+    		function returned \ref MDBX_RESULT_TRUE.
+    \retval MDBX_RESULT_FALSE if a matching key-value pair is NOT found, the search
+    		has reached the end of the data, or there is no data to search.
+    \retval ELSE any value other than \ref MDBX_RESULT_TRUE and \ref MDBX_RESULT_FALSE
+    		is a course positioning error code, or a user-defined search stop code
+			or error condition.
+    */
+	mdbx_cursor_scan_from :: proc(
+		cursor: ^Mdbx_Cursor,
+		predicate: Mdbx_Predicate_Func,
+		ctx: rawptr,
+		from_op: Mdbx_Cursor_Op,
+		from_key, from_value: ^Mdbx_Val,
+		turn_op: Mdbx_Cursor_Op,
+		arg: rawptr,
+	) -> Mdbx_Error ---
+
+	/*
+	Retrieve multiple non-dupsort key/value pairs by cursor.
+
+    This function retrieves multiple key/data pairs from the table without
+    \ref MDBX_DUPSORT option. For `MDBX_DUPSORT` tables please
+    use \ref MDBX_GET_MULTIPLE and \ref MDBX_NEXT_MULTIPLE.
+
+    The number of key and value items is returned in the `size_t count`
+    refers. The addresses and lengths of the keys and values are returned in the
+    array to which `pairs` refers.
+    \see mdbx_cursor_get()
+
+    \note The memory pointed to by the returned values is owned by the
+    database. The caller MUST not dispose of the memory, and MUST not modify it
+    in any way regardless in a read-only nor read-write transactions!
+    For case a database opened without the \ref MDBX_WRITEMAP modification
+    attempts likely will cause a `SIGSEGV`. However, when a database opened with
+    the \ref MDBX_WRITEMAP or in case values returned inside read-write
+    transaction are located on a "dirty" (modified and pending to commit) pages,
+    such modification will silently accepted and likely will lead to DB and/or
+    data corruption.
+
+    \param [in] cursor     A cursor handle returned by \ref mdbx_cursor_open().
+    \param [out] count     The number of key and value item returned, on success
+                           it always be the even because the key-value
+                           pairs are returned.
+    \param [in,out] pairs  A pointer to the array of key value pairs.
+    \param [in] limit      The size of pairs buffer as the number of items,
+                           but not a pairs.
+    \param [in] op         A cursor operation \ref MDBX_cursor_op (only
+                           \ref MDBX_FIRST and \ref MDBX_NEXT are supported).
+
+    \returns A non-zero error value on failure and 0 on success,
+             some possible errors are:
+    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+                                  by current thread.
+    \retval MDBX_NOTFOUND         No any key-value pairs are available.
+    \retval MDBX_ENODATA          The cursor is already at the end of data.
+    \retval MDBX_RESULT_TRUE      The returned chunk is the last one,
+                                  and there are no pairs left.
+    \retval MDBX_EINVAL           An invalid parameter was specified.
+    */
+	mdbx_cursor_get_batch :: proc(
+		cursor: ^Mdbx_Cursor,
+		count: ^c.size_t,
+		pairs: ^Mdbx_Val,
+		limit: c.size_t,
+		op: Mdbx_Cursor_Op,
+	) -> Mdbx_Error ---
+
+	/*
+	Store by cursor.
+
+    This function stores key/data pairs into the table. The cursor is
+    positioned at the new item, or on failure usually near it.
+
+    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
+    \param [in] key       The key operated on.
+    \param [in,out] data  The data operated on.
+    \param [in] flags     Options for this operation. This parameter
+                          must be set to 0 or by bitwise OR'ing together
+                          one or more of the values described here:
+     - \ref MDBX_CURRENT
+         Replace the item at the current cursor position. The key parameter
+         must still be provided, and must match it, otherwise the function
+         return \ref MDBX_EKEYMISMATCH. With combination the
+         \ref MDBX_ALLDUPS will replace all multi-values.
+
+         \note MDBX allows (unlike LMDB) you to change the size of the data and
+         automatically handles reordering for sorted duplicates
+         (see \ref MDBX_DUPSORT).
+
+     - \ref MDBX_NODUPDATA
+         Enter the new key-value pair only if it does not already appear in the
+         table. This flag may only be specified if the table was opened
+         with \ref MDBX_DUPSORT. The function will return \ref MDBX_KEYEXIST
+         if the key/data pair already appears in the table.
+
+     - \ref MDBX_NOOVERWRITE
+         Enter the new key/data pair only if the key does not already appear
+         in the table. The function will return \ref MDBX_KEYEXIST if the key
+         already appears in the table, even if the table supports
+         duplicates (\ref MDBX_DUPSORT).
+
+     - \ref MDBX_RESERVE
+         Reserve space for data of the given size, but don't copy the given
+         data. Instead, return a pointer to the reserved space, which the
+         caller can fill in later - before the next update operation or the
+         transaction ends. This saves an extra memcpy if the data is being
+         generated later. This flag must not be specified if the table
+         was opened with \ref MDBX_DUPSORT.
+
+     - \ref MDBX_APPEND
+         Append the given key/data pair to the end of the table. No key
+         comparisons are performed. This option allows fast bulk loading when
+         keys are already known to be in the correct order. Loading unsorted
+         keys with this flag will cause a \ref MDBX_KEYEXIST error.
+
+     - \ref MDBX_APPENDDUP
+         As above, but for sorted dup data.
+
+     - \ref MDBX_MULTIPLE
+         Store multiple contiguous data elements in a single request. This flag
+         may only be specified if the table was opened with
+         \ref MDBX_DUPFIXED. With combination the \ref MDBX_ALLDUPS
+         will replace all multi-values.
+         The data argument must be an array of two \ref MDBX_val. The `iov_len`
+         of the first \ref MDBX_val must be the size of a single data element.
+         The `iov_base` of the first \ref MDBX_val must point to the beginning
+         of the array of contiguous data elements which must be properly aligned
+         in case of table with \ref MDBX_INTEGERDUP flag.
+         The `iov_len` of the second \ref MDBX_val must be the count of the
+         number of data elements to store. On return this field will be set to
+         the count of the number of elements actually written. The `iov_base` of
+         the second \ref MDBX_val is unused.
+
+    \see \ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
+
+    \returns A non-zero error value on failure and 0 on success,
+             some possible errors are:
+    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+                                  by current thread.
+    \retval MDBX_EKEYMISMATCH  The given key value is mismatched to the current
+                               cursor position
+    \retval MDBX_MAP_FULL      The database is full,
+                                see \ref mdbx_env_set_mapsize().
+    \retval MDBX_TXN_FULL      The transaction has too many dirty pages.
+    \retval MDBX_EACCES        An attempt was made to write in a read-only
+                               transaction.
+    \retval MDBX_EINVAL        An invalid parameter was specified.
+    */
+	mdbx_cursor_put :: proc(
+		cursor: ^Mdbx_Cursor,
+		key, value: ^Mdbx_Val,
+		flags: Mdbx_Put_Flags,
+	) -> Mdbx_Error ---
+
+	/*
+	Delete current key/data pair.
+
+    This function deletes the key/data pair to which the cursor refers. This
+    does not invalidate the cursor, so operations such as \ref MDBX_NEXT can
+    still be used on it. Both \ref MDBX_NEXT and \ref MDBX_GET_CURRENT will
+    return the same record after this operation.
+
+    \param [in] cursor  A cursor handle returned by mdbx_cursor_open().
+    \param [in] flags   Options for this operation. This parameter must be set
+    to one of the values described here.
+
+     - \ref MDBX_CURRENT Delete only single entry at current cursor position.
+     - \ref MDBX_ALLDUPS
+       or \ref MDBX_NODUPDATA (supported for compatibility)
+         Delete all of the data items for the current key. This flag has effect
+         only for table(s) was created with \ref MDBX_DUPSORT.
+
+    \see \ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
+
+    \returns A non-zero error value on failure and 0 on success,
+             some possible errors are:
+    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+                                  by current thread.
+    \retval MDBX_MAP_FULL      The database is full,
+                               see \ref mdbx_env_set_mapsize().
+    \retval MDBX_TXN_FULL      The transaction has too many dirty pages.
+    \retval MDBX_EACCES        An attempt was made to write in a read-only
+                               transaction.
+    \retval MDBX_EINVAL        An invalid parameter was specified.
+    */
+	mdbx_cursor_del :: proc(
+		cursor: ^Mdbx_Cursor,
+		flags: Mdbx_Put_Flags,
+	) -> Mdbx_Error ---
+
+	/*
+	Return count of duplicates for current key.
+
+    This call is valid for all tables, but reasonable only for that support
+    sorted duplicate data items \ref MDBX_DUPSORT.
+
+    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
+    \param [out] pcount   Address where the count will be stored.
+
+    \returns A non-zero error value on failure and 0 on success,
+             some possible errors are:
+    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+                                  by current thread.
+    \retval MDBX_EINVAL   Cursor is not initialized, or an invalid parameter
+                          was specified.
+	*/
+	mdbx_cursor_count :: proc(cursor: ^Mdbx_Cursor, pcount: ^c.size_t) -> Mdbx_Error ---
+
+	/*
+	Determines whether the cursor is pointed to a key-value pair or not,
+    i.e. was not positioned or points to the end of data.
+
+    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
+
+    \returns A \ref MDBX_RESULT_TRUE or \ref MDBX_RESULT_FALSE value,
+             otherwise the error code.
+    \retval MDBX_RESULT_TRUE    No more data available or cursor not
+                                positioned
+    \retval MDBX_RESULT_FALSE   A data is available
+    \retval Otherwise the error code
+    */
+	mdbx_cursor_eof :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+
+	/*
+	Determines whether the cursor is pointed to the first key-value pair or not.
+
+    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
+
+    \returns A MDBX_RESULT_TRUE or MDBX_RESULT_FALSE value,
+             otherwise the error code.
+    \retval MDBX_RESULT_TRUE   Cursor positioned to the first key-value pair
+    \retval MDBX_RESULT_FALSE  Cursor NOT positioned to the first key-value
+    pair \retval Otherwise the error code
+    */
+	mdbx_cursor_on_first :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+
+	/*
+	Determines whether the cursor is on the first or only multi-value matching the key.
+
+    \param [in] cursor    Cursor created by \ref mdbx_cursor_open().
+    \returns Meaning \ref MDBX_RESULT_TRUE, or \ref MDBX_RESULT_FALSE,
+             otherwise error code.
+    \retval MDBX_RESULT_TRUE   the cursor is positioned on the first or only multi-value
+    						   corresponding to the key.
+    \retval MDBX_RESULT_FALSE  the cursor is NOT positioned on the first or only
+    						   multi-value matching the key.
+    \retval NACHE error code.
+    */
+	mdbx_cursor_on_first_dup :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+
+	/*
+	Determines whether the cursor is pointed to the last key-value pair or not.
+
+    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
+
+    \returns A \ref MDBX_RESULT_TRUE or \ref MDBX_RESULT_FALSE value,
+             otherwise the error code.
+    \retval MDBX_RESULT_TRUE   Cursor positioned to the last key-value pair
+    \retval MDBX_RESULT_FALSE  Cursor NOT positioned to the last key-value pair
+    \retval Otherwise the error code
+    */
+	mdbx_cursor_on_last :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+
+	/*
+	Determines whether the cursor is on the last or only multi-value matching the key.
+
+    \param [in] cursor    Cursor created by \ref mdbx_cursor_open().
+    \returns Meaning \ref MDBX_RESULT_TRUE, or \ref MDBX_RESULT_FALSE,
+             otherwise error code.
+    \retval MDBX_RESULT_TRUE   the cursor is positioned on the last or only multi-value
+    						   corresponding to the key.
+    \retval MDBX_RESULT_FALSE  the cursor is NOT positioned on the last or only
+    						   multi-value matching the key.
+    \retval OTHERWISE error code.
+    */
+	mdbx_cursor_on_last_dup :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+
+	/*
+	The estimation result varies greatly depending on the filling
+	of specific pages and the overall balance of the b-tree:
+
+	1. The number of items is estimated by analyzing the height and fullness of
+	the b-tree. The accuracy of the result directly depends on the balance of
+	the b-tree, which in turn is determined by the history of previous
+	insert/delete operations and the nature of the data (i.e. variability of
+	keys length and so on). Therefore, the accuracy of the estimation can vary
+	greatly in a particular situation.
+
+	2. To understand the potential spread of results, you should consider a
+	possible situations basing on the general criteria for splitting and merging
+	b-tree pages:
+	 - the page is split into two when there is no space for added data;
+	 - two pages merge if the result fits in half a page;
+	 - thus, the b-tree can consist of an arbitrary combination of pages filled
+	   both completely and only 1/4. Therefore, in the worst case, the result
+	   can diverge 4 times for each level of the b-tree excepting the first and
+	   the last.
+
+	3. In practice, the probability of extreme cases of the above situation is
+	close to zero and in most cases the error does not exceed a few percent. On
+	the other hand, it's just a chance you shouldn't overestimate.
+	*/
+
+	/*
+	Estimates the distance between cursors as a number of elements.
+
+    This function performs a rough estimate based only on b-tree pages that are
+    common for the both cursor's stacks. The results of such estimation can be
+    used to build and/or optimize query execution plans.
+
+    Please see notes on accuracy of the result in the details
+    of \ref c_rqest section.
+
+    Both cursors must be initialized for the same table and the same
+    transaction.
+
+    \param [in] first            The first cursor for estimation.
+    \param [in] last             The second cursor for estimation.
+    \param [out] distance_items  The pointer to store estimated distance value,
+                                 i.e. `*distance_items = distance(first, last)`.
+
+    \returns A non-zero error value on failure and 0 on success.
+    */
+	mdbx_estimate_distance :: proc(first, last: ^Mdbx_Cursor, distance_items: ^c.ptrdiff_t) -> Mdbx_Error ---
+
+	/*
+	Estimates the move distance.
+
+    This function performs a rough estimate distance between the current
+    cursor position and next position after the specified move-operation with
+    given key and data. The results of such estimation can be used to build
+    and/or optimize query execution plans. Current cursor position and state are
+    preserved.
+
+    Please see notes on accuracy of the result in the details
+    of \ref c_rqest section.
+
+    \param [in] cursor            Cursor for estimation.
+    \param [in,out] key           The key for a retrieved item.
+    \param [in,out] data          The data of a retrieved item.
+    \param [in] move_op           A cursor operation \ref MDBX_cursor_op.
+    \param [out] distance_items   A pointer to store estimated move distance
+                                  as the number of elements.
+
+    \returns A non-zero error value on failure and 0 on success.
+    */
+	mdbx_estimate_move :: proc(
+		cursor: ^Mdbx_Cursor,
+		key, value: ^Mdbx_Val,
+		move_op: Mdbx_Cursor_Op,
+		distance_items: ^c.ptrdiff_t,
+	) -> Mdbx_Error ---
+
+	/*
+	Estimates the size of a range as a number of elements.
+
+    The results of such estimation can be used to build and/or optimize query
+    execution plans.
+
+    Please see notes on accuracy of the result in the details
+    of \ref c_rqest section.
+
+    \param [in] txn        A transaction handle returned
+                           by \ref mdbx_txn_begin().
+    \param [in] dbi        A table handle returned by  \ref mdbx_dbi_open().
+    \param [in] begin_key  The key of range beginning or NULL for explicit FIRST.
+    \param [in] begin_data Optional additional data to seeking among sorted
+                           duplicates.
+                           Only for \ref MDBX_DUPSORT, NULL otherwise.
+    \param [in] end_key    The key of range ending or NULL for explicit LAST.
+    \param [in] end_data   Optional additional data to seeking among sorted
+                           duplicates.
+                           Only for \ref MDBX_DUPSORT, NULL otherwise.
+    \param [out] distance_items  A pointer to store range estimation result.
+
+    \returns A non-zero error value on failure and 0 on success.
+    */
+	mdbx_estimate_range :: proc(
+		txn: ^Mdbx_Txn,
+		dbi: Mdbx_DBI,
+		begin_key, begin_value: ^Mdbx_Val,
+		end_key, end_value: ^Mdbx_Val,
+		distance_items: ^c.ptrdiff_t,
+	) -> Mdbx_Error ---
+
+	/*
+	Determines whether the given address is on a dirty database page of
+    the transaction or not.
+
+    Ultimately, this allows to avoid copy data from non-dirty pages.
+
+    "Dirty" pages are those that have already been changed during a write
+    transaction. Accordingly, any further changes may result in such pages being
+    overwritten. Therefore, all functions libmdbx performing changes inside the
+    database as arguments should NOT get pointers to data in those pages. In
+    turn, "not dirty" pages before modification will be copied.
+
+    In other words, data from dirty pages must either be copied before being
+    passed as arguments for further processing or rejected at the argument
+    validation stage. Thus, `mdbx_is_dirty()` allows you to get rid of
+    unnecessary copying, and perform a more complete check of the arguments.
+
+    \note The address passed must point to the beginning of the data. This is
+    the only way to ensure that the actual page header is physically located in
+    the same memory page, including for multi-pages with long data.
+
+    \note In rare cases the function may return a false positive answer
+    (\ref MDBX_RESULT_TRUE when data is NOT on a dirty page), but never a false
+    negative if the arguments are correct.
+
+    \param [in] txn      A transaction handle returned by \ref mdbx_txn_begin().
+    \param [in] ptr      The address of data to check.
+
+    \returns A MDBX_RESULT_TRUE or MDBX_RESULT_FALSE value,
+             otherwise the error code.
+    \retval MDBX_RESULT_TRUE    Given address is on the dirty page.
+    \retval MDBX_RESULT_FALSE   Given address is NOT on the dirty page.
+    \retval Otherwise the error code.
+    */
+	mdbx_is_dirty :: proc(txn: ^Mdbx_Txn, ptr: rawptr) -> Mdbx_Error ---
+
+	/*
+	Sequence generation for a table.
+
+    The function allows to create a linear sequence of unique positive integers
+    for each table. The function can be called for a read transaction to
+    retrieve the current sequence value, and the increment must be zero.
+    Sequence changes become visible outside the current write transaction after
+    it is committed, and discarded on abort.
+
+    \param [in] txn        A transaction handle returned
+                           by \ref mdbx_txn_begin().
+    \param [in] dbi        A table handle returned by \ref mdbx_dbi_open().
+    \param [out] result    The optional address where the value of sequence
+                           before the change will be stored.
+    \param [in] increment  Value to increase the sequence,
+                           must be 0 for read-only transactions.
+
+    \returns A non-zero error value on failure and 0 on success,
+             some possible errors are:
+    \retval MDBX_RESULT_TRUE   Increasing the sequence has resulted in an
+                               overflow and therefore cannot be executed.
+    */
+	mdbx_dbi_sequence :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, result: ^u64, increment: u64) -> Mdbx_Error ---
+
+	/*
+	Enumerate the entries in the reader lock table.
+
+    \ingroup c_statinfo
+
+    \param [in] env     An environment handle returned by \ref mdbx_env_create().
+    \param [in] func    A \ref MDBX_reader_list_func function.
+    \param [in] ctx     An arbitrary context pointer for the enumeration
+                        function.
+
+    \returns A non-zero error value on failure and 0 on success,
+    or \ref MDBX_RESULT_TRUE if the reader lock table is empty.
+    */
+	mdbx_reader_list :: proc(env: ^Mdbx_Env, handler: Mdbx_Reader_List_Func, ctx: rawptr) -> Mdbx_Error ---
+
+	/*
+	Check for stale entries in the reader lock table.
+
+    \param [in] env     An environment handle returned by \ref mdbx_env_create().
+    \param [out] dead   Number of stale slots that were cleared.
+
+    \returns A non-zero error value on failure and 0 on success,
+    or \ref MDBX_RESULT_TRUE if a dead reader(s) found or mutex was recovered.
+    */
+	mdbx_reader_check :: proc(env: ^Mdbx_Env, dead: ^c.int) -> Mdbx_Error ---
+
+	/*
+	Returns a lag of the reading for the given transaction.
+
+    Returns an information for estimate how much given read-only
+    transaction is lagging relative the to actual head.
+    \deprecated Please use \ref mdbx_txn_info() instead.
+
+    \param [in] txn       A transaction handle returned by \ref mdbx_txn_begin().
+    \param [out] percent  Percentage of page allocation in the database.
+
+    \returns Number of transactions committed after the given was started for
+             read, or negative value on failure.
+    */
+	mdbx_txn_straggler :: proc(txn: ^Mdbx_Txn, percent: ^c.int) -> c.int ---
+
+	/*
+	Registers the current thread as a reader for the environment.
+
+    To perform read operations without blocking, a reader slot must be assigned
+    for each thread. However, this assignment requires a short-term lock
+    acquisition which is performed automatically. This function allows you to
+    assign the reader slot in advance and thus avoid capturing the blocker when
+    the read transaction starts firstly from current thread.
+    \see mdbx_thread_unregister()
+
+    \note Threads are registered automatically the first time a read transaction
+          starts. Therefore, there is no need to use this function, except in
+          special cases.
+
+    \param [in] env   An environment handle returned by \ref mdbx_env_create().
+
+    \returns A non-zero error value on failure and 0 on success,
+    or \ref MDBX_RESULT_TRUE if thread is already registered.
+    */
+	mdbx_thread_register :: proc(env: ^Mdbx_Env) -> Mdbx_Error ---
+
+	/*
+	Unregisters the current thread as a reader for the environment.
+
+    To perform read operations without blocking, a reader slot must be assigned
+    for each thread. However, the assigned reader slot will remain occupied until
+    the thread ends or the environment closes. This function allows you to
+    explicitly release the assigned reader slot.
+    \see mdbx_thread_register()
+
+    \param [in] env   An environment handle returned by \ref mdbx_env_create().
+
+    \returns A non-zero error value on failure and 0 on success, or
+    \ref MDBX_RESULT_TRUE if thread is not registered or already unregistered.
+    */
+	mdbx_thread_unregister :: proc(env: ^Mdbx_Env) -> Mdbx_Error ---
+
+	/*
+	Sets a Handle-Slow-Readers callback to resolve database full/overflow
+    issue due to a reader(s) which prevents the old data from being recycled.
+
+    The callback will only be triggered when the database is full due to a
+    reader(s) prevents the old data from being recycled.
+
+    \see MDBX_hsr_func
+    \see mdbx_env_get_hsr()
+    \see mdbx_txn_park()
+    \see <a href="intro.html#long-lived-read">Long-lived read transactions</a>
+
+    \param [in] env             An environment handle returned
+                                by \ref mdbx_env_create().
+    \param [in] hsr_callback    A \ref MDBX_hsr_func function
+                                or NULL to disable.
+
+    \returns A non-zero error value on failure and 0 on success.
+    */
+	mdbx_env_set_hsr :: proc(env: ^Mdbx_Env, hsr_callback: Mdbx_Hsr_Func) -> Mdbx_Error ---
+
+	/*
+	Gets current Handle-Slow-Readers callback used to resolve database
+    full/overflow issue due to a reader(s) which prevents the old data from being
+    recycled.
+
+    \see MDBX_hsr_func
+    \see mdbx_env_set_hsr()
+    \see mdbx_txn_park()
+    \see <a href="intro.html#long-lived-read">Long-lived read transactions</a>
+
+    \param [in] env   An environment handle returned by \ref mdbx_env_create().
+
+    \returns A MDBX_hsr_func function or NULL if disabled
+             or something wrong.
+    */
+	mdbx_env_get_hsr :: proc(env: ^Mdbx_Env) -> Mdbx_Hsr_Func ---
+
+	/*
+	Acquires write-transaction lock.
+    Provided for custom and/or complex locking scenarios.
+    \returns A non-zero error value on failure and 0 on success.
+    */
+	mdbx_txn_lock :: proc(env: ^Mdbx_Env, dont_wait: bool) -> Mdbx_Error ---
+
+	/*
+	Releases write-transaction lock.
+    Provided for custom and/or complex locking scenarios.
+    \returns A non-zero error value on failure and 0 on success.
+    */
+	mdbx_txn_unlock :: proc(env: ^Mdbx_Env) -> Mdbx_Error ---
+
+	/*
+	Open an environment instance using specific meta-page
+	for checking and recovery.
+
+	This function mostly of internal API for `mdbx_chk` utility and subject to
+	change at any time. Do not use this function to avoid shooting your own
+	leg(s).
+
+	\note On Windows the \ref mdbx_env_open_for_recoveryW() is recommended
+	to use.
+	*/
+	mdbx_env_open_for_recovery :: proc(
+		env: ^Mdbx_Env,
+		pathname: cstring,
+		target_meta: c.uint,
+		writeable: bool,
+	) -> Mdbx_Error ---
 }
 
 /*
@@ -2356,12 +3024,12 @@ Hot paths avoid
 @(link_prefix = "bop_")
 @(default_calling_convention = "c")
 foreign lib {
-	raft_buffer_new :: proc(size: uintptr) -> ^Raft_Buffer ---
+	raft_buffer_new :: proc(size: c.size_t) -> ^Raft_Buffer ---
 	raft_buffer_free :: proc(buf: ^Raft_Buffer) ---
-	raft_buffer_container_size :: proc(buf: ^Raft_Buffer) -> uintptr ---
-	raft_buffer_size :: proc(buf: ^Raft_Buffer) -> uintptr ---
-	raft_buffer_pos :: proc(buf: ^Raft_Buffer) -> uintptr ---
-	raft_buffer_set_pos :: proc(buf: ^Raft_Buffer, pos: uintptr) -> uintptr ---
+	raft_buffer_container_size :: proc(buf: ^Raft_Buffer) -> c.size_t ---
+	raft_buffer_size :: proc(buf: ^Raft_Buffer) -> c.size_t ---
+	raft_buffer_pos :: proc(buf: ^Raft_Buffer) -> c.size_t ---
+	raft_buffer_set_pos :: proc(buf: ^Raft_Buffer, pos: c.size_t) -> c.size_t ---
 
 	raft_async_u64_make :: proc(user_data: rawptr, when_ready: Raft_Async_U64_Done) -> ^Raft_Async_U64_Ptr ---
 	raft_async_u64_delete :: proc(ptr: ^Raft_Async_U64_Ptr) ---
@@ -2389,15 +3057,15 @@ foreign lib {
 	raft_cluster_config_log_idx :: proc(cfg: ^Raft_Cluster_Config) -> u64 ---
 	raft_cluster_config_prev_log_idx :: proc(cfg: ^Raft_Cluster_Config) -> u64 ---
 	raft_cluster_config_is_async_replication :: proc(cfg: ^Raft_Cluster_Config) -> bool ---
-	raft_cluster_config_user_ctx :: proc(cfg: ^Raft_Cluster_Config, out_data: ^byte, out_data_size: uintptr) -> uintptr ---
-	raft_cluster_config_user_ctx_size :: proc(cfg: ^Raft_Cluster_Config) -> uintptr ---
-	raft_cluster_config_servers_size :: proc(cfg: ^Raft_Cluster_Config) -> uintptr ---
+	raft_cluster_config_user_ctx :: proc(cfg: ^Raft_Cluster_Config, out_data: ^byte, out_data_size: c.size_t) -> c.size_t ---
+	raft_cluster_config_user_ctx_size :: proc(cfg: ^Raft_Cluster_Config) -> c.size_t ---
+	raft_cluster_config_servers_size :: proc(cfg: ^Raft_Cluster_Config) -> c.size_t ---
 	raft_cluster_config_server :: proc(cfg: ^Raft_Cluster_Config, idx: i32) -> ^Raft_Srv_Config ---
 
 	raft_srv_config_vec_create :: proc() -> ^Raft_Srv_Config_Vec ---
 	raft_srv_config_vec_delete :: proc(vec: ^Raft_Srv_Config_Vec) ---
-	raft_srv_config_vec_size :: proc(vec: ^Raft_Srv_Config_Vec) -> uintptr ---
-	raft_srv_config_vec_get :: proc(vec: ^Raft_Srv_Config_Vec, idx: uintptr) -> ^Raft_Srv_Config ---
+	raft_srv_config_vec_size :: proc(vec: ^Raft_Srv_Config_Vec) -> c.size_t ---
+	raft_srv_config_vec_get :: proc(vec: ^Raft_Srv_Config_Vec, idx: c.size_t) -> ^Raft_Srv_Config ---
 
 	raft_srv_config_ptr_make :: proc(config: ^Raft_Srv_Config) -> ^Raft_Srv_Config_Ptr ---
 	raft_srv_config_ptr_delete :: proc(config_ptr: ^Raft_Srv_Config_Ptr) ---
@@ -2405,9 +3073,9 @@ foreign lib {
 		id: i32,
 		dc_id: i32,
 		endpoint: [^]byte,
-		endpoint_size: uintptr,
+		endpoint_size: c.size_t,
 		aux: [^]byte,
-		aux_size: uintptr,
+		aux_size: c.size_t,
 		learner: bool,
 		priority: i32,
 	) -> ^Raft_Srv_Config ---
@@ -2415,9 +3083,9 @@ foreign lib {
 	raft_srv_config_id :: proc(config: ^Raft_Srv_Config) -> i32 ---
 	raft_srv_config_dc_id :: proc(config: ^Raft_Srv_Config) -> i32 ---
 	raft_srv_config_endpoint :: proc(config: ^Raft_Srv_Config) -> cstring ---
-	raft_srv_config_endpoint_size :: proc(config: ^Raft_Srv_Config) -> uintptr ---
+	raft_srv_config_endpoint_size :: proc(config: ^Raft_Srv_Config) -> c.size_t ---
 	raft_srv_config_aux :: proc(config: ^Raft_Srv_Config) -> cstring ---
-	raft_srv_config_aux_size :: proc(config: ^Raft_Srv_Config) -> uintptr ---
+	raft_srv_config_aux_size :: proc(config: ^Raft_Srv_Config) -> c.size_t ---
 
 	// `true` if this node is learner.
 	// Learner will not initiate or participate in leader election.
@@ -2481,7 +3149,7 @@ foreign lib {
 	raft_asio_rpc_client_make :: proc(
 		asio_service: ^Raft_Asio_Service_Ptr,
 		endpoint: [^]byte,
-		endpoint_size: uintptr
+		endpoint_size: c.size_t
 	) -> ^Raft_Asio_RPC_Client_Ptr ---
 
 	raft_asio_rpc_client_delete :: proc(rpc_listener: ^Raft_Asio_RPC_Client_Ptr) ---
@@ -2567,8 +3235,8 @@ foreign lib {
 
 	raft_server_peer_info_vec_delete :: proc(vec: ^Raft_Server_Peer_Info_Vec) ---
 
-	raft_server_peer_info_vec_size :: proc(vec: ^Raft_Server_Peer_Info_Vec) -> uintptr ---
-	raft_server_peer_info_vec_get :: proc(vec: ^Raft_Server_Peer_Info_Vec, index: uintptr) -> ^Raft_Server_Peer_Info ---
+	raft_server_peer_info_vec_size :: proc(vec: ^Raft_Server_Peer_Info_Vec) -> c.size_t ---
+	raft_server_peer_info_vec_get :: proc(vec: ^Raft_Server_Peer_Info_Vec, index: c.size_t) -> ^Raft_Server_Peer_Info ---
 
 	raft_params_make :: proc() -> ^Raft_Params ---
 	raft_params_delete :: proc(params: ^Raft_Params) ---
@@ -2589,7 +3257,7 @@ foreign lib {
 
 	raft_server_stop :: proc(
 		rs_ptr: ^Raft_Server_Ptr,
-		time_limit_sec: uintptr
+		time_limit_sec: c.size_t
 	) -> bool ---
 
 	raft_server_get :: proc(
@@ -2777,7 +3445,7 @@ foreign lib {
 	raft_server_set_user_ctx :: proc(
 		rs: ^Raft_Server,
 		data: [^]byte,
-		size: uintptr,
+		size: c.size_t,
 	) ---
 
 	/*
@@ -3169,7 +3837,7 @@ foreign lib {
 	*/
 	raft_server_pause_state_machine_execution :: proc(
 		rs: ^Raft_Server,
-		timeout_ms: uintptr,
+		timeout_ms: c.size_t,
 	) ---
 
 	/*
@@ -3197,7 +3865,7 @@ foreign lib {
 	*/
 	raft_server_wait_for_state_machine_pause :: proc(
 		rs: ^Raft_Server,
-		timeout_ms: uintptr,
+		timeout_ms: c.size_t,
 	) -> bool ---
 
 	/*
@@ -3262,14 +3930,14 @@ foreign lib {
 	raft_mdbx_state_mgr_open :: proc(
 		my_srv_config: ^Raft_Srv_Config_Ptr,
 		dir: [^]byte,
-		dir_size: uintptr,
+		dir_size: c.size_t,
 		logger: ^Raft_Logger_Ptr,
-		size_lower: uintptr,
-		size_now: uintptr,
-		size_upper: uintptr,
-		growth_step: uintptr,
-		shirnk_threshold: uintptr,
-		page_size: uintptr,
+		size_lower: c.size_t,
+		size_now: c.size_t,
+		size_upper: c.size_t,
+		growth_step: c.size_t,
+		shirnk_threshold: c.size_t,
+		page_size: c.size_t,
 		flags: u32,
 		mode: u16,
 		log_store: ^Raft_Log_Store_Ptr,
@@ -3277,17 +3945,17 @@ foreign lib {
 
 	raft_mdbx_log_store_open :: proc(
 		dir: [^]byte,
-		dir_size: uintptr,
+		dir_size: c.size_t,
 		logger: ^Raft_Logger_Ptr,
-		size_lower: uintptr,
-		size_now: uintptr,
-		size_upper: uintptr,
-		growth_step: uintptr,
-		shirnk_threshold: uintptr,
-		page_size: uintptr,
+		size_lower: c.size_t,
+		size_now: c.size_t,
+		size_upper: c.size_t,
+		growth_step: c.size_t,
+		shirnk_threshold: c.size_t,
+		page_size: c.size_t,
 		flags: u32,
 		mode: u16,
-		compact_batch_size: uintptr,
+		compact_batch_size: c.size_t,
 	) -> ^Raft_Log_Store_Ptr ---
 }
 

@@ -25,3 +25,6 @@ IO_Vec :: struct {
     base: rawptr,
     len:  uintptr,
 }
+
+PID :: windows.DWORD
+TID :: windows.DWORD

@@ -8,6 +8,8 @@ import "core:mem/virtual"
 import "core:os"
 import "core:thread"
 
+import c "core:c/libc"
+
 import bop "../"
 import os2 "core:os/os2"
 import strings "core:strings"
@@ -57,7 +59,7 @@ run_raft :: proc() {
     asio_service := bop.raft_asio_service_make(&asio_options, logger)
 
     endpoint := "localhost:15001"
-    rpc_client := bop.raft_asio_rpc_client_make(asio_service, raw_data(endpoint), uintptr(len(endpoint)))
+    rpc_client := bop.raft_asio_rpc_client_make(asio_service, raw_data(endpoint), c.size_t(len(endpoint)))
     rpc_listener := bop.raft_asio_rpc_listener_make(asio_service, 15001, logger)
     bop.raft_asio_rpc_client_delete(rpc_client)
     bop.raft_asio_rpc_listener_delete(rpc_listener)
@@ -131,7 +133,7 @@ run_raft_server :: proc() {
     srv_config := bop.raft_srv_config_make(
         i32(1),
         i32(1),
-        raw_data(endpoint), uintptr(len(endpoint)),
+        raw_data(endpoint), c.size_t(len(endpoint)),
         nil, 0,
         false,
         i32(1)
@@ -147,7 +149,7 @@ run_raft_server :: proc() {
 
     log_store := bop.raft_mdbx_log_store_open(
         raw_data(dir),
-        uintptr(len(dir)),
+        c.size_t(len(dir)),
         logger,
         1024*1024*64,
         1024*1024*64,
@@ -165,7 +167,7 @@ run_raft_server :: proc() {
     state_mgr := bop.raft_mdbx_state_mgr_open(
         srv_config_ptr,
         raw_data(dir),
-        uintptr(len(dir)),
+        c.size_t(len(dir)),
         logger,
         1024*64,
         1024*64,

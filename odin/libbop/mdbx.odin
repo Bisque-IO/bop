@@ -1,4 +1,10 @@
+#+feature dynamic-literals
+
 package libbop
+
+import c "core:c/libc"
+
+dd:: c.size_t
 
 Mdbx_Max_DBI :: 32765
 Mdbx_Max_Data_Size :: 0x7fff0000
@@ -82,6 +88,130 @@ Mdbx_Predicate_Func :: #type proc "c" (
 	key, value: ^Mdbx_Val,
 	arg: rawptr,
 ) -> Mdbx_Error
+
+/*
+A callback function used to enumerate the reader lock table.
+
+\ingroup c_statinfo
+
+\param [in] ctx            An arbitrary context pointer for the callback.
+\param [in] num            The serial number during enumeration,
+                           starting from 1.
+\param [in] slot           The reader lock table slot number.
+\param [in] txnid          The ID of the transaction being read,
+                           i.e. the MVCC-snapshot number.
+\param [in] lag            The lag from a recent MVCC-snapshot,
+                           i.e. the number of committed write transactions
+                           since the current read transaction started.
+\param [in] pid            The reader process ID.
+\param [in] thread         The reader thread ID.
+\param [in] bytes_used     The number of last used page
+                           in the MVCC-snapshot which being read,
+                           i.e. database file can't be shrunk beyond this.
+\param [in] bytes_retained The total size of the database pages that were
+                           retired by committed write transactions after
+                           the reader's MVCC-snapshot,
+                           i.e. the space which would be freed after
+                           the Reader releases the MVCC-snapshot
+                           for reuse by completion read transaction.
+
+\returns < 0 on failure, >= 0 on success. \see mdbx_reader_list()
+*/
+Mdbx_Reader_List_Func :: #type proc "c" (
+	ctx: rawptr,
+	num: c.int,
+	slot: c.int,
+	pid: PID,
+	thread: TID,
+	txnid: u64,
+	lag: u64,
+	bytes_used: c.size_t,
+	bytes_retained: c.size_t,
+) -> c.int
+
+/*
+A Handle-Slow-Readers callback function to resolve database
+full/overflow issue due to a reader(s) which prevents the old data from being
+recycled.
+
+Read transactions prevent reuse of pages freed by newer write transactions,
+thus the database can grow quickly. This callback will be called when there
+is not enough space in the database (i.e. before increasing the database size
+or before \ref MDBX_MAP_FULL error) and thus can be used to resolve issues
+with a "long-lived" read transactions.
+\see mdbx_env_set_hsr()
+\see mdbx_env_get_hsr()
+\see mdbx_txn_park()
+\see <a href="intro.html#long-lived-read">Long-lived read transactions</a>
+
+Using this callback you can choose how to resolve the situation:
+  - abort the write transaction with an error;
+  - wait for the read transaction(s) to complete;
+  - notify a thread performing a long-lived read transaction
+    and wait for an effect;
+  - kill the thread or whole process that performs the long-lived read
+    transaction;
+
+Depending on the arguments and needs, your implementation may wait,
+terminate a process or thread that is performing a long read, or perform
+some other action. In doing so it is important that the returned code always
+corresponds to the performed action.
+
+\param [in] env     An environment handle returned by \ref mdbx_env_create().
+\param [in] txn     The current write transaction which internally at
+                    the \ref MDBX_MAP_FULL condition.
+\param [in] pid     A pid of the reader process.
+\param [in] tid     A thread_id of the reader thread.
+\param [in] laggard An oldest read transaction number on which stalled.
+\param [in] gap     A lag from the last committed txn.
+\param [in] space   A space that actually become available for reuse after
+                    this reader finished. The callback function can take
+                    this value into account to evaluate the impact that
+                    a long-running transaction has.
+\param [in] retry   A retry number starting from 0.
+                    If callback has returned 0 at least once, then at end of
+                    current handling loop the callback function will be
+                    called additionally with negative `retry` value to notify
+                    about the end of loop. The callback function can use this
+                    fact to implement timeout reset logic while waiting for
+                    a readers.
+
+\returns The RETURN CODE determines the further actions libmdbx and must
+         match the action which was executed by the callback:
+
+\retval -2 or less  An error condition and the reader was not killed.
+
+\retval -1          The callback was unable to solve the problem and
+                    agreed on \ref MDBX_MAP_FULL error;
+                    libmdbx should increase the database size or
+                    return \ref MDBX_MAP_FULL error.
+
+\retval 0 (zero)    The callback solved the problem or just waited for
+                    a while, libmdbx should rescan the reader lock table and
+                    retry. This also includes a situation when corresponding
+                    transaction terminated in normal way by
+                    \ref mdbx_txn_abort() or \ref mdbx_txn_reset(),
+                    and my be restarted. I.e. reader slot don't needed
+                    to be cleaned from transaction.
+
+\retval 1           Transaction aborted asynchronous and reader slot
+                    should be cleared immediately, i.e. read transaction
+                    will not continue but \ref mdbx_txn_abort()
+                    nor \ref mdbx_txn_reset() will be called later.
+
+\retval 2 or great  The reader process was terminated or killed,
+                    and libmdbx should entirely reset reader registration.
+ */
+Mdbx_Hsr_Func :: #type proc "c" (
+	env: ^Mdbx_Env,
+	txn: ^Mdbx_Txn,
+	pid: PID,
+	tid: TID,
+	laggard: u64,
+	gap: c.uint,
+	space: c.size_t,
+	retry: c.int,
+) -> c.int
 
 /*
 The fours integers markers (aka "canary") associated with the
@@ -903,7 +1033,7 @@ Errors and return codes
 BerkeleyDB uses -30800 to -30999, we'll go under them
 \see mdbx_strerror() \see mdbx_strerror_r() \see mdbx_liberr2str()
 */
-Mdbx_Error :: enum i32 {
+Mdbx_Error :: enum c.int {
 	/* Successful result */
 	Success                = 0,
 
@@ -1097,6 +1227,10 @@ Mdbx_Error :: enum i32 {
 	ENOFILE                = i32(ENOFILE),
 	EREMOTE                = i32(EREMOTE),
 	EDEADLK                = i32(EDEADLK),
+}
+
+Mdbx_Error_Message := map[Mdbx_Error]string{
+	.Result_True = "RESULT_TRUE"
 }
 
 /*
@@ -1298,9 +1432,9 @@ Mdbx_Option :: enum i32 {
     the flush-to-disk.
 
     Basically for N chunks the latency/cost of write-through is:
-     latency = N * (emit + round-trip-to-storage + storage-execution);
+     latency = N(emit + round-trip-to-storage + storage-execution);
     And for serie of lazy writes with flush is:
-     latency = N * (emit + storage-execution) + flush + round-trip-to-storage.
+     latency = N(emit + storage-execution) + flush + round-trip-to-storage.
 
     So, for large N and/or noteable round-trip-to-storage the write+flush
     approach is win. But for small N and/or near-zero NVMe-like latency

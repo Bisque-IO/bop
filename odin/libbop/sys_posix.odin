@@ -22,3 +22,6 @@ IO_Vec :: struct {
     base: rawptr,
     len:  uintptr,
 }
+
+PID :: posix.pid_t
+TID :: posix.pthread_t
