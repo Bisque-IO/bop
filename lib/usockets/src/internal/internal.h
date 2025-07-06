@@ -18,11 +18,27 @@
 #ifndef INTERNAL_H
 #define INTERNAL_H
 
-#if defined(_MSC_VER)
-#define alignas(x) __declspec(align(x))
-#else
+// #if defined(_MSC_VER)
+// #undef alignas
+// #define alignas(x) __declspec(align(x))
+// #else
+// #include <stdalign.h>
+// #endif
+
+#if __has_include(<stdalign.h>)
 #include <stdalign.h>
 #endif
+#if defined(alignas) || defined(__cplusplus)
+#define LIBUS_ALIGNAS(N) alignas(N)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define LIBUS_ALIGNAS(N) _Alignas(N)
+#elif defined(_MSC_VER)
+#define LIBUS_ALIGNAS(N) __declspec(align(N))
+#elif __has_attribute(__aligned__) || defined(__GNUC__)
+#define LIBUS_ALIGNAS(N) __attribute__((__aligned__(N)))
+#else
+#error "FIXME: Required alignas() or equivalent."
+#endif /* LIBUS_ALIGNAS */
 
 /* We only have one networking implementation so far */
 #include "internal/networking/bsd.h"
@@ -93,7 +109,7 @@ void us_internal_socket_context_unlink_socket(struct us_socket_context_t *contex
 
 /* Sockets are polls */
 struct us_socket_t {
-    alignas(LIBUS_EXT_ALIGNMENT) struct us_poll_t p; // 4 bytes
+    LIBUS_ALIGNAS(LIBUS_EXT_ALIGNMENT) struct us_poll_t p; // 4 bytes
     unsigned char timeout; // 1 byte
     unsigned char long_timeout; // 1 byte
     unsigned short low_prio_state; /* 0 = not in low-prio queue, 1 = is in low-prio queue, 2 = was in low-prio queue in this iteration */
@@ -103,7 +119,7 @@ struct us_socket_t {
 
 /* Internal callback types are polls just like sockets */
 struct us_internal_callback_t {
-    alignas(LIBUS_EXT_ALIGNMENT) struct us_poll_t p;
+    LIBUS_ALIGNAS(LIBUS_EXT_ALIGNMENT) struct us_poll_t p;
     struct us_loop_t *loop;
     int cb_expects_the_loop;
     int leave_poll_ready;
@@ -112,7 +128,7 @@ struct us_internal_callback_t {
 
 /* Listen sockets are sockets */
 struct us_listen_socket_t {
-    alignas(LIBUS_EXT_ALIGNMENT) struct us_socket_t s;
+    LIBUS_ALIGNAS(LIBUS_EXT_ALIGNMENT) struct us_socket_t s;
     unsigned int socket_ext_size;
 };
 
@@ -121,7 +137,7 @@ void us_internal_socket_context_link_listen_socket(struct us_socket_context_t *c
 void us_internal_socket_context_unlink_listen_socket(struct us_socket_context_t *context, struct us_listen_socket_t *s);
 
 struct us_socket_context_t {
-    alignas(LIBUS_EXT_ALIGNMENT) struct us_loop_t *loop;
+    LIBUS_ALIGNAS(LIBUS_EXT_ALIGNMENT) struct us_loop_t *loop;
     uint32_t global_tick;
     unsigned char timestamp;
     unsigned char long_timestamp;

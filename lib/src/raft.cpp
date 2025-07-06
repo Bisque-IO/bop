@@ -1,3 +1,15 @@
+
+#ifdef BOOST_ASIO_USE_WOLFSSL
+extern "C" {
+#include <wolfssl/options.h>
+#include <wolfssl/wolfssl/ssl.h>
+#include <wolfssl/openssl/ssl.h>
+#include <wolfssl/openssl/bio.h>
+#include <wolfssl/openssl/err.h>
+#include <wolfssl/openssl/dh.h>
+}
+#endif
+
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -15,6 +27,8 @@ extern "C" {
 #include "../hash/rapidhash.h"
 #include "../hash/xxh3.h"
 #include "./raft.h"
+
+
 
 
 ////////////////////////////////////////////////////////////////////////////////////

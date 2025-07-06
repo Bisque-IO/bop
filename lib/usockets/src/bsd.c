@@ -220,7 +220,7 @@ void bsd_udp_buffer_set_packet_payload(struct us_udp_packet_buffer_t *send_buf, 
     ss[index].msg_hdr.msg_controllen = 0;
 
     // copy the payload
-    
+
     ss[index].msg_hdr.msg_iov->iov_len = length + offset;
 
 
@@ -412,12 +412,12 @@ int bsd_recv(LIBUS_SOCKET_DESCRIPTOR fd, void *buf, int length, int flags) {
 
 int bsd_write2(LIBUS_SOCKET_DESCRIPTOR fd, const char *header, int header_length, const char *payload, int payload_length) {
     struct iovec chunks[2];
-    
+
     chunks[0].iov_base = (char *)header;
     chunks[0].iov_len = header_length;
     chunks[1].iov_base = (char *)payload;
     chunks[1].iov_len = payload_length;
-    
+
     return writev(fd, chunks, 2);
 }
 #else
@@ -523,7 +523,7 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket(const char *host, int port, int
 #endif
 
     }
-    
+
 #ifdef IPV6_V6ONLY
     int disabled = 0;
     setsockopt(listenFd, IPPROTO_IPV6, IPV6_V6ONLY, (void *) &disabled, sizeof(disabled));
@@ -624,7 +624,7 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_udp_socket(const char *host, int port) {
         int enabled = 1;
         setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (void *) &enabled, sizeof(enabled));
     }
-    
+
 #ifdef IPV6_V6ONLY
     int disabled = 0;
     setsockopt(listenFd, IPPROTO_IPV6, IPV6_V6ONLY, (void *) &disabled, sizeof(disabled));

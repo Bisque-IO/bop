@@ -2,7 +2,8 @@
 package libbop
 
 import "core:sys/posix"
-import "core:sys/linux"
+
+import c "core:c/libc"
 
 ENODATA :: posix.ENODATA
 EINVAL  :: posix.EINVAL
@@ -15,13 +16,16 @@ EINTR   :: posix.EINTR
 ENOFILE :: posix.ENOENT
 EREMOTE :: 15 // ENOTBLK
 EDEADLK :: posix.EDEADLK
+ENOSYS  :: posix.ENOSYS
 
 FD :: posix.FD
 
 IO_Vec :: struct {
     base: rawptr,
-    len:  uintptr,
+    len:  uint,
 }
 
 PID :: posix.pid_t
 TID :: posix.pthread_t
+
+SOCKET :: c.int

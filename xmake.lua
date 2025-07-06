@@ -50,12 +50,11 @@ end
 add_requires("zig ~0.14.0")
 
 add_requires("openssl3 ~3.3.2", {
-    -- add_requires("conan::openssl/3.5.0", {
+--add_requires("conan::openssl/3.5.0", {
     alias = "openssl3",
     configs = {
         fPIC = true,
-        shared = false,
-        static = true
+        shared = true
     }
 })
 
@@ -85,22 +84,28 @@ add_requires("boost ~1.88.0", {
     }
 })
 
-add_requires("conan::libuv/1.49.2", {
-    alias = "libuv",
-    configs = {
-        shared = false,
-        fPIC = true
-    }
-})
-
 add_requires("wolfssl ~5.7.2", {
-    alias = "wolfssl",
+    --add_requires("conan::wolfssl/5.7.0", {
+    alias = "wolfssl1",
     configs = {
-        shared = false,
+        shared = true,
         asio = true,
         fPIC = true,
+        sslv3 = true,
+        certgen = true,
+        dsa = true,
+        ripemd = true,
+        sessioncerts = true,
+        testcert = true,
         openssl_all = true,
-        openssl_extra = true
+        openssl_extra = true,
+        opensslall = true,
+        opensslextra = true,
+        tls13 = true,
+        sni = true,
+        with_quic = true,
+        with_experimental = true,
+        with_rpk = true
     }
 })
 

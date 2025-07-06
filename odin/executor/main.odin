@@ -2,16 +2,13 @@ package executor
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:crypto"
 import "core:debug/trace"
 import "core:fmt"
-import "core:mem"
 import "core:simd"
 import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
-
 
 find_first_set_bit_x8 :: proc(bitmap: []simd.u64x8) -> int {
 	for block_index in 0 ..< len(bitmap) {
@@ -133,7 +130,7 @@ find_first_set_bit_x8_16 :: #force_inline proc "contextless" (
 	return -1, -1, -1
 }
 
-main :: proc() {
+main2 :: proc() {
 	value := u64(0)
 	signal := Signal(&value)
 	signal_39 := signal^
@@ -161,6 +158,8 @@ main :: proc() {
 			signal_nearest(data, 63)
 		},
 	)
+
+//	main2()
 }
 
 main1 :: proc() #no_bounds_check {
@@ -318,11 +317,11 @@ main1 :: proc() #no_bounds_check {
 	//		},
 	//	)
 
-	main2()
+//	main2()
 }
 
 
-main2 :: proc() {
+main :: proc() {
 	//	fmt.println("u64x8 -> find index 9")
 	//	bitmap := make([]simd.u64x8, 16)
 	//	bitmap[9] = simd.u64x8{0, 0, 1, 0, 0, 0, 0, 0}
@@ -386,6 +385,7 @@ main2 :: proc() {
 		panic("err")
 	}
 	group := &executor.groups[0]
+	group.waker = new(Waker)
 	slot := &group.slots[0]
 	slot.cpu_time_enabled = false
 	slot.waker = group.waker
@@ -431,19 +431,19 @@ main2 :: proc() {
 
 	stop: bool
 	th := thread.create_and_start_with_poly_data2(
-	slot,
-	&stop,
-	proc(core: ^Slot, stop: ^bool) {
-		for !stop^ {
-			if signal_acquire(core.signal, core.index) {
-				slot_execute(core)
-			} else {
-				//				intrinsics.cpu_relax()
-			}
+		slot,
+		&stop,
+		proc(core: ^Slot, stop: ^bool) {
+			for !stop^ {
+				if signal_acquire(core.signal, core.index) {
+					slot_execute(core)
+				} else {
+									intrinsics.cpu_relax()
+				}
 
-			//			vcore_execute(core)
-		}
-	},
+				//			vcore_execute(core)
+			}
+		},
 	)
 
 	sw: time.Stopwatch

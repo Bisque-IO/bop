@@ -23,8 +23,10 @@ FD :: windows.HANDLE
 
 IO_Vec :: struct {
     base: rawptr,
-    len:  uintptr,
+    len:  uint,
 }
 
 PID :: windows.DWORD
 TID :: windows.DWORD
+
+SOCKET :: windows.SOCKET

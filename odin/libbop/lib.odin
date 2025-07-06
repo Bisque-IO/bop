@@ -7,80 +7,121 @@ import "core:testing"
 #assert(size_of(c.int) == size_of(i32))
 
 when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
-	when #config(BOP_SHARED, 0) == 1 {
+	when #config(BOP_SHARED, 1) == 1 {
 		@(private)
 		LIB_PATH :: "../../build/windows/x64/release/bop.lib"
 	} else {
 		@(private)
-		LIB_PATH :: "../../build/windows/x64/debug/bop-static.lib"
+		LIB_PATH :: "../../build/windows/x64/release/bop.lib"
 	}
 
-	when #config(BOP_DEBUG, 1) == 1 {
+	when #config(BOP_DEBUG, 0) == 1 {
 		@(private)
 		MSVCRT_NAME :: "system:msvcrtd.lib"
 	} else {
 		@(private)
-//		MSVCRT_NAME :: "system:crt.lib"
 		MSVCRT_NAME :: "system:msvcrt.lib"
 	}
-	
-	//odinfmt:disable
+
 	foreign import lib {
-//	    "windows/amd64/libcrypto_static.lib",
-//	    "windows/amd64/libssl_static.lib",
-		"windows/amd64/libcrypto.lib",
-		"windows/amd64/libssl.lib",
+	    "windows/amd64/libcrypto_static.lib",
+	    "windows/amd64/libssl_static.lib",
+//		"windows/amd64/libcrypto.lib",
+//		"windows/amd64/libssl.lib",
 		"system:Kernel32.lib",
 		"system:User32.lib",
 		"system:Advapi32.lib",
 		"system:ntdll.lib",
 		"system:onecore.lib",
 		"system:Synchronization.lib",
+		"system:Dbghelp.lib",
 		MSVCRT_NAME,
 		LIB_PATH,
  	}
-	//odinfmt:enable
 } else when ODIN_OS == .Windows && ODIN_ARCH == .arm64 {
 	#panic("libbop does not support Windows ARM64 yet")
 } else when ODIN_OS == .Linux && ODIN_ARCH == .amd64 {
-	when #config(BOP_DEBUG, 1) == 1 {
-		@(private)
-		LIB_PATH :: "../../build/linux/x86_64/release/libbop-static.a"
-		//		LIB_PATH :: "../../build/linux/x86_64/release/libbop.so"
-		//		LIB_PATH :: "libbop.so"
+	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -extra-linker-flags:"-Wl,-rpath,$ORIGIN/libbop.so" -linker:lld
+	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -linker:lld -extra-linker-flags:"-rdynamic -static"
+	when #config(BOP_WOLFSSL, 0) == 1 {
+		when #config(BOP_DEBUG, 1) == 1 {
+			when #config(BOP_SHARED, 0) == 1 {
+				@(private)
+				LIB_PATH :: "../../build/linux/x86_64/release/libbop-wolfssl.so"
+			} else {
+				@(private)
+				LIB_PATH :: "../../build/linux/x86_64/release/libbop-wolfssl.a"
+			}
+		} else {
+			@(private)
+			LIB_PATH :: "linux/amd64/libbop-wolfssl.a"
+		}
+		foreign import lib {
+			"linux/amd64/libwolfssl.a",
+			"system:stdc++",
+			LIB_PATH,
+		}
 	} else {
-		@(private)
-		LIB_PATH :: "linux/amd64/libbop-static.a"
+		when #config(BOP_DEBUG, 1) == 1 {
+			when #config(BOP_SHARED, 0) == 1 {
+				@(private)
+				LIB_PATH :: "../../build/linux/x86_64/release/libbop.so"
+			} else {
+				@(private)
+				LIB_PATH :: "../../build/linux/x86_64/release/libbop.a"
+			}
+		} else {
+			@(private)
+			LIB_PATH :: "linux/amd64/libbop.a"
+		}
+		foreign import lib {
+			"system:crypto",
+			"system:ssl",
+			"system:stdc++",
+			LIB_PATH,
+		}
 	}
-
-	// odin build . -o:aggressive -define:BOP_DEBUG=1 -extra-linker-flags:"-Wl,-rpath,$ORIGIN/libbop.so" -linker:lld
-	//odinfmt:disable
-	foreign import lib {
-//		"system:dl",
-//		"system:pthread",
-//		"linux/amd64/libcrypto.a",
-//		"linux/amd64/libssl.a",
-		"system:crypto",
-		"system:ssl",
-		"system:stdc++",
-		LIB_PATH,
-	}
-	//odinfmt:enable
 } else when ODIN_OS == .Linux && ODIN_ARCH == .arm64 {
-	when #config(BOP_DEBUG, 0) == 1 {
-		@(private)
-		LIB_PATH :: "../../build/linux/aarch64/debug/libbop.a"
+	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -extra-linker-flags:"-Wl,-rpath,$ORIGIN/libbop.so" -linker:lld
+	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -linker:lld -extra-linker-flags:"-rdynamic -static"
+	when #config(BOP_WOLFSSL, 0) == 1 {
+		when #config(BOP_DEBUG, 1) == 1 {
+			when #config(BOP_SHARED, 0) == 1 {
+				@(private)
+				LIB_PATH :: "../../build/linux/arm64/release/libbop-wolfssl.so"
+			} else {
+				@(private)
+				LIB_PATH :: "../../build/linux/arm64/release/libbop-wolfssl.a"
+			}
+		} else {
+			@(private)
+			LIB_PATH :: "linux/arm64/libbop-wolfssl.a"
+		}
+		foreign import lib {
+			"linux/arm64/libwolfssl.a",
+			"system:stdc++",
+			LIB_PATH,
+		}
 	} else {
-		@(private)
-		LIB_PATH :: "linux/arm64/libbop.a"
+		when #config(BOP_DEBUG, 1) == 1 {
+			when #config(BOP_SHARED, 0) == 1 {
+				@(private)
+				LIB_PATH :: "../../build/linux/arm64/release/libbop.so"
+			} else {
+				@(private)
+				LIB_PATH :: "../../build/linux/arm64/release/libbop.a"
+			}
+		} else {
+			@(private)
+			LIB_PATH :: "linux/arm64/libbop.a"
+		}
+		foreign import lib {
+			"system:crypto",
+			"system:ssl",
+			"system:stdc++",
+			LIB_PATH,
+		}
 	}
-	//odinfmt:disable
-	foreign import lib {
-		"system:libm",
-		"system:libc",
-		LIB_PATH,
-	}
-	//odinfmt:enable
 } else when ODIN_OS == .Darwin && ODIN_ARCH == .amd64 {
 	when #config(BOP_DEBUG, 0) == 1 {
 		@(private)
@@ -204,7 +245,6 @@ https://github.com/erthink/libmdbx
 
 */
 
-//@(link_prefix = "bop_")
 @(default_calling_convention = "c")
 foreign lib {
 	/*
@@ -213,10 +253,10 @@ foreign lib {
     Does nothing if libmdbx was built with MDBX_DEBUG=0 or with NDEBUG,
     and will return `MDBX_ENOSYS` in such case.
 
-    \param [in] env   An environment handle returned by mdbx_env_create().
-    \param [in] func  An MDBX_assert_func function, or 0.
-    \returns A non-zero error value on failure and 0 on success. */
-	mdbx_env_set_assert :: proc(env: ^Mdbx_Env, func: Mdbx_Assert_Func) -> i32 ---
+    @param [in] env   An environment handle returned by mdbx_env_create().
+    @param [in] func  An MDBX_assert_func function, or 0.
+    @returns A non-zero error value on failure and 0 on success. */
+	mdbx_env_set_assert :: proc(env: ^MDBX_Env, func: MDBX_Assert_Func) -> i32 ---
 
 	/*
 	Return a string describing a given error code.
@@ -230,193 +270,193 @@ foreign lib {
     `mdbx_strerror()` is NOT thread-safe because may share common internal buffer
     for system messages. The returned string must NOT be modified by the
     application, but MAY be modified by a subsequent call to
-    \ref mdbx_strerror(), `strerror()` and other related functions.
-    \see mdbx_strerror_r()
+    @ref mdbx_strerror(), `strerror()` and other related functions.
+    @see mdbx_strerror_r()
 
-    \param [in] errnum  The error code.
+    @param [in] errnum  The error code.
 
-    \returns "error message" The description of the error.
+    @returns "error message" The description of the error.
     */
-	mdbx_strerror :: proc(err: Mdbx_Error) -> cstring ---
+	mdbx_strerror :: proc(err: MDBX_Error) -> cstring ---
 
-	mdbx_liberr2str :: proc(err: Mdbx_Error) -> cstring ---
+	mdbx_liberr2str :: proc(err: MDBX_Error) -> cstring ---
 
 	/*
 	Create an MDBX environment instance.
 
-    This function allocates memory for a \ref MDBX_env structure. To release
-    the allocated memory and discard the handle, call \ref mdbx_env_close().
-    Before the handle may be used, it must be opened using \ref mdbx_env_open().
+    This function allocates memory for a @ref MDBX_env structure. To release
+    the allocated memory and discard the handle, call @ref mdbx_env_close().
+    Before the handle may be used, it must be opened using @ref mdbx_env_open().
 
     Various other options may also need to be set before opening the handle,
-    e.g. \ref mdbx_env_set_geometry(), \ref mdbx_env_set_maxreaders(),
-    \ref mdbx_env_set_maxdbs(), depending on usage requirements.
+    e.g. @ref mdbx_env_set_geometry(), @ref mdbx_env_set_maxreaders(),
+    @ref mdbx_env_set_maxdbs(), depending on usage requirements.
 
-    \param [out] penv  The address where the new handle will be stored.
-    \returns a non-zero error value on failure and 0 on success.
+    @param [out] penv  The address where the new handle will be stored.
+    @returns a non-zero error value on failure and 0 on success.
     */
-	mdbx_env_create :: proc(penv: ^^Mdbx_Env) -> Mdbx_Error ---
+	mdbx_env_create :: proc(penv: ^^MDBX_Env) -> MDBX_Error ---
 
 	/*
 	Sets the value of a extra runtime options for an environment.
 
-    \param [in] env     An environment handle returned by \ref mdbx_env_create().
-    \param [in] option  The option from \ref MDBX_option_t to set value of it.
-    \param [in] value   The value of option to be set.
+    @param [in] env     An environment handle returned by @ref mdbx_env_create().
+    @param [in] option  The option from @ref MDBX_option_t to set value of it.
+    @param [in] value   The value of option to be set.
 
-    \see MDBX_option_t
-    \see mdbx_env_get_option()
-    \returns A non-zero error value on failure and 0 on success.
+    @see MDBX_option_t
+    @see mdbx_env_get_option()
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_env_set_option :: proc(env: ^Mdbx_Env, option: Mdbx_Option, value: u64) -> Mdbx_Error ---
+	mdbx_env_set_option :: proc(env: ^MDBX_Env, option: MDBX_Option, value: u64) -> MDBX_Error ---
 
 	/*
 	Gets the value of extra runtime options from an environment.
 
-    \param [in] env     An environment handle returned by \ref mdbx_env_create().
-    \param [in] option  The option from \ref MDBX_option_t to get value of it.
-    \param [out] pvalue The address where the option's value will be stored.
+    @param [in] env     An environment handle returned by @ref mdbx_env_create().
+    @param [in] option  The option from @ref MDBX_option_t to get value of it.
+    @param [out] pvalue The address where the option's value will be stored.
 
-    \see MDBX_option_t
-    \see mdbx_env_get_option()
-    \returns A non-zero error value on failure and 0 on success.
+    @see MDBX_option_t
+    @see mdbx_env_get_option()
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_env_get_option :: proc(env: ^Mdbx_Env, option: Mdbx_Option, value: ^u64) -> Mdbx_Error ---
+	mdbx_env_get_option :: proc(env: ^MDBX_Env, option: MDBX_Option, value: ^u64) -> MDBX_Error ---
 
 	/*\brief Open an environment instance.
 
-    Indifferently this function will fails or not, the \ref mdbx_env_close() must
-    be called later to discard the \ref MDBX_env handle and release associated
+    Indifferently this function will fails or not, the @ref mdbx_env_close() must
+    be called later to discard the @ref MDBX_env handle and release associated
     resources.
 
-    \note On Windows the \ref mdbx_env_openW() is recommended to use.
+    @note On Windows the @ref mdbx_env_openW() is recommended to use.
 
-    \param [in] env       An environment handle returned
-                          by \ref mdbx_env_create()
+    @param [in] env       An environment handle returned
+                          by @ref mdbx_env_create()
 
-    \param [in] pathname  The pathname for the database or the directory in which
+    @param [in] pathname  The pathname for the database or the directory in which
                           the database files reside. In the case of directory it
                           must already exist and be writable.
 
-    \param [in] flags     Specifies options for this environment.
+    @param [in] flags     Specifies options for this environment.
                           This parameter must be bitwise OR'ing together
-                          any constants described above in the \ref env_flags
-                          and \ref sync_modes sections.
+                          any constants described above in the @ref env_flags
+                          and @ref sync_modes sections.
 
     Flags set by mdbx_env_set_flags() are also used:
-     - \ref MDBX_ENV_DEFAULTS, \ref MDBX_NOSUBDIR, \ref MDBX_RDONLY,
-       \ref MDBX_EXCLUSIVE, \ref MDBX_WRITEMAP, \ref MDBX_NOSTICKYTHREADS,
-       \ref MDBX_NORDAHEAD, \ref MDBX_NOMEMINIT, \ref MDBX_COALESCE,
-       \ref MDBX_LIFORECLAIM. See \ref env_flags section.
+     - @ref MDBX_ENV_DEFAULTS, @ref MDBX_NOSUBDIR, @ref MDBX_RDONLY,
+       @ref MDBX_EXCLUSIVE, @ref MDBX_WRITEMAP, @ref MDBX_NOSTICKYTHREADS,
+       @ref MDBX_NORDAHEAD, @ref MDBX_NOMEMINIT, @ref MDBX_COALESCE,
+       @ref MDBX_LIFORECLAIM. See @ref env_flags section.
 
-     - \ref MDBX_SYNC_DURABLE, \ref MDBX_NOMETASYNC, \ref MDBX_SAFE_NOSYNC,
-       \ref MDBX_UTTERLY_NOSYNC. See \ref sync_modes section.
+     - @ref MDBX_SYNC_DURABLE, @ref MDBX_NOMETASYNC, @ref MDBX_SAFE_NOSYNC,
+       @ref MDBX_UTTERLY_NOSYNC. See @ref sync_modes section.
 
-    \note `MDB_NOLOCK` flag don't supported by MDBX,
-          try use \ref MDBX_EXCLUSIVE as a replacement.
+    @note `MDB_NOLOCK` flag don't supported by MDBX,
+          try use @ref MDBX_EXCLUSIVE as a replacement.
 
-    \note MDBX don't allow to mix processes with different \ref MDBX_SAFE_NOSYNC
+    @note MDBX don't allow to mix processes with different @ref MDBX_SAFE_NOSYNC
           flags on the same environment.
-          In such case \ref MDBX_INCOMPATIBLE will be returned.
+          In such case @ref MDBX_INCOMPATIBLE will be returned.
 
     If the database is already exist and parameters specified early by
-    \ref mdbx_env_set_geometry() are incompatible (i.e. for instance, different
-    page size) then \ref mdbx_env_open() will return \ref MDBX_INCOMPATIBLE
+    @ref mdbx_env_set_geometry() are incompatible (i.e. for instance, different
+    page size) then @ref mdbx_env_open() will return @ref MDBX_INCOMPATIBLE
     error.
 
-    \param [in] mode   The UNIX permissions to set on created files.
+    @param [in] mode   The UNIX permissions to set on created files.
                        Zero value means to open existing, but do not create.
 
     \return A non-zero error value on failure and 0 on success,
             some possible errors are:
-    \retval MDBX_VERSION_MISMATCH The version of the MDBX library doesn't match
+    @retval MDBX_VERSION_MISMATCH The version of the MDBX library doesn't match
                                the version that created the database environment.
-    \retval MDBX_INVALID       The environment file headers are corrupted.
-    \retval MDBX_ENOENT        The directory specified by the path parameter
+    @retval MDBX_INVALID       The environment file headers are corrupted.
+    @retval MDBX_ENOENT        The directory specified by the path parameter
                                doesn't exist.
-    \retval MDBX_EACCES        The user didn't have permission to access
+    @retval MDBX_EACCES        The user didn't have permission to access
                                the environment files.
-    \retval MDBX_BUSY          The \ref MDBX_EXCLUSIVE flag was specified and the
+    @retval MDBX_BUSY          The @ref MDBX_EXCLUSIVE flag was specified and the
                                environment is in use by another process,
                                or the current process tries to open environment
                                more than once.
-    \retval MDBX_INCOMPATIBLE  Environment is already opened by another process,
-                               but with different set of \ref MDBX_SAFE_NOSYNC,
-                               \ref MDBX_UTTERLY_NOSYNC flags.
+    @retval MDBX_INCOMPATIBLE  Environment is already opened by another process,
+                               but with different set of @ref MDBX_SAFE_NOSYNC,
+                               @ref MDBX_UTTERLY_NOSYNC flags.
                                Or if the database is already exist and parameters
-                               specified early by \ref mdbx_env_set_geometry()
+                               specified early by @ref mdbx_env_set_geometry()
                                are incompatible (i.e. different pagesize, etc).
 	 *
-    \retval MDBX_WANNA_RECOVERY The \ref MDBX_RDONLY flag was specified but
+    @retval MDBX_WANNA_RECOVERY The @ref MDBX_RDONLY flag was specified but
                                 read-write access is required to rollback
                                 inconsistent state after a system crash.
 	 *
-    \retval MDBX_TOO_LARGE      Database is too large for this process,
+    @retval MDBX_TOO_LARGE      Database is too large for this process,
                                 i.e. 32-bit process tries to open >4Gb database.
 	*/
-	mdbx_env_open :: proc(env: ^Mdbx_Env, pathname: cstring, flags: Mdbx_Env_Flags, mode: u16) -> Mdbx_Error ---
+	mdbx_env_open :: proc(env: ^MDBX_Env, pathname: cstring, flags: MDBX_Env_Flags, mode: u16) -> MDBX_Error ---
 
 	/*
 	Delete the environment's files in a proper and multiprocess-safe way.
 
-    \note On Windows the \ref mdbx_env_deleteW() is recommended to use.
+    @note On Windows the @ref mdbx_env_deleteW() is recommended to use.
 
-    \param [in] pathname  The pathname for the database or the directory in which
+    @param [in] pathname  The pathname for the database or the directory in which
                           the database files reside.
 
-    \param [in] mode      Specifies deletion mode for the environment. This
+    @param [in] mode      Specifies deletion mode for the environment. This
                           parameter must be set to one of the constants described
-                          above in the \ref MDBX_env_delete_mode_t section.
+                          above in the @ref MDBX_env_delete_mode_t section.
 
-    \note The \ref MDBX_ENV_JUST_DELETE don't supported on Windows since system
+    @note The @ref MDBX_ENV_JUST_DELETE don't supported on Windows since system
     unable to delete a memory-mapped files.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_RESULT_TRUE   No corresponding files or directories were found,
+    @retval MDBX_RESULT_TRUE   No corresponding files or directories were found,
                                so no deletion was performed.
     */
-	mdbx_env_delete :: proc(pathname: cstring, mode: Mdbx_Env_Delete_Mode) -> Mdbx_Error ---
+	mdbx_env_delete :: proc(pathname: cstring, mode: MDBX_Env_Delete_Mode) -> MDBX_Error ---
 
 	/*
 	Copy an MDBX environment to the specified path, with options.
 
     This function may be used to make a backup of an existing environment.
     No lockfile is created, since it gets recreated at need.
-    \note This call can trigger significant file size growth if run in
+    @note This call can trigger significant file size growth if run in
     parallel with write transactions, because it employs a read-only
-    transaction. See long-lived transactions under \ref restrictions section.
+    transaction. See long-lived transactions under @ref restrictions section.
 
-    \note On Windows the \ref mdbx_env_copyW() is recommended to use.
-    \see mdbx_env_copy2fd()
-    \see mdbx_txn_copy2pathname()
+    @note On Windows the @ref mdbx_env_copyW() is recommended to use.
+    @see mdbx_env_copy2fd()
+    @see mdbx_txn_copy2pathname()
 
-    \param [in] env    An environment handle returned by mdbx_env_create().
+    @param [in] env    An environment handle returned by mdbx_env_create().
                        It must have already been opened successfully.
-    \param [in] dest   The pathname of a file in which the copy will reside.
+    @param [in] dest   The pathname of a file in which the copy will reside.
                        This file must not be already exist, but parent directory
                        must be writable.
-    \param [in] flags  Specifies options for this operation. This parameter
+    @param [in] flags  Specifies options for this operation. This parameter
                        must be bitwise OR'ing together any of the constants
                        described here:
 
-     - \ref MDBX_CP_DEFAULTS
+     - @ref MDBX_CP_DEFAULTS
          Perform copy as-is without compaction, etc.
 
-     - \ref MDBX_CP_COMPACT
+     - @ref MDBX_CP_COMPACT
          Perform compaction while copying: omit free pages and sequentially
          renumber all pages in output. This option consumes little bit more
          CPU for processing, but may running quickly than the default, on
          account skipping free pages.
 
-     - \ref MDBX_CP_FORCE_DYNAMIC_SIZE
+     - @ref MDBX_CP_FORCE_DYNAMIC_SIZE
          Force to make resizable copy, i.e. dynamic size instead of fixed.
 
-     - \ref MDBX_CP_DONT_FLUSH
+     - @ref MDBX_CP_DONT_FLUSH
          Don't explicitly flush the written data to an output media to reduce
          the time of the operation and the duration of the transaction.
 
-     - \ref MDBX_CP_THROTTLE_MVCC
+     - @ref MDBX_CP_THROTTLE_MVCC
          Use read transaction parking during copying MVCC-snapshot
          to avoid stopping recycling and overflowing the database.
          This allows the writing transaction to oust the read
@@ -428,11 +468,11 @@ foreign lib {
          allows copy the database without interfering with write
          transactions and a threat of database overflow, but at the cost
          that copying will be aborted to prevent such conditions.
-         \see mdbx_txn_park()
+         @see mdbx_txn_park()
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_env_copy :: proc(env: ^Mdbx_Env, dest: cstring, flags: Mdbx_Copy_Flags) -> Mdbx_Error ---
+	mdbx_env_copy :: proc(env: ^MDBX_Env, dest: cstring, flags: MDBX_Copy_Flags) -> MDBX_Error ---
 
 	/*
 	Copy an MDBX environment by given read transaction to the specified
@@ -440,39 +480,39 @@ foreign lib {
 
     This function may be used to make a backup of an existing environment.
     No lockfile is created, since it gets recreated at need.
-    \note This call can trigger significant file size growth if run in
+    @note This call can trigger significant file size growth if run in
     parallel with write transactions, because it employs a read-only
-    transaction. See long-lived transactions under \ref restrictions section.
+    transaction. See long-lived transactions under @ref restrictions section.
 
-    \note On Windows the \ref mdbx_txn_copy2pathnameW() is recommended to use.
-    \see mdbx_txn_copy2fd()
-    \see mdbx_env_copy()
+    @note On Windows the @ref mdbx_txn_copy2pathnameW() is recommended to use.
+    @see mdbx_txn_copy2fd()
+    @see mdbx_env_copy()
 
-    \param [in] txn    A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] dest   The pathname of a file in which the copy will reside.
+    @param [in] txn    A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] dest   The pathname of a file in which the copy will reside.
                        This file must not be already exist, but parent directory
                        must be writable.
-    \param [in] flags  Specifies options for this operation. This parameter
+    @param [in] flags  Specifies options for this operation. This parameter
                        must be bitwise OR'ing together any of the constants
                        described here:
 
-     - \ref MDBX_CP_DEFAULTS
+     - @ref MDBX_CP_DEFAULTS
          Perform copy as-is without compaction, etc.
 
-     - \ref MDBX_CP_COMPACT
+     - @ref MDBX_CP_COMPACT
          Perform compaction while copying: omit free pages and sequentially
          renumber all pages in output. This option consumes little bit more
          CPU for processing, but may running quickly than the default, on
          account skipping free pages.
 
-     - \ref MDBX_CP_FORCE_DYNAMIC_SIZE
+     - @ref MDBX_CP_FORCE_DYNAMIC_SIZE
          Force to make resizable copy, i.e. dynamic size instead of fixed.
 
-     - \ref MDBX_CP_DONT_FLUSH
+     - @ref MDBX_CP_DONT_FLUSH
          Don't explicitly flush the written data to an output media to reduce
          the time of the operation and the duration of the transaction.
 
-     - \ref MDBX_CP_THROTTLE_MVCC
+     - @ref MDBX_CP_THROTTLE_MVCC
          Use read transaction parking during copying MVCC-snapshot
          to avoid stopping recycling and overflowing the database.
          This allows the writing transaction to oust the read
@@ -484,11 +524,11 @@ foreign lib {
          allows copy the database without interfering with write
          transactions and a threat of database overflow, but at the cost
          that copying will be aborted to prevent such conditions.
-         \see mdbx_txn_park()
+         @see mdbx_txn_park()
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_txn_copy2pathname :: proc(txn: ^Mdbx_Txn, dest: cstring, flags: Mdbx_Copy_Flags) -> Mdbx_Error ---
+	mdbx_txn_copy2pathname :: proc(txn: ^MDBX_Txn, dest: cstring, flags: MDBX_Copy_Flags) -> MDBX_Error ---
 
 	/*
 	Return statistics about the MDBX environment.
@@ -499,18 +539,18 @@ foreign lib {
     the last committed write transaction, and at next time, other information
     can be returned.
 
-    Legacy mdbx_env_stat() correspond to calling \ref mdbx_env_stat_ex() with the
+    Legacy mdbx_env_stat() correspond to calling @ref mdbx_env_stat_ex() with the
     null `txn` argument.
 
-    \param [in] env     An environment handle returned by \ref mdbx_env_create()
-    \param [in] txn     A transaction handle returned by \ref mdbx_txn_begin()
-    \param [out] stat   The address of an \ref MDBX_stat structure where
+    @param [in] env     An environment handle returned by @ref mdbx_env_create()
+    @param [in] txn     A transaction handle returned by @ref mdbx_txn_begin()
+    @param [out] stat   The address of an @ref MDBX_stat structure where
                         the statistics will be copied
-    \param [in] bytes   The size of \ref MDBX_stat.
+    @param [in] bytes   The size of @ref MDBX_stat.
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_env_stat_ex :: proc(env: ^Mdbx_Env, txn: ^Mdbx_Txn, stat: ^Mdbx_Stat, bytes: c.size_t) -> Mdbx_Error ---
+	mdbx_env_stat_ex :: proc(env: ^MDBX_Env, txn: ^MDBX_Txn, stat: ^MDBX_Stat, bytes: c.size_t) -> MDBX_Error ---
 
 	/*
 	Return information about the MDBX environment.
@@ -521,58 +561,58 @@ foreign lib {
     the last committed write transaction, and at next time, other information
     can be returned.
 
-    Legacy \ref mdbx_env_info() correspond to calling \ref mdbx_env_info_ex()
+    Legacy @ref mdbx_env_info() correspond to calling @ref mdbx_env_info_ex()
     with the null `txn` argument.
 
-    \param [in] env     An environment handle returned by \ref mdbx_env_create()
-    \param [in] txn     A transaction handle returned by \ref mdbx_txn_begin()
-    \param [out] info   The address of an \ref MDBX_envinfo structure
+    @param [in] env     An environment handle returned by @ref mdbx_env_create()
+    @param [in] txn     A transaction handle returned by @ref mdbx_txn_begin()
+    @param [out] info   The address of an @ref MDBX_envinfo structure
                         where the information will be copied
-    \param [in] bytes   The actual size of \ref MDBX_envinfo,
+    @param [in] bytes   The actual size of @ref MDBX_envinfo,
                         this value is used to provide ABI compatibility.
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_env_info_ex :: proc(env: ^Mdbx_Env, txn: ^Mdbx_Txn, info: ^Mdbx_Env_Info, bytes: c.size_t) -> Mdbx_Error ---
+	mdbx_env_info_ex :: proc(env: ^MDBX_Env, txn: ^MDBX_Txn, info: ^MDBX_Env_Info, bytes: c.size_t) -> MDBX_Error ---
 
 	/*
 	Flush the environment data buffers to disk.
 
-    Unless the environment was opened with no-sync flags (\ref MDBX_NOMETASYNC,
-    \ref MDBX_SAFE_NOSYNC and \ref MDBX_UTTERLY_NOSYNC), then
-    data is always written an flushed to disk when \ref mdbx_txn_commit() is
-    called. Otherwise \ref mdbx_env_sync() may be called to manually write and
+    Unless the environment was opened with no-sync flags (@ref MDBX_NOMETASYNC,
+    @ref MDBX_SAFE_NOSYNC and @ref MDBX_UTTERLY_NOSYNC), then
+    data is always written an flushed to disk when @ref mdbx_txn_commit() is
+    called. Otherwise @ref mdbx_env_sync() may be called to manually write and
     flush unsynced data to disk.
 
-    Besides, \ref mdbx_env_sync_ex() with argument `force=false` may be used to
+    Besides, @ref mdbx_env_sync_ex() with argument `force=false` may be used to
     provide polling mode for lazy/asynchronous sync in conjunction with
-    \ref mdbx_env_set_syncbytes() and/or \ref mdbx_env_set_syncperiod().
+    @ref mdbx_env_set_syncbytes() and/or @ref mdbx_env_set_syncperiod().
 
-    \note This call is not valid if the environment was opened with MDBX_RDONLY.
+    @note This call is not valid if the environment was opened with MDBX_RDONLY.
 
-    \param [in] env      An environment handle returned by \ref mdbx_env_create()
-    \param [in] force    If non-zero, force a flush. Otherwise, If force is
+    @param [in] env      An environment handle returned by @ref mdbx_env_create()
+    @param [in] force    If non-zero, force a flush. Otherwise, If force is
                          zero, then will run in polling mode,
                          i.e. it will check the thresholds that were
-                         set \ref mdbx_env_set_syncbytes()
-                         and/or \ref mdbx_env_set_syncperiod() and perform flush
+                         set @ref mdbx_env_set_syncbytes()
+                         and/or @ref mdbx_env_set_syncperiod() and perform flush
                          if at least one of the thresholds is reached.
 
-    \param [in] nonblock Don't wait if write transaction
+    @param [in] nonblock Don't wait if write transaction
                          is running by other thread.
 
-    \returns A non-zero error value on failure and \ref MDBX_RESULT_TRUE or 0 on
-        success. The \ref MDBX_RESULT_TRUE means no data pending for flush
+    @returns A non-zero error value on failure and @ref MDBX_RESULT_TRUE or 0 on
+        success. The @ref MDBX_RESULT_TRUE means no data pending for flush
         to disk, and 0 otherwise. Some possible errors are:
 
-    \retval MDBX_EACCES   The environment is read-only.
-    \retval MDBX_BUSY     The environment is used by other thread
+    @retval MDBX_EACCES   The environment is read-only.
+    @retval MDBX_BUSY     The environment is used by other thread
                           and `nonblock=true`.
-    \retval MDBX_EINVAL   An invalid parameter was specified.
-    \retval MDBX_EIO      An error occurred during the flushing/writing data
+    @retval MDBX_EINVAL   An invalid parameter was specified.
+    @retval MDBX_EIO      An error occurred during the flushing/writing data
                           to a storage medium/disk.
   	*/
-	mdbx_env_sync_ex :: proc(env: ^Mdbx_Env, force, nonblock: bool) -> Mdbx_Error ---
+	mdbx_env_sync_ex :: proc(env: ^MDBX_Env, force, nonblock: bool) -> MDBX_Error ---
 
 
 	/*
@@ -584,38 +624,38 @@ foreign lib {
     a `SIGSEGV`. The environment handle will be freed and must not be used again
     after this call.
 
-    \param [in] env        An environment handle returned by
-                           \ref mdbx_env_create().
+    @param [in] env        An environment handle returned by
+                           @ref mdbx_env_create().
 
-    \param [in] dont_sync  A dont'sync flag, if non-zero the last checkpoint
+    @param [in] dont_sync  A dont'sync flag, if non-zero the last checkpoint
                            will be kept "as is" and may be still "weak" in the
-                           \ref MDBX_SAFE_NOSYNC or \ref MDBX_UTTERLY_NOSYNC
+                           @ref MDBX_SAFE_NOSYNC or @ref MDBX_UTTERLY_NOSYNC
                            modes. Such "weak" checkpoint will be ignored on
                            opening next time, and transactions since the last
                            non-weak checkpoint (meta-page update) will rolledback
                            for consistency guarantee.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_BUSY   The write transaction is running by other thread,
-                        in such case \ref MDBX_env instance has NOT be destroyed
+    @retval MDBX_BUSY   The write transaction is running by other thread,
+                        in such case @ref MDBX_env instance has NOT be destroyed
                         not released!
-                        \note If any OTHER error code was returned then
+                        @note If any OTHER error code was returned then
                         given MDBX_env instance has been destroyed and released.
 
-    \retval MDBX_EBADSIGN  Environment handle already closed or not valid,
-                           i.e. \ref mdbx_env_close() was already called for the
-                           `env` or was not created by \ref mdbx_env_create().
+    @retval MDBX_EBADSIGN  Environment handle already closed or not valid,
+                           i.e. @ref mdbx_env_close() was already called for the
+                           `env` or was not created by @ref mdbx_env_create().
 
-    \retval MDBX_PANIC  If \ref mdbx_env_close_ex() was called in the child
-                        process after `fork()`. In this case \ref MDBX_PANIC
-                        is expected, i.e. \ref MDBX_env instance was freed in
+    @retval MDBX_PANIC  If @ref mdbx_env_close_ex() was called in the child
+                        process after `fork()`. In this case @ref MDBX_PANIC
+                        is expected, i.e. @ref MDBX_env instance was freed in
                         proper manner.
 
-    \retval MDBX_EIO    An error occurred during the flushing/writing data
+    @retval MDBX_EIO    An error occurred during the flushing/writing data
                         to a storage medium/disk.
 	*/
-	mdbx_env_close_ex :: proc(env: ^Mdbx_Env, dont_sync: bool) -> Mdbx_Error ---
+	mdbx_env_close_ex :: proc(env: ^MDBX_Env, dont_sync: bool) -> MDBX_Error ---
 
 	/*
 	Warms up the database by loading pages into memory,
@@ -629,99 +669,99 @@ foreign lib {
 
     At least one of `env` or `txn` argument must be non-null.
 
-    \param [in] env              An environment handle returned
-                                 by \ref mdbx_env_create().
-    \param [in] txn              A transaction handle returned
-                                 by \ref mdbx_txn_begin().
-    \param [in] flags            The \ref warmup_flags, bitwise OR'ed together.
+    @param [in] env              An environment handle returned
+                                 by @ref mdbx_env_create().
+    @param [in] txn              A transaction handle returned
+                                 by @ref mdbx_txn_begin().
+    @param [in] flags            The @ref warmup_flags, bitwise OR'ed together.
 
-    \param [in] timeout_seconds_16dot16  Optional timeout which checking only
+    @param [in] timeout_seconds_16dot16  Optional timeout which checking only
                                  during explicitly peeking database pages
-                                 for loading ones if the \ref MDBX_warmup_force
+                                 for loading ones if the @ref MDBX_warmup_force
                                  option was specified.
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     Some possible errors are:
 
-    \retval MDBX_ENOSYS        The system does not support requested
+    @retval MDBX_ENOSYS        The system does not support requested
     operation(s).
 
-    \retval MDBX_RESULT_TRUE   The specified timeout is reached during load
+    @retval MDBX_RESULT_TRUE   The specified timeout is reached during load
                                data into memory.
     */
 	mdbx_env_warmup :: proc(
-		env: ^Mdbx_Env,
-		txn: ^Mdbx_Txn,
-		flags: Mdbx_Warmup_Flags,
+		env: ^MDBX_Env,
+		txn: ^MDBX_Txn,
+		flags: MDBX_Warmup_Flags,
 		timeout_seconds_16dot16: u32
-	) -> Mdbx_Error ---
+	) -> MDBX_Error ---
 
 	/*
 	Set environment flags.
 
     This may be used to set some flags in addition to those from
     mdbx_env_open(), or to unset these flags.
-    \see mdbx_env_get_flags()
+    @see mdbx_env_get_flags()
 
-    \note In contrast to LMDB, the MDBX serialize threads via mutex while
+    @note In contrast to LMDB, the MDBX serialize threads via mutex while
     changing the flags. Therefore this function will be blocked while a write
-    transaction running by other thread, or \ref MDBX_BUSY will be returned if
+    transaction running by other thread, or @ref MDBX_BUSY will be returned if
     function called within a write transaction.
 
-    \param [in] env      An environment handle returned
-                         by \ref mdbx_env_create().
-    \param [in] flags    The \ref env_flags to change, bitwise OR'ed together.
-    \param [in] onoff    A non-zero value sets the flags, zero clears them.
+    @param [in] env      An environment handle returned
+                         by @ref mdbx_env_create().
+    @param [in] flags    The @ref env_flags to change, bitwise OR'ed together.
+    @param [in] onoff    A non-zero value sets the flags, zero clears them.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_EINVAL  An invalid parameter was specified.
+    @retval MDBX_EINVAL  An invalid parameter was specified.
     */
-	mdbx_env_set_flags :: proc(env: ^Mdbx_Env, flags: Mdbx_Env_Flags, onoff: bool) -> Mdbx_Error ---
+	mdbx_env_set_flags :: proc(env: ^MDBX_Env, flags: MDBX_Env_Flags, onoff: bool) -> MDBX_Error ---
 
 	/*
 	Get environment flags.
-	\see mdbx_env_set_flags()
-	\param [in] env     An environment handle returned by \ref mdbx_env_create().
-	\param [out] flags  The address of an integer to store the flags.
+	@see mdbx_env_set_flags()
+	@param [in] env     An environment handle returned by @ref mdbx_env_create().
+	@param [out] flags  The address of an integer to store the flags.
 
-	\returns A non-zero error value on failure and 0 on success,
+	@returns A non-zero error value on failure and 0 on success,
 	         some possible errors are:
-	\retval MDBX_EINVAL An invalid parameter was specified.
+	@retval MDBX_EINVAL An invalid parameter was specified.
 	*/
-	mdbx_env_get_flags :: proc(env: ^Mdbx_Env, flags_out: ^Mdbx_Env_Flags) -> Mdbx_Error ---
+	mdbx_env_get_flags :: proc(env: ^MDBX_Env, flags_out: ^MDBX_Env_Flags) -> MDBX_Error ---
 
 	/*
 	Return the path that was used in mdbx_env_open().
 	\ingroup c_statinfo
 
-	\note On Windows the \ref mdbx_env_get_pathW() is recommended to use.
+	@note On Windows the @ref mdbx_env_get_pathW() is recommended to use.
 
-	\param [in] env     An environment handle returned by \ref mdbx_env_create()
-	\param [out] dest   Address of a string pointer to contain the path.
+	@param [in] env     An environment handle returned by @ref mdbx_env_create()
+	@param [out] dest   Address of a string pointer to contain the path.
 	                    This is the actual string in the environment, not a
 	                    copy. It should not be altered in any way.
 
-	\returns A non-zero error value on failure and 0 on success,
+	@returns A non-zero error value on failure and 0 on success,
 	         some possible errors are:
-	\retval MDBX_EINVAL  An invalid parameter was specified.
+	@retval MDBX_EINVAL  An invalid parameter was specified.
 	*/
-	mdbx_env_get_path :: proc(env: ^Mdbx_Env, dest: ^cstring) -> Mdbx_Error ---
+	mdbx_env_get_path :: proc(env: ^MDBX_Env, dest: ^cstring) -> MDBX_Error ---
 
 	/*
 	Return the file descriptor for the given environment.
 
-	\note All MDBX file descriptors have `FD_CLOEXEC` and
+	@note All MDBX file descriptors have `FD_CLOEXEC` and
 	      couldn't be used after exec() and or `fork()`.
 
-	\param [in] env   An environment handle returned by \ref mdbx_env_create().
-	\param [out] fd   Address of a int to contain the descriptor.
+	@param [in] env   An environment handle returned by @ref mdbx_env_create().
+	@param [out] fd   Address of a int to contain the descriptor.
 
-	\returns A non-zero error value on failure and 0 on success,
+	@returns A non-zero error value on failure and 0 on success,
 	         some possible errors are:
-	\retval MDBX_EINVAL  An invalid parameter was specified.
+	@retval MDBX_EINVAL  An invalid parameter was specified.
 	*/
-	mdbx_env_get_fd :: proc(env: ^Mdbx_Env, fd: ^FD) -> Mdbx_Error ---
+	mdbx_env_get_fd :: proc(env: ^MDBX_Env, fd: ^FD) -> MDBX_Error ---
 
 	/*
 	Set all size-related parameters of environment, including page size
@@ -733,34 +773,34 @@ foreign lib {
 	it is reasonable to know some details in order to make optimal decisions
 	when choosing parameters.
 
-	\see mdbx_env_info_ex()
+	@see mdbx_env_info_ex()
 
-	Both \ref mdbx_env_set_geometry() and legacy \ref mdbx_env_set_mapsize() are
+	Both @ref mdbx_env_set_geometry() and legacy @ref mdbx_env_set_mapsize() are
 	inapplicable to read-only opened environment.
 
-	Both \ref mdbx_env_set_geometry() and legacy \ref mdbx_env_set_mapsize()
-	could be called either before or after \ref mdbx_env_open(), either within
+	Both @ref mdbx_env_set_geometry() and legacy @ref mdbx_env_set_mapsize()
+	could be called either before or after @ref mdbx_env_open(), either within
 	the write transaction running by current thread or not:
 
-	 - In case \ref mdbx_env_set_geometry() or legacy \ref mdbx_env_set_mapsize()
-	   was called BEFORE \ref mdbx_env_open(), i.e. for closed environment, then
+	 - In case @ref mdbx_env_set_geometry() or legacy @ref mdbx_env_set_mapsize()
+	   was called BEFORE @ref mdbx_env_open(), i.e. for closed environment, then
 	   the specified parameters will be used for new database creation,
 	   or will be applied during opening if database exists and no other process
 	   using it.
 
-	   If the database is already exist, opened with \ref MDBX_EXCLUSIVE or not
+	   If the database is already exist, opened with @ref MDBX_EXCLUSIVE or not
 	   used by any other process, and parameters specified by
-	   \ref mdbx_env_set_geometry() are incompatible (i.e. for instance,
-	   different page size) then \ref mdbx_env_open() will return
-	   \ref MDBX_INCOMPATIBLE error.
+	   @ref mdbx_env_set_geometry() are incompatible (i.e. for instance,
+	   different page size) then @ref mdbx_env_open() will return
+	   @ref MDBX_INCOMPATIBLE error.
 
 	   In another way, if database will opened read-only or will used by other
-	   process during calling \ref mdbx_env_open() that specified parameters will
-	   silently discarded (open the database with \ref MDBX_EXCLUSIVE flag
+	   process during calling @ref mdbx_env_open() that specified parameters will
+	   silently discarded (open the database with @ref MDBX_EXCLUSIVE flag
 	   to avoid this).
 
-	 - In case \ref mdbx_env_set_geometry() or legacy \ref mdbx_env_set_mapsize()
-	   was called after \ref mdbx_env_open() WITHIN the write transaction running
+	 - In case @ref mdbx_env_set_geometry() or legacy @ref mdbx_env_set_mapsize()
+	   was called after @ref mdbx_env_open() WITHIN the write transaction running
 	   by current thread, then specified parameters will be applied as a part of
 	   write transaction, i.e. will not be completely visible to any others
 	   processes until the current write transaction has been committed by the
@@ -769,8 +809,8 @@ foreign lib {
 	   when a next transaction will be committed or when the database will be
 	   opened next time.
 
-	 - In case \ref mdbx_env_set_geometry() or legacy \ref mdbx_env_set_mapsize()
-	   was called after \ref mdbx_env_open() but OUTSIDE a write transaction,
+	 - In case @ref mdbx_env_set_geometry() or legacy @ref mdbx_env_set_mapsize()
+	   was called after @ref mdbx_env_open() but OUTSIDE a write transaction,
 	   then MDBX will execute internal pseudo-transaction to apply new parameters
 	   (but only if anything has been changed), and changes be visible to any
 	   others processes immediately after successful completion of function.
@@ -792,7 +832,7 @@ foreign lib {
 	   reasonable size. Besides, the upper bound defines the linear address space
 	   reservation in each process that opens the database. Therefore changing
 	   the upper bound is costly and may be required reopening environment in
-	   case of \ref MDBX_UNABLE_EXTEND_MAPSIZE errors, and so on. Therefore, this
+	   case of @ref MDBX_UNABLE_EXTEND_MAPSIZE errors, and so on. Therefore, this
 	   value should be chosen reasonable large, to accommodate future growth of
 	   the database.
 	 - The growth step must be greater than zero to allow the database to grow,
@@ -802,7 +842,7 @@ foreign lib {
 	   to shrink but also reasonable not too small (to avoid extra overhead) and
 	   not less than growth step to avoid up-and-down flouncing.
 	 - The current size (i.e. `size_now` argument) is an auxiliary parameter for
-	   simulation legacy \ref mdbx_env_set_mapsize() and as workaround Windows
+	   simulation legacy @ref mdbx_env_set_mapsize() and as workaround Windows
 	   issues (see below).
 
 	Unfortunately, Windows has is a several issue
@@ -827,52 +867,52 @@ foreign lib {
 	   remapping further.
 
 	For create a new database with particular parameters, including the page
-	size, \ref mdbx_env_set_geometry() should be called after
-	\ref mdbx_env_create() and before \ref mdbx_env_open(). Once the database is
+	size, @ref mdbx_env_set_geometry() should be called after
+	@ref mdbx_env_create() and before @ref mdbx_env_open(). Once the database is
 	created, the page size cannot be changed. If you do not specify all or some
 	of the parameters, the corresponding default values will be used. For
 	instance, the default for database size is 10485760 bytes.
 
 	If the mapsize is increased by another process, MDBX silently and
 	transparently adopt these changes at next transaction start. However,
-	\ref mdbx_txn_begin() will return \ref MDBX_UNABLE_EXTEND_MAPSIZE if new
+	@ref mdbx_txn_begin() will return @ref MDBX_UNABLE_EXTEND_MAPSIZE if new
 	mapping size could not be applied for current process (for instance if
 	address space is busy).  Therefore, in the case of
-	\ref MDBX_UNABLE_EXTEND_MAPSIZE error you need close and reopen the
+	@ref MDBX_UNABLE_EXTEND_MAPSIZE error you need close and reopen the
 	environment to resolve error.
 
-	\note Actual values may be different than your have specified because of
+	@note Actual values may be different than your have specified because of
 	rounding to specified database page size, the system page size and/or the
 	size of the system virtual memory management unit. You can get actual values
-	by \ref mdbx_env_info_ex() or see by using the tool `mdbx_chk` with the `-v`
+	by @ref mdbx_env_info_ex() or see by using the tool `mdbx_chk` with the `-v`
 	option.
 
-	Legacy \ref mdbx_env_set_mapsize() correspond to calling
-	\ref mdbx_env_set_geometry() with the arguments `size_lower`, `size_now`,
+	Legacy @ref mdbx_env_set_mapsize() correspond to calling
+	@ref mdbx_env_set_geometry() with the arguments `size_lower`, `size_now`,
 	`size_upper` equal to the `size` and `-1` (i.e. default) for all other
 	parameters.
 
-	\param [in] env         An environment handle returned
-	                        by \ref mdbx_env_create()
+	@param [in] env         An environment handle returned
+	                        by @ref mdbx_env_create()
 
-	\param [in] size_lower  The lower bound of database size in bytes.
+	@param [in] size_lower  The lower bound of database size in bytes.
 	                        Zero value means "minimal acceptable",
 	                        and negative means "keep current or use default".
 
-	\param [in] size_now    The size in bytes to setup the database size for
+	@param [in] size_now    The size in bytes to setup the database size for
 	                        now. Zero value means "minimal acceptable", and
 	                        negative means "keep current or use default". So,
 	                        it is recommended always pass -1 in this argument
 	                        except some special cases.
 
-	\param [in] size_upper The upper bound of database size in bytes.
+	@param [in] size_upper The upper bound of database size in bytes.
 	                       Zero value means "minimal acceptable",
 	                       and negative means "keep current or use default".
 	                       It is recommended to avoid change upper bound while
 	                       database is used by other processes or threaded
 	                       (i.e. just pass -1 in this argument except absolutely
 	                       necessary). Otherwise you must be ready for
-	                       \ref MDBX_UNABLE_EXTEND_MAPSIZE error(s), unexpected
+	                       @ref MDBX_UNABLE_EXTEND_MAPSIZE error(s), unexpected
 	                       pauses during remapping and/or system errors like
 	                       "address busy", and so on. In other words, there
 	                       is no way to handle a growth of the upper bound
@@ -880,31 +920,31 @@ foreign lib {
 	                       system resources (which are extremely volatile in
 	                       a multi-process multi-threaded environment).
 
-	\param [in] growth_step  The growth step in bytes, must be greater than
+	@param [in] growth_step  The growth step in bytes, must be greater than
 	                         zero to allow the database to grow. Negative value
 	                         means "keep current or use default".
 
-	\param [in] shrink_threshold  The shrink threshold in bytes, must be greater
+	@param [in] shrink_threshold  The shrink threshold in bytes, must be greater
 	                              than zero to allow the database to shrink and
 	                              greater than growth_step to avoid shrinking
 	                              right after grow.
 	                              Negative value means "keep current
 	                              or use default". Default is 2*growth_step.
 
-	\param [in] pagesize          The database page size for new database
+	@param [in] pagesize          The database page size for new database
 	                              creation or -1 otherwise. Once the database
 	                              is created, the page size cannot be changed.
 	                              Must be power of 2 in the range between
-	                              \ref MDBX_MIN_PAGESIZE and
-	                              \ref MDBX_MAX_PAGESIZE. Zero value means
+	                              @ref MDBX_MIN_PAGESIZE and
+	                              @ref MDBX_MAX_PAGESIZE. Zero value means
 	                              "minimal acceptable", and negative means
 	                              "keep current or use default".
 
-	\returns A non-zero error value on failure and 0 on success,
+	@returns A non-zero error value on failure and 0 on success,
 	         some possible errors are:
-	\retval MDBX_EINVAL    An invalid parameter was specified,
+	@retval MDBX_EINVAL    An invalid parameter was specified,
 	                       or the environment has an active write transaction.
-	\retval MDBX_EPERM     Two specific cases for Windows:
+	@retval MDBX_EPERM     Two specific cases for Windows:
 	                       1) Shrinking was disabled before via geometry settings
 	                       and now it enabled, but there are reading threads that
 	                       don't use the additional `SRWL` (which is required to
@@ -912,41 +952,41 @@ foreign lib {
 	                       2) Temporary close memory mapped is required to change
 	                       geometry, but there read transaction(s) is running
 	                       and no corresponding thread(s) could be suspended
-	                       since the \ref MDBX_NOSTICKYTHREADS mode is used.
-	\retval MDBX_EACCESS   The environment opened in read-only.
-	\retval MDBX_MAP_FULL  Specified size smaller than the space already
+	                       since the @ref MDBX_NOSTICKYTHREADS mode is used.
+	@retval MDBX_EACCESS   The environment opened in read-only.
+	@retval MDBX_MAP_FULL  Specified size smaller than the space already
 	                       consumed by the environment.
-	\retval MDBX_TOO_LARGE Specified size is too large, i.e. too many pages for
+	@retval MDBX_TOO_LARGE Specified size is too large, i.e. too many pages for
 	                       given size, or a 32-bit process requests too much
 	                       bytes for the 32-bit address space.
    	*/
 	mdbx_env_set_geometry :: proc(
-		env: ^Mdbx_Env,
+		env: ^MDBX_Env,
 		size_lower: c.ssize_t,
 		size_now: c.ssize_t,
 		size_upper: c.ssize_t,
 		growth_step: c.ssize_t,
 		shrink_threshold: c.ssize_t,
 		page_size: c.ssize_t,
-	) -> Mdbx_Error ---
+	) -> MDBX_Error ---
 
 	/*
 	Find out whether to use readahead or not, based on the given database
 	size and the amount of available memory.
 
-	\param [in] volume      The expected database size in bytes.
-	\param [in] redundancy  Additional reserve or overload in case of negative
+	@param [in] volume      The expected database size in bytes.
+	@param [in] redundancy  Additional reserve or overload in case of negative
 	                        value.
 
-	\returns A \ref MDBX_RESULT_TRUE or \ref MDBX_RESULT_FALSE value,
+	@returns A @ref MDBX_RESULT_TRUE or @ref MDBX_RESULT_FALSE value,
 	         otherwise the error code.
-	\retval MDBX_RESULT_TRUE   Readahead is reasonable.
-	\retval MDBX_RESULT_FALSE  Readahead is NOT reasonable,
-	                           i.e. \ref MDBX_NORDAHEAD is useful to
-	                           open environment by \ref mdbx_env_open().
-	\retval Otherwise the error code.
+	@retval MDBX_RESULT_TRUE   Readahead is reasonable.
+	@retval MDBX_RESULT_FALSE  Readahead is NOT reasonable,
+	                           i.e. @ref MDBX_NORDAHEAD is useful to
+	                           open environment by @ref mdbx_env_open().
+	@retval Otherwise the error code.
 	*/
-	mdbx_is_readahead_reasonable :: proc(volume: c.size_t, redundancy: i64) -> Mdbx_Error ---
+	mdbx_is_readahead_reasonable :: proc(volume: c.size_t, redundancy: i64) -> MDBX_Error ---
 
 	/*
 	Returns the minimal database page size in bytes for a given page size.
@@ -964,167 +1004,167 @@ foreign lib {
 	and can be useful in that it returns the same information that libmdbx uses
 	internally to adjust various options and control readahead.
 
-	\param [out] page_size     Optional address where the system page size
+	@param [out] page_size     Optional address where the system page size
 	                           will be stored.
-	\param [out] total_pages   Optional address where the number of total RAM
+	@param [out] total_pages   Optional address where the number of total RAM
 	                           pages will be stored.
-	\param [out] avail_pages   Optional address where the number of
+	@param [out] avail_pages   Optional address where the number of
 	                           available/free RAM pages will be stored.
 
-	\returns A non-zero error value on failure and 0 on success.
+	@returns A non-zero error value on failure and 0 on success.
 	*/
-	mdbx_get_sysraminfo :: proc(page_size, total_pages, avail_pages: ^i64) -> Mdbx_Error ---
+	mdbx_get_sysraminfo :: proc(page_size, total_pages, avail_pages: ^i64) -> MDBX_Error ---
 
 	/*
 	Sets application information (a context pointer) associated with
 	the environment.
-	\see mdbx_env_get_userctx()
+	@see mdbx_env_get_userctx()
 
-	\param [in] env  An environment handle returned by \ref mdbx_env_create().
-	\param [in] ctx  An arbitrary pointer for whatever the application needs.
+	@param [in] env  An environment handle returned by @ref mdbx_env_create().
+	@param [in] ctx  An arbitrary pointer for whatever the application needs.
 
-	\returns A non-zero error value on failure and 0 on success.
+	@returns A non-zero error value on failure and 0 on success.
 	*/
-	mdbx_env_set_userctx :: proc(env: ^Mdbx_Env, ctx: rawptr) -> Mdbx_Error ---
+	mdbx_env_set_userctx :: proc(env: ^MDBX_Env, ctx: rawptr) -> MDBX_Error ---
 
 	/*
 	Returns an application information (a context pointer) associated
 	with the environment.
-	\see mdbx_env_set_userctx()
+	@see mdbx_env_set_userctx()
 
-	\param [in] env An environment handle returned by \ref mdbx_env_create()
-	\returns The pointer set by \ref mdbx_env_set_userctx()
+	@param [in] env An environment handle returned by @ref mdbx_env_create()
+	@returns The pointer set by @ref mdbx_env_set_userctx()
 	         or `NULL` if something wrong.
 	*/
-	mdbx_env_get_userctx :: proc(env: ^Mdbx_Env) -> rawptr ---
+	mdbx_env_get_userctx :: proc(env: ^MDBX_Env) -> rawptr ---
 
 	/*
 	Create a transaction with a user provided context pointer
 	for use with the environment.
 
-	The transaction handle may be discarded using \ref mdbx_txn_abort()
-	or \ref mdbx_txn_commit().
-	\see mdbx_txn_begin()
+	The transaction handle may be discarded using @ref mdbx_txn_abort()
+	or @ref mdbx_txn_commit().
+	@see mdbx_txn_begin()
 
-	\note A transaction and its cursors must only be used by a single thread,
+	@note A transaction and its cursors must only be used by a single thread,
 	and a thread may only have a single transaction at a time unless
-	the \ref MDBX_NOSTICKYTHREADS is used.
+	the @ref MDBX_NOSTICKYTHREADS is used.
 
-	\note Cursors may not span transactions.
+	@note Cursors may not span transactions.
 
-	\param [in] env     An environment handle returned by \ref mdbx_env_create().
+	@param [in] env     An environment handle returned by @ref mdbx_env_create().
 
-	\param [in] parent  If this parameter is non-NULL, the new transaction will
+	@param [in] parent  If this parameter is non-NULL, the new transaction will
 	                    be a nested transaction, with the transaction indicated
 	                    by parent as its parent. Transactions may be nested
 	                    to any level. A parent transaction and its cursors may
 	                    not issue any other operations than mdbx_txn_commit and
-	                    \ref mdbx_txn_abort() while it has active child
+	                    @ref mdbx_txn_abort() while it has active child
 	                    transactions.
 
-	\param [in] flags   Special options for this transaction. This parameter
+	@param [in] flags   Special options for this transaction. This parameter
 	                    must be set to 0 or by bitwise OR'ing together one
 	                    or more of the values described here:
-	                     - \ref MDBX_RDONLY   This transaction will not perform
+	                     - @ref MDBX_RDONLY   This transaction will not perform
 	                                          any write operations.
 
-	                     - \ref MDBX_TXN_TRY  Do not block when starting
+	                     - @ref MDBX_TXN_TRY  Do not block when starting
 	                                          a write transaction.
 
-	                     - \ref MDBX_SAFE_NOSYNC, \ref MDBX_NOMETASYNC.
+	                     - @ref MDBX_SAFE_NOSYNC, @ref MDBX_NOMETASYNC.
 	                       Do not sync data to disk corresponding
-	                       to \ref MDBX_NOMETASYNC or \ref MDBX_SAFE_NOSYNC
-	                       description. \see sync_modes
+	                       to @ref MDBX_NOMETASYNC or @ref MDBX_SAFE_NOSYNC
+	                       description. @see sync_modes
 
-	\param [out] txn    Address where the new \ref MDBX_txn handle
+	@param [out] txn    Address where the new @ref MDBX_txn handle
 	                    will be stored.
 
-	\param [in] context A pointer to application context to be associated with
+	@param [in] context A pointer to application context to be associated with
 	                    created transaction and could be retrieved by
-	                    \ref mdbx_txn_get_userctx() until transaction finished.
+	                    @ref mdbx_txn_get_userctx() until transaction finished.
 
-	\returns A non-zero error value on failure and 0 on success,
+	@returns A non-zero error value on failure and 0 on success,
 	         some possible errors are:
-	\retval MDBX_PANIC         A fatal error occurred earlier and the
+	@retval MDBX_PANIC         A fatal error occurred earlier and the
 	                           environment must be shut down.
-	\retval MDBX_UNABLE_EXTEND_MAPSIZE  Another process wrote data beyond
+	@retval MDBX_UNABLE_EXTEND_MAPSIZE  Another process wrote data beyond
 	                                    this MDBX_env's mapsize and this
 	                                    environment map must be resized as well.
-	                                    See \ref mdbx_env_set_mapsize().
-	\retval MDBX_READERS_FULL  A read-only transaction was requested and
+	                                    See @ref mdbx_env_set_mapsize().
+	@retval MDBX_READERS_FULL  A read-only transaction was requested and
 	                           the reader lock table is full.
-	                           See \ref mdbx_env_set_maxreaders().
-	\retval MDBX_ENOMEM        Out of memory.
-	\retval MDBX_BUSY          The write transaction is already started by the
+	                           See @ref mdbx_env_set_maxreaders().
+	@retval MDBX_ENOMEM        Out of memory.
+	@retval MDBX_BUSY          The write transaction is already started by the
 	                           current thread.
     */
 	mdbx_txn_begin_ex :: proc(
-		env: ^Mdbx_Env,
-		parent: ^Mdbx_Txn,
-		flags: Mdbx_Txn_Flags,
-		txn: ^^Mdbx_Txn,
+		env: ^MDBX_Env,
+		parent: ^MDBX_Txn,
+		flags: MDBX_Txn_Flags,
+		txn: ^^MDBX_Txn,
 		ctx: rawptr
-	) -> Mdbx_Error ---
+	) -> MDBX_Error ---
 
 	/*\brief Sets application information associated (a context pointer) with the
 	transaction.
-	\see mdbx_txn_get_userctx()
+	@see mdbx_txn_get_userctx()
 
-	\param [in] txn  An transaction handle returned by \ref mdbx_txn_begin_ex()
-	                 or \ref mdbx_txn_begin().
-	\param [in] ctx  An arbitrary pointer for whatever the application needs.
+	@param [in] txn  An transaction handle returned by @ref mdbx_txn_begin_ex()
+	                 or @ref mdbx_txn_begin().
+	@param [in] ctx  An arbitrary pointer for whatever the application needs.
 
-	\returns A non-zero error value on failure and 0 on success.
+	@returns A non-zero error value on failure and 0 on success.
 	*/
-	mdbx_txn_set_userctx :: proc(txn: ^Mdbx_Txn, ctx: rawptr) -> Mdbx_Error ---
+	mdbx_txn_set_userctx :: proc(txn: ^MDBX_Txn, ctx: rawptr) -> MDBX_Error ---
 
 	/*
 	Returns an application information (a context pointer) associated
 	with the transaction.
-	\see mdbx_txn_set_userctx()
+	@see mdbx_txn_set_userctx()
 
-	\param [in] txn  An transaction handle returned by \ref mdbx_txn_begin_ex()
-	                 or \ref mdbx_txn_begin().
-	\returns The pointer which was passed via the `context` parameter
-	         of `mdbx_txn_begin_ex()` or set by \ref mdbx_txn_set_userctx(),
+	@param [in] txn  An transaction handle returned by @ref mdbx_txn_begin_ex()
+	                 or @ref mdbx_txn_begin().
+	@returns The pointer which was passed via the `context` parameter
+	         of `mdbx_txn_begin_ex()` or set by @ref mdbx_txn_set_userctx(),
 	         or `NULL` if something wrong.
 	*/
-	mdbx_txn_get_userctx :: proc(txn: ^Mdbx_Txn) -> rawptr ---
+	mdbx_txn_get_userctx :: proc(txn: ^MDBX_Txn) -> rawptr ---
 
 	/*
 	Return information about the MDBX transaction.
 
-	\param [in] txn        A transaction handle returned by \ref mdbx_txn_begin()
-	\param [out] info      The address of an \ref MDBX_txn_info structure
+	@param [in] txn        A transaction handle returned by @ref mdbx_txn_begin()
+	@param [out] info      The address of an @ref MDBX_txn_info structure
 	                       where the information will be copied.
-	\param [in] scan_rlt   The boolean flag controls the scan of the read lock
+	@param [in] scan_rlt   The boolean flag controls the scan of the read lock
 	                       table to provide complete information. Such scan
 	                       is relatively expensive and you can avoid it
 	                       if corresponding fields are not needed.
-	                       See description of \ref MDBX_txn_info.
+	                       See description of @ref MDBX_txn_info.
 
-	\returns A non-zero error value on failure and 0 on success.
+	@returns A non-zero error value on failure and 0 on success.
 	*/
-	mdbx_txn_info :: proc(txn: ^Mdbx_Txn, info: ^Mdbx_Txn_Info, scan_rlt: bool) -> Mdbx_Error ---
+	mdbx_txn_info :: proc(txn: ^MDBX_Txn, info: ^MDBX_Txn_Info, scan_rlt: bool) -> MDBX_Error ---
 
 	/*
 	Returns the transaction's MDBX_env.
 
-	\param [in] txn  A transaction handle returned by \ref mdbx_txn_begin()
+	@param [in] txn  A transaction handle returned by @ref mdbx_txn_begin()
 	*/
-	mdbx_txn_env :: proc(txn: ^Mdbx_Txn) -> ^Mdbx_Env ---
+	mdbx_txn_env :: proc(txn: ^MDBX_Txn) -> ^MDBX_Env ---
 
 	/*
 	Return the transaction's flags.
 
 	This returns the flags, including internal, associated with this transaction.
 
-	\param [in] txn  A transaction handle returned by \ref mdbx_txn_begin().
+	@param [in] txn  A transaction handle returned by @ref mdbx_txn_begin().
 
-	\returns A transaction flags, valid if input is an valid transaction,
-	         otherwise \ref MDBX_TXN_INVALID.
+	@returns A transaction flags, valid if input is an valid transaction,
+	         otherwise @ref MDBX_TXN_INVALID.
 	*/
-	mdbx_txn_flags :: proc(txn: ^Mdbx_Txn) -> Mdbx_Txn_Flags ---
+	mdbx_txn_flags :: proc(txn: ^MDBX_Txn) -> MDBX_Txn_Flags ---
 
 	/*
 	Return the transaction's ID.
@@ -1133,97 +1173,97 @@ foreign lib {
 	read-only transaction, this corresponds to the snapshot being read;
 	concurrent readers will frequently have the same transaction ID.
 
-	\param [in] txn  A transaction handle returned by \ref mdbx_txn_begin().
+	@param [in] txn  A transaction handle returned by @ref mdbx_txn_begin().
 
-	\returns A transaction ID, valid if input is an active transaction,
+	@returns A transaction ID, valid if input is an active transaction,
 	         otherwise 0.
 	*/
-	mdbx_txn_id :: proc(txn: ^Mdbx_Txn) -> u64 ---
+	mdbx_txn_id :: proc(txn: ^MDBX_Txn) -> u64 ---
 
 	/*
 	Commit all the operations of a transaction into the database and
 	collect latency information.
-	\see mdbx_txn_commit()
-	\warning This function may be changed in future releases.
+	@see mdbx_txn_commit()
+	@warning This function may be changed in future releases.
 	*/
-	mdbx_txn_commit_ex :: proc(txn: ^Mdbx_Txn, latency: ^Mdbx_Commit_Latency) -> Mdbx_Error ---
+	mdbx_txn_commit_ex :: proc(txn: ^MDBX_Txn, latency: ^MDBX_Commit_Latency) -> MDBX_Error ---
 
 	/*
 	Commit all the operations of a transaction into the database.
 
 	If the current thread is not eligible to manage the transaction then
-	the \ref MDBX_THREAD_MISMATCH error will returned. Otherwise the transaction
+	the @ref MDBX_THREAD_MISMATCH error will returned. Otherwise the transaction
 	will be committed and its handle is freed. If the transaction cannot
 	be committed, it will be aborted with the corresponding error returned.
 
-	Thus, a result other than \ref MDBX_THREAD_MISMATCH means that the
+	Thus, a result other than @ref MDBX_THREAD_MISMATCH means that the
 	transaction is terminated:
 	 - Resources are released;
 	 - Transaction handle is invalid;
 	 - Cursor(s) associated with transaction must not be used, except with
-	   mdbx_cursor_renew() and \ref mdbx_cursor_close().
-	   Such cursor(s) must be closed explicitly by \ref mdbx_cursor_close()
+	   mdbx_cursor_renew() and @ref mdbx_cursor_close().
+	   Such cursor(s) must be closed explicitly by @ref mdbx_cursor_close()
 	   before or after transaction commit, either can be reused with
-	   \ref mdbx_cursor_renew() until it will be explicitly closed by
-	   \ref mdbx_cursor_close().
+	   @ref mdbx_cursor_renew() until it will be explicitly closed by
+	   @ref mdbx_cursor_close().
 
-	\param [in] txn  A transaction handle returned by \ref mdbx_txn_begin().
+	@param [in] txn  A transaction handle returned by @ref mdbx_txn_begin().
 
-	\returns A non-zero error value on failure and 0 on success,
+	@returns A non-zero error value on failure and 0 on success,
 	         some possible errors are:
-	\retval MDBX_RESULT_TRUE      Transaction was aborted since it should
+	@retval MDBX_RESULT_TRUE      Transaction was aborted since it should
 	                              be aborted due to previous errors.
-	\retval MDBX_PANIC            A fatal error occurred earlier
+	@retval MDBX_PANIC            A fatal error occurred earlier
 	                              and the environment must be shut down.
-	\retval MDBX_BAD_TXN          Transaction is already finished or never began.
-	\retval MDBX_EBADSIGN         Transaction object has invalid signature,
+	@retval MDBX_BAD_TXN          Transaction is already finished or never began.
+	@retval MDBX_EBADSIGN         Transaction object has invalid signature,
 	                              e.g. transaction was already terminated
 	                              or memory was corrupted.
-	\retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+	@retval MDBX_THREAD_MISMATCH  Given transaction is not owned
 	                              by current thread.
-	\retval MDBX_EINVAL           Transaction handle is NULL.
-	\retval MDBX_ENOSPC           No more disk space.
-	\retval MDBX_EIO              An error occurred during the flushing/writing
+	@retval MDBX_EINVAL           Transaction handle is NULL.
+	@retval MDBX_ENOSPC           No more disk space.
+	@retval MDBX_EIO              An error occurred during the flushing/writing
 	                              data to a storage medium/disk.
-	\retval MDBX_ENOMEM           Out of memory.
+	@retval MDBX_ENOMEM           Out of memory.
 	*/
-	mdbx_txn_commit :: proc(txn: ^Mdbx_Txn) -> Mdbx_Error ---
+	mdbx_txn_commit :: proc(txn: ^MDBX_Txn) -> MDBX_Error ---
 
 	/*
 	Abandon all the operations of the transaction instead of saving them.
 
 	The transaction handle is freed. It and its cursors must not be used again
-	after this call, except with \ref mdbx_cursor_renew() and
-	\ref mdbx_cursor_close().
+	after this call, except with @ref mdbx_cursor_renew() and
+	@ref mdbx_cursor_close().
 
 	If the current thread is not eligible to manage the transaction then
-	the \ref MDBX_THREAD_MISMATCH error will returned. Otherwise the transaction
+	the @ref MDBX_THREAD_MISMATCH error will returned. Otherwise the transaction
 	will be aborted and its handle is freed. Thus, a result other than
-	\ref MDBX_THREAD_MISMATCH means that the transaction is terminated:
+	@ref MDBX_THREAD_MISMATCH means that the transaction is terminated:
 	 - Resources are released;
 	 - Transaction handle is invalid;
 	 - Cursor(s) associated with transaction must not be used, except with
-	   \ref mdbx_cursor_renew() and \ref mdbx_cursor_close().
-	   Such cursor(s) must be closed explicitly by \ref mdbx_cursor_close()
+	   @ref mdbx_cursor_renew() and @ref mdbx_cursor_close().
+	   Such cursor(s) must be closed explicitly by @ref mdbx_cursor_close()
 	   before or after transaction abort, either can be reused with
-	   \ref mdbx_cursor_renew() until it will be explicitly closed by
-	   \ref mdbx_cursor_close().
+	   @ref mdbx_cursor_renew() until it will be explicitly closed by
+	   @ref mdbx_cursor_close().
 
-	\param [in] txn  A transaction handle returned by \ref mdbx_txn_begin().
+	@param [in] txn  A transaction handle returned by @ref mdbx_txn_begin().
 
-	\returns A non-zero error value on failure and 0 on success,
+	@returns A non-zero error value on failure and 0 on success,
 	         some possible errors are:
-	\retval MDBX_PANIC            A fatal error occurred earlier and
+	@retval MDBX_PANIC            A fatal error occurred earlier and
 	                              the environment must be shut down.
-	\retval MDBX_BAD_TXN          Transaction is already finished or never began.
-	\retval MDBX_EBADSIGN         Transaction object has invalid signature,
+	@retval MDBX_BAD_TXN          Transaction is already finished or never began.
+	@retval MDBX_EBADSIGN         Transaction object has invalid signature,
 	                              e.g. transaction was already terminated
 	                              or memory was corrupted.
-	\retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+	@retval MDBX_THREAD_MISMATCH  Given transaction is not owned
 	                              by current thread.
-	\retval MDBX_EINVAL           Transaction handle is NULL.
+	@retval MDBX_EINVAL           Transaction handle is NULL.
 	*/
-	mdbx_txn_abort :: proc(txn: ^Mdbx_Txn) -> Mdbx_Error ---
+	mdbx_txn_abort :: proc(txn: ^MDBX_Txn) -> MDBX_Error ---
 
 	/*
 	Marks transaction as broken.
@@ -1232,48 +1272,48 @@ foreign lib {
 	impossible to perform any operations within a broken transaction.
 	Broken transaction must then be aborted explicitly later.
 
-	\param [in] txn  A transaction handle returned by \ref mdbx_txn_begin().
+	@param [in] txn  A transaction handle returned by @ref mdbx_txn_begin().
 
-	\see mdbx_txn_abort() \see mdbx_txn_reset() \see mdbx_txn_commit()
-	\returns A non-zero error value on failure and 0 on success.
+	@see mdbx_txn_abort() @see mdbx_txn_reset() @see mdbx_txn_commit()
+	@returns A non-zero error value on failure and 0 on success.
 	*/
-	mdbx_txn_break :: proc(txn: ^Mdbx_Txn) -> Mdbx_Error ---
+	mdbx_txn_break :: proc(txn: ^MDBX_Txn) -> MDBX_Error ---
 
 	/*
 	Reset a read-only transaction.
 
-	Abort the read-only transaction like \ref mdbx_txn_abort(), but keep the
-	transaction handle. Therefore \ref mdbx_txn_renew() may reuse the handle.
+	Abort the read-only transaction like @ref mdbx_txn_abort(), but keep the
+	transaction handle. Therefore @ref mdbx_txn_renew() may reuse the handle.
 	This saves allocation overhead if the process will start a new read-only
-	transaction soon, and also locking overhead if \ref MDBX_NOSTICKYTHREADS is
+	transaction soon, and also locking overhead if @ref MDBX_NOSTICKYTHREADS is
 	in use. The reader table lock is released, but the table slot stays tied to
-	its thread or \ref MDBX_txn. Use \ref mdbx_txn_abort() to discard a reset
-	handle, and to free its lock table slot if \ref MDBX_NOSTICKYTHREADS
+	its thread or @ref MDBX_txn. Use @ref mdbx_txn_abort() to discard a reset
+	handle, and to free its lock table slot if @ref MDBX_NOSTICKYTHREADS
 	is in use.
 
 	Cursors opened within the transaction must not be used again after this
-	call, except with \ref mdbx_cursor_renew() and \ref mdbx_cursor_close().
+	call, except with @ref mdbx_cursor_renew() and @ref mdbx_cursor_close().
 
 	Reader locks generally don't interfere with writers, but they keep old
 	versions of database pages allocated. Thus they prevent the old pages from
 	being reused when writers commit new data, and so under heavy load the
 	database size may grow much more rapidly than otherwise.
 
-	\param [in] txn  A transaction handle returned by \ref mdbx_txn_begin().
+	@param [in] txn  A transaction handle returned by @ref mdbx_txn_begin().
 
-	\returns A non-zero error value on failure and 0 on success,
+	@returns A non-zero error value on failure and 0 on success,
 	         some possible errors are:
-	\retval MDBX_PANIC            A fatal error occurred earlier and
+	@retval MDBX_PANIC            A fatal error occurred earlier and
 	                              the environment must be shut down.
-	\retval MDBX_BAD_TXN          Transaction is already finished or never began.
-	\retval MDBX_EBADSIGN         Transaction object has invalid signature,
+	@retval MDBX_BAD_TXN          Transaction is already finished or never began.
+	@retval MDBX_EBADSIGN         Transaction object has invalid signature,
 	                              e.g. transaction was already terminated
 	                              or memory was corrupted.
-	\retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+	@retval MDBX_THREAD_MISMATCH  Given transaction is not owned
 	                              by current thread.
-	\retval MDBX_EINVAL           Transaction handle is NULL.
+	@retval MDBX_EINVAL           Transaction handle is NULL.
 	*/
-	mdbx_txn_reset :: proc(txn: ^Mdbx_Txn) -> Mdbx_Error ---
+	mdbx_txn_reset :: proc(txn: ^MDBX_Txn) -> MDBX_Error ---
 
 	/*
 	Puts the reading transaction into a "parked" state.
@@ -1288,35 +1328,34 @@ foreign lib {
 	while keeping overhead costs at a minimum.
 
 	To continue execution (reading and/or using data), the parked transaction must
-	be restored using \ref mdbx_txn_unpark(). For ease of use and to prevent
+	be restored using @ref mdbx_txn_unpark(). For ease of use and to prevent
 	unnecessary API calls, the `autounpark` parameter provides the ability to
 	automatically "unpark" when using a parked transaction in API functions that
 	involve reading data.
 
-	\warning Until the transaction is restored/unparked, regardless of the `autounpark`
+	@warning Until the transaction is restored/unparked, regardless of the `autounpark`
 	argument, pointers previously obtained when reading data within the parked
 	transaction must not be allowed to be dereferenced, since the MVCC snapshot in
 	which this data is located is not held and can be recycled at any time.
 
 	A parked transaction without "unparking" can be aborted, reset, or restarted at
-	any time using \ref mdbx_txn_abort(), \ref mdbx_txn_reset(), and
-	\ref mdbx_txn_renew(), respectively.
+	any time using @ref mdbx_txn_abort(), @ref mdbx_txn_reset(), and
+	@ref mdbx_txn_renew(), respectively.
 
-	\see mdbx_txn_unpark()
-	\see mdbx_txn_flags()
-	\see mdbx_env_set_hsr()
-	\see <a href="intro.html#long-lived-read">Long-lived read transactions</a>
+	@see mdbx_txn_unpark()
+	@see mdbx_txn_flags()
+	@see mdbx_env_set_hsr()
 
-	\param [in] txn          Read transaction started by
-	                         \ref mdbx_txn_begin().
+	@param [in] txn          Read transaction started by
+	                         @ref mdbx_txn_begin().
 
-	\param [in] autounpark   Allows you to enable automatic
+	@param [in] autounpark   Allows you to enable automatic
 	                         unpark/restore transaction when called
 	                         API functions that involve reading data.
 
-	\returns A non-zero error code value, or 0 on success.
+	@returns A non-zero error code value, or 0 on success.
 	*/
-	mdbx_txn_park :: proc(txn: ^Mdbx_Txn, autounpark: bool) -> Mdbx_Error ---
+	mdbx_txn_park :: proc(txn: ^MDBX_Txn, autounpark: bool) -> MDBX_Error ---
 
 	/*
 	Unparks a previously parked read transaction.
@@ -1324,71 +1363,71 @@ foreign lib {
 	The function attempts to restore a previously parked transaction. If the
 	parked transaction was ousted to recycle old MVCC snapshots, then depending
 	on the `restart_if_ousted` argument, it is restarted similarly to
-	\ref mdbx_txn_renew(), or the transaction is reset and the error code
-	\ref MDBX_OUSTED is returned.
+	@ref mdbx_txn_renew(), or the transaction is reset and the error code
+	@ref MDBX_OUSTED is returned.
 
-	\see mdbx_txn_park()
-	\see mdbx_txn_flags()
-	\see <a href="intro.html#long-lived-read">Long-lived read transactions</a>
+	@see mdbx_txn_park()
+	@see mdbx_txn_flags()
+	@see <a href="intro.html#long-lived-read">Long-lived read transactions</a>
 
-	\param [in] txn     A read transaction started via
-						\ref mdbx_txn_begin() and then parked
-						via \ref mdbx_txn_park.
+	@param [in] txn     A read transaction started via
+						@ref mdbx_txn_begin() and then parked
+						via @ref mdbx_txn_park.
 
-	\param [in] restart_if_ousted   Allows you to immediately restart a transaction
+	@param [in] restart_if_ousted   Allows you to immediately restart a transaction
 									if it has been taken out.
 
-	\returns A non-zero error code value, or 0 on success. Some specific result codes:
+	@returns A non-zero error code value, or 0 on success. Some specific result codes:
 
-	\retval MDBX_SUCCESS      The parked transaction was successfully restored, or it
+	@retval MDBX_SUCCESS      The parked transaction was successfully restored, or it
 							  was not parked.
 
-	\retval MDBX_OUSTED       The reader transaction was preempted by the writer
+	@retval MDBX_OUSTED       The reader transaction was preempted by the writer
 							  transaction to recycle old MVCC snapshots, and the
 							  `restart_if_ousted` argument was set to `false`.
 							  The transaction is reset to a state similar to that
-							  after calling \ref mdbx_txn_reset(), but the instance
+							  after calling @ref mdbx_txn_reset(), but the instance
 							  (handle) is not deallocated and can be reused
-							  via \ref mdbx_txn_renew(), or deallocated via
-							  \ref mdbx_txn_abort().
+							  via @ref mdbx_txn_renew(), or deallocated via
+							  @ref mdbx_txn_abort().
 
-	\retval MDBX_RESULT_TRUE  The reading transaction was ousted, but is now
+	@retval MDBX_RESULT_TRUE  The reading transaction was ousted, but is now
 							  restarted to read another (latest) MVCC snapshot
 							  because restart_if_ousted` was set to `true`.
 
-	\retval MDBX_BAD_TXN      The transaction has already been completed or was not started.
+	@retval MDBX_BAD_TXN      The transaction has already been completed or was not started.
 	*/
-	mdbx_txn_unpark :: proc(txn: ^Mdbx_Txn, restart_if_ousted: bool) -> Mdbx_Error ---
+	mdbx_txn_unpark :: proc(txn: ^MDBX_Txn, restart_if_ousted: bool) -> MDBX_Error ---
 
 	/*
 	Renew a read-only transaction.
 
 	This acquires a new reader lock for a transaction handle that had been
-	released by \ref mdbx_txn_reset(). It must be called before a reset
+	released by @ref mdbx_txn_reset(). It must be called before a reset
 	transaction may be used again.
 
-	\param [in] txn  A transaction handle returned by \ref mdbx_txn_begin().
+	@param [in] txn  A transaction handle returned by @ref mdbx_txn_begin().
 
-	\returns A non-zero error value on failure and 0 on success,
+	@returns A non-zero error value on failure and 0 on success,
 	         some possible errors are:
-	\retval MDBX_PANIC            A fatal error occurred earlier and
+	@retval MDBX_PANIC            A fatal error occurred earlier and
 	                              the environment must be shut down.
-	\retval MDBX_BAD_TXN          Transaction is already finished or never began.
-	\retval MDBX_EBADSIGN         Transaction object has invalid signature,
+	@retval MDBX_BAD_TXN          Transaction is already finished or never began.
+	@retval MDBX_EBADSIGN         Transaction object has invalid signature,
 	                              e.g. transaction was already terminated
 	                              or memory was corrupted.
-	\retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+	@retval MDBX_THREAD_MISMATCH  Given transaction is not owned
 	                              by current thread.
-	\retval MDBX_EINVAL           Transaction handle is NULL.
+	@retval MDBX_EINVAL           Transaction handle is NULL.
 	*/
-	mdbx_txn_renew :: proc(txn: ^Mdbx_Txn) -> Mdbx_Error ---
+	mdbx_txn_renew :: proc(txn: ^MDBX_Txn) -> MDBX_Error ---
 
 	/*
 	Set integers markers (aka "canary") associated with the environment.
-	\see mdbx_canary_get()
+	@see mdbx_canary_get()
 
-	\param [in] txn     A transaction handle returned by \ref mdbx_txn_begin()
-	\param [in] canary  A optional pointer to \ref MDBX_canary structure for `x`,
+	@param [in] txn     A transaction handle returned by @ref mdbx_txn_begin()
+	@param [in] canary  A optional pointer to @ref MDBX_canary structure for `x`,
 	             `y` and `z` values from.
 	           - If canary is NOT NULL then the `x`, `y` and `z` values will be
 	             updated from given canary argument, but the 'v' be always set
@@ -1400,33 +1439,33 @@ foreign lib {
 	             to the current transaction number without changes `x`, `y` nor
 	             `z`.
 
-	\returns A non-zero error value on failure and 0 on success.
+	@returns A non-zero error value on failure and 0 on success.
 	*/
-	mdbx_canary_put :: proc(txn: ^Mdbx_Txn, canary: ^Mdbx_Canary) -> Mdbx_Error ---
+	mdbx_canary_put :: proc(txn: ^MDBX_Txn, canary: ^MDBX_Canary) -> MDBX_Error ---
 
 	/*
 	Returns fours integers markers (aka "canary") associated with the
 	environment.
-	\see mdbx_canary_put()
+	@see mdbx_canary_put()
 
-	\param [in] txn     A transaction handle returned by \ref mdbx_txn_begin().
-	\param [in] canary  The address of an \ref MDBX_canary structure where the
+	@param [in] txn     A transaction handle returned by @ref mdbx_txn_begin().
+	@param [in] canary  The address of an @ref MDBX_canary structure where the
 	                    information will be copied.
 
-	\returns A non-zero error value on failure and 0 on success.
+	@returns A non-zero error value on failure and 0 on success.
 	*/
-	mdbx_canary_get :: proc(txn: ^Mdbx_Txn, canary: ^Mdbx_Canary) -> Mdbx_Error ---
+	mdbx_canary_get :: proc(txn: ^MDBX_Txn, canary: ^MDBX_Canary) -> MDBX_Error ---
 
 	/*
 	Open or Create a named table in the environment.
 
     A table handle denotes the name and parameters of a table,
     independently of whether such a table exists. The table handle may be
-    discarded by calling \ref mdbx_dbi_close(). The old table handle is
+    discarded by calling @ref mdbx_dbi_close(). The old table handle is
     returned if the table was already open. The handle may only be closed
     once.
 
-    \note A notable difference between MDBX and LMDB is that MDBX make handles
+    @note A notable difference between MDBX and LMDB is that MDBX make handles
     opened for existing tables immediately available for other transactions,
     regardless this transaction will be aborted or reset. The REASON for this is
     to avoiding the requirement for multiple opening a same handles in
@@ -1442,91 +1481,91 @@ foreign lib {
     In contrast to LMDB, the MDBX allow this function to be called from multiple
     concurrent transactions or threads in the same process.
 
-    To use named table (with name != NULL), \ref mdbx_env_set_maxdbs()
+    To use named table (with name != NULL), @ref mdbx_env_set_maxdbs()
     must be called before opening the environment. Table names are
     keys in the internal unnamed table, and may be read but not written.
 
-    \param [in] txn    transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] name   The name of the table to open. If only a single
+    @param [in] txn    transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] name   The name of the table to open. If only a single
                        table is needed in the environment,
                        this value may be NULL.
-    \param [in] flags  Special options for this table. This parameter must
+    @param [in] flags  Special options for this table. This parameter must
                        be bitwise OR'ing together any of the constants
                        described here:
 
-     - \ref MDBX_DB_DEFAULTS
+     - @ref MDBX_DB_DEFAULTS
          Keys are arbitrary byte strings and compared from beginning to end.
-     - \ref MDBX_REVERSEKEY
+     - @ref MDBX_REVERSEKEY
          Keys are arbitrary byte strings to be compared in reverse order,
          from the end of the strings to the beginning.
-     - \ref MDBX_INTEGERKEY
+     - @ref MDBX_INTEGERKEY
          Keys are binary integers in native byte order, either uint32_t or
          uint64_t, and will be sorted as such. The keys must all be of the
          same size and must be aligned while passing as arguments.
-     - \ref MDBX_DUPSORT
+     - @ref MDBX_DUPSORT
          Duplicate keys may be used in the table. Or, from another point of
          view, keys may have multiple data items, stored in sorted order. By
          default keys must be unique and may have only a single data item.
-     - \ref MDBX_DUPFIXED
-         This flag may only be used in combination with \ref MDBX_DUPSORT. This
+     - @ref MDBX_DUPFIXED
+         This flag may only be used in combination with @ref MDBX_DUPSORT. This
          option tells the library that the data items for this table are
          all the same size, which allows further optimizations in storage and
          retrieval. When all data items are the same size, the
-         \ref MDBX_GET_MULTIPLE, \ref MDBX_NEXT_MULTIPLE and
-         \ref MDBX_PREV_MULTIPLE cursor operations may be used to retrieve
+         @ref MDBX_GET_MULTIPLE, @ref MDBX_NEXT_MULTIPLE and
+         @ref MDBX_PREV_MULTIPLE cursor operations may be used to retrieve
          multiple items at once.
-     - \ref MDBX_INTEGERDUP
+     - @ref MDBX_INTEGERDUP
          This option specifies that duplicate data items are binary integers,
-         similar to \ref MDBX_INTEGERKEY keys. The data values must all be of the
+         similar to @ref MDBX_INTEGERKEY keys. The data values must all be of the
          same size and must be aligned while passing as arguments.
-     - \ref MDBX_REVERSEDUP
+     - @ref MDBX_REVERSEDUP
          This option specifies that duplicate data items should be compared as
          strings in reverse order (the comparison is performed in the direction
          from the last byte to the first).
-     - \ref MDBX_CREATE
+     - @ref MDBX_CREATE
          Create the named table if it doesn't exist. This option is not
          allowed in a read-only transaction or a read-only environment.
 
-    \param [out] dbi     Address where the new \ref MDBX_dbi handle
+    @param [out] dbi     Address where the new @ref MDBX_dbi handle
                          will be stored.
 
-    For \ref mdbx_dbi_open_ex() additional arguments allow you to set custom
+    For @ref mdbx_dbi_open_ex() additional arguments allow you to set custom
     comparison functions for keys and values (for multimaps).
-    \see avoid_custom_comparators
+    @see avoid_custom_comparators
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_NOTFOUND   The specified table doesn't exist in the
-                            environment and \ref MDBX_CREATE was not specified.
-    \retval MDBX_DBS_FULL   Too many tables have been opened.
-                            \see mdbx_env_set_maxdbs()
-    \retval MDBX_INCOMPATIBLE  Table is incompatible with given flags,
+    @retval MDBX_NOTFOUND   The specified table doesn't exist in the
+                            environment and @ref MDBX_CREATE was not specified.
+    @retval MDBX_DBS_FULL   Too many tables have been opened.
+                            @see mdbx_env_set_maxdbs()
+    @retval MDBX_INCOMPATIBLE  Table is incompatible with given flags,
                             i.e. the passed flags is different with which the
                             table was created, or the table was already
                             opened with a different comparison function(s).
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
     */
-	mdbx_dbi_open :: proc(txn: ^Mdbx_Txn, name: cstring, flags: Mdbx_DB_Flags, dbi: ^Mdbx_DBI) -> Mdbx_Error ---
+	mdbx_dbi_open :: proc(txn: ^MDBX_Txn, name: cstring, flags: MDBX_DB_Flags, dbi: ^MDBX_DBI) -> MDBX_Error ---
 
-	mdbx_dbi_open2 :: proc(txn: ^Mdbx_Txn, name: ^Mdbx_Val, flags: Mdbx_DB_Flags, dbi: ^Mdbx_DBI) -> Mdbx_Error ---
+	mdbx_dbi_open2 :: proc(txn: ^MDBX_Txn, name: ^MDBX_Val, flags: MDBX_DB_Flags, dbi: ^MDBX_DBI) -> MDBX_Error ---
 
 	/*
 	Renames a table by DBI handle
 
     Renames the user-named table associated with the passed DBI handle.
 
-    \param [in,out] txn   Write transaction started by
-                          \ref mdbx_txn_begin().
-    \param [in]     dbi   Table descriptor
-                          открытый посредством \ref mdbx_dbi_open().
+    @param [in,out] txn   Write transaction started by
+                          @ref mdbx_txn_begin().
+    @param [in]     dbi   Table descriptor
+                          открытый посредством @ref mdbx_dbi_open().
 
-    \param [in]     name  New name to rename.
+    @param [in]     name  New name to rename.
 
-    \returns A non-zero error code value, or 0 on success.
+    @returns A non-zero error code value, or 0 on success.
     */
-	mdbx_dbi_rename :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, name: cstring) -> Mdbx_Error ---
-	mdbx_dbi_rename2 :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, name: ^Mdbx_Val) -> Mdbx_Error ---
+	mdbx_dbi_rename :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, name: cstring) -> MDBX_Error ---
+	mdbx_dbi_rename2 :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, name: ^MDBX_Val) -> MDBX_Error ---
 
 	/*
 	Lists user-defined named tables.
@@ -1536,79 +1575,79 @@ foreign lib {
     more named tables, or until the user-defined function returns a nonzero
     result, which will be immediately returned as the result.
 
-    \see MDBX_table_enum_func
+    @see MDBX_table_enum_func
 
-    \param [in] txn     Transaction started via
-                        \ref mdbx_txn_begin().
-    \param [in] func    Pointer to a user-defined function with signature
-    					\ref MDBX_table_enum_func,
+    @param [in] txn     Transaction started via
+                        @ref mdbx_txn_begin().
+    @param [in] func    Pointer to a user-defined function with signature
+    					@ref MDBX_table_enum_func,
     					which will be called for each table.
-    \param [in] ctx     Pointer to some content that will be passed to the
+    @param [in] ctx     Pointer to some content that will be passed to the
     					`func()` function as is.
 
-    \returns A non-zero error code value, or 0 on success.
+    @returns A non-zero error code value, or 0 on success.
     */
-	mdbx_enumerate_tables :: proc(txn: ^Mdbx_Txn, handler: Mdbx_Table_Enum_Func, ctx: rawptr) -> Mdbx_Error ---
+	mdbx_enumerate_tables :: proc(txn: ^MDBX_Txn, handler: MDBX_Table_Enum_Func, ctx: rawptr) -> MDBX_Error ---
 
 	/*
 	Retrieve statistics for a table.
 
-    \param [in] txn     A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] dbi     A table handle returned by \ref mdbx_dbi_open().
-    \param [out] stat   The address of an \ref MDBX_stat structure where
+    @param [in] txn     A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] dbi     A table handle returned by @ref mdbx_dbi_open().
+    @param [out] stat   The address of an @ref MDBX_stat structure where
                         the statistics will be copied.
-    \param [in] bytes   The size of \ref MDBX_stat.
+    @param [in] bytes   The size of @ref MDBX_stat.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_EINVAL   An invalid parameter was specified.
+    @retval MDBX_EINVAL   An invalid parameter was specified.
     */
-	mdbx_dbi_stat :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, stat: ^Mdbx_Stat, bytes: c.size_t) -> Mdbx_Error ---
+	mdbx_dbi_stat :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, stat: ^MDBX_Stat, bytes: c.size_t) -> MDBX_Error ---
 
 	/*
 	Retrieve depth (bitmask) information of nested dupsort (multi-value)
     B+trees for given table.
 
-    \param [in] txn     A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] dbi     A table handle returned by \ref mdbx_dbi_open().
-    \param [out] mask   The address of an uint32_t value where the bitmask
+    @param [in] txn     A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] dbi     A table handle returned by @ref mdbx_dbi_open().
+    @param [out] mask   The address of an uint32_t value where the bitmask
                         will be stored.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_EINVAL       An invalid parameter was specified.
-    \retval MDBX_RESULT_TRUE  The dbi isn't a dupsort (multi-value) table.
+    @retval MDBX_EINVAL       An invalid parameter was specified.
+    @retval MDBX_RESULT_TRUE  The dbi isn't a dupsort (multi-value) table.
     */
-	mdbx_dbi_dupsort_depthmask :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, mask: ^u32) -> Mdbx_Error ---
+	mdbx_dbi_dupsort_depthmask :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, mask: ^u32) -> MDBX_Error ---
 
 	/*
 	Retrieve the DB flags and status for a table handle.
 
-    \see MDBX_db_flags_t
-    \see MDBX_dbi_state_t
+    @see MDBX_db_flags_t
+    @see MDBX_dbi_state_t
 
-    \param [in] txn     A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] dbi     A table handle returned by \ref mdbx_dbi_open().
-    \param [out] flags  Address where the flags will be returned.
-    \param [out] state  Address where the state will be returned.
+    @param [in] txn     A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] dbi     A table handle returned by @ref mdbx_dbi_open().
+    @param [out] flags  Address where the flags will be returned.
+    @param [out] state  Address where the state will be returned.
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_dbi_flags_ex :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, flags: ^u32, state: ^u32) -> Mdbx_Error ---
+	mdbx_dbi_flags_ex :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, flags: ^u32, state: ^u32) -> MDBX_Error ---
 
 	/*
 	Close a table handle. Normally unnecessary.
 
-    Closing a table handle is not necessary, but lets \ref mdbx_dbi_open()
+    Closing a table handle is not necessary, but lets @ref mdbx_dbi_open()
     reuse the handle value. Usually it's better to set a bigger
-    \ref mdbx_env_set_maxdbs(), unless that value would be large.
+    @ref mdbx_env_set_maxdbs(), unless that value would be large.
 
-    \note Use with care.
-    This call is synchronized via mutex with \ref mdbx_dbi_open(), but NOT with
+    @note Use with care.
+    This call is synchronized via mutex with @ref mdbx_dbi_open(), but NOT with
     any transaction(s) running by other thread(s).
     So the `mdbx_dbi_close()` MUST NOT be called in-parallel/concurrently
     with any transactions using the closing dbi-handle, nor during other thread
@@ -1618,30 +1657,30 @@ foreign lib {
     Handles should only be closed if no other threads are going to reference
     the table handle or one of its cursors any further. Do not close a handle
     if an existing transaction has modified its table. Doing so can cause
-    misbehavior from table corruption to errors like \ref MDBX_BAD_DBI
+    misbehavior from table corruption to errors like @ref MDBX_BAD_DBI
     (since the DB name is gone).
 
-    \param [in] env  An environment handle returned by \ref mdbx_env_create().
-    \param [in] dbi  A table handle returned by \ref mdbx_dbi_open().
+    @param [in] env  An environment handle returned by @ref mdbx_env_create().
+    @param [in] dbi  A table handle returned by @ref mdbx_dbi_open().
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_dbi_close :: proc(env: ^Mdbx_Env, dbi: Mdbx_DBI) -> Mdbx_Error ---
+	mdbx_dbi_close :: proc(env: ^MDBX_Env, dbi: MDBX_DBI) -> MDBX_Error ---
 
 	/*
 	Empty or delete and close a table.
     \ingroup c_crud
 
-    \see mdbx_dbi_close() \see mdbx_dbi_open()
+    @see mdbx_dbi_close() @see mdbx_dbi_open()
 
-    \param [in] txn  A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] dbi  A table handle returned by \ref mdbx_dbi_open().
-    \param [in] del  `false` to empty the DB, `true` to delete it
+    @param [in] txn  A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] dbi  A table handle returned by @ref mdbx_dbi_open().
+    @param [in] del  `false` to empty the DB, `true` to delete it
                      from the environment and close the DB handle.
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_drop :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, del: bool) -> Mdbx_Error ---
+	mdbx_drop :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, del: bool) -> MDBX_Error ---
 
 	/*
 	Get items from a table.
@@ -1649,108 +1688,108 @@ foreign lib {
     This function retrieves key/data pairs from the table. The address
     and length of the data associated with the specified key are returned
     in the structure to which data refers.
-    If the table supports duplicate keys (\ref MDBX_DUPSORT) then the
+    If the table supports duplicate keys (@ref MDBX_DUPSORT) then the
     first data item for the key will be returned. Retrieval of other
-    items requires the use of \ref mdbx_cursor_get().
+    items requires the use of @ref mdbx_cursor_get().
 
-    \note The memory pointed to by the returned values is owned by the
+    @note The memory pointed to by the returned values is owned by the
     table. The caller MUST not dispose of the memory, and MUST not modify it
     in any way regardless in a read-only nor read-write transactions!
-    For case a table opened without the \ref MDBX_WRITEMAP modification
+    For case a table opened without the @ref MDBX_WRITEMAP modification
     attempts likely will cause a `SIGSEGV`. However, when a table opened with
-    the \ref MDBX_WRITEMAP or in case values returned inside read-write
+    the @ref MDBX_WRITEMAP or in case values returned inside read-write
     transaction are located on a "dirty" (modified and pending to commit) pages,
     such modification will silently accepted and likely will lead to DB and/or
     data corruption.
 
-    \note Values returned from the table are valid only until a
+    @note Values returned from the table are valid only until a
     subsequent update operation, or the end of the transaction.
 
-    \param [in] txn       A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] dbi       A table handle returned by \ref mdbx_dbi_open().
-    \param [in] key       The key to search for in the table.
-    \param [in,out] data  The data corresponding to the key.
+    @param [in] txn       A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] dbi       A table handle returned by @ref mdbx_dbi_open().
+    @param [in] key       The key to search for in the table.
+    @param [in,out] data  The data corresponding to the key.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_NOTFOUND  The key was not in the table.
-    \retval MDBX_EINVAL    An invalid parameter was specified.
+    @retval MDBX_NOTFOUND  The key was not in the table.
+    @retval MDBX_EINVAL    An invalid parameter was specified.
     */
-	mdbx_get :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, key, value: ^Mdbx_Val) -> Mdbx_Error ---
+	mdbx_get :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, key, value: ^MDBX_Val) -> MDBX_Error ---
 
 	/*
 	Get items from a table
     and optionally number of data items for a given key.
 
-    Briefly this function does the same as \ref mdbx_get() with a few
+    Briefly this function does the same as @ref mdbx_get() with a few
     differences:
      1. If values_count is NOT NULL, then returns the count
         of multi-values/duplicates for a given key.
      2. Updates BOTH the key and the data for pointing to the actual key-value
         pair inside the table.
 
-    \param [in] txn           A transaction handle returned
-                              by \ref mdbx_txn_begin().
-    \param [in] dbi           A table handle returned by \ref mdbx_dbi_open().
-    \param [in,out] key       The key to search for in the table.
-    \param [in,out] data      The data corresponding to the key.
-    \param [out] values_count The optional address to return number of values
+    @param [in] txn           A transaction handle returned
+                              by @ref mdbx_txn_begin().
+    @param [in] dbi           A table handle returned by @ref mdbx_dbi_open().
+    @param [in,out] key       The key to search for in the table.
+    @param [in,out] data      The data corresponding to the key.
+    @param [out] values_count The optional address to return number of values
                               associated with given key:
-                               = 0 - in case \ref MDBX_NOTFOUND error;
+                               = 0 - in case @ref MDBX_NOTFOUND error;
                                = 1 - exactly for tables
-                                     WITHOUT \ref MDBX_DUPSORT;
-                               >= 1 for tables WITH \ref MDBX_DUPSORT.
+                                     WITHOUT @ref MDBX_DUPSORT;
+                               >= 1 for tables WITH @ref MDBX_DUPSORT.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_NOTFOUND  The key was not in the table.
-    \retval MDBX_EINVAL    An invalid parameter was specified.
+    @retval MDBX_NOTFOUND  The key was not in the table.
+    @retval MDBX_EINVAL    An invalid parameter was specified.
     */
 	mdbx_get_ex :: proc(
-		txn: ^Mdbx_Txn,
-		dbi: Mdbx_DBI,
-		key, value: ^Mdbx_Val,
+		txn: ^MDBX_Txn,
+		dbi: MDBX_DBI,
+		key, value: ^MDBX_Val,
 		values_count: ^c.size_t,
-	) -> Mdbx_Error ---
+	) -> MDBX_Error ---
 
 	/*
 	Get equal or great item from a table.
 
-    Briefly this function does the same as \ref mdbx_get() with a few
+    Briefly this function does the same as @ref mdbx_get() with a few
     differences:
     1. Return equal or great (due comparison function) key-value
        pair, but not only exactly matching with the key.
-    2. On success return \ref MDBX_SUCCESS if key found exactly,
-       and \ref MDBX_RESULT_TRUE otherwise. Moreover, for tables with
-       \ref MDBX_DUPSORT flag the data argument also will be used to match over
-       multi-value/duplicates, and \ref MDBX_SUCCESS will be returned only when
+    2. On success return @ref MDBX_SUCCESS if key found exactly,
+       and @ref MDBX_RESULT_TRUE otherwise. Moreover, for tables with
+       @ref MDBX_DUPSORT flag the data argument also will be used to match over
+       multi-value/duplicates, and @ref MDBX_SUCCESS will be returned only when
        BOTH the key and the data match exactly.
     3. Updates BOTH the key and the data for pointing to the actual key-value
        pair inside the table.
 
-    \param [in] txn           A transaction handle returned
-                              by \ref mdbx_txn_begin().
-    \param [in] dbi           A table handle returned by \ref mdbx_dbi_open().
-    \param [in,out] key       The key to search for in the table.
-    \param [in,out] data      The data corresponding to the key.
+    @param [in] txn           A transaction handle returned
+                              by @ref mdbx_txn_begin().
+    @param [in] dbi           A table handle returned by @ref mdbx_dbi_open().
+    @param [in,out] key       The key to search for in the table.
+    @param [in,out] data      The data corresponding to the key.
 
-    \returns A non-zero error value on failure and \ref MDBX_RESULT_FALSE
-             or \ref MDBX_RESULT_TRUE on success (as described above).
+    @returns A non-zero error value on failure and @ref MDBX_RESULT_FALSE
+             or @ref MDBX_RESULT_TRUE on success (as described above).
              Some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_NOTFOUND      The key was not in the table.
-    \retval MDBX_EINVAL        An invalid parameter was specified.
+    @retval MDBX_NOTFOUND      The key was not in the table.
+    @retval MDBX_EINVAL        An invalid parameter was specified.
     */
 	mdbx_get_equal_or_great :: proc(
-		txn: ^Mdbx_Txn,
-		dbi: Mdbx_DBI,
-		key, value: ^Mdbx_Val,
-	) -> Mdbx_Error ---
+		txn: ^MDBX_Txn,
+		dbi: MDBX_DBI,
+		key, value: ^MDBX_Val,
+	) -> MDBX_Error ---
 
 	/*
 	Store items into a table.
@@ -1758,88 +1797,88 @@ foreign lib {
     This function stores key/data pairs in the table. The default behavior
     is to enter the new key/data pair, replacing any previously existing key
     if duplicates are disallowed, or adding a duplicate data item if
-    duplicates are allowed (see \ref MDBX_DUPSORT).
+    duplicates are allowed (see @ref MDBX_DUPSORT).
 
-    \param [in] txn        A transaction handle returned
-                           by \ref mdbx_txn_begin().
-    \param [in] dbi        A table handle returned by \ref mdbx_dbi_open().
-    \param [in] key        The key to store in the table.
-    \param [in,out] data   The data to store.
-    \param [in] flags      Special options for this operation.
+    @param [in] txn        A transaction handle returned
+                           by @ref mdbx_txn_begin().
+    @param [in] dbi        A table handle returned by @ref mdbx_dbi_open().
+    @param [in] key        The key to store in the table.
+    @param [in,out] data   The data to store.
+    @param [in] flags      Special options for this operation.
                            This parameter must be set to 0 or by bitwise OR'ing
                            together one or more of the values described here:
-      - \ref MDBX_NODUPDATA
+      - @ref MDBX_NODUPDATA
          Enter the new key-value pair only if it does not already appear
          in the table. This flag may only be specified if the table
-         was opened with \ref MDBX_DUPSORT. The function will return
-         \ref MDBX_KEYEXIST if the key/data pair already appears in the table.
+         was opened with @ref MDBX_DUPSORT. The function will return
+         @ref MDBX_KEYEXIST if the key/data pair already appears in the table.
 
-     - \ref MDBX_NOOVERWRITE
+     - @ref MDBX_NOOVERWRITE
          Enter the new key/data pair only if the key does not already appear
-         in the table. The function will return \ref MDBX_KEYEXIST if the key
+         in the table. The function will return @ref MDBX_KEYEXIST if the key
          already appears in the table, even if the table supports
-         duplicates (see \ref  MDBX_DUPSORT). The data parameter will be set
+         duplicates (see @ref  MDBX_DUPSORT). The data parameter will be set
          to point to the existing item.
 
-     - \ref MDBX_CURRENT
+     - @ref MDBX_CURRENT
          Update an single existing entry, but not add new ones. The function will
-         return \ref MDBX_NOTFOUND if the given key not exist in the table.
+         return @ref MDBX_NOTFOUND if the given key not exist in the table.
          In case multi-values for the given key, with combination of
-         the \ref MDBX_ALLDUPS will replace all multi-values,
-         otherwise return the \ref MDBX_EMULTIVAL.
+         the @ref MDBX_ALLDUPS will replace all multi-values,
+         otherwise return the @ref MDBX_EMULTIVAL.
 
-     - \ref MDBX_RESERVE
+     - @ref MDBX_RESERVE
          Reserve space for data of the given size, but don't copy the given
          data. Instead, return a pointer to the reserved space, which the
          caller can fill in later - before the next update operation or the
          transaction ends. This saves an extra memcpy if the data is being
          generated later. MDBX does nothing else with this memory, the caller
          is expected to modify all of the space requested. This flag must not
-         be specified if the table was opened with \ref MDBX_DUPSORT.
+         be specified if the table was opened with @ref MDBX_DUPSORT.
 
-     - \ref MDBX_APPEND
+     - @ref MDBX_APPEND
          Append the given key/data pair to the end of the table. This option
          allows fast bulk loading when keys are already known to be in the
          correct order. Loading unsorted keys with this flag will cause
-         a \ref MDBX_EKEYMISMATCH error.
+         a @ref MDBX_EKEYMISMATCH error.
 
-     - \ref MDBX_APPENDDUP
+     - @ref MDBX_APPENDDUP
          As above, but for sorted dup data.
 
-     - \ref MDBX_MULTIPLE
+     - @ref MDBX_MULTIPLE
          Store multiple contiguous data elements in a single request. This flag
          may only be specified if the table was opened with
-         \ref MDBX_DUPFIXED. With combination the \ref MDBX_ALLDUPS
+         @ref MDBX_DUPFIXED. With combination the @ref MDBX_ALLDUPS
          will replace all multi-values.
-         The data argument must be an array of two \ref MDBX_val. The `iov_len`
-         of the first \ref MDBX_val must be the size of a single data element.
-         The `iov_base` of the first \ref MDBX_val must point to the beginning
+         The data argument must be an array of two @ref MDBX_val. The `iov_len`
+         of the first @ref MDBX_val must be the size of a single data element.
+         The `iov_base` of the first @ref MDBX_val must point to the beginning
          of the array of contiguous data elements which must be properly aligned
-         in case of table with \ref MDBX_INTEGERDUP flag.
-         The `iov_len` of the second \ref MDBX_val must be the count of the
+         in case of table with @ref MDBX_INTEGERDUP flag.
+         The `iov_len` of the second @ref MDBX_val must be the count of the
          number of data elements to store. On return this field will be set to
          the count of the number of elements actually written. The `iov_base` of
-         the second \ref MDBX_val is unused.
+         the second @ref MDBX_val is unused.
 
-    \see \ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
+    @see @ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_KEYEXIST  The key/value pair already exists in the table.
-    \retval MDBX_MAP_FULL  The database is full, see \ref mdbx_env_set_mapsize().
-    \retval MDBX_TXN_FULL  The transaction has too many dirty pages.
-    \retval MDBX_EACCES    An attempt was made to write
+    @retval MDBX_KEYEXIST  The key/value pair already exists in the table.
+    @retval MDBX_MAP_FULL  The database is full, see @ref mdbx_env_set_mapsize().
+    @retval MDBX_TXN_FULL  The transaction has too many dirty pages.
+    @retval MDBX_EACCES    An attempt was made to write
                            in a read-only transaction.
-    \retval MDBX_EINVAL    An invalid parameter was specified.
+    @retval MDBX_EINVAL    An invalid parameter was specified.
     */
 	mdbx_put :: proc(
-		txn: ^Mdbx_Txn,
-		dbi: Mdbx_DBI,
-		key, value: ^Mdbx_Val,
-		flags: Mdbx_Put_Flags,
-	) -> Mdbx_Error ---
+		txn: ^MDBX_Txn,
+		dbi: MDBX_DBI,
+		key, value: ^MDBX_Val,
+		flags: MDBX_Put_Flags,
+	) -> MDBX_Error ---
 
 	/*
 	Replace items in a table.
@@ -1852,163 +1891,163 @@ foreign lib {
     case, the page will be overwritten during the update, and the old value will
     be lost. Therefore, an additional buffer must be passed via old_data
     argument initially to copy the old value. If the buffer passed in is too
-    small, the function will return \ref MDBX_RESULT_TRUE by setting iov_len
+    small, the function will return @ref MDBX_RESULT_TRUE by setting iov_len
     field pointed by old_data argument to the appropriate value, without
     performing any changes.
 
-    For tables with non-unique keys (i.e. with \ref MDBX_DUPSORT flag),
+    For tables with non-unique keys (i.e. with @ref MDBX_DUPSORT flag),
     another use case is also possible, when by old_data argument selects a
     specific item from multi-value/duplicates with the same key for deletion or
     update. To select this scenario in flags should simultaneously specify
-    \ref MDBX_CURRENT and \ref MDBX_NOOVERWRITE. This combination is chosen
+    @ref MDBX_CURRENT and @ref MDBX_NOOVERWRITE. This combination is chosen
     because it makes no sense, and thus allows you to identify the request of
     such a scenario.
 
-    \param [in] txn           A transaction handle returned
-                              by \ref mdbx_txn_begin().
-    \param [in] dbi           A table handle returned by \ref mdbx_dbi_open().
-    \param [in] key           The key to store in the table.
-    \param [in] new_data      The data to store, if NULL then deletion will
+    @param [in] txn           A transaction handle returned
+                              by @ref mdbx_txn_begin().
+    @param [in] dbi           A table handle returned by @ref mdbx_dbi_open().
+    @param [in] key           The key to store in the table.
+    @param [in] new_data      The data to store, if NULL then deletion will
                               be performed.
-    \param [in,out] old_data  The buffer for retrieve previous value as describe
+    @param [in,out] old_data  The buffer for retrieve previous value as describe
                               above.
-    \param [in] flags         Special options for this operation.
+    @param [in] flags         Special options for this operation.
                               This parameter must be set to 0 or by bitwise
                               OR'ing together one or more of the values
-                              described in \ref mdbx_put() description above,
+                              described in @ref mdbx_put() description above,
                               and additionally
-                              (\ref MDBX_CURRENT | \ref MDBX_NOOVERWRITE)
+                              (@ref MDBX_CURRENT | @ref MDBX_NOOVERWRITE)
                               combination for selection particular item from
                               multi-value/duplicates.
 
-    \see \ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
+    @see @ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
 	mdbx_replace :: proc(
-		txn: ^Mdbx_Txn,
-		dbi: Mdbx_DBI,
-		key, new_value, old_value: ^Mdbx_Val,
-		flags: Mdbx_Put_Flags,
-	) -> Mdbx_Error ---
+		txn: ^MDBX_Txn,
+		dbi: MDBX_DBI,
+		key, new_value, old_value: ^MDBX_Val,
+		flags: MDBX_Put_Flags,
+	) -> MDBX_Error ---
 
 	mdbx_replace_ex :: proc(
-		txn: ^Mdbx_Txn,
-		dbi: Mdbx_DBI,
-		key, new_value, old_value: ^Mdbx_Val,
-		flags: Mdbx_Put_Flags,
+		txn: ^MDBX_Txn,
+		dbi: MDBX_DBI,
+		key, new_value, old_value: ^MDBX_Val,
+		flags: MDBX_Put_Flags,
 		preserver: Mdbx_Preserve_Func,
-	) -> Mdbx_Error ---
+	) -> MDBX_Error ---
 
 	/*
 	Delete items from a table.
 
     This function removes key/data pairs from the table.
 
-    \note The data parameter is NOT ignored regardless the table does
+    @note The data parameter is NOT ignored regardless the table does
     support sorted duplicate data items or not. If the data parameter
     is non-NULL only the matching data item will be deleted. Otherwise, if data
     parameter is NULL, any/all value(s) for specified key will be deleted.
 
-    This function will return \ref MDBX_NOTFOUND if the specified key/data
+    This function will return @ref MDBX_NOTFOUND if the specified key/data
     pair is not in the table.
 
-    \see \ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
+    @see @ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
 
-    \param [in] txn   A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] dbi   A table handle returned by \ref mdbx_dbi_open().
-    \param [in] key   The key to delete from the table.
-    \param [in] data  The data to delete.
+    @param [in] txn   A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] dbi   A table handle returned by @ref mdbx_dbi_open().
+    @param [in] key   The key to delete from the table.
+    @param [in] data  The data to delete.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_EACCES   An attempt was made to write
+    @retval MDBX_EACCES   An attempt was made to write
                           in a read-only transaction.
-    \retval MDBX_EINVAL   An invalid parameter was specified.
+    @retval MDBX_EINVAL   An invalid parameter was specified.
     */
 	mdbx_del :: proc(
-		txn: ^Mdbx_Txn,
-		dbi: Mdbx_DBI,
-		key, value: ^Mdbx_Val,
-	) -> Mdbx_Error ---
+		txn: ^MDBX_Txn,
+		dbi: MDBX_DBI,
+		key, value: ^MDBX_Val,
+	) -> MDBX_Error ---
 
 	/*
 	Create a cursor handle but not bind it to transaction nor DBI-handle.
 
     A cursor cannot be used when its table handle is closed. Nor when its
-    transaction has ended, except with \ref mdbx_cursor_bind() and \ref
-    mdbx_cursor_renew(). Also it can be discarded with \ref mdbx_cursor_close().
+    transaction has ended, except with @ref mdbx_cursor_bind() and \ref
+    mdbx_cursor_renew(). Also it can be discarded with @ref mdbx_cursor_close().
 
     A cursor must be closed explicitly always, before or after its transaction
-    ends. It can be reused with \ref mdbx_cursor_bind()
-    or \ref mdbx_cursor_renew() before finally closing it.
+    ends. It can be reused with @ref mdbx_cursor_bind()
+    or @ref mdbx_cursor_renew() before finally closing it.
 
-    \note In contrast to LMDB, the MDBX required that any opened cursors can be
+    @note In contrast to LMDB, the MDBX required that any opened cursors can be
     reused and must be freed explicitly, regardless ones was opened in a
     read-only or write transaction. The REASON for this is eliminates ambiguity
     which helps to avoid errors such as: use-after-free, double-free, i.e.
     memory corruption and segfaults.
 
-    \param [in] context A pointer to application context to be associated with
+    @param [in] context A pointer to application context to be associated with
                         created cursor and could be retrieved by
-                        \ref mdbx_cursor_get_userctx() until cursor closed.
+                        @ref mdbx_cursor_get_userctx() until cursor closed.
 
-    \returns Created cursor handle or NULL in case out of memory.
+    @returns Created cursor handle or NULL in case out of memory.
     */
-	mdbx_cursor_create :: proc(ctx: rawptr) -> ^Mdbx_Cursor ---
+	mdbx_cursor_create :: proc(ctx: rawptr) -> ^MDBX_Cursor ---
 
 	/*
 	Set application information associated with the cursor.
     \ingroup c_cursors
-    \see mdbx_cursor_get_userctx()
+    @see mdbx_cursor_get_userctx()
 
-    \param [in] cursor  An cursor handle returned by \ref mdbx_cursor_create()
-                        or \ref mdbx_cursor_open().
-    \param [in] ctx     An arbitrary pointer for whatever the application needs.
+    @param [in] cursor  An cursor handle returned by @ref mdbx_cursor_create()
+                        or @ref mdbx_cursor_open().
+    @param [in] ctx     An arbitrary pointer for whatever the application needs.
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_cursor_set_userctx :: proc(cursor: ^Mdbx_Cursor, ctx: rawptr) -> Mdbx_Error ---
+	mdbx_cursor_set_userctx :: proc(cursor: ^MDBX_Cursor, ctx: rawptr) -> MDBX_Error ---
 
 	/*
 	Get the application information associated with the MDBX_cursor.
-    \see mdbx_cursor_set_userctx()
+    @see mdbx_cursor_set_userctx()
 
-    \param [in] cursor  An cursor handle returned by \ref mdbx_cursor_create()
-                        or \ref mdbx_cursor_open().
-    \returns The pointer which was passed via the `context` parameter
-             of `mdbx_cursor_create()` or set by \ref mdbx_cursor_set_userctx(),
+    @param [in] cursor  An cursor handle returned by @ref mdbx_cursor_create()
+                        or @ref mdbx_cursor_open().
+    @returns The pointer which was passed via the `context` parameter
+             of `mdbx_cursor_create()` or set by @ref mdbx_cursor_set_userctx(),
              or `NULL` if something wrong.
 	*/
-	mdbx_cursor_get_userctx :: proc(cursor: ^Mdbx_Cursor) -> rawptr ---
+	mdbx_cursor_get_userctx :: proc(cursor: ^MDBX_Cursor) -> rawptr ---
 
 	/*
 	Bind cursor to specified transaction and DBI-handle.
 
     Using of the `mdbx_cursor_bind()` is equivalent to calling
-    \ref mdbx_cursor_renew() but with specifying an arbitrary DBI-handle.
+    @ref mdbx_cursor_renew() but with specifying an arbitrary DBI-handle.
 
     A cursor may be associated with a new transaction, and referencing a new or
     the same table handle as it was created with. This may be done whether the
     previous transaction is live or dead.
 
-    \note In contrast to LMDB, the MDBX required that any opened cursors can be
+    @note In contrast to LMDB, the MDBX required that any opened cursors can be
     reused and must be freed explicitly, regardless ones was opened in a
     read-only or write transaction. The REASON for this is eliminates ambiguity
     which helps to avoid errors such as: use-after-free, double-free, i.e.
     memory corruption and segfaults.
 
-    \param [in] txn      A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] dbi      A table handle returned by \ref mdbx_dbi_open().
-    \param [in] cursor   A cursor handle returned by \ref mdbx_cursor_create().
+    @param [in] txn      A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] dbi      A table handle returned by @ref mdbx_dbi_open().
+    @param [in] cursor   A cursor handle returned by @ref mdbx_cursor_create().
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_EINVAL  An invalid parameter was specified.
+    @retval MDBX_EINVAL  An invalid parameter was specified.
     */
-	mdbx_cursor_bind :: proc(txn: ^Mdbx_Txn, cursor: ^Mdbx_Cursor, dbi: Mdbx_DBI) -> Mdbx_Error ---
+	mdbx_cursor_bind :: proc(txn: ^MDBX_Txn, cursor: ^MDBX_Cursor, dbi: MDBX_DBI) -> MDBX_Error ---
 
 	/*
 	Unbind cursor from a transaction.
@@ -2017,22 +2056,22 @@ foreign lib {
     the original DBI-handle internally. Thus it could be renewed with any running
     transaction or closed.
 
-    \see mdbx_cursor_renew()
-    \see mdbx_cursor_bind()
-    \see mdbx_cursor_close()
-    \see mdbx_cursor_reset()
+    @see mdbx_cursor_renew()
+    @see mdbx_cursor_bind()
+    @see mdbx_cursor_close()
+    @see mdbx_cursor_reset()
 
-    \note In contrast to LMDB, the MDBX required that any opened cursors can be
+    @note In contrast to LMDB, the MDBX required that any opened cursors can be
     reused and must be freed explicitly, regardless ones was opened in a
     read-only or write transaction. The REASON for this is eliminates ambiguity
     which helps to avoid errors such as: use-after-free, double-free, i.e.
     memory corruption and segfaults.
 
-    \param [in] cursor   A cursor handle returned by \ref mdbx_cursor_open().
+    @param [in] cursor   A cursor handle returned by @ref mdbx_cursor_open().
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_cursor_unbind :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_unbind :: proc(cursor: ^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	Resets the cursor state.
@@ -2042,44 +2081,44 @@ foreign lib {
     is set to a position independent of the current one. This allows the application
     to prevent further operations without first positioning the cursor.
 
-    \param [in] cursor   Pointer to cursor.
+    @param [in] cursor   Pointer to cursor.
 
-    \returns The result of the scanning operation, or an error code.
+    @returns The result of the scanning operation, or an error code.
     */
-	mdbx_cursor_reset :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_reset :: proc(cursor: ^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	Create a cursor handle for the specified transaction and DBI handle.
 
     Using of the `mdbx_cursor_open()` is equivalent to calling
-    \ref mdbx_cursor_create() and then \ref mdbx_cursor_bind() functions.
+    @ref mdbx_cursor_create() and then @ref mdbx_cursor_bind() functions.
 
     A cursor cannot be used when its table handle is closed. Nor when its
-    transaction has ended, except with \ref mdbx_cursor_bind() and \ref
-    mdbx_cursor_renew(). Also it can be discarded with \ref mdbx_cursor_close().
+    transaction has ended, except with @ref mdbx_cursor_bind() and \ref
+    mdbx_cursor_renew(). Also it can be discarded with @ref mdbx_cursor_close().
 
     A cursor must be closed explicitly always, before or after its transaction
-    ends. It can be reused with \ref mdbx_cursor_bind()
-    or \ref mdbx_cursor_renew() before finally closing it.
+    ends. It can be reused with @ref mdbx_cursor_bind()
+    or @ref mdbx_cursor_renew() before finally closing it.
 
-    \note In contrast to LMDB, the MDBX required that any opened cursors can be
+    @note In contrast to LMDB, the MDBX required that any opened cursors can be
     reused and must be freed explicitly, regardless ones was opened in a
     read-only or write transaction. The REASON for this is eliminates ambiguity
     which helps to avoid errors such as: use-after-free, double-free, i.e.
     memory corruption and segfaults.
 
-    \param [in] txn      A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] dbi      A table handle returned by \ref mdbx_dbi_open().
-    \param [out] cursor  Address where the new \ref MDBX_cursor handle will be
+    @param [in] txn      A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] dbi      A table handle returned by @ref mdbx_dbi_open().
+    @param [out] cursor  Address where the new @ref MDBX_cursor handle will be
                          stored.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_EINVAL  An invalid parameter was specified.
+    @retval MDBX_EINVAL  An invalid parameter was specified.
     */
-	mdbx_cursor_open :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, cursor: ^^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_open :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, cursor: ^^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	Close a cursor handle.
@@ -2087,16 +2126,16 @@ foreign lib {
     The cursor handle will be freed and must not be used again after this call,
     but its transaction may still be live.
 
-    \note In contrast to LMDB, the MDBX required that any opened cursors can be
+    @note In contrast to LMDB, the MDBX required that any opened cursors can be
     reused and must be freed explicitly, regardless ones was opened in a
     read-only or write transaction. The REASON for this is eliminates ambiguity
     which helps to avoid errors such as: use-after-free, double-free, i.e.
     memory corruption and segfaults.
 
-    \param [in] cursor  A cursor handle returned by \ref mdbx_cursor_open()
-                        or \ref mdbx_cursor_create().
+    @param [in] cursor  A cursor handle returned by @ref mdbx_cursor_open()
+                        or @ref mdbx_cursor_create().
     */
-	mdbx_cursor_close :: proc(cursor: ^Mdbx_Cursor) ---
+	mdbx_cursor_close :: proc(cursor: ^MDBX_Cursor) ---
 
 	/*
 	Unbind or closes all cursors of a given transaction.
@@ -2104,21 +2143,21 @@ foreign lib {
     Unbinds either closes all cursors associated (opened or renewed) with
     a given transaction in a bulk with minimal overhead.
 
-    \see mdbx_cursor_unbind()
-    \see mdbx_cursor_close()
+    @see mdbx_cursor_unbind()
+    @see mdbx_cursor_close()
 
-    \param [in] txn      A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] unbind   If non-zero, unbinds cursors and leaves ones reusable.
+    @param [in] txn      A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] unbind   If non-zero, unbinds cursors and leaves ones reusable.
                          Otherwise close and dispose cursors.
 
-    \returns A negative error value on failure or the number of closed cursors
+    @returns A negative error value on failure or the number of closed cursors
              on success, some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_BAD_TXN          Given transaction is invalid or has
+    @retval MDBX_BAD_TXN          Given transaction is invalid or has
                                   a child/nested transaction transaction.
   	*/
-	mdbx_txn_release_all_cursors :: proc(txn: ^Mdbx_Txn, unbind: bool) -> Mdbx_Error ---
+	mdbx_txn_release_all_cursors :: proc(txn: ^MDBX_Txn, unbind: bool) -> MDBX_Error ---
 
 	/*
 	Renew a cursor handle for use within the given transaction.
@@ -2127,52 +2166,52 @@ foreign lib {
     transaction is running or finished.
 
     Using of the `mdbx_cursor_renew()` is equivalent to calling
-    \ref mdbx_cursor_bind() with the DBI-handle that previously
+    @ref mdbx_cursor_bind() with the DBI-handle that previously
     the cursor was used with.
 
-    \note In contrast to LMDB, the MDBX allow any cursor to be re-used by using
-    \ref mdbx_cursor_renew(), to avoid unnecessary malloc/free overhead until it
-    freed by \ref mdbx_cursor_close().
+    @note In contrast to LMDB, the MDBX allow any cursor to be re-used by using
+    @ref mdbx_cursor_renew(), to avoid unnecessary malloc/free overhead until it
+    freed by @ref mdbx_cursor_close().
 
-    \param [in] txn      A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] cursor   A cursor handle returned by \ref mdbx_cursor_open().
+    @param [in] txn      A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] cursor   A cursor handle returned by @ref mdbx_cursor_open().
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_EINVAL  An invalid parameter was specified.
-    \retval MDBX_BAD_DBI The cursor was not bound to a DBI-handle
+    @retval MDBX_EINVAL  An invalid parameter was specified.
+    @retval MDBX_BAD_DBI The cursor was not bound to a DBI-handle
                          or such a handle became invalid.
 	*/
-	mdbx_cursor_renew :: proc(txn: ^Mdbx_Txn, cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_renew :: proc(txn: ^MDBX_Txn, cursor: ^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	Return the cursor's transaction handle.
 
-    \param [in] cursor A cursor handle returned by \ref mdbx_cursor_open().
+    @param [in] cursor A cursor handle returned by @ref mdbx_cursor_open().
     */
-	mdbx_cursor_txn :: proc(cursor: ^Mdbx_Cursor) -> ^Mdbx_Txn ---
+	mdbx_cursor_txn :: proc(cursor: ^MDBX_Cursor) -> ^MDBX_Txn ---
 
 	/*
 	Return the cursor's table handle.
 
-    \param [in] cursor  A cursor handle returned by \ref mdbx_cursor_open().
+    @param [in] cursor  A cursor handle returned by @ref mdbx_cursor_open().
     */
-	mdbx_cursor_dbi :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_DBI ---
+	mdbx_cursor_dbi :: proc(cursor: ^MDBX_Cursor) -> MDBX_DBI ---
 
 	/*
 	Copy cursor position and state.
 
-    \param [in] src       A source cursor handle returned
-    by \ref mdbx_cursor_create() or \ref mdbx_cursor_open().
+    @param [in] src       A source cursor handle returned
+    by @ref mdbx_cursor_create() or @ref mdbx_cursor_open().
 
-    \param [in,out] dest  A destination cursor handle returned
-    by \ref mdbx_cursor_create() or \ref mdbx_cursor_open().
+    @param [in,out] dest  A destination cursor handle returned
+    by @ref mdbx_cursor_create() or @ref mdbx_cursor_open().
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_cursor_copy :: proc(src, dest: ^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_copy :: proc(src, dest: ^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	Compares the position of cursors.
@@ -2184,70 +2223,70 @@ foreign lib {
     or one of them is not initialized, then the result of the comparison is undefined
     (the behavior may change in future versions).
 
-    \param [in] left             Left cursor to compare positions.
-    \param [in] right            Right cursor to compare positions.
-    \param [in] ignore_multival  A Boolean flag that affects the result only when comparing
+    @param [in] left             Left cursor to compare positions.
+    @param [in] right            Right cursor to compare positions.
+    @param [in] ignore_multival  A Boolean flag that affects the result only when comparing
     							 cursors for multi-value tables, i.e. with the
-								 \ref MDBX_DUPSORT flag. If `true`, cursor positions are
+								 @ref MDBX_DUPSORT flag. If `true`, cursor positions are
 								 compared only by keys, without taking into account
 								 positioning among multi-values.
 								 Otherwise, if `false`, if the positions by keys match, the
 								 positions by multi-values are also compared.
 
-    \retval A signed value in the semantics of the `<=>` operator (less than zero, zero,
+    @retval A signed value in the semantics of the `<=>` operator (less than zero, zero,
     	    or greater than zero) as a result of comparing cursor positions.
     */
-	mdbx_cursor_compare :: proc(left, right: ^Mdbx_Cursor, ignore_multival: bool) -> i32 ---
+	mdbx_cursor_compare :: proc(left, right: ^MDBX_Cursor, ignore_multival: bool) -> i32 ---
 
 	/*
 	Retrieve by cursor.
 
     This function retrieves key/data pairs from the table. The address and
     length of the key are returned in the object to which key refers (except
-    for the case of the \ref MDBX_SET option, in which the key object is
+    for the case of the @ref MDBX_SET option, in which the key object is
     unchanged), and the address and length of the data are returned in the object
     to which data refers.
-    \see mdbx_get()
+    @see mdbx_get()
 
-    \note The memory pointed to by the returned values is owned by the
+    @note The memory pointed to by the returned values is owned by the
     database. The caller MUST not dispose of the memory, and MUST not modify it
     in any way regardless in a read-only nor read-write transactions!
-    For case a database opened without the \ref MDBX_WRITEMAP modification
+    For case a database opened without the @ref MDBX_WRITEMAP modification
     attempts likely will cause a `SIGSEGV`. However, when a database opened with
-    the \ref MDBX_WRITEMAP or in case values returned inside read-write
+    the @ref MDBX_WRITEMAP or in case values returned inside read-write
     transaction are located on a "dirty" (modified and pending to commit) pages,
     such modification will silently accepted and likely will lead to DB and/or
     data corruption.
 
-    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
-    \param [in,out] key   The key for a retrieved item.
-    \param [in,out] data  The data of a retrieved item.
-    \param [in] op        A cursor operation \ref MDBX_cursor_op.
+    @param [in] cursor    A cursor handle returned by @ref mdbx_cursor_open().
+    @param [in,out] key   The key for a retrieved item.
+    @param [in,out] data  The data of a retrieved item.
+    @param [in] op        A cursor operation @ref MDBX_cursor_op.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_NOTFOUND  No matching key found.
-    \retval MDBX_EINVAL    An invalid parameter was specified.
+    @retval MDBX_NOTFOUND  No matching key found.
+    @retval MDBX_EINVAL    An invalid parameter was specified.
     */
-	mdbx_cursor_get :: proc(cursor: ^Mdbx_Cursor, key, value: ^Mdbx_Val, op: Mdbx_Cursor_Op) -> Mdbx_Error ---
+	mdbx_cursor_get :: proc(cursor: ^MDBX_Cursor, key, value: ^MDBX_Val, op: MDBX_Cursor_Op) -> MDBX_Error ---
 
 	/*
 	A utility function for use in utilities.
 
     When using user-defined comparison functions (aka custom comparison functions),
     checking the order of keys may lead to incorrect results and return the error
-    \ref MDBX_CORRUPTED.
+    @ref MDBX_CORRUPTED.
 
     This function disables the control of the order of keys on pages when reading
     database pages for this cursor, and thus allows reading data in the absence/unavailability
     of the used comparison functions.
-    \see avoid_custom_comparators
+    @see avoid_custom_comparators
 
-    \returns The result of the scanning operation, or an error code.
+    @returns The result of the scanning operation, or an error code.
     */
-	mdbx_cursor_ignord :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_ignord :: proc(cursor: ^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	Scans a table using the passed predicate, reducing the associated overhead.
@@ -2264,58 +2303,58 @@ foreign lib {
     `turn_op` operation, until one of four events occurs:
      - end of data reached;
      - an error will occur when positioning the cursor;
-     - the evaluation function will return \ref MDBX_RESULT_TRUE, signaling the
+     - the evaluation function will return @ref MDBX_RESULT_TRUE, signaling the
        need to stop further scanning;
      - the evaluation function will return a value different from
-       \ref MDBX_RESULT_FALSE and \ref MDBX_RESULT_TRUE signaling an error.
+       @ref MDBX_RESULT_FALSE and @ref MDBX_RESULT_TRUE signaling an error.
 
-    \param [in,out] cursor   A cursor for performing a scan operation,
+    @param [in,out] cursor   A cursor for performing a scan operation,
 							 associated with an active transaction and a DBI
 							 handle to the table. For example, a cursor created
-							 via \ref mdbx_cursor_open().
-    \param [in] predicate    Predictive function for evaluating iterable key-value
-    						 pairs, see \ref MDBX_predicate_func for more details.
-    \param [in,out] context  A pointer to a context with the information needed for
+							 via @ref mdbx_cursor_open().
+    @param [in] predicate    Predictive function for evaluating iterable key-value
+    						 pairs, see @ref MDBX_predicate_func for more details.
+    @param [in,out] context  A pointer to a context with the information needed for
     						 the assessment, which is entirely prepared and controlled
     						 by you.
-    \param [in] start_op     Start cursor positioning operation, for more details see
-    						 \ref MDBX_cursor_op. To scan without changing the initial
-    						 cursor position, use \ref MDBX_GET_CURRENT. Valid values are
-    						 \ref MDBX_FIRST, \ref MDBX_FIRST_DUP, \ref MDBX_LAST,
-    						 \ref MDBX_LAST_DUP, \ref MDBX_GET_CURRENT,
-    						 and \ref MDBX_GET_MULTIPLE.
-    \param [in] turn_op      The operation of positioning the cursor to move to the next
-    						 element. Valid values are \ref MDBX_NEXT, \ref MDBX_NEXT_DUP,
-    						 \ref MDBX_NEXT_NODUP, \ref MDBX_PREV, \ref MDBX_PREV_DUP,
-    						 \ref MDBX_PREV_NODUP, and \ref MDBX_NEXT_MULTIPLE and
-    						 \ref MDBX_PREV_MULTIPLE.
-    \param [in,out] arg      An additional argument to the predicate function, which is
+    @param [in] start_op     Start cursor positioning operation, for more details see
+    						 @ref MDBX_cursor_op. To scan without changing the initial
+    						 cursor position, use @ref MDBX_GET_CURRENT. Valid values are
+    						 @ref MDBX_FIRST, @ref MDBX_FIRST_DUP, @ref MDBX_LAST,
+    						 @ref MDBX_LAST_DUP, @ref MDBX_GET_CURRENT,
+    						 and @ref MDBX_GET_MULTIPLE.
+    @param [in] turn_op      The operation of positioning the cursor to move to the next
+    						 element. Valid values are @ref MDBX_NEXT, @ref MDBX_NEXT_DUP,
+    						 @ref MDBX_NEXT_NODUP, @ref MDBX_PREV, @ref MDBX_PREV_DUP,
+    						 @ref MDBX_PREV_NODUP, and @ref MDBX_NEXT_MULTIPLE and
+    						 @ref MDBX_PREV_MULTIPLE.
+    @param [in,out] arg      An additional argument to the predicate function, which is
     						 entirely prepared and controlled by you.
 
-    \note When using \ref MDBX_GET_MULTIPLE, \ref MDBX_NEXT_MULTIPLE or
-    \ref MDBX_PREV_MULTIPLE, carefully consider the batch specifics of passing values
+    @note When using @ref MDBX_GET_MULTIPLE, @ref MDBX_NEXT_MULTIPLE or
+    @ref MDBX_PREV_MULTIPLE, carefully consider the batch specifics of passing values
     through the parameters of the predictive function.
 
-    \see MDBX_predicate_func
-    \see mdbx_cursor_scan_from
+    @see MDBX_predicate_func
+    @see mdbx_cursor_scan_from
 
-    \returns The result of the scanning operation, or an error code.
+    @returns The result of the scanning operation, or an error code.
 
-    \retval MDBX_RESULT_TRUE if a key-value pair is found for which the predictive
-    		function returned \ref MDBX_RESULT_TRUE.
-    \retval MDBX_RESULT_FALSE if a matching key-value pair is NOT found, the search
+    @retval MDBX_RESULT_TRUE if a key-value pair is found for which the predictive
+    		function returned @ref MDBX_RESULT_TRUE.
+    @retval MDBX_RESULT_FALSE if a matching key-value pair is NOT found, the search
     		has reached the end of the data, or there is no data to search.
-    \retval ELSE any value other than \ref MDBX_RESULT_TRUE and \ref MDBX_RESULT_FALSE
+    @retval ELSE any value other than @ref MDBX_RESULT_TRUE and @ref MDBX_RESULT_FALSE
     		is a course positioning error code, or a user-defined search stop code
 			or error condition.
     */
 	mdbx_cursor_scan :: proc(
-		cursor: ^Mdbx_Cursor,
-		predicate: Mdbx_Predicate_Func,
+		cursor: ^MDBX_Cursor,
+		predicate: MDBX_Predicate_Func,
 		ctx: rawptr,
-		start_op, turn_op: Mdbx_Cursor_Op,
+		start_op, turn_op: MDBX_Cursor_Op,
 		arg: rawptr,
-	) -> Mdbx_Error ---
+	) -> MDBX_Error ---
 
 	/*
 	Scans a table using the passed predicate, starting with the passed key-value pair,
@@ -2330,132 +2369,132 @@ foreign lib {
 	of four events occurs:
      - end of data reached;
      - an error will occur when positioning the cursor;
-     - the evaluation function will return \ref MDBX_RESULT_TRUE, signaling
+     - the evaluation function will return @ref MDBX_RESULT_TRUE, signaling
        the need to stop further scanning;
      - the evaluation function will return a value different from
-       \ref MDBX_RESULT_FALSE and \ref MDBX_RESULT_TRUE signaling an error.
+       @ref MDBX_RESULT_FALSE and @ref MDBX_RESULT_TRUE signaling an error.
 
-    \param [in,out] cursor    A cursor for performing a scan operation,
+    @param [in,out] cursor    A cursor for performing a scan operation,
     						  associated with an active transaction and a
     						  DBI handle to the table. For example, a cursor
-    						  created via \ref mdbx_cursor_open().
-    \param [in] predicate     Predictive function for evaluating iterable
+    						  created via @ref mdbx_cursor_open().
+    @param [in] predicate     Predictive function for evaluating iterable
     						  key-value pairs, For more details see
-    						  \ref MDBX_predicate_func.
-    \param [in,out] context   A pointer to a context with the information needed
+    						  @ref MDBX_predicate_func.
+    @param [in,out] context   A pointer to a context with the information needed
     						  for the assessment, which is entirely prepared and
     						  controlled by you.
-    \param [in] from_op       Operation of positioning the cursor to the initial
+    @param [in] from_op       Operation of positioning the cursor to the initial
 							  position, for more details see
-                              \ref MDBX_cursor_op.
-                              Acceptable values \ref MDBX_GET_BOTH,
-                              \ref MDBX_GET_BOTH_RANGE, \ref MDBX_SET_KEY,
-                              \ref MDBX_SET_LOWERBOUND, \ref MDBX_SET_UPPERBOUND,
-                              \ref MDBX_TO_KEY_LESSER_THAN,
-                              \ref MDBX_TO_KEY_LESSER_OR_EQUAL,
-                              \ref MDBX_TO_KEY_EQUAL,
-                              \ref MDBX_TO_KEY_GREATER_OR_EQUAL,
-                              \ref MDBX_TO_KEY_GREATER_THAN,
-                              \ref MDBX_TO_EXACT_KEY_VALUE_LESSER_THAN,
-                              \ref MDBX_TO_EXACT_KEY_VALUE_LESSER_OR_EQUAL,
-                              \ref MDBX_TO_EXACT_KEY_VALUE_EQUAL,
-                              \ref MDBX_TO_EXACT_KEY_VALUE_GREATER_OR_EQUAL,
-                              \ref MDBX_TO_EXACT_KEY_VALUE_GREATER_THAN,
-                              \ref MDBX_TO_PAIR_LESSER_THAN,
-                              \ref MDBX_TO_PAIR_LESSER_OR_EQUAL,
-                              \ref MDBX_TO_PAIR_EQUAL,
-                              \ref MDBX_TO_PAIR_GREATER_OR_EQUAL,
-                              \ref MDBX_TO_PAIR_GREATER_THAN,
-                              and also \ref MDBX_GET_MULTIPLE.
-    \param [in,out] from_key  A pointer to a key used for both initial positioning
+                              @ref MDBX_cursor_op.
+                              Acceptable values @ref MDBX_GET_BOTH,
+                              @ref MDBX_GET_BOTH_RANGE, @ref MDBX_SET_KEY,
+                              @ref MDBX_SET_LOWERBOUND, @ref MDBX_SET_UPPERBOUND,
+                              @ref MDBX_TO_KEY_LESSER_THAN,
+                              @ref MDBX_TO_KEY_LESSER_OR_EQUAL,
+                              @ref MDBX_TO_KEY_EQUAL,
+                              @ref MDBX_TO_KEY_GREATER_OR_EQUAL,
+                              @ref MDBX_TO_KEY_GREATER_THAN,
+                              @ref MDBX_TO_EXACT_KEY_VALUE_LESSER_THAN,
+                              @ref MDBX_TO_EXACT_KEY_VALUE_LESSER_OR_EQUAL,
+                              @ref MDBX_TO_EXACT_KEY_VALUE_EQUAL,
+                              @ref MDBX_TO_EXACT_KEY_VALUE_GREATER_OR_EQUAL,
+                              @ref MDBX_TO_EXACT_KEY_VALUE_GREATER_THAN,
+                              @ref MDBX_TO_PAIR_LESSER_THAN,
+                              @ref MDBX_TO_PAIR_LESSER_OR_EQUAL,
+                              @ref MDBX_TO_PAIR_EQUAL,
+                              @ref MDBX_TO_PAIR_GREATER_OR_EQUAL,
+                              @ref MDBX_TO_PAIR_GREATER_THAN,
+                              and also @ref MDBX_GET_MULTIPLE.
+    @param [in,out] from_key  A pointer to a key used for both initial positioning
     						  and subsequent iterations of the transition.
-    \param [in,out] from_value Pointer to a value used for both the initial positioning
+    @param [in,out] from_value Pointer to a value used for both the initial positioning
     						   and subsequent iterations of the transition.
-    \param [in] turn_op       The operation of positioning the cursor to move to the next
+    @param [in] turn_op       The operation of positioning the cursor to move to the next
     						  element. Valid values
-                              \ref MDBX_NEXT, \ref MDBX_NEXT_DUP,
-                              \ref MDBX_NEXT_NODUP, \ref MDBX_PREV,
-                              \ref MDBX_PREV_DUP, \ref MDBX_PREV_NODUP, and also
-                              \ref MDBX_NEXT_MULTIPLE и \ref MDBX_PREV_MULTIPLE.
-    \param [in,out] arg       An additional argument to the predicate function,
+                              @ref MDBX_NEXT, @ref MDBX_NEXT_DUP,
+                              @ref MDBX_NEXT_NODUP, @ref MDBX_PREV,
+                              @ref MDBX_PREV_DUP, @ref MDBX_PREV_NODUP, and also
+                              @ref MDBX_NEXT_MULTIPLE и @ref MDBX_PREV_MULTIPLE.
+    @param [in,out] arg       An additional argument to the predicate function,
 							  which is entirely prepared and controlled by you.
 
-    \note When using \ref MDBX_GET_MULTIPLE, \ref MDBX_NEXT_MULTIPLE
-		  or \ref MDBX_PREV_MULTIPLE, carefully consider the batch specifics
+    @note When using @ref MDBX_GET_MULTIPLE, @ref MDBX_NEXT_MULTIPLE
+		  or @ref MDBX_PREV_MULTIPLE, carefully consider the batch specifics
 		  of passing values ​​through the parameters of the predictive function.
 
-    \see MDBX_predicate_func
-    \see mdbx_cursor_scan
+    @see MDBX_predicate_func
+    @see mdbx_cursor_scan
 
-    \returns The result of the scanning operation, or an error code.
+    @returns The result of the scanning operation, or an error code.
 
-    \retval MDBX_RESULT_TRUE if a key-value pair is found for which the predictive
-    		function returned \ref MDBX_RESULT_TRUE.
-    \retval MDBX_RESULT_FALSE if a matching key-value pair is NOT found, the search
+    @retval MDBX_RESULT_TRUE if a key-value pair is found for which the predictive
+    		function returned @ref MDBX_RESULT_TRUE.
+    @retval MDBX_RESULT_FALSE if a matching key-value pair is NOT found, the search
     		has reached the end of the data, or there is no data to search.
-    \retval ELSE any value other than \ref MDBX_RESULT_TRUE and \ref MDBX_RESULT_FALSE
+    @retval ELSE any value other than @ref MDBX_RESULT_TRUE and @ref MDBX_RESULT_FALSE
     		is a course positioning error code, or a user-defined search stop code
 			or error condition.
     */
 	mdbx_cursor_scan_from :: proc(
-		cursor: ^Mdbx_Cursor,
-		predicate: Mdbx_Predicate_Func,
+		cursor: ^MDBX_Cursor,
+		predicate: MDBX_Predicate_Func,
 		ctx: rawptr,
-		from_op: Mdbx_Cursor_Op,
-		from_key, from_value: ^Mdbx_Val,
-		turn_op: Mdbx_Cursor_Op,
+		from_op: MDBX_Cursor_Op,
+		from_key, from_value: ^MDBX_Val,
+		turn_op: MDBX_Cursor_Op,
 		arg: rawptr,
-	) -> Mdbx_Error ---
+	) -> MDBX_Error ---
 
 	/*
 	Retrieve multiple non-dupsort key/value pairs by cursor.
 
     This function retrieves multiple key/data pairs from the table without
-    \ref MDBX_DUPSORT option. For `MDBX_DUPSORT` tables please
-    use \ref MDBX_GET_MULTIPLE and \ref MDBX_NEXT_MULTIPLE.
+    @ref MDBX_DUPSORT option. For `MDBX_DUPSORT` tables please
+    use @ref MDBX_GET_MULTIPLE and @ref MDBX_NEXT_MULTIPLE.
 
     The number of key and value items is returned in the `size_t count`
     refers. The addresses and lengths of the keys and values are returned in the
     array to which `pairs` refers.
-    \see mdbx_cursor_get()
+    @see mdbx_cursor_get()
 
-    \note The memory pointed to by the returned values is owned by the
+    @note The memory pointed to by the returned values is owned by the
     database. The caller MUST not dispose of the memory, and MUST not modify it
     in any way regardless in a read-only nor read-write transactions!
-    For case a database opened without the \ref MDBX_WRITEMAP modification
+    For case a database opened without the @ref MDBX_WRITEMAP modification
     attempts likely will cause a `SIGSEGV`. However, when a database opened with
-    the \ref MDBX_WRITEMAP or in case values returned inside read-write
+    the @ref MDBX_WRITEMAP or in case values returned inside read-write
     transaction are located on a "dirty" (modified and pending to commit) pages,
     such modification will silently accepted and likely will lead to DB and/or
     data corruption.
 
-    \param [in] cursor     A cursor handle returned by \ref mdbx_cursor_open().
-    \param [out] count     The number of key and value item returned, on success
+    @param [in] cursor     A cursor handle returned by @ref mdbx_cursor_open().
+    @param [out] count     The number of key and value item returned, on success
                            it always be the even because the key-value
                            pairs are returned.
-    \param [in,out] pairs  A pointer to the array of key value pairs.
-    \param [in] limit      The size of pairs buffer as the number of items,
+    @param [in,out] pairs  A pointer to the array of key value pairs.
+    @param [in] limit      The size of pairs buffer as the number of items,
                            but not a pairs.
-    \param [in] op         A cursor operation \ref MDBX_cursor_op (only
-                           \ref MDBX_FIRST and \ref MDBX_NEXT are supported).
+    @param [in] op         A cursor operation @ref MDBX_cursor_op (only
+                           @ref MDBX_FIRST and @ref MDBX_NEXT are supported).
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_NOTFOUND         No any key-value pairs are available.
-    \retval MDBX_ENODATA          The cursor is already at the end of data.
-    \retval MDBX_RESULT_TRUE      The returned chunk is the last one,
+    @retval MDBX_NOTFOUND         No any key-value pairs are available.
+    @retval MDBX_ENODATA          The cursor is already at the end of data.
+    @retval MDBX_RESULT_TRUE      The returned chunk is the last one,
                                   and there are no pairs left.
-    \retval MDBX_EINVAL           An invalid parameter was specified.
+    @retval MDBX_EINVAL           An invalid parameter was specified.
     */
 	mdbx_cursor_get_batch :: proc(
-		cursor: ^Mdbx_Cursor,
+		cursor: ^MDBX_Cursor,
 		count: ^c.size_t,
-		pairs: ^Mdbx_Val,
+		pairs: ^MDBX_Val,
 		limit: c.size_t,
-		op: Mdbx_Cursor_Op,
-	) -> Mdbx_Error ---
+		op: MDBX_Cursor_Op,
+	) -> MDBX_Error ---
 
 	/*
 	Store by cursor.
@@ -2463,209 +2502,209 @@ foreign lib {
     This function stores key/data pairs into the table. The cursor is
     positioned at the new item, or on failure usually near it.
 
-    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
-    \param [in] key       The key operated on.
-    \param [in,out] data  The data operated on.
-    \param [in] flags     Options for this operation. This parameter
+    @param [in] cursor    A cursor handle returned by @ref mdbx_cursor_open().
+    @param [in] key       The key operated on.
+    @param [in,out] data  The data operated on.
+    @param [in] flags     Options for this operation. This parameter
                           must be set to 0 or by bitwise OR'ing together
                           one or more of the values described here:
-     - \ref MDBX_CURRENT
+     - @ref MDBX_CURRENT
          Replace the item at the current cursor position. The key parameter
          must still be provided, and must match it, otherwise the function
-         return \ref MDBX_EKEYMISMATCH. With combination the
-         \ref MDBX_ALLDUPS will replace all multi-values.
+         return @ref MDBX_EKEYMISMATCH. With combination the
+         @ref MDBX_ALLDUPS will replace all multi-values.
 
-         \note MDBX allows (unlike LMDB) you to change the size of the data and
+         @note MDBX allows (unlike LMDB) you to change the size of the data and
          automatically handles reordering for sorted duplicates
-         (see \ref MDBX_DUPSORT).
+         (see @ref MDBX_DUPSORT).
 
-     - \ref MDBX_NODUPDATA
+     - @ref MDBX_NODUPDATA
          Enter the new key-value pair only if it does not already appear in the
          table. This flag may only be specified if the table was opened
-         with \ref MDBX_DUPSORT. The function will return \ref MDBX_KEYEXIST
+         with @ref MDBX_DUPSORT. The function will return @ref MDBX_KEYEXIST
          if the key/data pair already appears in the table.
 
-     - \ref MDBX_NOOVERWRITE
+     - @ref MDBX_NOOVERWRITE
          Enter the new key/data pair only if the key does not already appear
-         in the table. The function will return \ref MDBX_KEYEXIST if the key
+         in the table. The function will return @ref MDBX_KEYEXIST if the key
          already appears in the table, even if the table supports
-         duplicates (\ref MDBX_DUPSORT).
+         duplicates (@ref MDBX_DUPSORT).
 
-     - \ref MDBX_RESERVE
+     - @ref MDBX_RESERVE
          Reserve space for data of the given size, but don't copy the given
          data. Instead, return a pointer to the reserved space, which the
          caller can fill in later - before the next update operation or the
          transaction ends. This saves an extra memcpy if the data is being
          generated later. This flag must not be specified if the table
-         was opened with \ref MDBX_DUPSORT.
+         was opened with @ref MDBX_DUPSORT.
 
-     - \ref MDBX_APPEND
+     - @ref MDBX_APPEND
          Append the given key/data pair to the end of the table. No key
          comparisons are performed. This option allows fast bulk loading when
          keys are already known to be in the correct order. Loading unsorted
-         keys with this flag will cause a \ref MDBX_KEYEXIST error.
+         keys with this flag will cause a @ref MDBX_KEYEXIST error.
 
-     - \ref MDBX_APPENDDUP
+     - @ref MDBX_APPENDDUP
          As above, but for sorted dup data.
 
-     - \ref MDBX_MULTIPLE
+     - @ref MDBX_MULTIPLE
          Store multiple contiguous data elements in a single request. This flag
          may only be specified if the table was opened with
-         \ref MDBX_DUPFIXED. With combination the \ref MDBX_ALLDUPS
+         @ref MDBX_DUPFIXED. With combination the @ref MDBX_ALLDUPS
          will replace all multi-values.
-         The data argument must be an array of two \ref MDBX_val. The `iov_len`
-         of the first \ref MDBX_val must be the size of a single data element.
-         The `iov_base` of the first \ref MDBX_val must point to the beginning
+         The data argument must be an array of two @ref MDBX_val. The `iov_len`
+         of the first @ref MDBX_val must be the size of a single data element.
+         The `iov_base` of the first @ref MDBX_val must point to the beginning
          of the array of contiguous data elements which must be properly aligned
-         in case of table with \ref MDBX_INTEGERDUP flag.
-         The `iov_len` of the second \ref MDBX_val must be the count of the
+         in case of table with @ref MDBX_INTEGERDUP flag.
+         The `iov_len` of the second @ref MDBX_val must be the count of the
          number of data elements to store. On return this field will be set to
          the count of the number of elements actually written. The `iov_base` of
-         the second \ref MDBX_val is unused.
+         the second @ref MDBX_val is unused.
 
-    \see \ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
+    @see @ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_EKEYMISMATCH  The given key value is mismatched to the current
+    @retval MDBX_EKEYMISMATCH  The given key value is mismatched to the current
                                cursor position
-    \retval MDBX_MAP_FULL      The database is full,
-                                see \ref mdbx_env_set_mapsize().
-    \retval MDBX_TXN_FULL      The transaction has too many dirty pages.
-    \retval MDBX_EACCES        An attempt was made to write in a read-only
+    @retval MDBX_MAP_FULL      The database is full,
+                                see @ref mdbx_env_set_mapsize().
+    @retval MDBX_TXN_FULL      The transaction has too many dirty pages.
+    @retval MDBX_EACCES        An attempt was made to write in a read-only
                                transaction.
-    \retval MDBX_EINVAL        An invalid parameter was specified.
+    @retval MDBX_EINVAL        An invalid parameter was specified.
     */
 	mdbx_cursor_put :: proc(
-		cursor: ^Mdbx_Cursor,
-		key, value: ^Mdbx_Val,
-		flags: Mdbx_Put_Flags,
-	) -> Mdbx_Error ---
+		cursor: ^MDBX_Cursor,
+		key, value: ^MDBX_Val,
+		flags: MDBX_Put_Flags,
+	) -> MDBX_Error ---
 
 	/*
 	Delete current key/data pair.
 
     This function deletes the key/data pair to which the cursor refers. This
-    does not invalidate the cursor, so operations such as \ref MDBX_NEXT can
-    still be used on it. Both \ref MDBX_NEXT and \ref MDBX_GET_CURRENT will
+    does not invalidate the cursor, so operations such as @ref MDBX_NEXT can
+    still be used on it. Both @ref MDBX_NEXT and @ref MDBX_GET_CURRENT will
     return the same record after this operation.
 
-    \param [in] cursor  A cursor handle returned by mdbx_cursor_open().
-    \param [in] flags   Options for this operation. This parameter must be set
+    @param [in] cursor  A cursor handle returned by mdbx_cursor_open().
+    @param [in] flags   Options for this operation. This parameter must be set
     to one of the values described here.
 
-     - \ref MDBX_CURRENT Delete only single entry at current cursor position.
-     - \ref MDBX_ALLDUPS
-       or \ref MDBX_NODUPDATA (supported for compatibility)
+     - @ref MDBX_CURRENT Delete only single entry at current cursor position.
+     - @ref MDBX_ALLDUPS
+       or @ref MDBX_NODUPDATA (supported for compatibility)
          Delete all of the data items for the current key. This flag has effect
-         only for table(s) was created with \ref MDBX_DUPSORT.
+         only for table(s) was created with @ref MDBX_DUPSORT.
 
-    \see \ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
+    @see @ref c_crud_hints "Quick reference for Insert/Update/Delete operations"
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_MAP_FULL      The database is full,
-                               see \ref mdbx_env_set_mapsize().
-    \retval MDBX_TXN_FULL      The transaction has too many dirty pages.
-    \retval MDBX_EACCES        An attempt was made to write in a read-only
+    @retval MDBX_MAP_FULL      The database is full,
+                               see @ref mdbx_env_set_mapsize().
+    @retval MDBX_TXN_FULL      The transaction has too many dirty pages.
+    @retval MDBX_EACCES        An attempt was made to write in a read-only
                                transaction.
-    \retval MDBX_EINVAL        An invalid parameter was specified.
+    @retval MDBX_EINVAL        An invalid parameter was specified.
     */
 	mdbx_cursor_del :: proc(
-		cursor: ^Mdbx_Cursor,
-		flags: Mdbx_Put_Flags,
-	) -> Mdbx_Error ---
+		cursor: ^MDBX_Cursor,
+		flags: MDBX_Put_Flags,
+	) -> MDBX_Error ---
 
 	/*
 	Return count of duplicates for current key.
 
     This call is valid for all tables, but reasonable only for that support
-    sorted duplicate data items \ref MDBX_DUPSORT.
+    sorted duplicate data items @ref MDBX_DUPSORT.
 
-    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
-    \param [out] pcount   Address where the count will be stored.
+    @param [in] cursor    A cursor handle returned by @ref mdbx_cursor_open().
+    @param [out] pcount   Address where the count will be stored.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+    @retval MDBX_THREAD_MISMATCH  Given transaction is not owned
                                   by current thread.
-    \retval MDBX_EINVAL   Cursor is not initialized, or an invalid parameter
+    @retval MDBX_EINVAL   Cursor is not initialized, or an invalid parameter
                           was specified.
 	*/
-	mdbx_cursor_count :: proc(cursor: ^Mdbx_Cursor, pcount: ^c.size_t) -> Mdbx_Error ---
+	mdbx_cursor_count :: proc(cursor: ^MDBX_Cursor, pcount: ^c.size_t) -> MDBX_Error ---
 
 	/*
 	Determines whether the cursor is pointed to a key-value pair or not,
     i.e. was not positioned or points to the end of data.
 
-    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
+    @param [in] cursor    A cursor handle returned by @ref mdbx_cursor_open().
 
-    \returns A \ref MDBX_RESULT_TRUE or \ref MDBX_RESULT_FALSE value,
+    @returns A @ref MDBX_RESULT_TRUE or @ref MDBX_RESULT_FALSE value,
              otherwise the error code.
-    \retval MDBX_RESULT_TRUE    No more data available or cursor not
+    @retval MDBX_RESULT_TRUE    No more data available or cursor not
                                 positioned
-    \retval MDBX_RESULT_FALSE   A data is available
-    \retval Otherwise the error code
+    @retval MDBX_RESULT_FALSE   A data is available
+    @retval Otherwise the error code
     */
-	mdbx_cursor_eof :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_eof :: proc(cursor: ^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	Determines whether the cursor is pointed to the first key-value pair or not.
 
-    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
+    @param [in] cursor    A cursor handle returned by @ref mdbx_cursor_open().
 
-    \returns A MDBX_RESULT_TRUE or MDBX_RESULT_FALSE value,
+    @returns A MDBX_RESULT_TRUE or MDBX_RESULT_FALSE value,
              otherwise the error code.
-    \retval MDBX_RESULT_TRUE   Cursor positioned to the first key-value pair
-    \retval MDBX_RESULT_FALSE  Cursor NOT positioned to the first key-value
-    pair \retval Otherwise the error code
+    @retval MDBX_RESULT_TRUE   Cursor positioned to the first key-value pair
+    @retval MDBX_RESULT_FALSE  Cursor NOT positioned to the first key-value
+    pair @retval Otherwise the error code
     */
-	mdbx_cursor_on_first :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_on_first :: proc(cursor: ^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	Determines whether the cursor is on the first or only multi-value matching the key.
 
-    \param [in] cursor    Cursor created by \ref mdbx_cursor_open().
-    \returns Meaning \ref MDBX_RESULT_TRUE, or \ref MDBX_RESULT_FALSE,
+    @param [in] cursor    Cursor created by @ref mdbx_cursor_open().
+    @returns Meaning @ref MDBX_RESULT_TRUE, or @ref MDBX_RESULT_FALSE,
              otherwise error code.
-    \retval MDBX_RESULT_TRUE   the cursor is positioned on the first or only multi-value
+    @retval MDBX_RESULT_TRUE   the cursor is positioned on the first or only multi-value
     						   corresponding to the key.
-    \retval MDBX_RESULT_FALSE  the cursor is NOT positioned on the first or only
+    @retval MDBX_RESULT_FALSE  the cursor is NOT positioned on the first or only
     						   multi-value matching the key.
-    \retval NACHE error code.
+    @retval NACHE error code.
     */
-	mdbx_cursor_on_first_dup :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_on_first_dup :: proc(cursor: ^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	Determines whether the cursor is pointed to the last key-value pair or not.
 
-    \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
+    @param [in] cursor    A cursor handle returned by @ref mdbx_cursor_open().
 
-    \returns A \ref MDBX_RESULT_TRUE or \ref MDBX_RESULT_FALSE value,
+    @returns A @ref MDBX_RESULT_TRUE or @ref MDBX_RESULT_FALSE value,
              otherwise the error code.
-    \retval MDBX_RESULT_TRUE   Cursor positioned to the last key-value pair
-    \retval MDBX_RESULT_FALSE  Cursor NOT positioned to the last key-value pair
-    \retval Otherwise the error code
+    @retval MDBX_RESULT_TRUE   Cursor positioned to the last key-value pair
+    @retval MDBX_RESULT_FALSE  Cursor NOT positioned to the last key-value pair
+    @retval Otherwise the error code
     */
-	mdbx_cursor_on_last :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_on_last :: proc(cursor: ^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	Determines whether the cursor is on the last or only multi-value matching the key.
 
-    \param [in] cursor    Cursor created by \ref mdbx_cursor_open().
-    \returns Meaning \ref MDBX_RESULT_TRUE, or \ref MDBX_RESULT_FALSE,
+    @param [in] cursor    Cursor created by @ref mdbx_cursor_open().
+    @returns Meaning @ref MDBX_RESULT_TRUE, or @ref MDBX_RESULT_FALSE,
              otherwise error code.
-    \retval MDBX_RESULT_TRUE   the cursor is positioned on the last or only multi-value
+    @retval MDBX_RESULT_TRUE   the cursor is positioned on the last or only multi-value
     						   corresponding to the key.
-    \retval MDBX_RESULT_FALSE  the cursor is NOT positioned on the last or only
+    @retval MDBX_RESULT_FALSE  the cursor is NOT positioned on the last or only
     						   multi-value matching the key.
-    \retval OTHERWISE error code.
+    @retval OTHERWISE error code.
     */
-	mdbx_cursor_on_last_dup :: proc(cursor: ^Mdbx_Cursor) -> Mdbx_Error ---
+	mdbx_cursor_on_last_dup :: proc(cursor: ^MDBX_Cursor) -> MDBX_Error ---
 
 	/*
 	The estimation result varies greatly depending on the filling
@@ -2701,19 +2740,19 @@ foreign lib {
     used to build and/or optimize query execution plans.
 
     Please see notes on accuracy of the result in the details
-    of \ref c_rqest section.
+    of @ref c_rqest section.
 
     Both cursors must be initialized for the same table and the same
     transaction.
 
-    \param [in] first            The first cursor for estimation.
-    \param [in] last             The second cursor for estimation.
-    \param [out] distance_items  The pointer to store estimated distance value,
+    @param [in] first            The first cursor for estimation.
+    @param [in] last             The second cursor for estimation.
+    @param [out] distance_items  The pointer to store estimated distance value,
                                  i.e. `*distance_items = distance(first, last)`.
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_estimate_distance :: proc(first, last: ^Mdbx_Cursor, distance_items: ^c.ptrdiff_t) -> Mdbx_Error ---
+	mdbx_estimate_distance :: proc(first, last: ^MDBX_Cursor, distance_items: ^c.ptrdiff_t) -> MDBX_Error ---
 
 	/*
 	Estimates the move distance.
@@ -2725,23 +2764,23 @@ foreign lib {
     preserved.
 
     Please see notes on accuracy of the result in the details
-    of \ref c_rqest section.
+    of @ref c_rqest section.
 
-    \param [in] cursor            Cursor for estimation.
-    \param [in,out] key           The key for a retrieved item.
-    \param [in,out] data          The data of a retrieved item.
-    \param [in] move_op           A cursor operation \ref MDBX_cursor_op.
-    \param [out] distance_items   A pointer to store estimated move distance
+    @param [in] cursor            Cursor for estimation.
+    @param [in,out] key           The key for a retrieved item.
+    @param [in,out] data          The data of a retrieved item.
+    @param [in] move_op           A cursor operation @ref MDBX_cursor_op.
+    @param [out] distance_items   A pointer to store estimated move distance
                                   as the number of elements.
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
 	mdbx_estimate_move :: proc(
-		cursor: ^Mdbx_Cursor,
-		key, value: ^Mdbx_Val,
-		move_op: Mdbx_Cursor_Op,
+		cursor: ^MDBX_Cursor,
+		key, value: ^MDBX_Val,
+		move_op: MDBX_Cursor_Op,
 		distance_items: ^c.ptrdiff_t,
-	) -> Mdbx_Error ---
+	) -> MDBX_Error ---
 
 	/*
 	Estimates the size of a range as a number of elements.
@@ -2750,30 +2789,30 @@ foreign lib {
     execution plans.
 
     Please see notes on accuracy of the result in the details
-    of \ref c_rqest section.
+    of @ref c_rqest section.
 
-    \param [in] txn        A transaction handle returned
-                           by \ref mdbx_txn_begin().
-    \param [in] dbi        A table handle returned by  \ref mdbx_dbi_open().
-    \param [in] begin_key  The key of range beginning or NULL for explicit FIRST.
-    \param [in] begin_data Optional additional data to seeking among sorted
+    @param [in] txn        A transaction handle returned
+                           by @ref mdbx_txn_begin().
+    @param [in] dbi        A table handle returned by  @ref mdbx_dbi_open().
+    @param [in] begin_key  The key of range beginning or NULL for explicit FIRST.
+    @param [in] begin_data Optional additional data to seeking among sorted
                            duplicates.
-                           Only for \ref MDBX_DUPSORT, NULL otherwise.
-    \param [in] end_key    The key of range ending or NULL for explicit LAST.
-    \param [in] end_data   Optional additional data to seeking among sorted
+                           Only for @ref MDBX_DUPSORT, NULL otherwise.
+    @param [in] end_key    The key of range ending or NULL for explicit LAST.
+    @param [in] end_data   Optional additional data to seeking among sorted
                            duplicates.
-                           Only for \ref MDBX_DUPSORT, NULL otherwise.
-    \param [out] distance_items  A pointer to store range estimation result.
+                           Only for @ref MDBX_DUPSORT, NULL otherwise.
+    @param [out] distance_items  A pointer to store range estimation result.
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
 	mdbx_estimate_range :: proc(
-		txn: ^Mdbx_Txn,
-		dbi: Mdbx_DBI,
-		begin_key, begin_value: ^Mdbx_Val,
-		end_key, end_value: ^Mdbx_Val,
+		txn: ^MDBX_Txn,
+		dbi: MDBX_DBI,
+		begin_key, begin_value: ^MDBX_Val,
+		end_key, end_value: ^MDBX_Val,
 		distance_items: ^c.ptrdiff_t,
-	) -> Mdbx_Error ---
+	) -> MDBX_Error ---
 
 	/*
 	Determines whether the given address is on a dirty database page of
@@ -2792,24 +2831,24 @@ foreign lib {
     validation stage. Thus, `mdbx_is_dirty()` allows you to get rid of
     unnecessary copying, and perform a more complete check of the arguments.
 
-    \note The address passed must point to the beginning of the data. This is
+    @note The address passed must point to the beginning of the data. This is
     the only way to ensure that the actual page header is physically located in
     the same memory page, including for multi-pages with long data.
 
-    \note In rare cases the function may return a false positive answer
-    (\ref MDBX_RESULT_TRUE when data is NOT on a dirty page), but never a false
+    @note In rare cases the function may return a false positive answer
+    (@ref MDBX_RESULT_TRUE when data is NOT on a dirty page), but never a false
     negative if the arguments are correct.
 
-    \param [in] txn      A transaction handle returned by \ref mdbx_txn_begin().
-    \param [in] ptr      The address of data to check.
+    @param [in] txn      A transaction handle returned by @ref mdbx_txn_begin().
+    @param [in] ptr      The address of data to check.
 
-    \returns A MDBX_RESULT_TRUE or MDBX_RESULT_FALSE value,
+    @returns A MDBX_RESULT_TRUE or MDBX_RESULT_FALSE value,
              otherwise the error code.
-    \retval MDBX_RESULT_TRUE    Given address is on the dirty page.
-    \retval MDBX_RESULT_FALSE   Given address is NOT on the dirty page.
-    \retval Otherwise the error code.
+    @retval MDBX_RESULT_TRUE    Given address is on the dirty page.
+    @retval MDBX_RESULT_FALSE   Given address is NOT on the dirty page.
+    @retval Otherwise the error code.
     */
-	mdbx_is_dirty :: proc(txn: ^Mdbx_Txn, ptr: rawptr) -> Mdbx_Error ---
+	mdbx_is_dirty :: proc(txn: ^MDBX_Txn, ptr: rawptr) -> MDBX_Error ---
 
 	/*
 	Sequence generation for a table.
@@ -2820,61 +2859,61 @@ foreign lib {
     Sequence changes become visible outside the current write transaction after
     it is committed, and discarded on abort.
 
-    \param [in] txn        A transaction handle returned
-                           by \ref mdbx_txn_begin().
-    \param [in] dbi        A table handle returned by \ref mdbx_dbi_open().
-    \param [out] result    The optional address where the value of sequence
+    @param [in] txn        A transaction handle returned
+                           by @ref mdbx_txn_begin().
+    @param [in] dbi        A table handle returned by @ref mdbx_dbi_open().
+    @param [out] result    The optional address where the value of sequence
                            before the change will be stored.
-    \param [in] increment  Value to increase the sequence,
+    @param [in] increment  Value to increase the sequence,
                            must be 0 for read-only transactions.
 
-    \returns A non-zero error value on failure and 0 on success,
+    @returns A non-zero error value on failure and 0 on success,
              some possible errors are:
-    \retval MDBX_RESULT_TRUE   Increasing the sequence has resulted in an
+    @retval MDBX_RESULT_TRUE   Increasing the sequence has resulted in an
                                overflow and therefore cannot be executed.
     */
-	mdbx_dbi_sequence :: proc(txn: ^Mdbx_Txn, dbi: Mdbx_DBI, result: ^u64, increment: u64) -> Mdbx_Error ---
+	mdbx_dbi_sequence :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, result: ^u64, increment: u64) -> MDBX_Error ---
 
 	/*
 	Enumerate the entries in the reader lock table.
 
     \ingroup c_statinfo
 
-    \param [in] env     An environment handle returned by \ref mdbx_env_create().
-    \param [in] func    A \ref MDBX_reader_list_func function.
-    \param [in] ctx     An arbitrary context pointer for the enumeration
+    @param [in] env     An environment handle returned by @ref mdbx_env_create().
+    @param [in] func    A @ref MDBX_reader_list_func function.
+    @param [in] ctx     An arbitrary context pointer for the enumeration
                         function.
 
-    \returns A non-zero error value on failure and 0 on success,
-    or \ref MDBX_RESULT_TRUE if the reader lock table is empty.
+    @returns A non-zero error value on failure and 0 on success,
+    or @ref MDBX_RESULT_TRUE if the reader lock table is empty.
     */
-	mdbx_reader_list :: proc(env: ^Mdbx_Env, handler: Mdbx_Reader_List_Func, ctx: rawptr) -> Mdbx_Error ---
+	mdbx_reader_list :: proc(env: ^MDBX_Env, handler: MDBX_Reader_List_Func, ctx: rawptr) -> MDBX_Error ---
 
 	/*
 	Check for stale entries in the reader lock table.
 
-    \param [in] env     An environment handle returned by \ref mdbx_env_create().
-    \param [out] dead   Number of stale slots that were cleared.
+    @param [in] env     An environment handle returned by @ref mdbx_env_create().
+    @param [out] dead   Number of stale slots that were cleared.
 
-    \returns A non-zero error value on failure and 0 on success,
-    or \ref MDBX_RESULT_TRUE if a dead reader(s) found or mutex was recovered.
+    @returns A non-zero error value on failure and 0 on success,
+    or @ref MDBX_RESULT_TRUE if a dead reader(s) found or mutex was recovered.
     */
-	mdbx_reader_check :: proc(env: ^Mdbx_Env, dead: ^c.int) -> Mdbx_Error ---
+	mdbx_reader_check :: proc(env: ^MDBX_Env, dead: ^c.int) -> MDBX_Error ---
 
 	/*
 	Returns a lag of the reading for the given transaction.
 
     Returns an information for estimate how much given read-only
     transaction is lagging relative the to actual head.
-    \deprecated Please use \ref mdbx_txn_info() instead.
+    \deprecated Please use @ref mdbx_txn_info() instead.
 
-    \param [in] txn       A transaction handle returned by \ref mdbx_txn_begin().
-    \param [out] percent  Percentage of page allocation in the database.
+    @param [in] txn       A transaction handle returned by @ref mdbx_txn_begin().
+    @param [out] percent  Percentage of page allocation in the database.
 
-    \returns Number of transactions committed after the given was started for
+    @returns Number of transactions committed after the given was started for
              read, or negative value on failure.
     */
-	mdbx_txn_straggler :: proc(txn: ^Mdbx_Txn, percent: ^c.int) -> c.int ---
+	mdbx_txn_straggler :: proc(txn: ^MDBX_Txn, percent: ^c.int) -> c.int ---
 
 	/*
 	Registers the current thread as a reader for the environment.
@@ -2884,18 +2923,18 @@ foreign lib {
     acquisition which is performed automatically. This function allows you to
     assign the reader slot in advance and thus avoid capturing the blocker when
     the read transaction starts firstly from current thread.
-    \see mdbx_thread_unregister()
+    @see mdbx_thread_unregister()
 
-    \note Threads are registered automatically the first time a read transaction
+    @note Threads are registered automatically the first time a read transaction
           starts. Therefore, there is no need to use this function, except in
           special cases.
 
-    \param [in] env   An environment handle returned by \ref mdbx_env_create().
+    @param [in] env   An environment handle returned by @ref mdbx_env_create().
 
-    \returns A non-zero error value on failure and 0 on success,
-    or \ref MDBX_RESULT_TRUE if thread is already registered.
+    @returns A non-zero error value on failure and 0 on success,
+    or @ref MDBX_RESULT_TRUE if thread is already registered.
     */
-	mdbx_thread_register :: proc(env: ^Mdbx_Env) -> Mdbx_Error ---
+	mdbx_thread_register :: proc(env: ^MDBX_Env) -> MDBX_Error ---
 
 	/*
 	Unregisters the current thread as a reader for the environment.
@@ -2904,14 +2943,14 @@ foreign lib {
     for each thread. However, the assigned reader slot will remain occupied until
     the thread ends or the environment closes. This function allows you to
     explicitly release the assigned reader slot.
-    \see mdbx_thread_register()
+    @see mdbx_thread_register()
 
-    \param [in] env   An environment handle returned by \ref mdbx_env_create().
+    @param [in] env   An environment handle returned by @ref mdbx_env_create().
 
-    \returns A non-zero error value on failure and 0 on success, or
-    \ref MDBX_RESULT_TRUE if thread is not registered or already unregistered.
+    @returns A non-zero error value on failure and 0 on success, or
+    @ref MDBX_RESULT_TRUE if thread is not registered or already unregistered.
     */
-	mdbx_thread_unregister :: proc(env: ^Mdbx_Env) -> Mdbx_Error ---
+	mdbx_thread_unregister :: proc(env: ^MDBX_Env) -> MDBX_Error ---
 
 	/*
 	Sets a Handle-Slow-Readers callback to resolve database full/overflow
@@ -2920,50 +2959,50 @@ foreign lib {
     The callback will only be triggered when the database is full due to a
     reader(s) prevents the old data from being recycled.
 
-    \see MDBX_hsr_func
-    \see mdbx_env_get_hsr()
-    \see mdbx_txn_park()
-    \see <a href="intro.html#long-lived-read">Long-lived read transactions</a>
+    @see MDBX_hsr_func
+    @see mdbx_env_get_hsr()
+    @see mdbx_txn_park()
+    @see <a href="intro.html#long-lived-read">Long-lived read transactions</a>
 
-    \param [in] env             An environment handle returned
-                                by \ref mdbx_env_create().
-    \param [in] hsr_callback    A \ref MDBX_hsr_func function
+    @param [in] env             An environment handle returned
+                                by @ref mdbx_env_create().
+    @param [in] hsr_callback    A @ref MDBX_hsr_func function
                                 or NULL to disable.
 
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_env_set_hsr :: proc(env: ^Mdbx_Env, hsr_callback: Mdbx_Hsr_Func) -> Mdbx_Error ---
+	mdbx_env_set_hsr :: proc(env: ^MDBX_Env, hsr_callback: MDBX_Hsr_Func) -> MDBX_Error ---
 
 	/*
 	Gets current Handle-Slow-Readers callback used to resolve database
     full/overflow issue due to a reader(s) which prevents the old data from being
     recycled.
 
-    \see MDBX_hsr_func
-    \see mdbx_env_set_hsr()
-    \see mdbx_txn_park()
-    \see <a href="intro.html#long-lived-read">Long-lived read transactions</a>
+    @see MDBX_hsr_func
+    @see mdbx_env_set_hsr()
+    @see mdbx_txn_park()
+    @see <a href="intro.html#long-lived-read">Long-lived read transactions</a>
 
-    \param [in] env   An environment handle returned by \ref mdbx_env_create().
+    @param [in] env   An environment handle returned by @ref mdbx_env_create().
 
-    \returns A MDBX_hsr_func function or NULL if disabled
+    @returns A MDBX_hsr_func function or NULL if disabled
              or something wrong.
     */
-	mdbx_env_get_hsr :: proc(env: ^Mdbx_Env) -> Mdbx_Hsr_Func ---
+	mdbx_env_get_hsr :: proc(env: ^MDBX_Env) -> MDBX_Hsr_Func ---
 
 	/*
 	Acquires write-transaction lock.
     Provided for custom and/or complex locking scenarios.
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_txn_lock :: proc(env: ^Mdbx_Env, dont_wait: bool) -> Mdbx_Error ---
+	mdbx_txn_lock :: proc(env: ^MDBX_Env, dont_wait: bool) -> MDBX_Error ---
 
 	/*
 	Releases write-transaction lock.
     Provided for custom and/or complex locking scenarios.
-    \returns A non-zero error value on failure and 0 on success.
+    @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_txn_unlock :: proc(env: ^Mdbx_Env) -> Mdbx_Error ---
+	mdbx_txn_unlock :: proc(env: ^MDBX_Env) -> MDBX_Error ---
 
 	/*
 	Open an environment instance using specific meta-page
@@ -2973,15 +3012,15 @@ foreign lib {
 	change at any time. Do not use this function to avoid shooting your own
 	leg(s).
 
-	\note On Windows the \ref mdbx_env_open_for_recoveryW() is recommended
+	@note On Windows the @ref mdbx_env_open_for_recoveryW() is recommended
 	to use.
 	*/
 	mdbx_env_open_for_recovery :: proc(
-		env: ^Mdbx_Env,
+		env: ^MDBX_Env,
 		pathname: cstring,
 		target_meta: c.uint,
 		writeable: bool,
-	) -> Mdbx_Error ---
+	) -> MDBX_Error ---
 }
 
 /*
@@ -3957,6 +3996,436 @@ foreign lib {
 		mode: u16,
 		compact_batch_size: c.size_t,
 	) -> ^Raft_Log_Store_Ptr ---
+}
+
+/*
+///////////////////////////////////////////////////////////////////////////////////
+//
+// uSockets
+// Miniscule cross-platform eventing, networking & crypto for async applications
+//
+///////////////////
+
+https://github.com/uNetworking/uSockets
+*/
+
+@(default_calling_convention = "c")
+foreign lib {
+	us_socket_send_buffer :: proc(ssl: c.int, s: ^US_Socket) -> rawptr ---
+
+	/* Create a new high precision, low performance timer. May fail and return null */
+	us_create_timer :: proc(loop: ^US_Loop, _fallthrough: c.int, ext_size: c.uint) ->  ^US_Timer ---
+
+	/* Returns user data extension for this timer */
+	us_timer_ext :: proc(timer: ^US_Timer) -> rawptr ---
+
+	us_timer_close :: proc(timer: ^US_Timer) ---
+
+	/* Arm a timer with a delay from now and eventually a repeat delay.
+ 	* Specify 0 as repeat delay to disable repeating. Specify both 0 to disarm. */
+	us_timer_set :: proc(timer: ^US_Timer, cb: proc "c" (t: ^US_Timer), ms: c.int, repeat_ms: c.int) ---
+
+	/* Returns the loop for this timer */
+	us_timer_loop :: proc(timer: ^US_Timer) -> ^US_Loop ---
+
+	us_socket_context_timestamp :: proc(ssl: c.int, ctx: ^US_Socket_Context) -> c.ushort ---
+
+	/* Adds SNI domain and cert in asn1 format */
+
+	us_socket_context_add_server_name :: proc(
+		ssl: c.int,
+		ctx: ^US_Socket_Context,
+		hostname_pattern: cstring,
+		options: US_Socket_Context_Options,
+		user: rawptr,
+	) ---
+
+	us_socket_context_remove_server_name :: proc(ssl: c.int, ctx: ^US_Socket_Context, hostname_pattern: cstring) ---
+
+	us_socket_context_on_server_name :: proc(
+		ssl: c.int,
+		ctx: ^US_Socket_Context,
+		cb: proc "c" (c: ^US_Socket_Context),
+		hostname: cstring,
+	) ---
+
+	us_socket_server_name_userdata :: proc(ssl: c.int, s: ^US_Socket) -> rawptr ---
+	us_socket_context_find_server_name_userdata :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+	    hostname_pattern: cstring,
+	) -> rawptr ---
+
+	/* Returns the underlying SSL native handle, such as SSL_CTX or nullptr */
+	us_socket_context_get_native_handle :: proc(ssl: c.int, ctx: ^US_Socket_Context) -> rawptr ---
+
+	/* A socket context holds shared callbacks and user data extension for associated sockets */
+	us_create_socket_context :: proc(
+	    ssl: c.int,
+		loop: ^US_Loop,
+		ext_size: c.int,
+		options: US_Socket_Context_Options,
+	) -> ^US_Socket_Context ---
+
+	/* Delete resources allocated at creation time. */
+	us_socket_context_free :: proc(ssl: c.int, ctx: ^US_Socket_Context) ---
+
+	/* Setters of various async callbacks */
+	us_socket_context_on_pre_open :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		on_pre_open: proc "c" (ctx: ^US_Socket_Context, fd: SOCKET) -> SOCKET,
+	) ---
+
+	us_socket_context_on_open :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		on_open: proc "c" (s: ^US_Socket, is_client: c.int, ip: [^]byte, ip_length: c.int) -> ^US_Socket,
+	) ---
+
+	us_socket_context_on_close :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		on_close: proc "c" (s: ^US_Socket, code: c.int, reason: rawptr) -> ^US_Socket,
+	) ---
+
+	us_socket_context_on_data :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		on_data: proc "c" (s: ^US_Socket, data: [^]byte, length: c.int) -> ^US_Socket,
+	) ---
+
+	us_socket_context_on_writable :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		on_writable: proc "c" (s: ^US_Socket) -> ^US_Socket,
+	) ---
+
+	us_socket_context_on_timeout :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		on_timeout: proc "c" (s: ^US_Socket) -> ^US_Socket,
+	) ---
+
+	us_socket_context_on_long_timeout :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		on_timeout: proc "c" (s: ^US_Socket, ctx: ^US_Socket_Context) -> ^US_Socket,
+	) ---
+
+	/* This one is only used for when a connecting socket fails in a late stage. */
+	us_socket_context_on_connect_error :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		on_connect_error: proc "c" (s: ^US_Socket, code: c.int) -> ^US_Socket,
+	) ---
+
+	/* Emitted when a socket has been half-closed */
+	us_socket_context_on_end :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		on_end: proc "c" (s: ^US_Socket) -> ^US_Socket,
+	) ---
+
+	/* Returns user data extension for this socket context */
+	us_socket_context_ext :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+	) -> rawptr ---
+
+	/* Closes all open sockets, including listen sockets. Does not invalidate the socket context. */
+	us_socket_context_close :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+	) ---
+
+	/* Listen for connections. Acts as the main driving cog in a server. Will call set async callbacks. */
+	us_socket_context_listen :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		host: cstring,
+		port: c.int,
+		options: c.int,
+		socket_ext_size: c.int,
+	) -> ^US_Listen_Socket ---
+
+	us_socket_context_listen_unix :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		path: cstring,
+		options: c.int,
+		socket_ext_size: c.int,
+	) -> ^US_Listen_Socket ---
+
+	us_listen_socket_close :: proc(ssl: c.int, ls: ^US_Listen_Socket) ---
+
+	/* Adopt a socket which was accepted either internally, or from another accept() outside libusockets */
+	us_adopt_accepted_socket :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		client_fd: SOCKET,
+		socket_ext_size: c.uint,
+		addr_ip: [^]byte,
+		addr_ip_length: c.int,
+	) -> ^US_Socket ---
+
+	/* Land in on_open or on_connection_error or return null or return socket */
+	us_socket_context_connect :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		host: cstring,
+		port: c.int,
+		source_host: cstring,
+		options: c.int,
+		socket_ext_size: c.int,
+	) -> ^US_Socket ---
+
+	us_socket_context_connect_unix :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		server_path: cstring,
+		options: c.int,
+		socket_ext_size: c.int,
+	) -> ^US_Socket ---
+
+	/*
+	Is this socket established? Can be used to check if a connecting socket has
+	fired the on_open event yet. Can also be used to determine if a socket is a
+	listen_socket or not, but you probably know that already.
+	*/
+	us_socket_is_established :: proc(ssl: c.int, s: ^US_Socket) -> c.int ---
+
+	/*
+	Cancel a connecting socket. Can be used together with us_socket_timeout to
+	limit connection times. Entirely destroys the socket - this function works
+	like us_socket_close but does not trigger on_close event since you never
+	got the on_open event first.
+	*/
+	us_socket_close_connecting :: proc(ssl: c.int, s: ^US_Socket) -> ^US_Socket ---
+
+	/* Returns the loop for this socket context. */
+	us_socket_context_loop :: proc(ssl: c.int, ctx: ^US_Socket_Context) -> ^US_Loop ---
+
+	/*
+	Invalidates passed socket, returning a new resized socket which belongs to a
+	different socket context. Used mainly for "socket upgrades" such as when
+	transitioning from HTTP to WebSocket.
+	*/
+	us_socket_context_adopt_socket :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		s: ^US_Socket,
+		ext_size: c.int,
+	) -> ^US_Socket ---
+
+	/*
+	Create a child socket context which acts much like its own socket context with
+	its own callbacks yet still relies on the parent socket context for some shared
+	resources. Child socket contexts should be used together with socket adoptions
+	and nothing else.
+	*/
+	us_create_child_socket_context :: proc(
+	    ssl: c.int,
+		ctx: ^US_Socket_Context,
+		ctx_ext_size: c.int,
+	) -> ^US_Socket ---
+
+	/* Public interfaces for loops */
+
+	/* Returns a new event loop with user data extension */
+	us_create_loop :: proc(
+	    hint: rawptr,
+		wakeup_cb: proc "c" (loop: ^US_Loop),
+		pre_cb: proc "c" (loop: ^US_Loop),
+		post_cb: proc "c" (loop: ^US_Loop),
+		ext_size: c.uint,
+	) -> ^US_Loop ---
+
+	/* Frees the loop immediately */
+	us_loop_free :: proc(loop: ^US_Loop) ---
+
+	/* Returns the loop user data extension */
+	us_loop_ext :: proc(loop: ^US_Loop) -> rawptr ---
+
+	/*
+	Blocks the calling thread and drives the event loop until no more non-fallthrough
+	polls are scheduled
+	*/
+	us_loop_run :: proc(loop: ^US_Loop) ---
+
+	/*
+	Signals the loop from any thread to wake up and execute its wakeup handler from
+	the loop's own running thread. This is the only fully thread-safe function and
+	serves as the basis for thread safety
+	*/
+	us_wakeup_loop :: proc(loop: ^US_Loop) ---
+
+	/* Hook up timers in existing loop */
+	us_loop_integrate :: proc(loop: ^US_Loop) ---
+
+	/* Returns the loop iteration number */
+	us_loop_iteration_number :: proc(loop: ^US_Loop) -> c.longlong ---
+
+	/* Public interfaces for polls */
+
+	/* A fallthrough poll does not keep the loop running, it falls through */
+	us_create_poll :: proc(loop: ^US_Loop, _fallthrough: c.int, ext_size: c.uint) -> ^US_Poll ---
+
+	/* After stopping a poll you must manually free the memory */
+	us_poll_free :: proc(p: ^US_Poll, loop: ^US_Loop) ---
+
+	/* Associate this poll with a socket descriptor and poll type */
+	us_poll_init :: proc(p: ^US_Poll, fd: SOCKET, poll_type: c.int) ---
+
+	/* Start, change and stop polling for events */
+	us_poll_start :: proc(p: ^US_Poll, loop: ^US_Loop, events: c.int) ---
+	us_poll_change :: proc(p: ^US_Poll, loop: ^US_Loop, events: c.int) ---
+	us_poll_stop :: proc(p: ^US_Poll, loop: ^US_Loop) ---
+
+	/* Return what events we are polling for */
+	us_poll_events :: proc (p: ^US_Poll) -> c.int ---
+
+	/* Returns the user data extension of this poll */
+	us_poll_ext :: proc(p: ^US_Poll) -> rawptr ---
+
+	/* Get associated socket descriptor from a poll */
+	us_poll_fd :: proc(p: ^US_Poll) -> SOCKET ---
+
+	/* Resize an active poll */
+	us_poll_resize :: proc(p: ^US_Poll, loop: ^US_Loop, ext_size: c.uint) -> ^US_Poll ---
+
+	/* Public interfaces for sockets */
+
+	/*
+	Returns the underlying native handle for a socket, such as SSL or file
+	descriptor. In the case of file descriptor, the value of pointer is fd.
+	*/
+	us_socket_get_native_handle :: proc(ssl: c.int, s: ^US_Socket) -> rawptr ---
+
+	/*
+	Write up to length bytes of data. Returns actual bytes written. Will call
+	the on_writable callback of active socket context on failure to write
+	everything off in one go. Set hint msg_more if you have more immediate data
+	to write.
+	*/
+	us_socket_write :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+		data: [^]byte,
+		length: c.int,
+		msg_more: c.int,
+	) -> c.int ---
+
+	/*
+	Special path for non-SSL sockets. Used to send header and payload in
+	one go. Works like us_socket_write.
+	*/
+	us_socket_write2 :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+		header: [^]byte,
+		header_length: c.int,
+		payload: [^]byte,
+		payload_length: c.int,
+	) -> c.int ---
+
+	/*
+	Set a low precision, high performance timer on a socket. A socket can
+	only have one single active timer at any given point in time. Will remove
+	any such pre set timer
+	*/
+	us_socket_timeout :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+		seconds: c.uint,
+	) ---
+
+	/*
+	Set a low precision, high performance timer on a socket. Suitable for
+	per-minute precision.
+	*/
+	us_socket_long_timeout :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+		minutes: c.uint,
+	) ---
+
+	/* Return the user data extension of this socket */
+	us_socket_ext :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+	) -> rawptr ---
+
+	/* Return the socket context of this socket */
+	us_socket_context :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+	) -> ^US_Socket_Context ---
+
+	/* Withdraw any msg_more status and flush any pending data */
+	us_socket_flush :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+	) ---
+
+	/* Shuts down the connection by sending FIN and/or close_notify */
+	us_socket_shutdown :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+	) ---
+
+	/*
+	Shuts down the connection in terms of read, meaning next event loop
+	iteration will catch the socket being closed. Can be used to defer
+	closing to next event loop iteration.
+	*/
+	us_socket_shutdown_read :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+	) ---
+
+	/* Returns whether the socket has been shut down or not */
+	us_socket_is_shut_down :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+	) -> c.int ---
+
+	/*
+	Returns whether this socket has been closed. Only valid if memory
+	has not yet been released.
+	*/
+	us_socket_is_closed :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+	) -> c.int ---
+
+	/* Immediately closes the socket */
+	us_socket_close :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+		code: c.int,
+		reason: rawptr,
+	) -> ^US_Socket ---
+
+	/* Returns local port or -1 on failure. */
+	us_socket_local_port :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+	) -> c.int ---
+
+	/* Returns remote ephemeral port or -1 on failure. */
+	us_socket_remote_port :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+	) -> c.int ---
+
+	/* Copy remote (IP) address of socket, or fail with zero length. */
+	us_socket_remote_address :: proc(
+	    ssl: c.int,
+		s: ^US_Socket,
+		buf: [^]byte,
+		length: ^c.int,
+	) -> c.int ---
 }
 
 main :: proc() {

@@ -14,6 +14,8 @@ extern "C" {
 #define BOP_API
 #endif
 
+#include "./libusockets.h"
+
 
 BOP_API void bop_stub() {
 }

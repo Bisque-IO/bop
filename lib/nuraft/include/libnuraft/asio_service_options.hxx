@@ -23,8 +23,12 @@ limitations under the License.
 #include <string>
 #include <system_error>
 
-
+#ifdef BOOST_ASIO_USE_WOLFSSL
+#include "wolfssl/options.h"
+#include "wolfssl/ssl.h"
+#else
 typedef struct ssl_ctx_st SSL_CTX;
+#endif
 
 #ifdef USE_BOOST_ASIO
 namespace boost { namespace asio {

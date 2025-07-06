@@ -6,13 +6,14 @@ function target_usockets(kind)
     target(name)
     set_kind(kind)
     set_languages("c++23", "c23")
-    -- add_toolchains("@llvm")
+    add_toolchains("@llvm")
     add_cxflags("-O3", "-fPIC")
-    add_defines("LIBUS_USE_WOLFSSL")
-    -- add_defines("LIBUS_USE_OPENSSL")
+
+    --
     add_files("src/**.c", "src/**.cpp")
     add_includedirs("src", { public = false })
     add_includedirs("include", { public = true })
+    add_includedirs("../src", { public = true })
 
     -- add_cxxflags("clang::-stdlib=libc++")
 
@@ -32,15 +33,19 @@ function target_usockets(kind)
     -- add_cxxflags("-stdlib=libc++")
 
     if is_plat("windows", "mingw") then
+        add_defines("LIBUS_USE_OPENSSL")
         add_defines("LIBUS_USE_UV=1")
-        add_packages("libuv")
+        add_packages("libuv", "openssl3", "zlib")
         --set_languages("c++23", "c23")
         --add_packages("boost")
         add_syslinks("advapi32", "iphlpapi", "psapi", "user32", "userenv", "ws2_32", "shell32", "ole32", "uuid",
             "dbghelp")
+    else
+        add_defines("LIBUS_USE_WOLFSSL")
+        add_packages("wolfssl", "zlib")
+        --add_deps("wolfssl")
     end
 
-    add_packages("wolfssl", "zlib")
     target_end()
 end
 
