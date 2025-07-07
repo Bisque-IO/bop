@@ -60,12 +60,12 @@ function add_example(name, src)
     set_default(false)
 
     --add_deps("usockets")
-    add_defines("LIBUS_USE_WOLFSSL")
+    add_defines("LIBUS_USE_OPENSSL")
     add_includedirs("src", { public = true })
     add_includedirs("include", { public = true })
     add_files("src/**.c", "src/**.cpp")
 
-    add_packages("wolfssl", "zlib")
+    add_packages("openssl3", "zlib")
 
     add_files(src)
     set_configdir("$(builddir)/$(plat)/$(arch)/$(mode)")

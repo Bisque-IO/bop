@@ -36,9 +36,9 @@ local target_of = function(kind, enable_wolfssl)
 
     if is_plat("windows") then
         if kind == "static" then
-            --add_cxflags("/MT")
+            add_cxflags("/MT")
         else
-            --add_cxflags("/MD")
+            add_cxflags("/MD")
             --add_syslinks("MSVCRT")
         end
         add_defines("NOMINMAX")

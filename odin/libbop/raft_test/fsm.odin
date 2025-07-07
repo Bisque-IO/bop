@@ -66,7 +66,7 @@ fsm_commit_config :: proc "c" (
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 }
 
-/**
+/*
 Pre-commit the given Raft log.
 
 Pre-commit is called after appending Raft log,

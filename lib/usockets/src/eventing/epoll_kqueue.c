@@ -18,7 +18,6 @@
 #include "libusockets.h"
 #include "internal/internal.h"
 #include <stdlib.h>
-#include <time.h>
 
 #if defined(LIBUS_USE_EPOLL) || defined(LIBUS_USE_KQUEUE)
 

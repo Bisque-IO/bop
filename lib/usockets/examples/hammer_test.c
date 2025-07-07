@@ -406,8 +406,8 @@ int main() {
     // these are ignored for non-SSL
     struct us_socket_context_options_t options;
     memset(&options, 0, sizeof(struct us_socket_context_options_t));
-    options.key_file_name = "/home/alexhultman/uWebSockets.js/misc/key.pem";
-    options.cert_file_name = "/home/alexhultman/uWebSockets.js/misc/cert.pem";
+    options.key_file_name = "key.pem";
+    options.cert_file_name = "cert.pem";
     options.passphrase = "1234";
 
     http_context = us_create_socket_context(SSL, loop, sizeof(struct http_context), options);
