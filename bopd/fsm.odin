@@ -31,7 +31,7 @@ fsm_commit :: proc "c" (
 	size: uintptr,
 	result: ^^bop.Raft_Buffer,
 ) {
-	context = load_context()
+	context = tls_context()
 }
 
 /*
@@ -46,7 +46,7 @@ fsm_commit_config :: proc "c" (
 	log_idx: u64,
 	new_conf: ^bop.Raft_Cluster_Config
 ) {
-	context = load_context()
+	context = tls_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 }
 
@@ -71,7 +71,7 @@ fsm_pre_commit :: proc "c" (
 	size: uintptr,
 	result: ^^bop.Raft_Buffer,
 ) {
-	context = load_context()
+	context = tls_context()
 }
 
 /*
@@ -128,7 +128,7 @@ Only applicable on followers.
         follower is busy handling pending logs.
 */
 fsm_get_next_batch_size_hint_in_bytes :: proc "c" (user_data: rawptr) -> i64 {
-	context = load_context()
+	context = tls_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	log.info("fsm_get_next_batch_size_hint_in_bytes")
 	return i64(102464)
@@ -329,7 +329,7 @@ fsm_adjust_commit_index :: proc "c" (
 import "core:testing"
 
 @test
-test_fsm :: proc(t: ^testing.T) {
+test_fsm_make_delete :: proc(t: ^testing.T) {
 	user_data : rawptr = nil
 	current_conf : ^bop.Raft_Cluster_Config = nil
 	rollback_conf : ^bop.Raft_Cluster_Config = nil
@@ -359,7 +359,4 @@ test_fsm :: proc(t: ^testing.T) {
 
 	ensure(fsm != nil, "raft_fsm_make returned nil")
 	bop.raft_fsm_delete(fsm)
-
-	log.info("passed!")
-	fmt.println("passed!")
 }

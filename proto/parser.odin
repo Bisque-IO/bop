@@ -358,18 +358,18 @@ _pretty_print_token :: proc(token: Token) -> string {
         return fmt.tprint(token.token)
     }
     return fmt.tprint(
-    token.token,
-    " ",
-    token.begin.line,
-    ":",
-    token.begin.col,
-    "-",
-    token.end.line,
-    ":",
-    token.end.col,
-    " = ",
-    strings.trim_space(token.text),
-    sep = "",
+        token.token,
+        " ",
+        token.begin.line,
+        ":",
+        token.begin.col,
+        "-",
+        token.end.line,
+        ":",
+        token.end.col,
+        " = ",
+        strings.trim_space(token.text),
+        sep = "",
     )
 }
 

@@ -40,7 +40,7 @@ Buffer Allocation:
 Safety Note:
   The buffer must always be accessed via the appropriate casts and offsets.
   Misaligned or overflow access can lead to undefined behavior.
- */
+*/
 Raft_Buffer :: struct {}
 
 /*

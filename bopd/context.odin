@@ -9,7 +9,7 @@ import "core:thread"
 @thread_local
 local_context: runtime.Context
 
-load_context :: #force_inline proc "contextless" () -> runtime.Context {
+tls_context :: #force_inline proc "contextless" () -> runtime.Context {
     c := local_context
     if c.allocator.procedure == nil {
         c = runtime.default_context()

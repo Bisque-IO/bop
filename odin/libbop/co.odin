@@ -137,9 +137,9 @@ test_perf :: proc() {
     co_start(&desc2, false)
 
     fmt.printf(
-    "perf: %d switches in %s, %d / switch\n",
-    perf_count,
-    perf_dur,
-    perf_dur / NUM_YIELDS,
+        "perf: %d switches in %s, %d / switch\n",
+        perf_count,
+        perf_dur,
+        perf_dur / NUM_YIELDS,
     )
 }

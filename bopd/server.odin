@@ -61,12 +61,12 @@ server_on_post :: proc "c" (loop: ^bop.US_Loop) {}
 ///////////////////////////////////////
 
 server_on_writeable_ssl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_writeable(1, s)
 }
 
 server_on_writeable_nossl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_writeable(0, s)
 }
 
@@ -100,7 +100,7 @@ server_on_close_ssl :: proc "c" (
 	code: c.int,
 	reason: rawptr,
 ) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_close(1, s, code, reason)
 }
 
@@ -109,7 +109,7 @@ server_on_close_nossl :: proc "c" (
 	code: c.int,
 	reason: rawptr,
 ) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_close(0, s, code, reason)
 }
 
@@ -130,12 +130,12 @@ server_on_close :: proc(
 ///////////////////////////////////////
 
 server_on_end_ssl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_end(1, s)
 }
 
 server_on_end_nossl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_end(0, s)
 }
 
@@ -156,7 +156,7 @@ server_on_data_ssl :: proc "c" (
 	data: [^]byte,
 	length: c.int,
 ) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_data(1, s, data, length)
 }
 
@@ -165,7 +165,7 @@ server_on_data_nossl :: proc "c" (
 	data: [^]byte,
 	length: c.int,
 ) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_data(0, s, data, length)
 }
 
@@ -215,7 +215,7 @@ server_on_open_ssl :: proc "c" (
 	ip: [^]byte,
 	ip_length: c.int,
 ) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_open(1, s, is_client, ip, ip_length)
 }
 
@@ -225,7 +225,7 @@ server_on_open_nossl :: proc "c" (
 	ip: [^]byte,
 	ip_length: c.int,
 ) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_open(0, s, is_client, ip, ip_length)
 }
 
@@ -256,12 +256,12 @@ server_on_open :: proc(
 ///////////////////////////////////////
 
 server_on_timeout_ssl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_timeout(1, s)
 }
 
 server_on_timeout_nossl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
-	context = load_context()
+	context = tls_context()
 	return server_on_timeout(0, s)
 }
 
@@ -397,7 +397,7 @@ Only valid to call directly after @ref listener_make
 */
 listener_run :: proc(listener: ^Server_Listener) -> bool {
 	ensure(listener != nil)
-	listener.ctx = load_context()
+	listener.ctx = tls_context()
 	{
 		sync.mutex_guard(&listener.mu)
 		if listener.state != .Opened do return false
@@ -420,8 +420,6 @@ listener_run :: proc(listener: ^Server_Listener) -> bool {
 		} else {
 			listener.state = .Stopped
 		}
-
-
 	}
 	bop.us_loop_run(listener.loop)
 	return true
@@ -449,14 +447,11 @@ listener_stop :: proc(listener: ^Server_Listener) -> bool {
 		bop.us_listen_socket_close(listener.ssl, listener.listen_socket)
 		listener.listen_socket = nil
 	}
-	if listener.socket_context != nil {
-		bop.us_socket_context_close(listener.ssl, listener.socket_context)
-		listener.socket_context = nil
-	}
 
 	if listener.state == .Running {
 		listener.state = .Stopping
 		log.info("listener stopping...")
+		bop.us_wakeup_loop(listener.loop)
 		return false
 	}
 
@@ -478,7 +473,8 @@ listener_delete :: proc(listener: ^Server_Listener) {
 }
 
 /*
-Ensures listener is stopped, waiting until it is stopped or the supplied timeout elapses.
+Ensures listener is stopped and deleted, waiting until it is stopped or the
+supplied timeout elapses.
 
 @param listener listener to delete
 @param duration max time to wait
@@ -507,6 +503,10 @@ listener_delete_with_timeout :: proc(listener: ^Server_Listener, duration: time.
 	context.allocator = listener.allocator
 	delete(listener.host)
 	delete(listener.sockets)
+	if listener.socket_context != nil {
+		bop.us_socket_context_close(listener.ssl, listener.socket_context)
+		listener.socket_context = nil
+	}
 	if listener.loop != nil {
 		bop.us_loop_free(listener.loop)
 		listener.loop = nil
