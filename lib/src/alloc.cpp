@@ -48,3 +48,7 @@ BOP_API void bop_dealloc_sized(void *p, size_t size) {
 BOP_API void bop_heap_access(void *data, size_t size) {
     *static_cast<uint8_t *>(data) = 5;
 }
+
+BOP_API size_t bop_malloc_usable_size(const void *data) {
+    return snmalloc::libc::malloc_usable_size(data);
+}

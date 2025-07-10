@@ -110,8 +110,6 @@ main :: proc() {
         fmt.printfln("%.2f ns", f64(diff)/f64(1000000))
     }
 
-
-
     err = mdbx_reader_list(env, proc "c" (
         ctx: rawptr,
         num: c.int,

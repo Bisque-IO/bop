@@ -25,6 +25,8 @@ BOP_API void bop_dealloc_sized(void *p, size_t size);
 
 BOP_API void bop_heap_access(void *data, size_t size);
 
+BOP_API size_t bop_malloc_usable_size(const void *data);
+
 #ifdef __cplusplus
 }
 #endif

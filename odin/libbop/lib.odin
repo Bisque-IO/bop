@@ -7,27 +7,29 @@ import "core:testing"
 #assert(size_of(c.int) == size_of(i32))
 
 when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
-	when #config(BOP_SHARED, 1) == 1 {
+	when #config(BOP_DEBUG, 0) == 1 {
 		@(private)
 		LIB_PATH :: "../../build/windows/x64/release/bop.lib"
 	} else {
 		@(private)
-		LIB_PATH :: "../../build/windows/x64/release/bop.lib"
+		LIB_PATH :: "windows/amd64/bop.lib"
 	}
 
 	when #config(BOP_DEBUG, 0) == 1 {
 		@(private)
-		MSVCRT_NAME :: "system:msvcrtd.lib"
+		MSVCRT_NAME :: "system:msvcrt.lib"
 	} else {
 		@(private)
 		MSVCRT_NAME :: "system:msvcrt.lib"
 	}
 
 	foreign import lib {
-	    "windows/amd64/libcrypto_static.lib",
-	    "windows/amd64/libssl_static.lib",
-//		"windows/amd64/libcrypto.lib",
-//		"windows/amd64/libssl.lib",
+//	    "windows/amd64/libcrypto_static.lib",
+//	    "windows/amd64/libssl_static.lib",
+//		"windows/amd64/libcrypto.a",
+//		"windows/amd64/libssl.a",
+		"windows/amd64/iwasm.lib",
+		"windows/amd64/wolfssl.lib",
 		"system:Kernel32.lib",
 		"system:User32.lib",
 		"system:Advapi32.lib",
@@ -35,6 +37,14 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 		"system:onecore.lib",
 		"system:Synchronization.lib",
 		"system:Dbghelp.lib",
+		"system:ws2_32.lib",
+		"system:bcrypt.lib",
+//		"system:libcmt.lib",
+//		"system:psapi.lib",
+//		"system:iphlpapi.lib",
+//		"system:ole32.lib",
+//		"system:shell32.lib",
+//		"system:uuid.lib",
 //		"system:ucrt.lib",
 		MSVCRT_NAME,
 		LIB_PATH,
@@ -44,26 +54,8 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 } else when ODIN_OS == .Linux && ODIN_ARCH == .amd64 {
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -extra-linker-flags:"-Wl,-rpath,$ORIGIN/libbop.so" -linker:lld
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -linker:lld -extra-linker-flags:"-rdynamic -static"
-	when #config(BOP_WOLFSSL, 0) == 1 {
-		when #config(BOP_DEBUG, 1) == 1 {
-			when #config(BOP_SHARED, 0) == 1 {
-				@(private)
-				LIB_PATH :: "../../build/linux/x86_64/release/libbop-wolfssl.so"
-			} else {
-				@(private)
-				LIB_PATH :: "../../build/linux/x86_64/release/libbop-wolfssl.a"
-			}
-		} else {
-			@(private)
-			LIB_PATH :: "linux/amd64/libbop-wolfssl.a"
-		}
-		foreign import lib {
-			"linux/amd64/libwolfssl.a",
-			"system:stdc++",
-			LIB_PATH,
-		}
-	} else {
-		when #config(BOP_DEBUG, 1) == 1 {
+	when #config(BOP_OPENSSL, 0) == 0 {
+		when #config(BOP_DEBUG, 0) == 1 {
 			when #config(BOP_SHARED, 0) == 1 {
 				@(private)
 				LIB_PATH :: "../../build/linux/x86_64/release/libbop.so"
@@ -72,27 +64,57 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 				LIB_PATH :: "../../build/linux/x86_64/release/libbop.a"
 			}
 		} else {
-			@(private)
-			LIB_PATH :: "linux/amd64/libbop.a"
+			when #config(BOP_SHARED, 0) == 1 {
+				@(private)
+				LIB_PATH :: "linux/amd64/libbop.so"
+			} else {
+				@(private)
+				LIB_PATH :: "linux/amd64/libbop.a"
+			}
+		}
+		foreign import lib {
+			"linux/amd64/libwolfssl.a",
+			"linux/amd64/libiwasm.a",
+			"system:stdc++",
+			LIB_PATH,
+		}
+	} else {
+		when #config(BOP_DEBUG, 0) == 1 {
+			when #config(BOP_SHARED, 0) == 1 {
+				@(private)
+				LIB_PATH :: "../../build/linux/x86_64/release/libbop-openssl.so"
+			} else {
+				@(private)
+				LIB_PATH :: "../../build/linux/x86_64/release/libbop-openssl.a"
+			}
+		} else {
+			when #config(BOP_SHARED, 0) == 1 {
+				@(private)
+				LIB_PATH :: "linux/amd64/libbop-openssl.so"
+			} else {
+				@(private)
+				LIB_PATH :: "linux/amd64/libbop-openssl.a"
+			}
 		}
 		foreign import lib {
 			"system:crypto",
 			"system:ssl",
 			"system:stdc++",
+			"linux/amd64/libiwasm.a",
 			LIB_PATH,
 		}
 	}
 } else when ODIN_OS == .Linux && ODIN_ARCH == .arm64 {
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -extra-linker-flags:"-Wl,-rpath,$ORIGIN/libbop.so" -linker:lld
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -linker:lld -extra-linker-flags:"-rdynamic -static"
-	when #config(BOP_WOLFSSL, 0) == 1 {
+	when #config(BOP_OPENSSL, 0) == 0 {
 		when #config(BOP_DEBUG, 1) == 1 {
 			when #config(BOP_SHARED, 0) == 1 {
 				@(private)
-				LIB_PATH :: "../../build/linux/arm64/release/libbop-wolfssl.so"
+				LIB_PATH :: "../../build/linux/arm64/release/libbop.so"
 			} else {
 				@(private)
-				LIB_PATH :: "../../build/linux/arm64/release/libbop-wolfssl.a"
+				LIB_PATH :: "../../build/linux/arm64/release/libbop.a"
 			}
 		} else {
 			@(private)
@@ -206,8 +228,12 @@ into the code docs/AddressSpace.md provides a good overview of the allocation an
 @(default_calling_convention = "c")
 foreign lib {
 	alloc :: proc(size: c.size_t) -> rawptr ---
+	alloc_aligned :: proc(alignment, size: c.size_t) -> rawptr ---
 	zalloc :: proc(size: c.size_t) -> rawptr ---
+	zalloc_aligned :: proc(alignment, size: c.size_t) -> rawptr ---
+	realloc :: proc(p: rawptr, s: c.size_t) -> rawptr ---
 	dealloc :: proc(p: rawptr) ---
+	dealloc_sized :: proc(p: rawptr, s: c.size_t) ---
 }
 
 /*

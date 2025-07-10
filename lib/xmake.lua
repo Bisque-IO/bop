@@ -1,26 +1,26 @@
-local target_of = function(kind, enable_wolfssl)
+local target_of = function(kind, use_openssl)
     if is_plat("windows") then
-        enable_wolfssl = false
+        use_openssl = false
     end
     if kind == "static" then
-        if enable_wolfssl then
-            target("bop-static-wolfssl")
-            set_basename("bop-wolfssl")
-        else
-            target("bop-static")
+        if not use_openssl then
+            target("bop")
             set_basename("bop")
+        else
+            target("bop-openssl")
+            set_basename("bop-openssl")
         end
     else
-        if enable_wolfssl then
-            target("bop-shared-wolfssl")
-            set_basename("bop-wolfssl")
-        else
+        if not use_openssl then
             target("bop-shared")
             set_basename("bop")
+        else
+            target("bop-shared-openssl")
+            set_basename("bop-openssl")
         end
     end
     set_kind(kind)
-    set_languages("c++23", "c23")
+    set_languages("c++23")
 
     -- ./configure --enable-static --enable-pic --enable-opensslall --enable-opensslextra --enable-aesni --enable-all --enable-all-crypto --enable-asio
 
@@ -38,13 +38,17 @@ local target_of = function(kind, enable_wolfssl)
         if kind == "static" then
             add_cxflags("/MT")
         else
-            add_cxflags("/MD")
+            --add_cxflags("/MD")
             --add_syslinks("MSVCRT")
         end
         add_defines("NOMINMAX")
-        add_ldflags("/NODEFAULTLIB:MSVCRT")
-        add_cxflags("/Zc:preprocessor")
-        add_syslinks("Advapi32", "User32", "Kernel32", "onecore", "ntdll", "Synchronization")
+        --add_ldflags("/NODEFAULTLIB:MSVCRT")
+        --add_ldflags("/NODEFAULTLIB:ucrt")
+        --add_ldflags("/NODEFAULTLIB:libcmt")
+        --add_cxflags("/MT")
+        --add_ldflags("/MT")
+        add_cxflags("/Zc:preprocessor", "/std:c23", "/experimental:c11atomics")
+        add_syslinks("Advapi32", "User32", "Kernel32", "onecore", "ntdll", "Synchronization", "msvcrt")
         add_defines("MDBX_ENABLE_MINCORE=0")
     else
         add_syslinks("c", "m")
@@ -121,19 +125,23 @@ local target_of = function(kind, enable_wolfssl)
 
     if is_plat("windows", "mingw") then
         add_defines("LIBUS_USE_UV=1")
-        add_defines("LIBUS_USE_OPENSSL")
-        --add_defines("LIBUS_USE_WOLFSSL")
+        --add_defines("LIBUS_USE_OPENSSL")
+        add_defines("LIBUS_USE_WOLFSSL")
+        add_defines("BOOST_ASIO_USE_WOLFSSL=1")
+        add_defines("HAVE_WOLFSSL_ASIO=1")
         --add_defines("LIBUS_USE_ASIO=1")
-        add_packages("openssl3")
-        add_syslinks("advapi32", "iphlpapi", "psapi", "user32", "userenv", "ws2_32", "shell32", "ole32", "uuid", "Dbghelp")
-        --add_ldflags("-l:./odin/libbop/windows/amd64/wolfssl.lib")
-        --add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
+        add_defines("_WIN32_WINNT=0x0602")
+        --add_packages("openssl3")
+        add_syslinks("bcrypt", "advapi32", "iphlpapi", "psapi", "user32", "userenv", "ws2_32", "shell32", "ole32", "uuid",
+            "Dbghelp")
+        add_ldflags("-l:./odin/libbop/windows/amd64/wolfssl.lib")
+        add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
 
         add_files("libuv/src/*.c", "libuv/src/win/*.c")
         add_includedirs("libuv/src", { public = false })
         add_includedirs("libuv/include", { public = true })
     else
-        if enable_wolfssl then
+        if not use_openssl then
             add_defines("BOOST_ASIO_USE_WOLFSSL=1")
             add_defines("LIBUS_USE_WOLFSSL")
             add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
@@ -169,12 +177,13 @@ local target_of = function(kind, enable_wolfssl)
 
     add_deps("snmalloc")
     --add_deps("sqlite")
+    --add_packages("wamr2")
 
     add_packages(
     --"mimalloc",
     --"openssl3",
     --"wolfssl",
-        --"fmt",
+    --"fmt",
         "zlib",
         "zstd",
         "brotli",

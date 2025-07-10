@@ -2,6 +2,7 @@ import os
 import platform
 import subprocess
 import sys
+import shutil
 from dataclasses import dataclass
 from typing import List
 
@@ -10,6 +11,45 @@ IS_WINDOWS = platform.system() == "Windows"
 IS_LINUX = platform.system() == "Linux"
 IS_MAC = platform.system() == "Darwin"
 
+arch = platform.machine().lower()
+
+IS_AMD64 = False
+IS_ARM64 = False
+IS_RISCV64 = False
+LIB_DIR = ""
+SO_SUFFIX = ""
+
+if IS_LINUX:
+    SO_SUFFIX = ".so"
+elif IS_MAC:
+    SO_SUFFIX = ".dylib"
+elif IS_WINDOWS:
+    SO_SUFFIX = ".dll"
+
+# Normalize to common arch names
+if arch in ("x86_64", "amd64"):
+    IS_AMD64 = True
+    if IS_LINUX:
+        LIB_DIR = "odin/libbop/linux/amd64"
+    elif IS_MAC:
+        LIB_DIR = "odin/libbop/macos/amd64"
+    elif IS_WINDOWS:
+        LIB_DIR = "odin/libbop/windows/amd64"
+elif arch in ("aarch64", "arm64"):
+    IS_ARM64 = True
+    if IS_LINUX:
+        LIB_DIR = "odin/libbop/linux/arm64"
+    elif IS_MAC:
+        LIB_DIR = "odin/libbop/macos/arm64"
+    elif IS_WINDOWS:
+        LIB_DIR = "odin/libbop/windows/arm64"
+elif arch in ("riscv64",):
+    IS_RISCV64 = True
+    if IS_LINUX:
+        LIB_DIR = "odin/libbop/linux/riscv64"
+else:
+    print(f"Unknown architecture: {arch}")
+    sys.exit(-1)
 
 @dataclass
 class Test:
@@ -24,6 +64,7 @@ def boxify(text: str, padding: int = 1) -> str:
     bottom = "└" + "─" * (max_len + padding * 2) + "┘"
     middle = [f"│{pad}{line.ljust(max_len)}{pad}│" for line in lines]
     return "\n".join([top] + middle + [bottom])
+
 def print_odin_version():
     try:
         subprocess.run(["odin", "version"], check=True)
@@ -54,11 +95,11 @@ def format_size(bytes, suffix="B"):
     return f"{bytes:.1f} P{suffix}"
 
 def run_odin_tests(
-        path: str,
-        name: str = "",
-        debug: bool = False,
-        keep_build: bool = False,
-        build_only: bool = False
+    path: str,
+    name: str = "",
+    debug: bool = False,
+    keep_build: bool = False,
+    build_only: bool = False
 ):
     cmd = ["odin", "test"]
     cmd += [path]
@@ -102,14 +143,16 @@ def run_odin_tests(
     # if build_only:
     #     cmd += ["-build-only"]
 
-    if IS_WINDOWS:
-        cmd += ["-linker:default"]
-        cmd += ['-extra-linker-flags:/ignore:4099 /NODEFAULTLIB:libcmt']
-    else:
-        cmd += ["-linker:lld"]
-
     if debug:
         cmd += ["-debug"]
+        cmd += ["-define:BOP_DEBUG=1"]
+
+    if IS_WINDOWS:
+        cmd += ["-linker:default"]
+        linker_flags = "/ignore:4099 /NODEFAULTLIB:libcmt"
+        cmd += [f"-extra-linker-flags:{linker_flags}"]
+    else:
+        cmd += ["-linker:lld"]
 
     print(f"\n🔧 running test(s):\n\n\t{' '.join(cmd)}\n")
     print_odin_report()
@@ -117,7 +160,7 @@ def run_odin_tests(
         subprocess.run(cmd, check=True)
         print(f"✅  SUCCESS\n")
     except subprocess.CalledProcessError as e:
-        print(f"❌  FAILED with exit code {e.returncode}\n")
+        print(f"\n❌  FAILED with exit code {e.returncode}\n")
         sys.exit(e.returncode)
 
 
@@ -327,9 +370,9 @@ def build(args: List[str]):
     os.makedirs(bin_dir, 777, True)
 
     debug = True
+    shared = False
     release = False
-    openssl = True
-    wolfssl = False
+    openssl = False
     hide_timings = False
     sanitize_address = False
     sanitize_memory = False
@@ -354,6 +397,7 @@ def build(args: List[str]):
     vet_using_stmt = False
     warnings_as_errors = False
     microarch = ""
+    no_cmt = False
 
     for arg in args:
         if arg == "-h" or arg == "-help":
@@ -366,8 +410,11 @@ def build(args: List[str]):
             release = True
             opt = "aggressive"
             continue
-        if arg == "-wolfssl":
-            wolfssl = True
+        if arg == "-openssl":
+            openssl = True
+            continue
+        if arg == "-shared":
+            shared = True
             continue
         if arg == "-hide-timings":
             hide_timings = True
@@ -469,6 +516,9 @@ def build(args: List[str]):
 
     cmd += [f"-build-mode:{kind}"]
 
+    if debug:
+        cmd += ["-debug"]
+
     if sanitize_address:
         cmd += ["-sanitize:address"]
     if sanitize_memory:
@@ -513,19 +563,32 @@ def build(args: List[str]):
     if IS_WINDOWS:
         cmd += ["-o:" + opt]
         cmd += [f"-out:{exe_path}"]
-        cmd += ["-define:BOP_DEBUG=0"]
         # cmd += ["-define:BOP_SHARED=0"]
         cmd += ["-linker:default"]
         cmd += ["-show-timings"]
-        linker_flags = "/ignore:4099 /NODEFAULTLIB:libcmt"
+        # linker_flags = "/ignore:4099 /NODEFAULTLIB:libcmt /MAP"
+        linker_flags = "/ignore:4099"
         cmd += [f"-extra-linker-flags:{linker_flags}"]
     else:
+        if shared:
+            cmd += ["-define:BOP_SHARED=1"]
+            if openssl:
+                shutil.copy(
+                    os.path.join(LIB_DIR, "libbop-openssl") + SO_SUFFIX,
+                    os.path.join(bin_dir, "libbop-openssl") + SO_SUFFIX
+                )
+            else:
+                shutil.copy(
+                    os.path.join(LIB_DIR, "libbop") + SO_SUFFIX,
+                    os.path.join(bin_dir, "libbop") + SO_SUFFIX
+                )
+
         cmd += ["-o:" + opt]
         cmd += [f"-out:{exe_path}"]
-        cmd += ["-define:BOP_DEBUG=0"]
+        # cmd += ["-define:BOP_DEBUG=0"]
         # cmd += ["-define:BOP_SHARED=0"]
-        if wolfssl:
-            cmd += ["-define:BOP_WOLFSSL=1"]
+        if openssl:
+            cmd += ["-define:BOP_OPENSSL=1"]
         cmd += ["-linker:lld"]
         cmd += ["-show-timings"]
         linker_flags = "-rdynamic"
@@ -557,6 +620,11 @@ def build(args: List[str]):
         print(f"\n❌  '{path}' failed with exit code {e.returncode}\n")
         sys.exit(e.returncode)
 
+def release(args: List[str]):
+    """
+
+    :return:
+    """
 
 def main():
     if len(sys.argv) < 2:
@@ -572,8 +640,10 @@ def main():
 
     if cmd == "test":
         test(args)
-    elif cmd == "build":
+    elif cmd == "build" or cmd == "b":
         build(args)
+    elif cmd == "release":
+        release(args)
     elif cmd == "version":
         print_odin_report()
     else:

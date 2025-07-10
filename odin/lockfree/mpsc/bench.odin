@@ -6,8 +6,11 @@ import "core:fmt"
 import "core:thread"
 import "core:time"
 
+//import bop "../../libbop"
+
 main :: proc() {
 //    bench_parallelism(8, 4096*4, 2000000000)
+//    bop.alloc(1)
 
     for i in 0 ..< 5 {
 //            stress_test_mpsc_push(1, 8192 / 4, 20000000)
