@@ -17,7 +17,7 @@ main :: proc() {
     }
 
     for i in 0 ..< 5 {
-        stress_test_spsc_push(8192 / 32, 20000000)
+        stress_test_spsc_push(8192 / 64, 20000000)
 //        stress_test_mpsc_push(1, 8192 / 4, 20000000)
     }
     for i in 0 ..< 5 {

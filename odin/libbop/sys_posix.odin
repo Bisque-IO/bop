@@ -21,7 +21,7 @@ ENOSYS  :: posix.ENOSYS
 FD :: posix.FD
 
 IO_Vec :: struct {
-    base: rawptr,
+    base: [^]byte,
     len:  uint,
 }
 

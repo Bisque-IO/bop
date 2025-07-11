@@ -45,7 +45,7 @@ MDBX_Table_Enum_Func :: #type proc "c" (
 	dbi: MDBX_DBI,
 ) -> MDBX_Error
 
-Mdbx_Preserve_Func :: #type proc "c" (
+MDBX_Preserve_Func :: #type proc "c" (
 	ctx: rawptr,
 	target: ^MDBX_Val,
 	src: [^]byte,

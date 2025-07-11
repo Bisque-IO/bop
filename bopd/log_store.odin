@@ -1,5 +1,6 @@
 package bopd
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:flags"
 import "core:fmt"
@@ -10,7 +11,14 @@ import "core:thread"
 
 import bop "../odin/libbop"
 
-Log_Store :: struct {}
+Log_Store :: struct {
+	allocator: runtime.Allocator,
+	log_store: ^bop.Raft_Log_Store_Ptr,
+	state_mgr: ^State_Mgr,
+	idx_start: u64,
+	idx_last: u64,
+	idx_durable: u64,
+}
 
 /*
 The first available slot of the store, starts with 1
@@ -18,7 +26,8 @@ The first available slot of the store, starts with 1
 @return Last log index number + 1
 */
 log_store_next_slot :: proc "c" (user_data: rawptr) -> u64 {
-	return 0
+	ls := cast(^Log_Store)user_data
+	return intrinsics.atomic_load_explicit(&ls.idx_last, .Seq_Cst)
 }
 
 /*
@@ -27,7 +36,8 @@ However, after some compact actions, this could be anything equal to or
 greater than one
 */
 log_store_start_index :: proc "c" (user_data: rawptr) -> u64 {
-	return 0
+	ls := cast(^Log_Store)user_data
+	return intrinsics.atomic_load_explicit(&ls.idx_last, .Seq_Cst)
 }
 
 /*
@@ -37,6 +47,7 @@ The last log entry in store.
         value set to null and term set to zero.
 */
 log_store_last_entry :: proc "c" (user_data: rawptr) -> ^bop.Raft_Log_Entry {
+	ls := cast(^Log_Store)user_data
 	return nil
 }
 
@@ -55,6 +66,7 @@ log_store_append :: proc "c" (
 	has_crc32: bool,
 	crc32: u32,
 ) -> u64 {
+	ls := cast(^Log_Store)user_data
 	return 0
 }
 
@@ -77,7 +89,7 @@ log_store_write_at :: proc "c" (
 	has_crc32: bool,
 	crc32: u32,
 ) {
-
+	ls := cast(^Log_Store)user_data
 }
 
 /*
@@ -88,7 +100,7 @@ a single append_entries request.
 @param cnt The number of log entries written.
 */
 log_store_end_of_append_batch :: proc "c" (user_data: rawptr, start: u64, count: u64) {
-
+	ls := cast(^Log_Store)user_data
 }
 
 /*
@@ -107,7 +119,7 @@ log_store_log_entries :: proc "c" (
 	start: u64,
 	end: u64,
 ) {
-
+	ls := cast(^Log_Store)user_data
 }
 
 /*
@@ -117,6 +129,7 @@ Get the log entry at the specified log index number.
 @return The log entry or null if index >= this->next_slot().
 */
 log_store_entry_at :: proc "c" (user_data: rawptr, index: u64) -> ^bop.Raft_Log_Entry {
+	ls := cast(^Log_Store)user_data
 	return nil
 }
 
@@ -129,6 +142,7 @@ Suggest to stop the system if the index >= this->next_slot()
         0 if index < this->start_index().
 */
 log_store_term_at :: proc "c" (user_data: rawptr, index: u64) -> u64 {
+	ls := cast(^Log_Store)user_data
 	return 0
 }
 
@@ -140,6 +154,7 @@ Pack the given number of log items starting from the given index.
 @return Packed (encoded) logs.
 */
 log_store_pack :: proc "c" (user_data: rawptr, index: u64, count: i32) -> ^bop.Raft_Buffer {
+	ls := cast(^Log_Store)user_data
 	return nil
 }
 
@@ -150,6 +165,7 @@ Apply the log pack to current log store, starting from index.
 @param Packed logs.
 */
 log_store_apply_pack :: proc "c" (user_data: rawptr, index: u64, pack: ^bop.Raft_Buffer) {
+	ls := cast(^Log_Store)user_data
 
 }
 
@@ -164,6 +180,7 @@ set start log index to `last_log_index + 1`.
 @return `true` on success.
 */
 log_store_compact :: proc "c" (user_data: rawptr, last_log_index: u64) -> bool {
+	ls := cast(^Log_Store)user_data
 	return true
 }
 
@@ -186,6 +203,7 @@ actual job incurring disk IO can run in background. Once the job is done,
                  the log compaction is done.
 */
 log_store_compact_async :: proc "c" (user_data: rawptr, last_log_index: u64) -> bool {
+	ls := cast(^Log_Store)user_data
 	return true
 }
 
@@ -196,6 +214,7 @@ so that all log entries are guaranteed to be durable upon process crash.
 @return `true` on success.
 */
 log_store_flush :: proc "c" (user_data: rawptr) -> bool {
+	ls := cast(^Log_Store)user_data
 	return true
 }
 
@@ -207,7 +226,8 @@ Please refer to the comment of the flag.
 @return The last durable log index.
 */
 log_store_last_durable_index :: proc "c" (user_data: rawptr) -> u64 {
-	return 0
+	ls := cast(^Log_Store)user_data
+	return intrinsics.atomic_load_explicit(&ls.idx_durable, .Seq_Cst)
 }
 
 wire_log_store :: proc() {

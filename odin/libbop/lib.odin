@@ -1963,7 +1963,7 @@ foreign lib {
 		dbi: MDBX_DBI,
 		key, new_value, old_value: ^MDBX_Val,
 		flags: MDBX_Put_Flags,
-		preserver: Mdbx_Preserve_Func,
+		preserver: MDBX_Preserve_Func,
 	) -> MDBX_Error ---
 
 	/*
@@ -3093,6 +3093,7 @@ foreign lib {
 	raft_buffer_new :: proc(size: c.size_t) -> ^Raft_Buffer ---
 	raft_buffer_free :: proc(buf: ^Raft_Buffer) ---
 	raft_buffer_container_size :: proc(buf: ^Raft_Buffer) -> c.size_t ---
+	raft_buffer_data :: proc(buf: ^Raft_Buffer) -> [^]byte ---
 	raft_buffer_size :: proc(buf: ^Raft_Buffer) -> c.size_t ---
 	raft_buffer_pos :: proc(buf: ^Raft_Buffer) -> c.size_t ---
 	raft_buffer_set_pos :: proc(buf: ^Raft_Buffer, pos: c.size_t) -> c.size_t ---

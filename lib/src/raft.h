@@ -233,27 +233,27 @@ BOP_API void bop_raft_srv_config_set_priority(bop_raft_srv_config *cfg, int32_t 
 
 struct bop_raft_srv_state;
 
-BOP_API bop_raft_buffer *bop_raft_svr_state_serialize(bop_raft_srv_state *state);
+BOP_API bop_raft_buffer *bop_raft_srv_state_serialize(bop_raft_srv_state *state);
 
-BOP_API bop_raft_srv_state *bop_raft_svr_state_deserialize(bop_raft_buffer *buf);
+BOP_API bop_raft_srv_state *bop_raft_srv_state_deserialize(bop_raft_buffer *buf);
 
-BOP_API void bop_raft_svr_state_delete(const bop_raft_srv_state *state);
+BOP_API void bop_raft_srv_state_delete(const bop_raft_srv_state *state);
 
 /**
  * Term
  */
-BOP_API uint64_t bop_raft_svr_state_term(const bop_raft_srv_state *state);
+BOP_API uint64_t bop_raft_srv_state_term(const bop_raft_srv_state *state);
 
 /**
  * Server ID that this server voted for.
  * `-1` if not voted.
  */
-BOP_API int32_t bop_raft_svr_state_voted_for(const bop_raft_srv_state *state);
+BOP_API int32_t bop_raft_srv_state_voted_for(const bop_raft_srv_state *state);
 
 /**
  * `true` if election timer is allowed.
  */
-BOP_API bool bop_raft_svr_state_is_election_timer_allowed(const bop_raft_srv_state *state);
+BOP_API bool bop_raft_srv_state_is_election_timer_allowed(const bop_raft_srv_state *state);
 
 /**
  * true if this server has joined the cluster but has not yet
@@ -262,7 +262,7 @@ BOP_API bool bop_raft_svr_state_is_election_timer_allowed(const bop_raft_srv_sta
  * this server will not receive normal append_entries
  * requests.
  */
-BOP_API bool bop_raft_svr_state_is_catching_up(const bop_raft_srv_state *state);
+BOP_API bool bop_raft_srv_state_is_catching_up(const bop_raft_srv_state *state);
 
 /**
  * `true` if this server is receiving a snapshot.
@@ -272,7 +272,7 @@ BOP_API bool bop_raft_svr_state_is_catching_up(const bop_raft_srv_state *state);
  * neither
  * receive normal append_entries requests nor initiate election.
  */
-BOP_API bool bop_raft_svr_state_is_receiving_snapshot(const bop_raft_srv_state *state);
+BOP_API bool bop_raft_srv_state_is_receiving_snapshot(const bop_raft_srv_state *state);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::logger

@@ -22,7 +22,7 @@ EDEADLK :: 1131 // ERROR_POSSIBLE_DEADLOCK
 FD :: windows.HANDLE
 
 IO_Vec :: struct {
-    base: rawptr,
+    base: [^]byte,
     len:  uint,
 }
 

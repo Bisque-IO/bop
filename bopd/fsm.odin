@@ -8,6 +8,10 @@ import "core:thread"
 
 import bop "../odin/libbop"
 
+FSM :: struct {
+	allocator: runtime.Allocator,
+}
+
 /*
 Commit the given Raft log.
 

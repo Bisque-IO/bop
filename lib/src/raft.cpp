@@ -548,7 +548,7 @@ BOP_API void bop_raft_srv_config_set_priority(bop_raft_srv_config *cfg, int32_t 
 /// nuraft::svr_state
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-BOP_API bop_raft_buffer *bop_raft_svr_state_serialize(bop_raft_srv_state *state) {
+BOP_API bop_raft_buffer *bop_raft_srv_state_serialize(bop_raft_srv_state *state) {
     if (!state)
         return nullptr;
     uint8_t version = 2;
@@ -578,7 +578,7 @@ BOP_API bop_raft_buffer *bop_raft_svr_state_serialize(bop_raft_srv_state *state)
     return buf;
 }
 
-BOP_API bop_raft_srv_state *bop_raft_svr_state_deserialize(bop_raft_buffer *buf) {
+BOP_API bop_raft_srv_state *bop_raft_srv_state_deserialize(bop_raft_buffer *buf) {
     nuraft::buffer_serializer bs(*reinterpret_cast<nuraft::buffer *>(buf));
     uint8_t ver = bs.get_u8();
 
@@ -601,7 +601,7 @@ BOP_API bop_raft_srv_state *bop_raft_svr_state_deserialize(bop_raft_buffer *buf)
     );
 }
 
-BOP_API void bop_raft_svr_state_delete(const bop_raft_srv_state *state) {
+BOP_API void bop_raft_srv_state_delete(const bop_raft_srv_state *state) {
     if (state)
         delete reinterpret_cast<const nuraft::srv_state *>(state);
 }
@@ -609,7 +609,7 @@ BOP_API void bop_raft_svr_state_delete(const bop_raft_srv_state *state) {
 /**
  * Term
  */
-BOP_API uint64_t bop_raft_svr_state_term(const bop_raft_srv_state *state) {
+BOP_API uint64_t bop_raft_srv_state_term(const bop_raft_srv_state *state) {
     return reinterpret_cast<const nuraft::srv_state *>(state)->get_term();
 }
 
@@ -617,14 +617,14 @@ BOP_API uint64_t bop_raft_svr_state_term(const bop_raft_srv_state *state) {
  * Server ID that this server voted for.
  * `-1` if not voted.
  */
-BOP_API int32_t bop_raft_svr_state_voted_for(const bop_raft_srv_state *state) {
+BOP_API int32_t bop_raft_srv_state_voted_for(const bop_raft_srv_state *state) {
     return reinterpret_cast<const nuraft::srv_state *>(state)->get_voted_for();
 }
 
 /**
  * `true` if election timer is allowed.
  */
-BOP_API bool bop_raft_svr_state_is_election_timer_allowed(const bop_raft_srv_state *state) {
+BOP_API bool bop_raft_srv_state_is_election_timer_allowed(const bop_raft_srv_state *state) {
     return reinterpret_cast<const nuraft::srv_state *>(state)->is_election_timer_allowed();
 }
 
@@ -633,7 +633,7 @@ BOP_API bool bop_raft_svr_state_is_election_timer_allowed(const bop_raft_srv_sta
  * fully caught up with the latest log. While in the catch-up status,
  * this server will not receive normal append_entries requests.
  */
-BOP_API bool bop_raft_svr_state_is_catching_up(const bop_raft_srv_state *state) {
+BOP_API bool bop_raft_srv_state_is_catching_up(const bop_raft_srv_state *state) {
     return reinterpret_cast<const nuraft::srv_state *>(state)->is_catching_up();
 }
 
@@ -643,7 +643,7 @@ BOP_API bool bop_raft_svr_state_is_catching_up(const bop_raft_srv_state *state) 
  * reset after restart. While this flag is set, this server will neither
  * receive normal append_entries requests nor initiate election.
  */
-BOP_API bool bop_raft_svr_state_is_receiving_snapshot(const bop_raft_srv_state *state) {
+BOP_API bool bop_raft_srv_state_is_receiving_snapshot(const bop_raft_srv_state *state) {
     return reinterpret_cast<const nuraft::srv_state *>(state)->is_receiving_snapshot();
 }
 
