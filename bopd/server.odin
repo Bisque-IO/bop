@@ -9,6 +9,8 @@ import "core:log"
 import "core:sync"
 import "core:time"
 
+import us "../odin/usockets"
+
 Server_Listener_State :: enum {
 	Opened	  = 0,
 	Running   = 1,
@@ -24,11 +26,11 @@ Server_Listener :: struct {
 	allocator: 		runtime.Allocator,
 	host: 			string,
 	port: 			u16,
-	loop: 			^bop.US_Loop,
-	socket_context: ^bop.US_Socket_Context,
-	listen_socket:  ^bop.US_Listen_Socket,
+	loop: 			^us.Loop,
+	socket_context: ^us.Socket_Context,
+	listen_socket:  ^us.Listen_Socket,
 	ctx: 			runtime.Context,
-	ssl_options: 	bop.US_Socket_Context_Options,
+	ssl_options: 	us.Socket_Context_Options,
 	state:			Server_Listener_State,
 	ssl: 			c.int,
 	sockets_mu:		sync.RW_Mutex,
@@ -46,13 +48,13 @@ Server_Socket :: struct {
 	offset: int,
 }
 
-server_on_wakeup :: proc "c" (loop: ^bop.US_Loop) {
+server_on_wakeup :: proc "c" (loop: ^us.Loop) {
 //	log.debug("server_on_wakeup")
 }
 
-server_on_pre :: proc "c" (loop: ^bop.US_Loop) {}
+server_on_pre :: proc "c" (loop: ^us.Loop) {}
 
-server_on_post :: proc "c" (loop: ^bop.US_Loop) {}
+server_on_post :: proc "c" (loop: ^us.Loop) {}
 
 //////////////////////////////////////////////////////////////////////////////////
 //
@@ -60,25 +62,25 @@ server_on_post :: proc "c" (loop: ^bop.US_Loop) {}
 //
 ///////////////////////////////////////
 
-server_on_writeable_ssl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
+server_on_writeable_ssl :: proc "c" (s: ^us.Socket) -> ^us.Socket {
 	context = tls_context()
 	return server_on_writeable(1, s)
 }
 
-server_on_writeable_nossl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
+server_on_writeable_nossl :: proc "c" (s: ^us.Socket) -> ^us.Socket {
 	context = tls_context()
 	return server_on_writeable(0, s)
 }
 
-server_on_writeable :: proc($SSL: c.int, s: ^bop.US_Socket) -> ^bop.US_Socket {
-	socket := cast(^Server_Socket)bop.us_socket_ext(SSL, s)
-	socket_context := cast(^Server_Context)bop.us_socket_context_ext(
+server_on_writeable :: proc($SSL: c.int, s: ^us.Socket) -> ^us.Socket {
+	socket := cast(^Server_Socket)us.socket_ext(SSL, s)
+	socket_context := cast(^Server_Context)us.socket_context_ext(
 		SSL,
-		bop.us_socket_context(SSL, s),
+		us.socket_context(SSL, s),
 	)
 
 	// Stream whatever is remaining of the response
-//	socket.offset += bop.us_socket_write(
+//	socket.offset += us.socket_write(
 //		SSL,
 //		s,
 //		raw_data(socket_context.response[socket.offset:]),
@@ -96,29 +98,29 @@ server_on_writeable :: proc($SSL: c.int, s: ^bop.US_Socket) -> ^bop.US_Socket {
 ///////////////////////////////////////
 
 server_on_close_ssl :: proc "c" (
-	s: ^bop.US_Socket,
+	s: ^us.Socket,
 	code: c.int,
 	reason: rawptr,
-) -> ^bop.US_Socket {
+) -> ^us.Socket {
 	context = tls_context()
 	return server_on_close(1, s, code, reason)
 }
 
 server_on_close_nossl :: proc "c" (
-	s: ^bop.US_Socket,
+	s: ^us.Socket,
 	code: c.int,
 	reason: rawptr,
-) -> ^bop.US_Socket {
+) -> ^us.Socket {
 	context = tls_context()
 	return server_on_close(0, s, code, reason)
 }
 
 server_on_close :: proc(
 	$SSL: c.int,
-	s: ^bop.US_Socket,
+	s: ^us.Socket,
 	code: c.int,
 	reason: rawptr,
-) -> ^bop.US_Socket {
+) -> ^us.Socket {
 	fmt.println("client disconnected")
 	return s
 }
@@ -129,20 +131,20 @@ server_on_close :: proc(
 //
 ///////////////////////////////////////
 
-server_on_end_ssl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
+server_on_end_ssl :: proc "c" (s: ^us.Socket) -> ^us.Socket {
 	context = tls_context()
 	return server_on_end(1, s)
 }
 
-server_on_end_nossl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
+server_on_end_nossl :: proc "c" (s: ^us.Socket) -> ^us.Socket {
 	context = tls_context()
 	return server_on_end(0, s)
 }
 
-server_on_end :: proc($SSL: c.int, s: ^bop.US_Socket) -> ^bop.US_Socket {
+server_on_end :: proc($SSL: c.int, s: ^us.Socket) -> ^us.Socket {
 	// HTTP does not support half-closed sockets
-	bop.us_socket_shutdown(SSL, s)
-	return bop.us_socket_close(SSL, s, 0, nil)
+	us.socket_shutdown(SSL, s)
+	return us.socket_close(SSL, s, 0, nil)
 }
 
 //////////////////////////////////////////////////////////////////////////////////
@@ -152,33 +154,33 @@ server_on_end :: proc($SSL: c.int, s: ^bop.US_Socket) -> ^bop.US_Socket {
 ///////////////////////////////////////
 
 server_on_data_ssl :: proc "c" (
-	s: ^bop.US_Socket,
+	s: ^us.Socket,
 	data: [^]byte,
 	length: c.int,
-) -> ^bop.US_Socket {
+) -> ^us.Socket {
 	context = tls_context()
 	return server_on_data(1, s, data, length)
 }
 
 server_on_data_nossl :: proc "c" (
-	s: ^bop.US_Socket,
+	s: ^us.Socket,
 	data: [^]byte,
 	length: c.int,
-) -> ^bop.US_Socket {
+) -> ^us.Socket {
 	context = tls_context()
 	return server_on_data(0, s, data, length)
 }
 
 server_on_data :: proc(
 	$SSL: c.int,
-	s: ^bop.US_Socket,
+	s: ^us.Socket,
 	data: [^]byte,
 	length: c.int,
-) -> ^bop.US_Socket {
-	client_socket := cast(^Server_Socket)bop.us_socket_ext(SSL, s)
-	server_context := cast(^Server_Context)bop.us_socket_context_ext(
+) -> ^us.Socket {
+	client_socket := cast(^Server_Socket)us.socket_ext(SSL, s)
+	server_context := cast(^Server_Context)us.socket_context_ext(
 		SSL,
-		bop.us_socket_context(SSL, s),
+		us.socket_context(SSL, s),
 	)
 
 	fmt.println("on_data: size=", length)
@@ -189,7 +191,7 @@ server_on_data :: proc(
 
 
 	// We treat all data events as a request
-//	client_socket.offset = bop.us_socket_write(
+//	client_socket.offset = us.socket_write(
 //		SSL,
 //		s,
 //		raw_data(socket_context.response),
@@ -198,7 +200,7 @@ server_on_data :: proc(
 //	)
 
 	// Reset idle timer
-	bop.us_socket_timeout(SSL, s, 30)
+	us.socket_timeout(SSL, s, 30)
 
 	return s
 }
@@ -210,39 +212,39 @@ server_on_data :: proc(
 ///////////////////////////////////////
 
 server_on_open_ssl :: proc "c" (
-	s: ^bop.US_Socket,
+	s: ^us.Socket,
 	is_client: c.int,
 	ip: [^]byte,
 	ip_length: c.int,
-) -> ^bop.US_Socket {
+) -> ^us.Socket {
 	context = tls_context()
 	return server_on_open(1, s, is_client, ip, ip_length)
 }
 
 server_on_open_nossl :: proc "c" (
-	s: ^bop.US_Socket,
+	s: ^us.Socket,
 	is_client: c.int,
 	ip: [^]byte,
 	ip_length: c.int,
-) -> ^bop.US_Socket {
+) -> ^us.Socket {
 	context = tls_context()
 	return server_on_open(0, s, is_client, ip, ip_length)
 }
 
 server_on_open :: proc(
 	$SSL: c.int,
-	s: ^bop.US_Socket,
+	s: ^us.Socket,
 	is_client: c.int,
 	ip: [^]byte,
 	ip_length: c.int,
-) -> ^bop.US_Socket {
-	client_socket := cast(^Server_Socket)bop.us_socket_ext(SSL, s)
+) -> ^us.Socket {
+	client_socket := cast(^Server_Socket)us.socket_ext(SSL, s)
 
 	// Reset offset
 	client_socket.offset = 0
 
 	// Timeout idle HTTP connections
-	bop.us_socket_timeout(SSL, s, 30)
+	us.socket_timeout(SSL, s, 30)
 
 	fmt.println("client connected")
 
@@ -255,19 +257,19 @@ server_on_open :: proc(
 //
 ///////////////////////////////////////
 
-server_on_timeout_ssl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
+server_on_timeout_ssl :: proc "c" (s: ^us.Socket) -> ^us.Socket {
 	context = tls_context()
 	return server_on_timeout(1, s)
 }
 
-server_on_timeout_nossl :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
+server_on_timeout_nossl :: proc "c" (s: ^us.Socket) -> ^us.Socket {
 	context = tls_context()
 	return server_on_timeout(0, s)
 }
 
-server_on_timeout :: proc($SSL: c.int, s: ^bop.US_Socket) -> ^bop.US_Socket {
+server_on_timeout :: proc($SSL: c.int, s: ^us.Socket) -> ^us.Socket {
 	// Close idle sockets
-	return bop.us_socket_close(SSL, s, 0, nil)
+	return us.socket_close(SSL, s, 0, nil)
 }
 
 //////////////////////////////////////////////////////////////////////////////////
@@ -302,13 +304,13 @@ Makes a new listener and starts listening on the port.
 listener_make :: proc(
 	host: cstring,
 	port: u16,
-	ssl_options: bop.US_Socket_Context_Options,
+	ssl_options: us.Socket_Context_Options,
 	allocator := context.allocator,
 ) -> (
 	listener: ^Server_Listener,
 	err: Listener_Make_Error,
 ) {
-	loop := bop.us_create_loop(nil, server_on_wakeup, server_on_pre, server_on_post, 0)
+	loop := us.create_loop(nil, server_on_wakeup, server_on_pre, server_on_post, 0)
 	if loop == nil {
 		return nil, Listener_Make_Error_Code.Create_Loop
 	}
@@ -316,7 +318,7 @@ listener_make :: proc(
 	SSL : c.int = 1 if len(ssl_options.cert_file_name) > 0 else 0
 
 	// create socket context
-	socket_context := bop.us_create_socket_context(
+	socket_context := us.create_socket_context(
 		SSL,
 		loop,
 		c.int(size_of(Server_Context)),
@@ -324,30 +326,30 @@ listener_make :: proc(
 	)
 
 	if socket_context == nil {
-		bop.us_loop_free(loop)
+		us.loop_free(loop)
 		return nil, Listener_Make_Error_Code.SSL
 	}
 
 	// init server context on the socket context
-	server_context := cast(^Server_Context)bop.us_socket_context_ext(SSL, socket_context)
+	server_context := cast(^Server_Context)us.socket_context_ext(SSL, socket_context)
 	server_context^ = Server_Context{}
 
 	// wire callbacks
-	bop.us_socket_context_on_open(SSL, socket_context,
+	us.socket_context_on_open(SSL, socket_context,
 		server_on_open_ssl if SSL == 1 else server_on_open_nossl)
-	bop.us_socket_context_on_data(SSL, socket_context,
+	us.socket_context_on_data(SSL, socket_context,
 		server_on_data_ssl if SSL == 1 else server_on_data_nossl)
-	bop.us_socket_context_on_writable(SSL, socket_context,
+	us.socket_context_on_writable(SSL, socket_context,
 		server_on_writeable_ssl if SSL == 1 else server_on_writeable_nossl)
-	bop.us_socket_context_on_close(SSL, socket_context,
+	us.socket_context_on_close(SSL, socket_context,
 		server_on_close_ssl if SSL == 1 else server_on_close_nossl)
-	bop.us_socket_context_on_timeout(SSL, socket_context,
+	us.socket_context_on_timeout(SSL, socket_context,
 		server_on_timeout_ssl if SSL == 1 else server_on_timeout_nossl)
-	bop.us_socket_context_on_end(SSL, socket_context,
+	us.socket_context_on_end(SSL, socket_context,
 		server_on_end_ssl if SSL == 1 else server_on_end_nossl)
 
 	// create listener socket and start listening
-	listen_socket := bop.us_socket_context_listen(
+	listen_socket := us.socket_context_listen(
 		SSL,
 		socket_context,
 		host,
@@ -360,9 +362,9 @@ listener_make :: proc(
 
 		listener, err = new(Server_Listener, allocator)
 		if err != nil {
-			bop.us_socket_context_close(SSL, socket_context)
-			bop.us_loop_free(loop)
-			bop.us_listen_socket_close(SSL, listen_socket)
+			us.socket_context_close(SSL, socket_context)
+			us.loop_free(loop)
+			us.listen_socket_close(SSL, listen_socket)
 			return nil, err
 		}
 
@@ -381,8 +383,8 @@ listener_make :: proc(
 	} else {
 		log.errorf("failed to listen on port %d", port)
 
-		bop.us_socket_context_close(SSL, socket_context)
-		bop.us_loop_free(loop)
+		us.socket_context_close(SSL, socket_context)
+		us.loop_free(loop)
 
 		return nil, Listener_Make_Error_Code.Port_Taken
 	}
@@ -408,11 +410,11 @@ listener_run :: proc(listener: ^Server_Listener) -> bool {
 		log.info("listener stopped")
 
 		if listener.listen_socket != nil {
-			bop.us_listen_socket_close(listener.ssl, listener.listen_socket)
+			us.listen_socket_close(listener.ssl, listener.listen_socket)
 			listener.listen_socket = nil
 		}
 		if listener.socket_context != nil {
-			bop.us_socket_context_close(listener.ssl, listener.socket_context)
+			us.socket_context_close(listener.ssl, listener.socket_context)
 			listener.socket_context = nil
 		}
 		if listener.state == .Stopping {
@@ -421,7 +423,7 @@ listener_run :: proc(listener: ^Server_Listener) -> bool {
 			listener.state = .Stopped
 		}
 	}
-	bop.us_loop_run(listener.loop)
+	us.loop_run(listener.loop)
 	return true
 }
 
@@ -444,14 +446,14 @@ listener_stop :: proc(listener: ^Server_Listener) -> bool {
 		return false
 	}
 	if listener.listen_socket != nil {
-		bop.us_listen_socket_close(listener.ssl, listener.listen_socket)
+		us.listen_socket_close(listener.ssl, listener.listen_socket)
 		listener.listen_socket = nil
 	}
 
 	if listener.state == .Running {
 		listener.state = .Stopping
 		log.info("listener stopping...")
-		bop.us_wakeup_loop(listener.loop)
+		us.wakeup_loop(listener.loop)
 		return false
 	}
 
@@ -504,11 +506,11 @@ listener_delete_with_timeout :: proc(listener: ^Server_Listener, duration: time.
 	delete(listener.host)
 	delete(listener.sockets)
 	if listener.socket_context != nil {
-		bop.us_socket_context_close(listener.ssl, listener.socket_context)
+		us.socket_context_close(listener.ssl, listener.socket_context)
 		listener.socket_context = nil
 	}
 	if listener.loop != nil {
-		bop.us_loop_free(listener.loop)
+		us.loop_free(listener.loop)
 		listener.loop = nil
 	}
 	free(listener)

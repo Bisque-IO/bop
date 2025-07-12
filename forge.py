@@ -254,7 +254,7 @@ Usage:
                         ./forge build filename.odin         Builds single-file package, must contain entry point.
 
         Flags
-        
+
         -kind:<mode>
                 Sets the build mode.
                 Available options:
@@ -278,14 +278,14 @@ Usage:
 
         -show-system-calls
                 Prints the whole command and arguments for calls to external tools like linker and assembler.
-                
+
         -microarch:<string>
                 Specifies the specific micro-architecture for the build in a string.
                 Examples:
                         -microarch:sandybridge
                         -microarch:native
                         -microarch:"?" for a list
-                        
+
         -strict-style
                 This enforces parts of same style as the Odin compiler, prefer '-vet-style -vet-semicolon' if you do not want to match it exactly.
 
@@ -294,7 +294,7 @@ Usage:
                 Errs on deprecated syntax.
                 Errs when the attached-brace style in not adhered to (also known as 1TBS).
                 Errs when 'case' labels are not in the same column as the associated 'switch' token.
-                
+
         -vet
                 Does extra checks on the code.
                 Extra checks include:
@@ -358,6 +358,16 @@ def build(args: List[str]):
     path = args[0]
     dir = path
     name = path
+
+    if path == "bop" or path == "libbop":
+        args = args[1:]
+        build_libbop(args)
+        return
+
+    if path == "wolfssl":
+        args = args[1:]
+        wolfssl_build(args)
+        return
 
     is_file = path.endswith(".odin")
     if is_file:
@@ -638,6 +648,211 @@ def bake(args: List[str]):
         print("")
 
 
+def xmake_configure(platform: str, arch: str, toolchain: str, debug = False):
+    args = ["xmake", "f", "-m", "release" if not debug else "debug", "-p", platform, "-a", arch]
+    if len(toolchain) > 0:
+        args += [toolchain]
+    try:
+        subprocess.run(args, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"exited with exit code {e.returncode}\n")
+        sys.exit(e.returncode)
+    except KeyboardInterrupt:
+        print("")
+
+def xmake_build_bop(platform: str, arch: str, toolchain: str):
+    try:
+        subprocess.run(["xmake", "b", "bop"], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"exited with exit code {e.returncode}\n")
+        sys.exit(e.returncode)
+    except KeyboardInterrupt:
+        print("")
+
+def xmake_configure_and_build_bop(platform: str, arch: str, toolchain: str, debug = False):
+    print(f"configuring xmake: platform={platform}  arch={arch}" + ("  " + toolchain if len(toolchain) > 0 else ""))
+    xmake_configure(platform, arch, toolchain, debug)
+    print(f"building [bop] xmake: platform={platform}  arch={arch}" + ("  " + toolchain if len(toolchain) > 0 else ""))
+    xmake_build_bop(platform, arch, toolchain)
+
+    build_dir = os.path.join("build", platform, arch, "release")
+    libbop_path = os.path.join(build_dir, "libbop.a" if not IS_WINDOWS else "bop.lib")
+
+    platform_name = ""
+    if platform == "linux" or platform == "cross":
+        platform_name = "linux"
+    elif platform == "macosx" or platform == "macos" or platform == "darwin":
+        platform_name = "macos"
+    elif platform == "windows" or platform == "mingw" or platform == "win":
+        platform_name = "windows"
+
+    arch_name = arch
+    if arch == "x86_64" or arch == "amd64" or arch == "x64":
+        arch_name = "amd64"
+    elif arch == "arm64" or arch == "aarch64":
+        arch_name = "arm64"
+    elif arch == "riscv64":
+        arch_name = "riscv64"
+
+    dest_dir = os.path.join("odin", "libbop", platform_name, arch_name)
+    dest_libbop = os.path.join(dest_dir, "libbop.a" if not IS_WINDOWS else "bop.lib")
+    shutil.copy(
+        libbop_path,
+        dest_libbop,
+    )
+
+
+def build_libbop(args: List[str]):
+    build_amd64 = False
+    build_arm64 = False
+    build_riscv64 = False
+    debug = False
+
+    if IS_AMD64:
+        build_amd64 = True
+    elif IS_ARM64:
+        build_arm64 = True
+    elif IS_RISCV64:
+        build_riscv64 = True
+
+    for arg in args:
+        if arg == "-all":
+            build_amd64 = True
+            build_arm64 = True
+            build_riscv64 = True
+            continue
+
+        if arg == "-arm64":
+            build_arm64 = True
+            continue
+
+        if arg == "-amd64":
+            build_amd64 = True
+            continue
+
+        if arg == "-riscv64":
+            build_riscv64 = True
+            continue
+
+        if arg == "-debug":
+            debug = True
+            continue
+
+    if IS_LINUX:
+        if build_amd64:
+            if IS_AMD64:
+                xmake_configure_and_build_bop("linux", "x86_64", "", debug)
+            else:
+                xmake_configure_and_build_bop("cross", "x86_64", "--cross=x86_64-linux-gnu-", debug)
+
+        if build_arm64:
+            if IS_ARM64:
+                xmake_configure_and_build_bop("linux", "arm64", "")
+            else:
+                xmake_configure_and_build_bop("cross", "arm64", "--cross=aarch64-linux-gnu-", debug)
+
+        if build_riscv64:
+            if IS_RISCV64:
+                xmake_configure_and_build_bop("linux", "riscv64", "")
+            else:
+                xmake_configure_and_build_bop("cross", "riscv64", "--cross=riscv64-linux-gnu-", debug)
+
+    elif IS_MAC:
+        if arch == "arm64" or arch == "aarch64":
+            xmake_configure_and_build_bop("macosx", "arm64", "", debug)
+        elif arch == "x86_64":
+            xmake_configure_and_build_bop("macosx", "x86_64", "", debug)
+        else:
+            print("unsupported macos arch: " + arch)
+            sys.exit(-1)
+    elif IS_WINDOWS:
+        xmake_configure_and_build_bop("windows", "x64", "", debug)
+
+def wolfssl_do_configure_build(
+    host: str,
+    cc: str,
+    cxx: str,
+):
+    os.chdir("lib")
+    os.chdir("wolfssl")
+    args = ["sh", "configure"]
+    if len(host) > 0:
+        args += ["--host=" + host]
+
+    if len(cc) > 0:
+        args += ["CC=" + cc]
+
+    if len(cxx) > 0:
+        args += ["CXX=" + cxx]
+
+    args += [
+        "--enable-static",
+        "--enable-pic",
+        "--enable-opensslall",
+        "--enable-opensslextra",
+        "--enable-asio"
+    ]
+    if host.startswith("x86_64"):
+        args += ["--enable-aesni"]
+
+    # ./configure --host=aarch64-linux-gnu CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ --enable-static --enable-pic --enable-opensslall --enable-opensslextra --enable-asio
+    try:
+        subprocess.run(args, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"exited with exit code {e.returncode}\n")
+        sys.exit(e.returncode)
+    except KeyboardInterrupt:
+        print("")
+
+    try:
+        subprocess.run(["make", "-j"], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"exited with exit code {e.returncode}\n")
+        sys.exit(e.returncode)
+    except KeyboardInterrupt:
+        print("")
+
+    os.chdir("..")
+    os.chdir("..")
+
+    dst_dir = ""
+    if host.startswith("x86_64"):
+        dst_dir = os.path.join("odin", "libbop", "linux", "amd64")
+    elif host.startswith("aarch64"):
+        dst_dir = os.path.join("odin", "libbop", "linux", "arm64")
+    elif host.startswith("riscv64"):
+        dst_dir = os.path.join("odin", "libbop", "linux", "riscv64")
+
+    if len(dst_dir) == 0:
+        print("unknown arch: expected amd64, arm64 or riscv64")
+        sys.exit(-1)
+
+    src_libwolfssl_a = os.path.join("lib/wolfssl/src/.libs/libwolfssl.a")
+    dst_libwolfssl_a = os.path.join(dst_dir, "libwolfssl.a")
+    shutil.copy(src_libwolfssl_a, dst_libwolfssl_a)
+
+def wolfssl_build(args: List[str]):
+    if not IS_LINUX:
+        print("only Linux is supported")
+        sys.exit(-1)
+
+    wolfssl_do_configure_build(
+        "x86_64-linux-gnu",
+        "x86_64-linux-gnu-gcc",
+        "x86_64-linux-gnu-g++"
+    )
+    wolfssl_do_configure_build(
+        "aarch64-linux-gnu",
+        "aarch64-linux-gnu-gcc",
+        "aarch64-linux-gnu-g++"
+    )
+    wolfssl_do_configure_build(
+        "riscv64-linux-gnu",
+        "riscv64-linux-gnu-gcc",
+        "riscv64-linux-gnu-g++"
+    )
+
+    # xmake f -v -p cross -a arm64 --cross=aarch64-linux-gnu-
 
 def main():
     if len(sys.argv) < 2:

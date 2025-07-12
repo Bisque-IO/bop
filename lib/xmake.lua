@@ -26,7 +26,9 @@ local target_of = function(kind, use_openssl)
     set_kind(kind)
     set_languages("c++23")
 
+    -- ./configure --host=aarch64-linux-gnu --build=x86_64-linux-gnu CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ --enable-static --enable-pic --enable-opensslall --enable-opensslextra --enable-asio
     -- ./configure --enable-static --enable-pic --enable-opensslall --enable-opensslextra --enable-aesni --enable-all --enable-all-crypto --enable-asio
+    -- ./configure --enable-static --enable-pic --enable-opensslall --enable-opensslextra --enable-aesni --enable-asio
 
     if is_plat("windows") then
         --add_toolchains("@llvm")
@@ -154,12 +156,15 @@ local target_of = function(kind, use_openssl)
             add_defines("ASIO_USE_WOLFSSL=1")
             --add_defines("BOOST_ASIO_USE_WOLFSSL=1")
             add_defines("LIBUS_USE_WOLFSSL")
+            -- add_packages("wolfssl")
             add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
 
             if is_plat("linux") and is_arch("x86_64") then
                 add_ldflags("-l:./odin/libbop/linux/amd64/libwolfssl.a")
             elseif is_plat("linux") and is_arch("arm64", "aarch64") then
                 add_ldflags("-l:./odin/libbop/linux/arm64/libwolfssl.a")
+            elseif is_plat("linux") and is_arch("riscv64") then
+                add_ldflags("-l:./odin/libbop/linux/riscv64/libwolfssl.a")
             elseif is_plat("macosx", "macos", "darwin") and is_arch("x86_64") then
                 add_ldflags("-l:./odin/libbop/macos/amd64/libwolfssl.a")
             elseif is_plat("macosx", "macos", "darwin") and is_arch("arm64", "aarch64") then
@@ -203,13 +208,13 @@ local target_of = function(kind, use_openssl)
     --add_deps("snmalloc")
     --add_deps("sqlite")
 
-    add_packages(
-        "zlib",
-        "zstd",
-        "brotli",
-        "lz4"
-    --"boost"
-    )
+    -- add_packages(
+    --     "zlib",
+    --     "zstd",
+    --     "brotli",
+    --     "lz4"
+    -- --"boost"
+    -- )
 
     --set_symbols("debug")
     set_strip("all")
@@ -223,11 +228,8 @@ local target_of = function(kind, use_openssl)
         end
     end
     if kind == "static" then
-        --set_policy("build.merge_archive", true)
-        -- add_cxflags("-static")
-        add_shflags("-static-libgcc", "-static-libstdc++")
+        set_policy("build.merge_archive", true)
     end
-    --set_policy("build.merge_archive", true)
 
     -- on_build(function(target)
     --     local output = target:targetfile()
