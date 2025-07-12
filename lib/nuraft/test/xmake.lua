@@ -12,6 +12,11 @@ function add_nuraft_target(name, src, is_test)
         set_languages("c++23")
         add_cxflags("-O3")
         set_optimize("aggressive")
+        --add_toolchains("@llvm")
+
+        if is_plat("windows") then
+            add_syslinks("onecore", "Synchronization", "msvcrt")
+        end
 
         add_includedirs(
             nuraft_dir .. "bench",
@@ -26,21 +31,32 @@ function add_nuraft_target(name, src, is_test)
             nuraft_dir
         )
         set_default(true)
-        add_deps("snmalloc")
+        --add_deps("snmalloc")
         --add_deps("nuraft")
         add_packages("boost")
         add_files(nuraft_dir .. "*.cxx")
         add_files(src)
 
-        add_defines("USE_BOOST_ASIO=1")
+        --add_defines("USE_BOOST_ASIO=1")
+        add_includedirs("../../asio")
 
         if is_plat("linux") then
             -- add_defines("ASIO_HAS_IO_URING", "ASIO_DISABLE_EPOLL", "BOOST_ASIO_HAS_IO_URING", "BOOST_ASIO_DISABLE_EPOLL")
             add_packages("libaio", "liburing")
         end
-        
+
+
+       add_defines(
+           "SNMALLOC_ENABLE_WAIT_ON_ADDRESS=1",
+           "SNMALLOC_USE_WAIT_ON_ADDRESS=1",
+   --         "SNMALLOC_NO_UNIQUE_ADDRESS=1",
+           "SNMALLOC_STATIC_LIBRARY=1"
+       )
+       add_includedirs("../../snmalloc/src")
+       add_files("../../snmalloc/src/snmalloc/override/new.cc")
+
         -- add_defines("USE_BOOST_ASIO")
-        add_packages("mimalloc", "openssl3")
+        add_packages("openssl3")
         set_configdir("$(builddir)/$(plat)/$(arch)/$(mode)")
         add_configfiles(nuraft_dir .. "test/cert.pem", {onlycopy = true})
         add_configfiles(nuraft_dir .. "test/key.pem", {onlycopy = true})

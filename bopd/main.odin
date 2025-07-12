@@ -14,6 +14,8 @@ import bop "../odin/libbop"
 import os2 "core:os/os2"
 import strings "core:strings"
 
+import "../odin/raft"
+
 Logger_Ctx :: struct {
     ctx: runtime.Context,
 }
@@ -100,11 +102,11 @@ run_raft_server :: proc() {
     context.logger = log.create_console_logger(.Debug)
     logger_ctx := new(Logger_Ctx)
     logger_ctx.ctx = context
-    logger := bop.raft_logger_make(
+    logger := raft.logger_make(
         rawptr(logger_ctx),
         proc "c" (
             user_data: rawptr,
-            level: bop.Raft_Log_Level,
+            level: raft.Log_Level,
             source_file: cstring,
             func_name: cstring,
             line_number: uintptr,
@@ -113,7 +115,7 @@ run_raft_server :: proc() {
         ) {
             context = (cast(^Logger_Ctx)user_data).ctx
             log.log(
-            bop.Raft_Log_Level_To_Odin_Level[level],
+            raft.Log_Level_To_Odin_Level[level],
             string(log_line[0:log_line_size]),
             location = runtime.Source_Code_Location {
                 file_path = string(source_file),
@@ -127,18 +129,18 @@ run_raft_server :: proc() {
 
     user_data : rawptr = nil
 
-    asio_options := bop.Raft_Asio_Options{}
+    asio_options := raft.Asio_Options{}
     asio_options.thread_pool_size = 2
     asio_options.invoke_req_cb_on_empty_meta = true
     asio_options.invoke_resp_cb_on_empty_meta = true
     fmt.println("creating asio service...")
-    asio_service := bop.raft_asio_service_make(&asio_options, logger)
+    asio_service := raft.asio_service_make(&asio_options, logger)
 
     endpoint := "127.0.0.1:15001"
 
 //    os.make_directory(state_dir, 0655)
 
-    srv_config := bop.raft_srv_config_make(
+    srv_config := raft.srv_config_make(
         i32(1),
         i32(1),
         raw_data(endpoint), c.size_t(len(endpoint)),
@@ -147,15 +149,15 @@ run_raft_server :: proc() {
         i32(1)
     )
 
-    srv_config_ptr := bop.raft_srv_config_ptr_make(srv_config)
-    defer bop.raft_srv_config_ptr_delete(srv_config_ptr)
+    srv_config_ptr := raft.srv_config_ptr_make(srv_config)
+    defer raft.srv_config_ptr_delete(srv_config_ptr)
 
 
     dir := "." + os2.Path_Separator_String + "data"
 //    state_dir := "./data"
 //    logs_dir := "./data"
 
-    log_store := bop.raft_mdbx_log_store_open(
+    log_store := raft.mdbx_log_store_open(
         raw_data(dir),
         c.size_t(len(dir)),
         logger,
@@ -172,7 +174,7 @@ run_raft_server :: proc() {
 
     ensure(log_store != nil, "log_store is nil")
 
-    state_mgr := bop.raft_mdbx_state_mgr_open(
+    state_mgr := raft.mdbx_state_mgr_open(
         srv_config_ptr,
         raw_data(dir),
         c.size_t(len(dir)),
@@ -190,9 +192,9 @@ run_raft_server :: proc() {
 
     ensure(state_mgr != nil, "state_mgr is nil")
 
-    current_conf : ^bop.Raft_Cluster_Config = nil
-    rollback_conf : ^bop.Raft_Cluster_Config = nil
-    fsm := bop.raft_fsm_make(
+    current_conf : ^raft.Cluster_Config = nil
+    rollback_conf : ^raft.Cluster_Config = nil
+    fsm := raft.fsm_make(
         user_data = user_data,
         current_conf = current_conf,
         rollback_conf = rollback_conf,
@@ -216,9 +218,9 @@ run_raft_server :: proc() {
 
     ensure(fsm != nil, "raft_fsm_make returned nil")
 
-    params := bop.raft_params_make()
+    params := raft.params_make()
 
-    raft_server := bop.raft_server_launch(
+    raft_server := raft.server_launch(
         user_data,
         fsm,
         state_mgr,
@@ -232,11 +234,11 @@ run_raft_server :: proc() {
         nil
     )
 
-    bop.raft_server_stop(raft_server, 5)
+    raft.server_stop(raft_server, 5)
 
-    bop.raft_log_store_delete(log_store)
-    bop.raft_state_mgr_delete(state_mgr)
-    bop.raft_logger_delete(logger)
+    raft.log_store_delete(log_store)
+    raft.state_mgr_delete(state_mgr)
+    raft.logger_delete(logger)
 }
 
 setup_options :: proc() {
@@ -301,9 +303,9 @@ main0 :: proc() {
     setup_options()
 
     user_data : rawptr = nil
-    current_conf : ^bop.Raft_Cluster_Config = nil
-    rollback_conf : ^bop.Raft_Cluster_Config = nil
-    fsm := bop.raft_fsm_make(
+    current_conf : ^raft.Cluster_Config = nil
+    rollback_conf : ^raft.Cluster_Config = nil
+    fsm := raft.fsm_make(
         user_data = user_data,
         current_conf = current_conf,
         rollback_conf = rollback_conf,
@@ -330,7 +332,7 @@ main0 :: proc() {
     fsm_get_next_batch_size_hint_in_bytes(nil)
     fsm_get_next_batch_size_hint_in_bytes(nil)
 
-    bop.raft_fsm_delete(fsm)
+    raft.fsm_delete(fsm)
 
     run_raft()
 

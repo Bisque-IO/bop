@@ -1,6 +1,10 @@
 local target_of = function(kind, use_openssl)
     if is_plat("windows") then
-        use_openssl = false
+        if kind == "shared" then
+            use_openssl = true
+        else
+            use_openssl = false
+        end
     end
     if kind == "static" then
         if not use_openssl then
@@ -30,7 +34,7 @@ local target_of = function(kind, use_openssl)
         --add_defines("MDBX_HAVE_BUILTIN_CPU_SUPPORTS=0")
         --add_defines("LIBMDBX_EXPORTS=1")
     else
-        add_toolchains("@llvm")
+        --add_toolchains("@llvm")
     end
     -- set_pcxxheader("include/pch.hpp")
 
@@ -56,8 +60,7 @@ local target_of = function(kind, use_openssl)
         add_cxflags("-fPIC")
         add_defines("MDBX_ENABLE_MINCORE=1")
     end
-    if is_plat("linux") and is_arch("x86_64") then
-        add_cxflags("-mcx16")
+    if not is_plat("windows") then
         add_defines("MDBX_ENABLE_MADVISE=1")
     end
 
@@ -70,9 +73,10 @@ local target_of = function(kind, use_openssl)
     --add_syslinks("c++")
 
     add_defines(
-    -- "ASIO_STANDALONE=1",
+        "ASIO_STANDALONE=1",
         "SNMALLOC_USE_WAIT_ON_ADDRESS",
-        "USE_BOOST_ASIO",
+        -- "USE_BOOST_ASIO",
+        "ASIO_DISABLE_STD_ALIGNED_ALLOC",
         "BOOST_ASIO_DISABLE_STD_ALIGNED_ALLOC",
         "BOOST_BEAST_USE_STD_STRING_VIEW",
         -- "BOOST_ASIO_NO_DEPRECATED=1",
@@ -98,6 +102,7 @@ local target_of = function(kind, use_openssl)
     end
 
     add_includedirs("src")
+    add_includedirs("asio")
 
     -- nuraft
     add_includedirs("nuraft")
@@ -121,28 +126,33 @@ local target_of = function(kind, use_openssl)
     -- add_files("../lib/sqlite/sqlite3.c", { languages = "c99", includedirs = { "./", "../lib/sqlite" }, cflags = "-O3" })
 
     -- usockets
-
-
     if is_plat("windows", "mingw") then
         add_defines("LIBUS_USE_UV=1")
-        --add_defines("LIBUS_USE_OPENSSL")
-        add_defines("LIBUS_USE_WOLFSSL")
-        add_defines("BOOST_ASIO_USE_WOLFSSL=1")
-        add_defines("HAVE_WOLFSSL_ASIO=1")
-        --add_defines("LIBUS_USE_ASIO=1")
+
+        if use_openssl then
+            add_packages("openssl3")
+            add_defines("LIBUS_USE_OPENSSL")
+        else
+            add_defines("LIBUS_USE_WOLFSSL")
+            add_defines("BOOST_ASIO_USE_WOLFSSL=1")
+            add_defines("HAVE_WOLFSSL_ASIO=1")
+            add_ldflags("-l:./odin/libbop/windows/amd64/wolfssl.lib")
+            --add_ldflags("-lodin/libbop/windows/amd64/wolfssl.lib")
+            add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
+        end
+
         add_defines("_WIN32_WINNT=0x0602")
-        --add_packages("openssl3")
+
         add_syslinks("bcrypt", "advapi32", "iphlpapi", "psapi", "user32", "userenv", "ws2_32", "shell32", "ole32", "uuid",
             "Dbghelp")
-        add_ldflags("-l:./odin/libbop/windows/amd64/wolfssl.lib")
-        add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
 
         add_files("libuv/src/*.c", "libuv/src/win/*.c")
         add_includedirs("libuv/src", { public = false })
         add_includedirs("libuv/include", { public = true })
     else
         if not use_openssl then
-            add_defines("BOOST_ASIO_USE_WOLFSSL=1")
+            add_defines("ASIO_USE_WOLFSSL=1")
+            --add_defines("BOOST_ASIO_USE_WOLFSSL=1")
             add_defines("LIBUS_USE_WOLFSSL")
             add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
 
@@ -175,30 +185,30 @@ local target_of = function(kind, use_openssl)
 
     -- add_includedirs("../lib/uwebsockets/src")
 
-    add_deps("snmalloc")
+    if not is_plat("windows") then
+        add_cxflags("-mcx16")
+    end
+    add_defines(
+        "SNMALLOC_ENABLE_WAIT_ON_ADDRESS=1",
+        "SNMALLOC_USE_WAIT_ON_ADDRESS=1",
+        --         "SNMALLOC_NO_UNIQUE_ADDRESS=1",
+        "SNMALLOC_STATIC_LIBRARY=1"
+    )
+    add_includedirs("snmalloc/src")
+    if not is_plat("windows") then
+        add_files("snmalloc/src/snmalloc/override/malloc.cc")
+    end
+    add_files("snmalloc/src/snmalloc/override/new.cc")
+
+    --add_deps("snmalloc")
     --add_deps("sqlite")
-    --add_packages("wamr2")
 
     add_packages(
-    --"mimalloc",
-    --"openssl3",
-    --"wolfssl",
-    --"fmt",
         "zlib",
         "zstd",
         "brotli",
-        "lz4",
-        --"snappy",=
-        --"xxhash",
-        -- "onnxruntime",
-        "boost"
-    --             "minio-cpp",
-    --         "wamr",
-    -- "duckdb",
-    --         "aws-c-s3",
-    --             "ftxui",
-    -- "cli11"
-    --             "libcurl"
+        "lz4"
+    --"boost"
     )
 
     --set_symbols("debug")

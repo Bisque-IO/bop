@@ -10,17 +10,19 @@ local target_of = function(kind)
         add_rules("mode.release")
 
         --add_toolchains("@zig")
+        add_toolchains("@llvm")
         -- add_cxflags("-target x86_64-linux-musl")
-        add_defines("USE_BOOST_ASIO=1")
+        --add_defines("USE_BOOST_ASIO=1")
         add_defines("BOOST_ASIO_DISABLE_STD_ALIGNED_ALLOC")
         add_defines("ASIO_DISABLE_STD_ALIGNED_ALLOC")
 
         add_cxflags("-fPIC")
         add_cxflags("-O3")
         set_optimize("aggressive")
-        add_defines("USE_BOOST_ASIO")
-        add_defines("BOOST_ASIO_USE_WOLFSSL=1")
+        --add_defines("USE_BOOST_ASIO")
+        --add_defines("BOOST_ASIO_USE_WOLFSSL=0")
         --add_includedirs("../../src", { public = false })
+        add_includedirs("../asio")
 
         if is_plat("linux") then
             -- add_defines("ASIO_HAS_IO_URING", "ASIO_DISABLE_EPOLL", "BOOST_ASIO_HAS_IO_URING", "BOOST_ASIO_DISABLE_EPOLL")
@@ -38,12 +40,16 @@ local target_of = function(kind)
         add_packages(
 --             "snmalloc",
             "openssl3",
-            "wolfssl",
+            --"wolfssl",
 --             "zlib",
 --             "zstd"
             "boost"
             -- "asio"
         )
+
+        if is_plat("windows") then
+            add_syslinks("onecore")
+        end
 
         if is_plat("macosx") then
 --             add_cxxflags("clang::-std=c++23")

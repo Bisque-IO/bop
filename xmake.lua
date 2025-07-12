@@ -144,40 +144,42 @@ end
 
 add_requires("zig ~0.14.0")
 
-add_requires("openssl3 ~3.3.2", {
-    --add_requires("conan::openssl/3.5.0", {
-    alias = "openssl3",
-    configs = {
-        fPIC = true,
-        shared = true
-    }
-})
+if is_plat("windows") then
+    -- add_requires("openssl3 ~3.3.2", {
+    add_requires("conan::openssl/3.5.0", {
+        alias = "openssl3",
+        configs = {
+            fPIC = true,
+            shared = true
+        }
+    })
+end
 
-add_requires("boost ~1.88.0", {
-    alias = "boost",
-    configs = {
-        asio = true,
-        charconv = true,
-        chrono = true,
-        cobalt = false,
-        container = true,
-        coroutine = true,
-        date_time = false,
-        headers = true,
-        json = false,
-        random = false,
-        regex = true,
-        stacktrace = false,
-        system = true,
-        thread = false,
-        timer = false,
-        test = false,
-        url = true,
-        zlib = true,
-        zstd = true,
-        header_only = false
-    }
-})
+-- add_requires("conan::boost/1.88.0", {
+--     alias = "boost",
+--     configs = {
+--         asio = true,
+--         charconv = true,
+--         chrono = true,
+--         cobalt = false,
+--         container = true,
+--         coroutine = true,
+--         date_time = false,
+--         headers = true,
+--         json = false,
+--         random = false,
+--         regex = true,
+--         stacktrace = false,
+--         system = true,
+--         thread = false,
+--         timer = false,
+--         test = false,
+--         url = true,
+--         zlib = true,
+--         zstd = true,
+--         header_only = true
+--     }
+-- })
 
 add_requires("wolfssl ~5.7.2", {
     --add_requires("conan::wolfssl/5.7.0", {
@@ -207,7 +209,7 @@ add_requires("wolfssl ~5.7.2", {
 add_requires(
 -- "onnxruntime ~1.19.2",
 --     "ftxui ~5.0.0",
-    "cli11 ~2.5.0",
+-- "cli11 ~2.5.0",
     "doctest ~2.4.11",
     "gtest ~1.16.0",
     "gflags ~2.2.2",
@@ -216,8 +218,8 @@ add_requires(
     "benchmark ~1.9.1"
 )
 
-add_requires("nanobench ~4.3.11")
+-- add_requires("nanobench ~4.3.11")
 
-add_requires("fmt ~11.1.4", { configs = { header_only = true } })
+--add_requires("fmt ~11.1.4", { configs = { header_only = true } })
 
 includes("lib")

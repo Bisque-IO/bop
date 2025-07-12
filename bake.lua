@@ -9,7 +9,7 @@ local host = os.host()
 local HOST = os.host()
 local ARCH = os.arch()
 
-local logo = [[
+local logo1 = [[
   _     _
  | |   (_)
  | |__  _ ___  __ _ _   _  ___
@@ -19,8 +19,18 @@ local logo = [[
                  |_| v0.1.0
 ]]
 
+local logo = [[
+ _
+| |
+| |__   ___  ____
+|  _ \ / _ \|  _ \
+| |_) ) |_| | |_| |
+|____/ \___/|  __/
+  v0.1.0    |_|
+]]
+
 local help = [[
-bake is a tool for managing bisque source code development.
+bake is a tool for managing bop source code development.
 
 Usage:
 

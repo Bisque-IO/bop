@@ -26,6 +26,9 @@ limitations under the License.
 #ifdef BOOST_ASIO_USE_WOLFSSL
 #include "wolfssl/options.h"
 #include "wolfssl/ssl.h"
+#elifdef ASIO_USE_WOLFSSL
+#include "wolfssl/options.h"
+#include "wolfssl/ssl.h"
 #else
 typedef struct ssl_ctx_st SSL_CTX;
 #endif

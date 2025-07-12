@@ -626,6 +626,19 @@ def release(args: List[str]):
     :return:
     """
 
+def bake(args: List[str]):
+    # args = ["bake" + (".bat" if IS_WINDOWS else "")] + args
+    args = ["xmake", "l", "bake.lua", "build", "bop"]
+    try:
+        subprocess.run(args, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"exited with exit code {e.returncode}\n")
+        sys.exit(e.returncode)
+    except KeyboardInterrupt:
+        print("")
+
+
+
 def main():
     if len(sys.argv) < 2:
         print(USAGE)
@@ -642,6 +655,8 @@ def main():
         test(args)
     elif cmd == "build" or cmd == "b":
         build(args)
+    elif cmd == "x" or cmd == "bake":
+        bake(args)
     elif cmd == "release":
         release(args)
     elif cmd == "version":
