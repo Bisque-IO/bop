@@ -303,7 +303,7 @@ state_mgr_make :: proc(
 
 	mdbx.env_create(&s.env) or_return
 
-	// Setup geometry. Try to utilize only a single file-system page.
+	// Setup geometry. Try to utilize only a single file-system page for entire db.
 	mdbx.env_set_geometry(
 		s.env,
 		runtime.Kilobyte*4,

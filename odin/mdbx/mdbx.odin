@@ -138,6 +138,203 @@ env_get_path :: bop.mdbx_env_get_path
 
 env_get_fd :: bop.mdbx_env_get_fd
 
+/*
+Set all size-related parameters of environment, including page size
+and the min/max size of the memory map.
+
+In contrast to LMDB, the MDBX provide automatic size management of an
+database according the given parameters, including shrinking and resizing
+on the fly. From user point of view all of these just working. Nevertheless,
+it is reasonable to know some details in order to make optimal decisions
+when choosing parameters.
+
+@see mdbx_env_info_ex()
+
+Both @ref mdbx_env_set_geometry() and legacy @ref mdbx_env_set_mapsize() are
+inapplicable to read-only opened environment.
+
+Both @ref mdbx_env_set_geometry() and legacy @ref mdbx_env_set_mapsize()
+could be called either before or after @ref mdbx_env_open(), either within
+the write transaction running by current thread or not:
+
+ - In case @ref mdbx_env_set_geometry() or legacy @ref mdbx_env_set_mapsize()
+   was called BEFORE @ref mdbx_env_open(), i.e. for closed environment, then
+   the specified parameters will be used for new database creation,
+   or will be applied during opening if database exists and no other process
+   using it.
+
+   If the database is already exist, opened with @ref MDBX_EXCLUSIVE or not
+   used by any other process, and parameters specified by
+   @ref mdbx_env_set_geometry() are incompatible (i.e. for instance,
+   different page size) then @ref mdbx_env_open() will return
+   @ref MDBX_INCOMPATIBLE error.
+
+   In another way, if database will opened read-only or will used by other
+   process during calling @ref mdbx_env_open() that specified parameters will
+   silently discarded (open the database with @ref MDBX_EXCLUSIVE flag
+   to avoid this).
+
+ - In case @ref mdbx_env_set_geometry() or legacy @ref mdbx_env_set_mapsize()
+   was called after @ref mdbx_env_open() WITHIN the write transaction running
+   by current thread, then specified parameters will be applied as a part of
+   write transaction, i.e. will not be completely visible to any others
+   processes until the current write transaction has been committed by the
+   current process. However, if transaction will be aborted, then the
+   database file will be reverted to the previous size not immediately, but
+   when a next transaction will be committed or when the database will be
+   opened next time.
+
+ - In case @ref mdbx_env_set_geometry() or legacy @ref mdbx_env_set_mapsize()
+   was called after @ref mdbx_env_open() but OUTSIDE a write transaction,
+   then MDBX will execute internal pseudo-transaction to apply new parameters
+   (but only if anything has been changed), and changes be visible to any
+   others processes immediately after successful completion of function.
+
+Essentially a concept of "automatic size management" is simple and useful:
+ - There are the lower and upper bounds of the database file size;
+ - There is the growth step by which the database file will be increased,
+   in case of lack of space;
+ - There is the threshold for unused space, beyond which the database file
+   will be shrunk;
+ - The size of the memory map is also the maximum size of the database;
+ - MDBX will automatically manage both the size of the database and the size
+   of memory map, according to the given parameters.
+
+So, there some considerations about choosing these parameters:
+ - The lower bound allows you to prevent database shrinking below certain
+   reasonable size to avoid unnecessary resizing costs.
+ - The upper bound allows you to prevent database growth above certain
+   reasonable size. Besides, the upper bound defines the linear address space
+   reservation in each process that opens the database. Therefore changing
+   the upper bound is costly and may be required reopening environment in
+   case of @ref MDBX_UNABLE_EXTEND_MAPSIZE errors, and so on. Therefore, this
+   value should be chosen reasonable large, to accommodate future growth of
+   the database.
+ - The growth step must be greater than zero to allow the database to grow,
+   but also reasonable not too small, since increasing the size by little
+   steps will result a large overhead.
+ - The shrink threshold must be greater than zero to allow the database
+   to shrink but also reasonable not too small (to avoid extra overhead) and
+   not less than growth step to avoid up-and-down flouncing.
+ - The current size (i.e. `size_now` argument) is an auxiliary parameter for
+   simulation legacy @ref mdbx_env_set_mapsize() and as workaround Windows
+   issues (see below).
+
+Unfortunately, Windows has is a several issue
+with resizing of memory-mapped file:
+ - Windows unable shrinking a memory-mapped file (i.e memory-mapped section)
+   in any way except unmapping file entirely and then map again. Moreover,
+   it is impossible in any way when a memory-mapped file is used more than
+   one process.
+ - Windows does not provide the usual API to augment a memory-mapped file
+   (i.e. a memory-mapped partition), but only by using "Native API"
+   in an undocumented way.
+
+MDBX bypasses all Windows issues, but at a cost:
+ - Ability to resize database on the fly requires an additional lock
+   and release `SlimReadWriteLock` during each read-only transaction.
+ - During resize all in-process threads should be paused and then resumed.
+ - Shrinking of database file is performed only when it used by single
+   process, i.e. when a database closes by the last process or opened
+   by the first.
+ = Therefore, the size_now argument may be useful to set database size
+   by the first process which open a database, and thus avoid expensive
+   remapping further.
+
+For create a new database with particular parameters, including the page
+size, @ref mdbx_env_set_geometry() should be called after
+@ref mdbx_env_create() and before @ref mdbx_env_open(). Once the database is
+created, the page size cannot be changed. If you do not specify all or some
+of the parameters, the corresponding default values will be used. For
+instance, the default for database size is 10485760 bytes.
+
+If the mapsize is increased by another process, MDBX silently and
+transparently adopt these changes at next transaction start. However,
+@ref mdbx_txn_begin() will return @ref MDBX_UNABLE_EXTEND_MAPSIZE if new
+mapping size could not be applied for current process (for instance if
+address space is busy).  Therefore, in the case of
+@ref MDBX_UNABLE_EXTEND_MAPSIZE error you need close and reopen the
+environment to resolve error.
+
+@note Actual values may be different than your have specified because of
+rounding to specified database page size, the system page size and/or the
+size of the system virtual memory management unit. You can get actual values
+by @ref mdbx_env_info_ex() or see by using the tool `mdbx_chk` with the `-v`
+option.
+
+Legacy @ref mdbx_env_set_mapsize() correspond to calling
+@ref mdbx_env_set_geometry() with the arguments `size_lower`, `size_now`,
+`size_upper` equal to the `size` and `-1` (i.e. default) for all other
+parameters.
+
+@param [in] env         An environment handle returned
+                        by @ref mdbx_env_create()
+
+@param [in] size_lower  The lower bound of database size in bytes.
+                        Zero value means "minimal acceptable",
+                        and negative means "keep current or use default".
+
+@param [in] size_now    The size in bytes to setup the database size for
+                        now. Zero value means "minimal acceptable", and
+                        negative means "keep current or use default". So,
+                        it is recommended always pass -1 in this argument
+                        except some special cases.
+
+@param [in] size_upper The upper bound of database size in bytes.
+                       Zero value means "minimal acceptable",
+                       and negative means "keep current or use default".
+                       It is recommended to avoid change upper bound while
+                       database is used by other processes or threaded
+                       (i.e. just pass -1 in this argument except absolutely
+                       necessary). Otherwise you must be ready for
+                       @ref MDBX_UNABLE_EXTEND_MAPSIZE error(s), unexpected
+                       pauses during remapping and/or system errors like
+                       "address busy", and so on. In other words, there
+                       is no way to handle a growth of the upper bound
+                       robustly because there may be a lack of appropriate
+                       system resources (which are extremely volatile in
+                       a multi-process multi-threaded environment).
+
+@param [in] growth_step  The growth step in bytes, must be greater than
+                         zero to allow the database to grow. Negative value
+                         means "keep current or use default".
+
+@param [in] shrink_threshold  The shrink threshold in bytes, must be greater
+                              than zero to allow the database to shrink and
+                              greater than growth_step to avoid shrinking
+                              right after grow.
+                              Negative value means "keep current
+                              or use default". Default is 2*growth_step.
+
+@param [in] pagesize          The database page size for new database
+                              creation or -1 otherwise. Once the database
+                              is created, the page size cannot be changed.
+                              Must be power of 2 in the range between
+                              @ref MDBX_MIN_PAGESIZE and
+                              @ref MDBX_MAX_PAGESIZE. Zero value means
+                              "minimal acceptable", and negative means
+                              "keep current or use default".
+
+@returns A non-zero error value on failure and 0 on success,
+         some possible errors are:
+@retval MDBX_EINVAL    An invalid parameter was specified,
+                       or the environment has an active write transaction.
+@retval MDBX_EPERM     Two specific cases for Windows:
+                       1) Shrinking was disabled before via geometry settings
+                       and now it enabled, but there are reading threads that
+                       don't use the additional `SRWL` (which is required to
+                       avoid Windows issues).
+                       2) Temporary close memory mapped is required to change
+                       geometry, but there read transaction(s) is running
+                       and no corresponding thread(s) could be suspended
+                       since the @ref MDBX_NOSTICKYTHREADS mode is used.
+@retval MDBX_EACCESS   The environment opened in read-only.
+@retval MDBX_MAP_FULL  Specified size smaller than the space already
+                       consumed by the environment.
+@retval MDBX_TOO_LARGE Specified size is too large, i.e. too many pages for
+                       given size, or a 32-bit process requests too much
+                       bytes for the 32-bit address space.
+*/
 env_set_geometry :: bop.mdbx_env_set_geometry
 
 is_readahead_reasonable :: bop.mdbx_is_readahead_reasonable
@@ -302,4 +499,3 @@ txn_lock :: bop.mdbx_txn_lock
 txn_unlock :: bop.mdbx_txn_unlock
 
 env_open_for_recovery :: bop.mdbx_env_open_for_recovery
-
