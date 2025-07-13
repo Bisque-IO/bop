@@ -159,18 +159,20 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 	}
 	//odinfmt:enable
 } else when ODIN_OS == .Darwin && ODIN_ARCH == .arm64 {
-	when #config(BOP_DEBUG, 0) == 1 {
+    when #config(BOP_DEBUG, 0) == 1 {
 		@(private)
-		LIB_PATH :: "../../build/macosx/aarch64/debug/libbop.a"
+		LIB_PATH :: "../../build/macosx/arm64/release/libbop.a"
 	} else {
 		@(private)
 		LIB_PATH :: "macos/arm64/libbop.a"
 	}
-	//odinfmt:disable
 	foreign import lib {
+		"macos/arm64/libwolfssl.a",
+		"system:stdc++",
+		"system:CoreFoundation.framework",
+		"system:Security.framework",
 		LIB_PATH,
 	}
-	//odinfmt:enable
 } else {
 	#panic("libbop does not support this platform yet")
 }

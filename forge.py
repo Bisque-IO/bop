@@ -120,7 +120,8 @@ def run_odin_tests(
         cmd += ["-keep-executable"]
 
     test_bin = os.path.join(path, "test-bin")
-    os.makedirs(test_bin, 777, True)
+    os.makedirs(test_bin, 755, True)
+    os.chmod(test_bin, 755)
 
     exe_name = ""
     if len(name) > 0:
@@ -377,7 +378,8 @@ def build(args: List[str]):
         name = os.path.basename(os.path.normpath(path))
 
     bin_dir = os.path.join(dir, "bin")
-    os.makedirs(bin_dir, 777, True)
+    os.makedirs(bin_dir, 755, True)
+    os.chmod(bin_dir, 755)
 
     debug = True
     shared = False
@@ -832,26 +834,36 @@ def wolfssl_do_configure_build(
     shutil.copy(src_libwolfssl_a, dst_libwolfssl_a)
 
 def wolfssl_build(args: List[str]):
-    if not IS_LINUX:
-        print("only Linux is supported")
-        sys.exit(-1)
+    if IS_LINUX:
 
-    wolfssl_do_configure_build(
-        "x86_64-linux-gnu",
-        "x86_64-linux-gnu-gcc",
-        "x86_64-linux-gnu-g++"
-    )
-    wolfssl_do_configure_build(
-        "aarch64-linux-gnu",
-        "aarch64-linux-gnu-gcc",
-        "aarch64-linux-gnu-g++"
-    )
-    wolfssl_do_configure_build(
-        "riscv64-linux-gnu",
-        "riscv64-linux-gnu-gcc",
-        "riscv64-linux-gnu-g++"
-    )
 
+        wolfssl_do_configure_build(
+            "x86_64-linux-gnu",
+            "x86_64-linux-gnu-gcc",
+            "x86_64-linux-gnu-g++"
+        )
+        wolfssl_do_configure_build(
+            "aarch64-linux-gnu",
+            "aarch64-linux-gnu-gcc",
+            "aarch64-linux-gnu-g++"
+        )
+        wolfssl_do_configure_build(
+            "riscv64-linux-gnu",
+            "riscv64-linux-gnu-gcc",
+            "riscv64-linux-gnu-g++"
+        )
+        return
+
+    if IS_MAC:
+        wolfssl_do_configure_build(
+            "",
+            "",
+            ""
+        )
+        return
+
+    print("only nix systems are supported")
+    sys.exit(-1)
     # xmake f -v -p cross -a arm64 --cross=aarch64-linux-gnu-
 
 def main():
