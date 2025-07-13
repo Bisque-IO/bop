@@ -651,9 +651,27 @@ def bake(args: List[str]):
 
 
 def xmake_configure(platform: str, arch: str, toolchain: str, debug = False):
-    args = ["xmake", "f", "-m", "release" if not debug else "debug", "-p", platform, "-a", arch]
+
+    args = ["xmake", "f", "-v", "-m", "release" if not debug else "debug", "-p", platform, "-a", arch]
     if len(toolchain) > 0:
         args += [toolchain]
+
+    if platform == "macosx":
+        if IS_ARM64 and arch == "x86_64":
+            sdkroot = ""
+            if IS_MAC:
+                try:
+                    output = subprocess.run(["xcrun", "-sdk", "macosx", "--show-sdk-path"], check=True, capture_output=True, text=True)
+                    sdkroot = " -isysroot " + output.stdout.strip()
+                except subprocess.CalledProcessError as e:
+                    print(f"exited with exit code {e.returncode}\n")
+                    sys.exit(e.returncode)
+                except KeyboardInterrupt:
+                    print("")
+            args += [f"--cflags=\"-arch x86_64{sdkroot}\"",
+                f"--ldflags=\"-arch x86_64{sdkroot}\""]
+
+    print(" ".join(args))
     try:
         subprocess.run(args, check=True)
     except subprocess.CalledProcessError as e:
@@ -760,10 +778,16 @@ def build_libbop(args: List[str]):
                 xmake_configure_and_build_bop("cross", "riscv64", "--cross=riscv64-linux-gnu-", debug)
 
     elif IS_MAC:
-        if arch == "arm64" or arch == "aarch64":
-            xmake_configure_and_build_bop("macosx", "arm64", "", debug)
-        elif arch == "x86_64":
-            xmake_configure_and_build_bop("macosx", "x86_64", "", debug)
+        os.environ["CFLAGS"] = ""
+        os.environ["LDFLAGS"] = ""
+        os.environ["CC"] = ""
+        os.environ["CXX"] = ""
+        if IS_ARM64:
+            xmake_configure_and_build_bop("macosx", "x86_64", "--toolchain=clang", debug)
+            xmake_configure_and_build_bop("macosx", "arm64", "--toolchain=clang", debug)
+        elif IS_AMD64:
+            xmake_configure_and_build_bop("macosx", "arm64", "--toolchain=clang", debug)
+            xmake_configure_and_build_bop("macosx", "x86_64", "--toolchain=clang", debug)
         else:
             print("unsupported macos arch: " + arch)
             sys.exit(-1)
@@ -777,7 +801,31 @@ def wolfssl_do_configure_build(
 ):
     os.chdir("lib")
     os.chdir("wolfssl")
-    args = ["sh", "configure"]
+
+    try:
+        subprocess.run(["sh", "autogen.sh"], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"exited with exit code {e.returncode}\n")
+        sys.exit(e.returncode)
+    except KeyboardInterrupt:
+        print("")
+
+    args = []
+
+    if IS_MAC and len(host) > 0:
+        if host.startswith("x86_64"):
+            os.environ["CFLAGS"] = "-arch x86_64"
+            os.environ["LDFLAGS"] = "-arch x86_64"
+            os.environ["CC"] = "clang -arch x86_64"
+            os.environ["CXX"] = "clang++ -arch x86_64"
+            # args += ["CFLAGS=\"-arch x86_64\"", "LDFLAGS=\"-arch x86_64\"", "CC=\"-arch x86_64\""]
+    elif IS_MAC:
+        os.environ["CFLAGS"] = ""
+        os.environ["LDFLAGS"] = ""
+        os.environ["CC"] = ""
+        os.environ["CXX"] = ""
+
+    args += ["sh", "configure"]
     if len(host) > 0:
         args += ["--host=" + host]
 
@@ -794,10 +842,13 @@ def wolfssl_do_configure_build(
         "--enable-opensslextra",
         "--enable-asio"
     ]
-    if host.startswith("x86_64"):
+    if IS_LINUX and host.startswith("x86_64"):
         args += ["--enable-aesni"]
 
     # ./configure --host=aarch64-linux-gnu CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ --enable-static --enable-pic --enable-opensslall --enable-opensslextra --enable-asio
+    # print(" ".join(args))
+    # sys.exit(-1)
+
     try:
         subprocess.run(args, check=True)
     except subprocess.CalledProcessError as e:
@@ -818,12 +869,19 @@ def wolfssl_do_configure_build(
     os.chdir("..")
 
     dst_dir = ""
-    if host.startswith("x86_64"):
-        dst_dir = os.path.join("odin", "libbop", "linux", "amd64")
-    elif host.startswith("aarch64"):
-        dst_dir = os.path.join("odin", "libbop", "linux", "arm64")
-    elif host.startswith("riscv64"):
-        dst_dir = os.path.join("odin", "libbop", "linux", "riscv64")
+
+    if IS_MAC:
+        if host.startswith("x86_64") or (IS_AMD64 and len(host) == 0):
+            dst_dir = os.path.join("odin", "libbop", "macos", "amd64")
+        elif host.startswith("arm64") or (IS_ARM64 and len(host) == 0):
+            dst_dir = os.path.join("odin", "libbop", "macos", "arm64")
+    elif IS_LINUX:
+        if host.startswith("x86_64"):
+            dst_dir = os.path.join("odin", "libbop", "linux", "amd64")
+        elif host.startswith("aarch64"):
+            dst_dir = os.path.join("odin", "libbop", "linux", "arm64")
+        elif host.startswith("riscv64"):
+            dst_dir = os.path.join("odin", "libbop", "linux", "riscv64")
 
     if len(dst_dir) == 0:
         print("unknown arch: expected amd64, arm64 or riscv64")
@@ -835,8 +893,6 @@ def wolfssl_do_configure_build(
 
 def wolfssl_build(args: List[str]):
     if IS_LINUX:
-
-
         wolfssl_do_configure_build(
             "x86_64-linux-gnu",
             "x86_64-linux-gnu-gcc",
@@ -855,11 +911,11 @@ def wolfssl_build(args: List[str]):
         return
 
     if IS_MAC:
-        wolfssl_do_configure_build(
-            "",
-            "",
-            ""
-        )
+        wolfssl_do_configure_build("", "", "")
+        if IS_ARM64:
+            wolfssl_do_configure_build("x86_64-apple-darwin", "", "")
+        elif IS_AMD64:
+            wolfssl_do_configure_build("arm64-apple-darwin", "", "")
         return
 
     print("only nix systems are supported")

@@ -8,7 +8,7 @@ import "core:mem/virtual"
 import "core:os"
 import "core:thread"
 
-import bop "../"
+import bop "../../libbop"
 
 Log_Store :: struct {}
 
@@ -232,4 +232,3 @@ wire_log_store :: proc() {
 	ensure(log_store != nil, "log_store is nil")
 	bop.raft_log_store_delete(log_store)
 }
-

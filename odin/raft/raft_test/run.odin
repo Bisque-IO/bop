@@ -10,7 +10,7 @@ import "core:thread"
 
 import c "core:c/libc"
 
-import bop "../"
+import bop "../../libbop"
 import os2 "core:os/os2"
 import strings "core:strings"
 

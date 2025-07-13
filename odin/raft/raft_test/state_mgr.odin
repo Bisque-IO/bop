@@ -8,7 +8,7 @@ import "core:mem/virtual"
 import "core:os"
 import "core:thread"
 
-import bop "../"
+import bop "../../libbop"
 
 State_Mgr :: struct {}
 
@@ -101,4 +101,3 @@ wire_state_mgr :: proc() {
 	ensure(state_mgr != nil, "state_mgr is nil")
 	bop.raft_state_mgr_delete(state_mgr)
 }
-

@@ -6,7 +6,7 @@ import "core:log"
 import "core:mem/virtual"
 import "core:thread"
 
-import bop "../"
+import bop "../../libbop"
 
 @thread_local
 local_context: runtime.Context
