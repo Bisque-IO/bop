@@ -6,18 +6,27 @@ import "core:fmt"
 import "core:thread"
 import "core:time"
 
-//import bop "../../libbop"
+import bop "../../libbop"
 
 main :: proc() {
 //    bench_parallelism(8, 4096*4, 2000000000)
 //    bop.alloc(1)
 
     for i in 0 ..< 5 {
-//            stress_test_mpsc_push(1, 8192 / 4, 20000000)
+        stress_test_libbop_mpmc_bulk_push(8192 / 4, 20000000)
     }
 
     for i in 0 ..< 5 {
-        stress_test_spsc_push(8192 / 64, 20000000)
+        stress_test_mpsc_push(1, 8192 / 4, 20000000)
+    }
+
+    for i in 0 ..< 5 {
+        stress_test_libbop_spsc_push(8192 / 8, 20000000)
+    //        stress_test_mpsc_push(1, 8192 / 4, 20000000)
+    }
+
+    for i in 0 ..< 5 {
+        stress_test_spsc_push(8192 / 8, 20000000)
 //        stress_test_mpsc_push(1, 8192 / 4, 20000000)
     }
     for i in 0 ..< 5 {
@@ -299,5 +308,132 @@ stress_test_spsc_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
     u64(time.Second) /
     u64(time.stopwatch_duration(stopwatch) / time.Duration(ITERS)),
     "/sec",
+    )
+}
+
+stress_test_libbop_spsc_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
+    fmt.println(
+        "stress_test_libbop_spsc_push: ",
+        " QUEUE_SIZE =",
+        QUEUE_SIZE,
+        " ITERS =",
+        ITERS,
+    )
+
+    queue := bop.spsc_create()
+    defer bop.spsc_destroy(queue)
+
+    stopwatch: time.Stopwatch
+    time.stopwatch_start(&stopwatch)
+
+    producers: [2]^thread.Thread
+
+    for i in 0 ..< 1 {
+        producers[i] = thread.create_and_start_with_poly_data2(
+            queue,
+            i,
+            proc(q: ^bop.SPSC, id: int) {
+                id := id + 1
+                for i in 0 ..< ITERS {
+                    for !bop.spsc_enqueue(q, rawptr(uintptr(u64(i)))) {
+                        time.sleep(time.Nanosecond)
+                    }
+                }
+            },
+        )
+    }
+
+    count := 0
+    loop: for {
+        value : rawptr = nil
+        for !bop.spsc_dequeue(queue, &value) {
+            intrinsics.cpu_relax()
+        }
+        count += 1
+        if count == ITERS {
+            time.stopwatch_stop(&stopwatch)
+            break
+        }
+    }
+
+    fmt.println(
+        "done in",
+        time.stopwatch_duration(stopwatch),
+        "   ",
+        time.stopwatch_duration(stopwatch) / time.Duration(ITERS),
+        "/op",
+        "   ",
+        u64(time.Second) /
+        u64(time.stopwatch_duration(stopwatch) / time.Duration(ITERS)),
+        "/sec",
+    )
+}
+
+stress_test_libbop_mpmc_bulk_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
+    fmt.println(
+        "stress_test_libbop_mpmc_bulk_push: ",
+        " QUEUE_SIZE =",
+        QUEUE_SIZE,
+        " ITERS =",
+        ITERS,
+    )
+
+    queue := bop.mpmc_create()
+    defer bop.mpmc_destroy(queue)
+
+    stopwatch: time.Stopwatch
+    time.stopwatch_start(&stopwatch)
+
+    producers: [2]^thread.Thread
+
+    for i in 0 ..< 1 {
+        producers[i] = thread.create_and_start_with_poly_data2(
+            queue,
+            i,
+            proc(q: ^bop.MPMC, id: int) {
+                id := id + 1
+                for i in 0 ..< ITERS {
+                    for !bop.mpmc_enqueue(q, rawptr(q)) {
+                        time.sleep(time.Nanosecond)
+                    }
+                    fmt.println("EE")
+                    time.sleep(time.Second)
+                }
+            },
+        )
+    }
+
+    count := 0
+    items_ := [256]rawptr{}
+    items := items_[0:256]
+    loop: for {
+        value : rawptr = nil
+        size : i64 = 0
+//        for size = bop.mpmc_dequeue_bulk(queue, rawptr(&items_[0]), 1); size == 0; {
+//            intrinsics.cpu_relax()
+//            time.sleep(time.Second)
+//        }
+//        count += int(size)
+                for !bop.mpmc_dequeue(queue, &value) {
+                    intrinsics.cpu_relax()
+                }
+        count += 1
+        fmt.println("DD")
+        if count == ITERS {
+            time.stopwatch_stop(&stopwatch)
+            break
+        }
+    }
+
+    fmt.println(
+        "done in",
+        time.stopwatch_duration(stopwatch),
+        "   ",
+        time.stopwatch_duration(stopwatch) / time.Duration(ITERS),
+        "/op",
+        "   ",
+        u64(time.Second) /
+        u64(time.stopwatch_duration(stopwatch) / time.Duration(ITERS)),
+        "/sec",
     )
 }

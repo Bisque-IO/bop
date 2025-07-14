@@ -29,8 +29,6 @@ extern "C" {
 #include "./raft.h"
 
 
-
-
 ////////////////////////////////////////////////////////////////////////////////////
 /// NuRaft C API
 ////////////////////////////////////////////////////////////////////////////////////
@@ -1963,6 +1961,75 @@ BOP_API void bop_raft_state_mgr_delete(const bop_raft_state_mgr_ptr *sm) {
 
 struct bop_raft_log_entry;
 
+struct bop_raft_log_entry_ptr {
+    nuraft::ptr<nuraft::log_entry> entry;
+};
+
+BOP_API size_t bop_raft_log_entry_ptr_use_count(bop_raft_log_entry_ptr *log_entry_ptr) {
+    return log_entry_ptr->entry.use_count();
+}
+
+BOP_API void bop_raft_log_entry_ptr_retain(bop_raft_log_entry_ptr *log_entry_ptr) {
+    auto l = new(log_entry_ptr) bop_raft_log_entry_ptr{log_entry_ptr->entry};
+}
+
+BOP_API void bop_raft_log_entry_ptr_release(bop_raft_log_entry_ptr *log_entry_ptr) {
+    auto l = new(log_entry_ptr) bop_raft_log_entry_ptr{log_entry_ptr->entry};
+}
+
+// typedef uint64_t (*bop_raft_log_store_append_async)(
+//     void *user_data,
+//     int64_t batch_size,
+//     int64_t batch_index,
+//     uint64_t term,
+//     uint8_t *data,
+//     size_t data_size,
+//     uint64_t log_timestamp,
+//     bool has_crc32,
+//     uint32_t crc32
+// );
+//
+// typedef void (*bop_raft_log_store_append_async_batch_done)(void *user_data);
+//
+// BOP_API int64_t bop_raft_log_entry_queue_pop(
+//     void *user_data,
+//     bop_raft_log_entry_queue *queue,
+//     int64_t timeout_micros,
+//     bop_raft_log_store_append_async on_entry,
+//     bop_raft_log_store_append_async_batch_done on_batch_done
+// ) {
+//     if (!queue) return -1;
+//     if (!on_entry) return -1;
+//
+//     bop_raft_log_store_append a;
+//
+//     nuraft::ptr<nuraft::log_entry> entries[128];
+//
+//     int64_t size = queue->queue_.wait_dequeue_bulk_timed(entries, 128, timeout_micros);
+//
+//     if (size == 0) return 0;
+//
+//     for (int64_t i = 0; i < size; i++) {
+//         auto entry = entries[i];
+//         entries[i] = nullptr;
+//         on_entry(
+//             user_data,
+//             size,
+//             i,
+//             entry->get_term(),
+//             entry->get_buf().data(),
+//             entry->get_buf().size(),
+//             entry->get_timestamp(),
+//             entry->has_crc32(),
+//             entry->get_crc32()
+//         );
+//     }
+//
+//     if (on_batch_done) on_batch_done(user_data);
+//
+//     return size;
+// }
+
 struct bop_raft_log_entry_vector {
     std::vector<nuraft::ptr<nuraft::log_entry> > *log_entries;
 
@@ -2098,12 +2165,9 @@ struct bop_raft_log_store : nuraft::log_store {
     }
 
     /**
-     * Overwrite a log entry at the given `index`.
-     * This API should make sure that all
-     * log entries
-     * after the given `index` should be truncated (if exist),
-     * as a result
-     * of this function call.
+     * Overwrite a log entry at the given `index`. This API should make sure
+     * that all log entries after the given `index` should be truncated (if exist),
+     * as a result of this function call.
      *
      * @param index Log index number to overwrite.
      *
@@ -2138,10 +2202,8 @@ struct bop_raft_log_store : nuraft::log_store {
     /**
      * Get log entries with index [start, end).
      *
-     * Return nullptr to indicate
-     * error if any log entry within the requested range
-     * could not be retrieved (e.g. due to
-     * external log truncation).
+     * Return nullptr to indicate error if any log entry within the requested range
+     * could not be retrieved (e.g. due to external log truncation).
      *
      * @param start The start log index number (inclusive).
 
@@ -2210,8 +2272,7 @@ struct bop_raft_log_store : nuraft::log_store {
 
     /**
      * Get the term for the log entry at the specified index.
-     * Suggest to stop the
-     * system if the index >= this->next_slot()
+     * Suggest to stop the system if the index >= this->next_slot()
      *
      * @param index Should be equal to or
      * greater than 1.
@@ -4307,11 +4368,12 @@ static nuraft::ptr<State_Mgr> raft_mdbx_state_mgr_open(
     }
 
     flags = MDBX_NOSTICKYTHREADS | MDBX_NOSUBDIR | MDBX_NOMEMINIT |
-                             MDBX_SYNC_DURABLE | MDBX_LIFORECLAIM | MDBX_WRITEMAP;
+            MDBX_SYNC_DURABLE | MDBX_LIFORECLAIM | MDBX_WRITEMAP;
 
     BISQUE_DEBUG("opening mdbx state_mgr at {}", state_path);
-    err = mdbx_env_open(env, state_path.c_str(), static_cast<MDBX_env_flags_t>(MDBX_NOSTICKYTHREADS | MDBX_NOSUBDIR | MDBX_NOMEMINIT |
-                             MDBX_SYNC_DURABLE | MDBX_LIFORECLAIM | MDBX_WRITEMAP), mode);
+    err = mdbx_env_open(env, state_path.c_str(),
+                        static_cast<MDBX_env_flags_t>(MDBX_NOSTICKYTHREADS | MDBX_NOSUBDIR | MDBX_NOMEMINIT |
+                                                      MDBX_SYNC_DURABLE | MDBX_LIFORECLAIM | MDBX_WRITEMAP), mode);
     if (err != MDBX_SUCCESS) {
         mdbx_env_close(env);
 
@@ -4742,7 +4804,8 @@ static nuraft::ptr<Log_Store> raft_mdbx_log_store_open(
         return nullptr;
     }
 
-    flags = MDBX_NOSTICKYTHREADS | MDBX_NOSUBDIR | MDBX_NOMEMINIT | MDBX_SYNC_DURABLE | MDBX_LIFORECLAIM | MDBX_WRITEMAP;
+    flags = MDBX_NOSTICKYTHREADS | MDBX_NOSUBDIR | MDBX_NOMEMINIT | MDBX_SYNC_DURABLE | MDBX_LIFORECLAIM |
+            MDBX_WRITEMAP;
 
     auto dir = std::filesystem::path(path);
     auto db_path = (std::filesystem::path(dir) / std::filesystem::path("raft_logs.db"));
@@ -5042,8 +5105,7 @@ auto Log_Store::last_entry() const -> log_entry_ptr {
  * Append a log entry to store.
  *
  * @param entry Log entry
- * @return Log index
- * number.
+ * @return Log index number.
  */
 auto Log_Store::append(log_entry_ptr &entry) -> nuraft::ulong {
     nuraft::ulong index = last_index() + 1;

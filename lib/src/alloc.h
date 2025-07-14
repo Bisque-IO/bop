@@ -27,6 +27,8 @@ BOP_API void bop_heap_access(void *data, size_t size);
 
 BOP_API size_t bop_malloc_usable_size(const void *data);
 
+BOP_API size_t bop_size_of_shared_ptr();
+
 #ifdef __cplusplus
 }
 #endif

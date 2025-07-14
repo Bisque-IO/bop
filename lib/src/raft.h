@@ -1097,8 +1097,13 @@ typedef uint64_t (*bop_raft_log_store_start_index)(void *user_data);
 typedef bop_raft_log_entry * (*bop_raft_log_store_last_entry)(void *user_data);
 
 typedef uint64_t (*bop_raft_log_store_append)(
-    void *user_data, uint64_t term, uint8_t *data, size_t data_size, uint64_t log_timestamp,
-    bool has_crc32, uint32_t crc32
+    void *user_data,
+    uint64_t term,
+    uint8_t *data,
+    size_t data_size,
+    uint64_t log_timestamp,
+    bool has_crc32,
+    uint32_t crc32
 );
 
 typedef void (*bop_raft_log_store_write_at)(

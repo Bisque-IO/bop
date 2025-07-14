@@ -13,6 +13,9 @@
 /// snmalloc C API
 ////////////////////////////////////////////////////////////////////////////////////
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 BOP_API void *bop_alloc(size_t size) {
     return snmalloc::ThreadAlloc::get().alloc<snmalloc::ZeroMem::NoZero>(size);
 }
@@ -52,3 +55,14 @@ BOP_API void bop_heap_access(void *data, size_t size) {
 BOP_API size_t bop_malloc_usable_size(const void *data) {
     return snmalloc::libc::malloc_usable_size(data);
 }
+
+struct SP {
+    std::shared_ptr<void *> p;
+};
+
+BOP_API size_t bop_size_of_shared_ptr() {
+    return sizeof(SP);
+}
+#ifdef __cplusplus
+}
+#endif

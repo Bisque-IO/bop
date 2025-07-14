@@ -791,6 +791,7 @@ def build_libbop(args: List[str]):
         else:
             print("unsupported macos arch: " + arch)
             sys.exit(-1)
+
     elif IS_WINDOWS:
         xmake_configure_and_build_bop("windows", "x64", "", debug)
 

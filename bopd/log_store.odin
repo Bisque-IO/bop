@@ -11,6 +11,22 @@ import "core:thread"
 
 import bop "../odin/libbop"
 
+Log_Entry_Ptr_Map :: struct {
+	data: map[u64]Log_Entry_Ptr,
+}
+
+Log_Entry_Ptr :: struct {
+	p: u128,
+}
+
+log_entry_ptr_ref_count :: proc "contextless" (p: Log_Entry_Ptr) -> int {
+	return 0
+}
+
+Log_Segment :: struct {
+	cache: Log_Entry_Ptr_Map,
+}
+
 Log_Store :: struct {
 	allocator: runtime.Allocator,
 	log_store: ^bop.Raft_Log_Store_Ptr,
@@ -27,7 +43,7 @@ The first available slot of the store, starts with 1
 */
 log_store_next_slot :: proc "c" (user_data: rawptr) -> u64 {
 	ls := cast(^Log_Store)user_data
-	return intrinsics.atomic_load_explicit(&ls.idx_last, .Seq_Cst)
+	return intrinsics.atomic_load_explicit(&ls.idx_last, .Seq_Cst) + 1
 }
 
 /*

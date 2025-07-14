@@ -241,6 +241,113 @@ foreign lib {
 /*
 ///////////////////////////////////////////////////////////////////////////////////
 //
+// concurrentqueue
+//
+//
+///////////////////
+
+https://github.com/cameron314/concurrentqueue
+
+moodycamel::ConcurrentQueue
+
+An industrial-strength lock-free queue for C++.
+
+Note: If all you need is a single-producer, single-consumer queue, I have one of those too.
+
+Features
+	- Knock-your-socks-off blazing fast performance.
+	- Single-header implementation. Just drop it in your project.
+	- Fully thread-safe lock-free queue. Use concurrently from any number of threads.
+	- C++11 implementation -- elements are moved (instead of copied) where possible.
+	- Templated, obviating the need to deal exclusively with pointers -- memory is managed for you.
+	- No artificial limitations on element types or maximum count.
+	- Memory can be allocated once up-front, or dynamically as needed.
+	- Fully portable (no assembly; all is done through standard C++11 primitives).
+	- Supports super-fast bulk operations.
+	- Includes a low-overhead blocking version (BlockingConcurrentQueue).
+	- Exception safe.
+*/
+@(link_prefix = "bop_")
+@(default_calling_convention = "c")
+foreign lib {
+	mpmc_create :: proc() -> ^MPMC ---
+	mpmc_destroy :: proc(m: ^MPMC) ---
+	mpmc_size_approx :: proc(m: ^MPMC) -> c.size_t ---
+	mpmc_enqueue :: proc(m: ^MPMC, item: rawptr) -> bool ---
+	mpmc_dequeue :: proc(m: ^MPMC, item: ^rawptr) -> bool ---
+	mpmc_dequeue_bulk :: proc(m: ^MPMC, items: rawptr, max_size: c.size_t) -> i64 ---
+
+	mpmc_blocking_create :: proc() -> ^MPMC_Blocking ---
+	mpmc_blocking_destroy :: proc(m: ^MPMC_Blocking) ---
+	mpmc_blocking_size_approx :: proc(m: ^MPMC_Blocking) -> c.size_t ---
+	mpmc_blocking_enqueue :: proc(m: ^MPMC_Blocking, item: rawptr) -> bool ---
+	mpmc_blocking_dequeue :: proc(m: ^MPMC_Blocking, item: ^rawptr) -> bool ---
+	mpmc_blocking_dequeue_wait :: proc(m: ^MPMC_Blocking, item: ^rawptr, timeout_micros: i64) -> bool ---
+	mpmc_blocking_dequeue_bulk :: proc(m: ^MPMC_Blocking, items: rawptr, max_size: c.size_t) -> i64 ---
+	mpmc_blocking_dequeue_bulk_wait :: proc(
+		m: ^MPMC_Blocking,
+		items: [^]rawptr,
+		max_items: c.size_t,
+		timeout_micros: i64,
+	) -> i64 ---
+}
+
+/*
+///////////////////////////////////////////////////////////////////////////////////
+//
+// readerwriterqueue (SPSC)
+//
+//
+///////////////////
+
+https://github.com/cameron314/readerwriterqueue
+
+A single-producer, single-consumer lock-free queue for C++
+
+It only supports a two-thread use case (one consuming, and one producing).
+The threads can't switch roles, though you could use this queue completely
+from a single thread if you wish (but that would sort of defeat the purpose!).
+
+
+Features
+	- Blazing fast
+	- Compatible with C++11 (supports moving objects instead of making copies)
+	- Fully generic (templated container of any type) -- just like std::queue, you never need
+	  to allocate memory for elements yourself (which saves you the hassle of writing a lock-free
+	  memory manager to hold the elements you're queueing)
+	- Allocates memory up front, in contiguous blocks
+	- Provides a try_enqueue method which is guaranteed never to allocate memory
+	  (the queue starts with an initial capacity)
+	- Also provides an enqueue method which can dynamically grow the size of the queue as needed
+	- Also provides try_emplace/emplace convenience methods
+	- Has a blocking version with wait_dequeue
+	- Completely "wait-free" (no compare-and-swap loop). Enqueue and dequeue are always O(1)
+	  (not counting memory allocation)
+	- On x86, the memory barriers compile down to no-ops, meaning enqueue and dequeue are just a
+	  simple series of loads and stores (and branches)
+*/
+@(link_prefix = "bop_")
+@(default_calling_convention = "c")
+foreign lib {
+	spsc_create :: proc() -> ^SPSC ---
+	spsc_destroy :: proc(m: ^SPSC) ---
+	spsc_size_approx :: proc(m: ^SPSC) -> c.size_t ---
+	spsc_max_capacity :: proc(m: ^SPSC) -> c.size_t ---
+	spsc_enqueue :: proc(m: ^SPSC, item: rawptr) -> bool ---
+	spsc_dequeue :: proc(m: ^SPSC, item: ^rawptr) -> bool ---
+
+	spsc_blocking_create :: proc() -> ^SPSC_Blocking ---
+	spsc_blocking_destroy :: proc(m: ^SPSC_Blocking) ---
+	spsc_blocking_size_approx :: proc(m: ^SPSC_Blocking) -> c.size_t ---
+	spsc_blocking_max_capacity :: proc(m: ^SPSC_Blocking) -> c.size_t ---
+	spsc_blocking_enqueue :: proc(m: ^SPSC_Blocking, item: rawptr) -> bool ---
+	spsc_blocking_dequeue :: proc(m: ^SPSC_Blocking, item: ^rawptr) -> bool ---
+	spsc_blocking_dequeue_wait :: proc(m: ^SPSC_Blocking, item: ^rawptr, timeout_micros: i64) -> bool ---
+}
+
+/*
+///////////////////////////////////////////////////////////////////////////////////
+//
 // llco
 // low-level coroutines
 //

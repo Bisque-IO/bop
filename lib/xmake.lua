@@ -137,6 +137,7 @@ local target_of = function(kind, use_openssl)
         else
             add_defines("LIBUS_USE_WOLFSSL")
             add_defines("BOOST_ASIO_USE_WOLFSSL=1")
+            add_defines("ASIO_USE_WOLFSSL=1")
             add_defines("HAVE_WOLFSSL_ASIO=1")
             add_ldflags("-l:./odin/libbop/windows/amd64/wolfssl.lib")
             --add_ldflags("-lodin/libbop/windows/amd64/wolfssl.lib")
@@ -216,8 +217,8 @@ local target_of = function(kind, use_openssl)
     -- --"boost"
     -- )
 
-    --set_symbols("debug")
-    set_strip("all")
+    set_symbols("debug")
+    --set_strip("all")
 
     --     add_ldflags("-fPIC")
     if kind == "shared" then
@@ -243,4 +244,4 @@ target_of("static", true)
 target_of("shared", false)
 target_of("shared", true)
 
-includes("snmalloc", "sqlite", "nuraft", "usockets", "uwebsockets", "libuv", "mdbx")
+includes("snmalloc", "sqlite", "nuraft", "usockets", "uwebsockets", "libuv", "mdbx", "scratch")
