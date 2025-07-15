@@ -7,28 +7,36 @@ import "core:thread"
 import "core:time"
 
 import bop "../../libbop"
+import runtime "base:runtime"
 
 main :: proc() {
 //    bench_parallelism(8, 4096*4, 2000000000)
 //    bop.alloc(1)
+    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
     for i in 0 ..< 5 {
+        stress_test_libbop_mpmc_push(8192 / 4, 20000000)
         stress_test_libbop_mpmc_bulk_push(8192 / 4, 20000000)
-    }
-
-    for i in 0 ..< 5 {
+        stress_test_libbop_mpmc_blocking_bulk_push(8192 / 4, 20000000)
         stress_test_mpsc_push(1, 8192 / 4, 20000000)
-    }
-
-    for i in 0 ..< 5 {
         stress_test_libbop_spsc_push(8192 / 8, 20000000)
-    //        stress_test_mpsc_push(1, 8192 / 4, 20000000)
+        stress_test_spsc(8192 * 2, 20000000)
+        fmt.println("")
     }
 
-    for i in 0 ..< 5 {
-        stress_test_spsc_push(8192 / 8, 20000000)
+//    for i in 0 ..< 5 {
 //        stress_test_mpsc_push(1, 8192 / 4, 20000000)
-    }
+//    }
+//
+//    for i in 0 ..< 5 {
+//        stress_test_libbop_spsc_push(8192 / 8, 20000000)
+//    //        stress_test_mpsc_push(1, 8192 / 4, 20000000)
+//    }
+//
+//    for i in 0 ..< 5 {
+//        stress_test_spsc_push(8192 / 8, 20000000)
+////        stress_test_mpsc_push(1, 8192 / 4, 20000000)
+//    }
     for i in 0 ..< 5 {
 //        stress_test_mpsc_push(2, 2048, 20000000)
     }
@@ -141,14 +149,14 @@ bench_parallelism :: proc($THREADS: int, $QUEUE_SIZE: int, $ITERS: int) {
 }
 
 stress_test_mpsc_push :: proc($THREADS: int, $QUEUE_SIZE: int, $ITERS: int) {
-    fmt.println(
-    "stress_test_mpsc_push: THREADS =",
-    THREADS,
-    " QUEUE_SIZE =",
-    QUEUE_SIZE,
-    " ITERS =",
-    ITERS,
-    )
+//    fmt.println(
+//    "stress_test_mpsc_push: THREADS =",
+//    THREADS,
+//    " QUEUE_SIZE =",
+//    QUEUE_SIZE,
+//    " ITERS =",
+//    ITERS,
+//    )
 
     queue := mpsc.queue_make(u64, u64(QUEUE_SIZE))
     defer mpsc.destroy(queue)
@@ -213,27 +221,22 @@ stress_test_mpsc_push :: proc($THREADS: int, $QUEUE_SIZE: int, $ITERS: int) {
         }
     }
 
-    fmt.println(
-        "done in",
-        time.stopwatch_duration(stopwatch),
-        "   ",
-        time.stopwatch_duration(stopwatch) / time.Duration(ITERS * THREADS),
-        "/op",
-        "   ",
-        u64(time.Second) /
-        u64(time.stopwatch_duration(stopwatch) / time.Duration(ITERS * THREADS)),
-        "/sec",
+    fmt.printfln(
+        "mpsc:                         %.2f ns/op          %s ops/sec",
+        f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS)),
+        temp_humanize_number(u64(f64(time.Second) /
+        (f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS))))),
     )
 }
 
-stress_test_spsc_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
-    fmt.println(
-        "stress_test_spsc_push: ",
-        " QUEUE_SIZE =",
-        QUEUE_SIZE,
-        " ITERS =",
-        ITERS,
-    )
+stress_test_spsc :: proc($QUEUE_SIZE: int, $ITERS: int) {
+//    fmt.println(
+//        "stress_test_spsc_push: ",
+//        " QUEUE_SIZE =",
+//        QUEUE_SIZE,
+//        " ITERS =",
+//        ITERS,
+//    )
 
     queue := mpsc.queue_make(u64, u64(QUEUE_SIZE))
     defer mpsc.destroy(queue)
@@ -298,27 +301,22 @@ stress_test_spsc_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
         }
     }
 
-    fmt.println(
-    "done in",
-    time.stopwatch_duration(stopwatch),
-    "   ",
-    time.stopwatch_duration(stopwatch) / time.Duration(ITERS),
-    "/op",
-    "   ",
-    u64(time.Second) /
-    u64(time.stopwatch_duration(stopwatch) / time.Duration(ITERS)),
-    "/sec",
+    fmt.printfln(
+        "spsc:                         %.2f ns/op          %s ops/sec",
+        f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS)),
+        temp_humanize_number(u64(f64(time.Second) /
+        (f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS))))),
     )
 }
 
 stress_test_libbop_spsc_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
-    fmt.println(
-        "stress_test_libbop_spsc_push: ",
-        " QUEUE_SIZE =",
-        QUEUE_SIZE,
-        " ITERS =",
-        ITERS,
-    )
+//    fmt.println(
+//        "stress_test_libbop_spsc_push: ",
+//        " QUEUE_SIZE =",
+//        QUEUE_SIZE,
+//        " ITERS =",
+//        ITERS,
+//    )
 
     queue := bop.spsc_create()
     defer bop.spsc_destroy(queue)
@@ -356,27 +354,24 @@ stress_test_libbop_spsc_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
         }
     }
 
-    fmt.println(
-        "done in",
-        time.stopwatch_duration(stopwatch),
-        "   ",
-        time.stopwatch_duration(stopwatch) / time.Duration(ITERS),
-        "/op",
-        "   ",
-        u64(time.Second) /
-        u64(time.stopwatch_duration(stopwatch) / time.Duration(ITERS)),
-        "/sec",
+    fmt.printfln(
+        "libbop_spsc:                  %.2f ns/op          %s ops/sec",
+        f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS)),
+        temp_humanize_number(u64(f64(time.Second) /
+        (f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS))))),
     )
 }
 
-stress_test_libbop_mpmc_bulk_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
-    fmt.println(
-        "stress_test_libbop_mpmc_bulk_push: ",
-        " QUEUE_SIZE =",
-        QUEUE_SIZE,
-        " ITERS =",
-        ITERS,
-    )
+stress_test_libbop_mpmc_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
+//    fmt.println(
+//        "libbop_mpmc_bulk_push: ",
+//        " QUEUE_SIZE =",
+//        QUEUE_SIZE,
+//        " ITERS =",
+//        ITERS,
+//    )
+
+    BATCH_SIZE :: 128
 
     queue := bop.mpmc_create()
     defer bop.mpmc_destroy(queue)
@@ -392,48 +387,235 @@ stress_test_libbop_mpmc_bulk_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
             i,
             proc(q: ^bop.MPMC, id: int) {
                 id := id + 1
+                token := bop.mpmc_create_producer_token(q)
+                defer bop.mpmc_destroy_producer_token(token)
+                items: [BATCH_SIZE]u64
                 for i in 0 ..< ITERS {
-                    for !bop.mpmc_enqueue(q, rawptr(q)) {
+                    for !bop.mpmc_enqueue_token(token, u64(i+1)) {
                         time.sleep(time.Nanosecond)
                     }
-                    fmt.println("EE")
-                    time.sleep(time.Second)
+                //                    fmt.println("EE")
+                //                    time.sleep(time.Second)
                 }
             },
         )
     }
 
     count := 0
-    items_ := [256]rawptr{}
-    items := items_[0:256]
+    items_ := [BATCH_SIZE]u64{}
+    items := items_[0:BATCH_SIZE]
+    token := bop.mpmc_create_consumer_token(queue)
+    defer bop.mpmc_destroy_consumer_token(token)
     loop: for {
         value : rawptr = nil
         size : i64 = 0
-//        for size = bop.mpmc_dequeue_bulk(queue, rawptr(&items_[0]), 1); size == 0; {
-//            intrinsics.cpu_relax()
-//            time.sleep(time.Second)
-//        }
-//        count += int(size)
-                for !bop.mpmc_dequeue(queue, &value) {
-                    intrinsics.cpu_relax()
+
+        #unroll for i in 0..<25 do intrinsics.cpu_relax()
+
+        size = bop.mpmc_dequeue_bulk_token(token, raw_data(items), BATCH_SIZE)
+
+        if size == BATCH_SIZE {
+            for size == BATCH_SIZE {
+                count += int(size)
+                if count >= ITERS {
+                    time.stopwatch_stop(&stopwatch)
+                    break
                 }
-        count += 1
-        fmt.println("DD")
+                size = bop.mpmc_dequeue_bulk_token(token, raw_data(items), BATCH_SIZE)
+            }
+            count += int(size)
+        } else if size == 0 {
+            for size == 0 {
+                #unroll for i in 0..<25 do intrinsics.cpu_relax()
+                size = bop.mpmc_dequeue_bulk_token(token, raw_data(items), BATCH_SIZE)
+                count += int(size)
+
+                if count >= ITERS {
+                    time.stopwatch_stop(&stopwatch)
+                    break
+                }
+            }
+        } else {
+            count += int(size)
+            if count >= ITERS {
+                time.stopwatch_stop(&stopwatch)
+                break
+            }
+            #unroll for i in 0..<10 do intrinsics.cpu_relax()
+        }
+
+        if count >= ITERS {
+            time.stopwatch_stop(&stopwatch)
+            break
+        }
+    }
+
+    fmt.printfln(
+        "libbop_mpmc:                  %.2f ns/op          %s ops/sec",
+        f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS)),
+        temp_humanize_number(u64(f64(time.Second) /
+        (f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS))))),
+    )
+}
+
+stress_test_libbop_mpmc_bulk_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
+//    fmt.println(
+//        "libbop_mpmc_bulk_push: ",
+//        " QUEUE_SIZE =",
+//        QUEUE_SIZE,
+//        " ITERS =",
+//        ITERS,
+//    )
+
+    BATCH_SIZE :: 256
+    ITERS_BULK :: ITERS / BATCH_SIZE
+
+    queue := bop.mpmc_create()
+    defer bop.mpmc_destroy(queue)
+
+    stopwatch: time.Stopwatch
+    time.stopwatch_start(&stopwatch)
+
+    producers: [2]^thread.Thread
+
+    for i in 0 ..< 1 {
+        producers[i] = thread.create_and_start_with_poly_data2(
+            queue,
+            i,
+            proc(q: ^bop.MPMC, id: int) {
+                id := id + 1
+                token := bop.mpmc_create_producer_token(q)
+                items: [BATCH_SIZE]u64
+                for i in 0 ..< ITERS_BULK {
+//                    for !bop.mpmc_enqueue(q, u64(i+1)) {
+                    for !bop.mpmc_enqueue_bulk_token(token, raw_data(items[0:BATCH_SIZE]), BATCH_SIZE) {
+                        time.sleep(time.Nanosecond)
+                    }
+//                    fmt.println("EE")
+//                    time.sleep(time.Second)
+                }
+            },
+        )
+    }
+
+    count := 0
+    items_ := [BATCH_SIZE]u64{}
+    items := items_[0:BATCH_SIZE]
+    token := bop.mpmc_create_consumer_token(queue)
+    loop: for {
+        value : rawptr = nil
+        size : i64 = 0
+
+        size = bop.mpmc_dequeue_bulk_token(token, raw_data(items), BATCH_SIZE)
+        for size == 0 {
+            intrinsics.cpu_relax()
+            size = bop.mpmc_dequeue_bulk_token(token, raw_data(items), BATCH_SIZE)
+        }
+        count += int(size)
         if count == ITERS {
             time.stopwatch_stop(&stopwatch)
             break
         }
     }
 
-    fmt.println(
-        "done in",
-        time.stopwatch_duration(stopwatch),
-        "   ",
-        time.stopwatch_duration(stopwatch) / time.Duration(ITERS),
-        "/op",
-        "   ",
-        u64(time.Second) /
-        u64(time.stopwatch_duration(stopwatch) / time.Duration(ITERS)),
-        "/sec",
+    fmt.printfln(
+        "libbop_mpmc_bulk:             %.2f ns/op          %s ops/sec",
+        f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS)),
+        temp_humanize_number(u64(f64(time.Second) /
+        (f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS))))),
     )
+}
+
+stress_test_libbop_mpmc_blocking_bulk_push :: proc($QUEUE_SIZE: int, $ITERS: int) {
+//    fmt.println(
+//        "libbop_mpmc_blocking_bulk_push: ",
+//        " QUEUE_SIZE =",
+//        QUEUE_SIZE,
+//        " ITERS =",
+//        ITERS,
+//    )
+
+    BATCH_SIZE :: 256
+    ITERS_BULK :: ITERS / BATCH_SIZE
+
+    queue := bop.mpmc_blocking_create()
+    defer bop.mpmc_blocking_destroy(queue)
+
+    stopwatch: time.Stopwatch
+    time.stopwatch_start(&stopwatch)
+
+    producers: [2]^thread.Thread
+
+    for i in 0 ..< 1 {
+        producers[i] = thread.create_and_start_with_poly_data2(
+            queue,
+            i,
+            proc(q: ^bop.MPMC_Blocking, id: int) {
+                id := id + 1
+                token := bop.mpmc_blocking_create_producer_token(q)
+                items: [BATCH_SIZE]u64
+                for i in 0 ..< ITERS_BULK {
+                    for !bop.mpmc_blocking_enqueue_bulk_token(token, raw_data(items[0:BATCH_SIZE]), BATCH_SIZE) {
+                        time.sleep(time.Nanosecond)
+                    }
+                }
+            },
+        )
+    }
+
+    count := 0
+    items_ := [BATCH_SIZE]u64{}
+    items := items_[0:BATCH_SIZE]
+    token := bop.mpmc_blocking_create_consumer_token(queue)
+    loop: for {
+        value : rawptr = nil
+        size : i64 = 0
+
+        size = bop.mpmc_blocking_dequeue_bulk_wait_token(token, raw_data(items), BATCH_SIZE, -1)
+        for size == 0 {
+            intrinsics.cpu_relax()
+            size = bop.mpmc_blocking_dequeue_bulk_wait_token(token, raw_data(items), BATCH_SIZE, -1)
+        }
+        count += int(size)
+        if count == ITERS {
+            time.stopwatch_stop(&stopwatch)
+            break
+        }
+    }
+
+    fmt.printfln(
+        "libbop_mpmc_blocking_bulk:    %.2f ns/op          %s ops/sec",
+        f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS)),
+        temp_humanize_number(u64(f64(time.Second) /
+        (f64(time.stopwatch_duration(stopwatch)) / f64(time.Duration(ITERS))))),
+    )
+}
+
+temp_humanize_number :: proc(n: u64, allocator := context.temp_allocator) -> string {
+    buffer := make([dynamic]u8, 0, 32, allocator)
+    num := n
+    digit_count := 0
+
+    if num == 0 {
+        return "0"
+    }
+
+    for num > 0 {
+        if digit_count > 0 && digit_count % 3 == 0 {
+            append(&buffer, ',')
+        }
+
+        digit := u8('0' + num % 10)
+        append(&buffer, digit)
+
+        num /= 10
+        digit_count += 1
+    }
+
+    // reverse the string
+    for i := 0; i < len(buffer)/2; i += 1 {
+        buffer[i], buffer[len(buffer)-1-i] = buffer[len(buffer)-1-i], buffer[i]
+    }
+
+    return string(buffer[0:len(buffer)])
 }

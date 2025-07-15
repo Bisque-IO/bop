@@ -110,6 +110,8 @@ FSM_Ptr :: bop.Raft_FSM_Ptr
 
 Log_Entry :: bop.Raft_Log_Entry
 
+Log_Entry_Ptr :: bop.Raft_Log_Entry_Ptr
+
 Log_Entry_Vec :: bop.Raft_Log_Entry_Vec
 
 Log_Store_Next_Slot_Func :: bop.Raft_Log_Store_Next_Slot_Func
@@ -319,6 +321,12 @@ fsm_make :: bop.raft_fsm_make
 fsm_delete :: bop.raft_fsm_delete
 
 log_entry_make :: bop.raft_log_entry_make
+
+log_entry_ptr_ref_count :: bop.raft_log_entry_ptr_ref_count
+
+log_entry_ptr_retain :: bop.raft_log_entry_ptr_retain
+
+log_entry_ptr_release :: bop.raft_log_entry_ptr_release
 
 log_entry_delete :: bop.raft_log_entry_delete
 

@@ -7,7 +7,7 @@ import "core:time"
 
 import c "core:c/libc"
 
-import bop "../"
+import bop "../../libbop"
 
 SSL :: 1
 

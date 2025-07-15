@@ -768,6 +768,10 @@ Raft_FSM_Ptr :: struct {}
 
 Raft_Log_Entry :: struct {}
 
+Raft_Log_Entry_Ptr :: struct {
+	data: u128,
+}
+
 Raft_Log_Entry_Vec :: struct {}
 
 Raft_Log_Store_Next_Slot_Func :: #type proc "c" (user_data: rawptr) -> u64

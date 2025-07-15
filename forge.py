@@ -99,7 +99,8 @@ def run_odin_tests(
     name: str = "",
     debug: bool = False,
     keep_build: bool = False,
-    build_only: bool = False
+    build_only: bool = False,
+    nodefault_libcmt: bool = False,
 ):
     cmd = ["odin", "test"]
     cmd += [path]
@@ -150,7 +151,10 @@ def run_odin_tests(
 
     if IS_WINDOWS:
         cmd += ["-linker:default"]
-        linker_flags = "/ignore:4099 /NODEFAULTLIB:libcmt"
+        linker_flags = "/ignore:4099"
+        if nodefault_libcmt:
+            linker_flags += " /NODEFAULTLIB:libcmt"
+
         cmd += [f"-extra-linker-flags:{linker_flags}"]
     else:
         cmd += ["-linker:lld"]
@@ -838,7 +842,7 @@ def wolfssl_do_configure_build(
 
     args += [
         "--enable-static",
-        "--enable-pic",
+        # "--enable-pic",
         "--enable-opensslall",
         "--enable-opensslextra",
         "--enable-asio"
@@ -899,16 +903,16 @@ def wolfssl_build(args: List[str]):
             "x86_64-linux-gnu-gcc",
             "x86_64-linux-gnu-g++"
         )
-        wolfssl_do_configure_build(
-            "aarch64-linux-gnu",
-            "aarch64-linux-gnu-gcc",
-            "aarch64-linux-gnu-g++"
-        )
-        wolfssl_do_configure_build(
-            "riscv64-linux-gnu",
-            "riscv64-linux-gnu-gcc",
-            "riscv64-linux-gnu-g++"
-        )
+        # wolfssl_do_configure_build(
+        #     "aarch64-linux-gnu",
+        #     "aarch64-linux-gnu-gcc",
+        #     "aarch64-linux-gnu-g++"
+        # )
+        # wolfssl_do_configure_build(
+        #     "riscv64-linux-gnu",
+        #     "riscv64-linux-gnu-gcc",
+        #     "riscv64-linux-gnu-g++"
+        # )
         return
 
     if IS_MAC:

@@ -252,8 +252,6 @@ moodycamel::ConcurrentQueue
 
 An industrial-strength lock-free queue for C++.
 
-Note: If all you need is a single-producer, single-consumer queue, I have one of those too.
-
 Features
 	- Knock-your-socks-off blazing fast performance.
 	- Single-header implementation. Just drop it in your project.
@@ -272,21 +270,50 @@ Features
 foreign lib {
 	mpmc_create :: proc() -> ^MPMC ---
 	mpmc_destroy :: proc(m: ^MPMC) ---
+	mpmc_create_producer_token :: proc(m: ^MPMC) -> ^MPMC_Producer_Token ---
+	mpmc_destroy_producer_token :: proc(token: ^MPMC_Producer_Token) ---
+	mpmc_create_consumer_token :: proc(m: ^MPMC) -> ^MPMC_Consumer_Token ---
+	mpmc_destroy_consumer_token :: proc(token: ^MPMC_Consumer_Token) ---
 	mpmc_size_approx :: proc(m: ^MPMC) -> c.size_t ---
-	mpmc_enqueue :: proc(m: ^MPMC, item: rawptr) -> bool ---
-	mpmc_dequeue :: proc(m: ^MPMC, item: ^rawptr) -> bool ---
-	mpmc_dequeue_bulk :: proc(m: ^MPMC, items: rawptr, max_size: c.size_t) -> i64 ---
+	mpmc_enqueue :: proc(m: ^MPMC, item: u64) -> bool ---
+	mpmc_enqueue_token :: proc(token: ^MPMC_Producer_Token, item: u64) -> bool ---
+	mpmc_enqueue_bulk :: proc(m: ^MPMC, items: [^]u64, size: c.size_t) -> bool ---
+	mpmc_enqueue_bulk_token :: proc(token: ^MPMC_Producer_Token, items: [^]u64, size: c.size_t) -> bool ---
+	mpmc_try_enqueue_bulk :: proc(m: ^MPMC, items: [^]u64, max_size: c.size_t) -> bool ---
+	mpmc_try_enqueue_bulk_token :: proc(token: ^MPMC_Producer_Token, items: [^]u64, size: c.size_t) -> bool ---
+	mpmc_dequeue :: proc(m: ^MPMC, item: ^u64) -> bool ---
+	mpmc_dequeue_token :: proc(token: ^MPMC_Consumer_Token, item: ^u64) -> bool ---
+	mpmc_dequeue_bulk :: proc(m: ^MPMC, items: [^]u64, max_size: c.size_t) -> i64 ---
+	mpmc_dequeue_bulk_token :: proc(token: ^MPMC_Consumer_Token, items: [^]u64, max_size: c.size_t) -> i64 ---
 
 	mpmc_blocking_create :: proc() -> ^MPMC_Blocking ---
 	mpmc_blocking_destroy :: proc(m: ^MPMC_Blocking) ---
+	mpmc_blocking_create_producer_token :: proc(m: ^MPMC_Blocking) -> ^MPMC_Blocking_Producer_Token ---
+	mpmc_blocking_destroy_producer_token :: proc(token: ^MPMC_Blocking_Producer_Token) ---
+	mpmc_blocking_create_consumer_token :: proc(m: ^MPMC_Blocking) -> ^MPMC_Blocking_Consumer_Token ---
+	mpmc_blocking_destroy_consumer_token :: proc(token: ^MPMC_Blocking_Consumer_Token) ---
 	mpmc_blocking_size_approx :: proc(m: ^MPMC_Blocking) -> c.size_t ---
-	mpmc_blocking_enqueue :: proc(m: ^MPMC_Blocking, item: rawptr) -> bool ---
-	mpmc_blocking_dequeue :: proc(m: ^MPMC_Blocking, item: ^rawptr) -> bool ---
-	mpmc_blocking_dequeue_wait :: proc(m: ^MPMC_Blocking, item: ^rawptr, timeout_micros: i64) -> bool ---
-	mpmc_blocking_dequeue_bulk :: proc(m: ^MPMC_Blocking, items: rawptr, max_size: c.size_t) -> i64 ---
+	mpmc_blocking_enqueue :: proc(m: ^MPMC_Blocking, item: u64) -> bool ---
+	mpmc_blocking_enqueue_token :: proc(token: ^MPMC_Blocking_Producer_Token, item: u64) -> bool ---
+	mpmc_blocking_enqueue_bulk :: proc(m: ^MPMC_Blocking, items: [^]u64, size: c.size_t) -> bool ---
+	mpmc_blocking_enqueue_bulk_token :: proc(token: ^MPMC_Blocking_Producer_Token, items: [^]u64, size: c.size_t) -> bool ---
+	mpmc_blocking_try_enqueue_bulk :: proc(m: ^MPMC_Blocking, items: [^]u64, size: c.size_t) -> bool ---
+	mpmc_blocking_try_enqueue_bulk_token :: proc(token: ^MPMC_Blocking_Producer_Token, items: [^]u64, size: c.size_t) -> bool ---
+	mpmc_blocking_dequeue :: proc(m: ^MPMC_Blocking, item: ^u64) -> bool ---
+	mpmc_blocking_dequeue_token :: proc(token: ^MPMC_Blocking_Consumer_Token, item: ^u64) -> bool ---
+	mpmc_blocking_dequeue_wait :: proc(m: ^MPMC_Blocking, item: ^u64, timeout_micros: i64) -> bool ---
+	mpmc_blocking_dequeue_wait_token :: proc(token: ^MPMC_Blocking_Consumer_Token, item: ^u64, timeout_micros: i64) -> bool ---
+	mpmc_blocking_dequeue_bulk :: proc(m: ^MPMC_Blocking, items: [^]u64, max_size: c.size_t) -> i64 ---
+	mpmc_blocking_dequeue_bulk_token :: proc(token: ^MPMC_Blocking_Consumer_Token, items: [^]u64, max_size: c.size_t) -> i64 ---
 	mpmc_blocking_dequeue_bulk_wait :: proc(
 		m: ^MPMC_Blocking,
-		items: [^]rawptr,
+		items: [^]u64,
+		max_items: c.size_t,
+		timeout_micros: i64,
+	) -> i64 ---
+	mpmc_blocking_dequeue_bulk_wait_token :: proc(
+		token: ^MPMC_Blocking_Consumer_Token,
+		items: [^]u64,
 		max_items: c.size_t,
 		timeout_micros: i64,
 	) -> i64 ---
@@ -3363,6 +3390,12 @@ foreign lib {
 	) -> ^Raft_Log_Entry ---
 
 	raft_log_entry_delete :: proc(entry: ^Raft_Log_Entry) ---
+
+	raft_log_entry_ptr_ref_count :: proc(p: ^Raft_Log_Entry_Ptr) -> c.size_t ---
+
+	raft_log_entry_ptr_retain :: proc(p: ^Raft_Log_Entry_Ptr) ---
+
+	raft_log_entry_ptr_release :: proc(p: ^Raft_Log_Entry_Ptr) ---
 
 	raft_log_entry_vec_push :: proc(
 		vec: ^Raft_Log_Entry_Vec,

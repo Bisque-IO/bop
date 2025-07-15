@@ -7,33 +7,37 @@ import "core:fmt"
 import "core:log"
 import "core:mem/virtual"
 import "core:os"
+import "core:sync"
 import "core:thread"
 
 import bop "../odin/libbop"
 
+import "../odin/raft"
+
 Log_Entry_Ptr_Map :: struct {
-	data: map[u64]Log_Entry_Ptr,
+	allocator:  runtime.Allocator,
+	data: 		map[u64]raft.Log_Entry_Ptr,
 }
 
-Log_Entry_Ptr :: struct {
-	p: u128,
-}
-
-log_entry_ptr_ref_count :: proc "contextless" (p: Log_Entry_Ptr) -> int {
-	return 0
-}
+Log_Segment_Index :: struct {}
 
 Log_Segment :: struct {
-	cache: Log_Entry_Ptr_Map,
+	allocator:  runtime.Allocator,
+	fsm_id: 	u32,
+	id:     	u32,
+	cache:  	Log_Entry_Ptr_Map,
+	index:  	^Log_Segment_Index,
+	mu:	    	sync.Mutex,
 }
 
 Log_Store :: struct {
 	allocator: runtime.Allocator,
-	log_store: ^bop.Raft_Log_Store_Ptr,
+	log_store: ^raft.Log_Store_Ptr,
 	state_mgr: ^State_Mgr,
 	idx_start: u64,
 	idx_last: u64,
 	idx_durable: u64,
+	segment: ^Log_Segment,
 }
 
 /*

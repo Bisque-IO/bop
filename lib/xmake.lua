@@ -244,4 +244,4 @@ target_of("static", true)
 target_of("shared", false)
 target_of("shared", true)
 
-includes("snmalloc", "sqlite", "nuraft", "usockets", "uwebsockets", "libuv", "mdbx", "scratch")
+includes("snmalloc", "sqlite", "nuraft", "usockets", "uwebsockets", "libuv", "mdbx", "scratch", "test")

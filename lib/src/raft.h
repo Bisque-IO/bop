@@ -154,6 +154,12 @@ BOP_API bop_raft_srv_config *bop_raft_cluster_config_server(bop_raft_cluster_con
 
 struct bop_raft_srv_config_ptr;
 
+// BOP_API void bop_raft_srv_config_ptr_retain(bop_raft_srv_config_ptr* p);
+//
+// BOP_API void bop_raft_srv_config_ptr_release(bop_raft_srv_config_ptr* p);
+//
+// BOP_API int64_t bop_raft_srv_config_ptr_ref_count(bop_raft_srv_config_ptr* p);
+
 struct bop_raft_srv_config_vec;
 
 BOP_API bop_raft_srv_config_vec *bop_raft_srv_config_vec_make();
@@ -1075,6 +1081,12 @@ BOP_API void bop_raft_state_mgr_delete(const bop_raft_state_mgr_ptr *sm);
 /// nuraft::log_store
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+extern const size_t BOP_RAFT_LOG_ENTRY_PTR_SIZE;
+
+struct bop_raft_log_entry_ptr {
+    uint64_t data[2];
+};
+
 struct bop_raft_log_entry;
 
 BOP_API bop_raft_log_entry *bop_raft_log_entry_make(
@@ -1098,6 +1110,7 @@ typedef bop_raft_log_entry * (*bop_raft_log_store_last_entry)(void *user_data);
 
 typedef uint64_t (*bop_raft_log_store_append)(
     void *user_data,
+    bop_raft_log_entry_ptr log_entry,
     uint64_t term,
     uint8_t *data,
     size_t data_size,

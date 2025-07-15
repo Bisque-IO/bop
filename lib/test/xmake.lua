@@ -1,0 +1,5 @@
+target("mpmc_test")
+    set_kind("binary")
+    add_languages("c++23")
+    add_files("mpmc_test.cpp", "../src/mpmc.cpp")
+    add_includedirs("../src")

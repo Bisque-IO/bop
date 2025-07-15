@@ -1961,20 +1961,23 @@ BOP_API void bop_raft_state_mgr_delete(const bop_raft_state_mgr_ptr *sm) {
 
 struct bop_raft_log_entry;
 
-struct bop_raft_log_entry_ptr {
-    nuraft::ptr<nuraft::log_entry> entry;
-};
+const size_t BOP_RAFT_LOG_ENTRY_PTR_SIZE = sizeof(nuraft::ptr<nuraft::log_entry>);
 
-BOP_API size_t bop_raft_log_entry_ptr_use_count(bop_raft_log_entry_ptr *log_entry_ptr) {
-    return log_entry_ptr->entry.use_count();
+static_assert(sizeof(nuraft::ptr<nuraft::log_entry>) == 16);
+
+static_assert(sizeof(bop_raft_log_entry_ptr) == 16);
+
+size_t bop_raft_log_entry_ptr_use_count(bop_raft_log_entry_ptr *log_entry_ptr) {
+    return reinterpret_cast<nuraft::ptr<nuraft::log_entry>*>(log_entry_ptr)->use_count();
 }
 
-BOP_API void bop_raft_log_entry_ptr_retain(bop_raft_log_entry_ptr *log_entry_ptr) {
-    auto l = new(log_entry_ptr) bop_raft_log_entry_ptr{log_entry_ptr->entry};
+void bop_raft_log_entry_ptr_retain(bop_raft_log_entry_ptr* log_entry_ptr) {
+    char data[BOP_RAFT_LOG_ENTRY_PTR_SIZE];
+    new(data) nuraft::ptr(*reinterpret_cast<nuraft::ptr<nuraft::log_entry>*>(log_entry_ptr));
 }
 
-BOP_API void bop_raft_log_entry_ptr_release(bop_raft_log_entry_ptr *log_entry_ptr) {
-    auto l = new(log_entry_ptr) bop_raft_log_entry_ptr{log_entry_ptr->entry};
+void bop_raft_log_entry_ptr_release(bop_raft_log_entry_ptr *log_entry_ptr) {
+    reinterpret_cast<nuraft::ptr<nuraft::log_entry>*>(log_entry_ptr)->~shared_ptr();
 }
 
 // typedef uint64_t (*bop_raft_log_store_append_async)(
@@ -2139,7 +2142,7 @@ struct bop_raft_log_store : nuraft::log_store {
      * constant entry with
      *         value set to null and term set to zero.
      */
-    nuraft::ptr<nuraft::log_entry> last_entry() const override {
+    [[nodiscard]] nuraft::ptr<nuraft::log_entry> last_entry() const override {
         return nuraft::ptr<nuraft::log_entry>(
             reinterpret_cast<nuraft::log_entry *>(last_entry_(user_data_))
         );
@@ -2155,6 +2158,7 @@ struct bop_raft_log_store : nuraft::log_store {
     nuraft::ulong append(nuraft::ptr<nuraft::log_entry> &entry) override {
         return append_(
             user_data_,
+            *reinterpret_cast<bop_raft_log_entry_ptr *>(&entry),
             entry->get_term(),
             entry->get_buf().data_begin(),
             entry->get_buf().size(),
