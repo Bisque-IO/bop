@@ -1,15 +1,39 @@
 #+build darwin, freebsd, openbsd, netbsd
-package mmap
+package fs
 
+import "base:runtime"
+import "core:strings"
 import "core:sys/posix"
 import c "core:c/libc"
 
 FD             :: posix.FD
-INVALID_HANDLE :: posix.FD(0)
+INVALID_HANDLE :: posix.FD(-1)
 
-@(init)
-init_module :: proc() {
-    PAGE_SIZE = int(posix.sysconf(posix.PAGE_SIZE))
+when ODIN_OS == .Linux {
+    foreign import libc "system:c"
+
+    @(default_calling_convention="c")
+    foreign libc {
+        getpagesize  :: proc() -> c.int ---
+    }
+
+    @(init)
+    init_module :: proc() {
+        PAGE_SIZE = int(getpagesize())
+    }
+} else {
+    @(init)
+    init_module :: proc() {
+        PAGE_SIZE = int(posix.sysconf(posix.PAGE_SIZE))
+    }
+}
+
+is_valid_handle :: proc "contextless" (fd: FD) -> bool {
+    return fd > -1
+}
+
+is_invalid_handle :: proc "contextless" (fd: FD) -> bool {
+    return fd < 0
 }
 
 _Platform_Error :: posix.Errno
@@ -50,7 +74,15 @@ _get_platform_error :: proc{
     _get_platform_error_from_errno,
 }
 
-_open :: proc(name: string, flags: File_Flags, perm: int) -> (fd: FD, err: Error) {
+_open_file :: proc(
+    name: string,
+    flags: File_Flags,
+    perm: int,
+    temp_allocator: runtime.Allocator,
+) -> (
+    fd: FD,
+    err: Error
+) {
     if name == "" {
         err = General_Error.Invalid_Path
         return
@@ -73,10 +105,9 @@ _open :: proc(name: string, flags: File_Flags, perm: int) -> (fd: FD, err: Error
     if .Trunc       in flags { sys_flags += {.TRUNC} }
     if .Inheritable in flags { sys_flags -= {.CLOEXEC} }
 
-    temp_allocator := TEMP_ALLOCATOR_GUARD({})
-    cname := clone_to_cstring(name, temp_allocator) or_return
+    cname := strings.clone_to_cstring(name, temp_allocator) or_return
 
-    fd := posix.open(cname, sys_flags, transmute(posix.mode_t)posix._mode_t(perm))
+    fd = posix.open(cname, sys_flags, transmute(posix.mode_t)posix._mode_t(perm))
     if fd < 0 {
         err = _get_platform_error()
         return
@@ -85,12 +116,12 @@ _open :: proc(name: string, flags: File_Flags, perm: int) -> (fd: FD, err: Error
     return FD(fd), nil
 }
 
-_map_with_fd :: proc(
+_mmap :: proc(
     file_handle: FD,
     offset: int,
     length: int,
     mode: Access_Mode,
-) -> (m: Mapping, err: Error) {
+) -> (m: MMAP, err: Error) {
     aligned_offset := make_offset_page_aligned(offset)
     length_to_map := offset - aligned_offset + length
 
@@ -98,29 +129,28 @@ _map_with_fd :: proc(
     mapping_start := posix.mmap(
         nil,
         c.size_t(length_to_map),
-        posix.PROT_READ if mode == .Read else posix.PROT_WRITE,
-        posix.MAP_SHARED,
+        {posix.Prot_Flags.READ} if mode == .Read else {posix.Prot_Flags.WRITE},
+        {posix.Map_Flags.SHARED},
         file_handle,
-        aligned_offset,
+        posix.off_t(aligned_offset),
     )
 
     if mapping_start == nil || mapping_start == posix.MAP_FAILED {
         return m, General_Error.Invalid_Command
     }
 
-    m.file = file
     m.fd = file_handle
     m.access = mode
     m.data = cast([^]byte)mapping_start
     m.size = length
     m.mapped_size = length_to_map
     m.is_internal = true
-    m.mapping_fd = FD(0)
+    m.mapping_fd = FD(-1)
 
     return m, nil
 }
 
-_sync :: proc(m: ^Mapping) -> (err: Error) {
+_msync :: proc(m: ^MMAP) -> (err: Error) {
     if m.data == nil {
         return General_Error.Invalid_File
     }
@@ -155,7 +185,15 @@ _truncate :: proc(fd: FD, size: i64) -> Error {
     }
 }
 
-_close :: proc(m: ^Mapping) -> (err: Error) {
+_close_fd :: proc(fd: FD) -> Error {
+    if posix.close(fd) == posix.result.OK {
+        return nil
+    } else {
+        return General_Error.Invalid_File
+    }
+}
+
+_close_mmap :: proc(m: ^MMAP) -> (err: Error) {
     if m == nil {
         return nil
     }
@@ -166,7 +204,7 @@ _close :: proc(m: ^Mapping) -> (err: Error) {
         m.data = nil
     }
 
-    if m.fd != -1 {
+    if m.fd > -1 {
         posix.close(m.fd)
         m.fd = -1
     }

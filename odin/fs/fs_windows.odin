@@ -1,5 +1,5 @@
 #+build windows
-package mmap
+package fs
 
 import "base:runtime"
 import win32 "core:sys/windows"
@@ -8,8 +8,23 @@ import "core:slice"
 import "core:strings"
 import "core:io"
 
-FD :: win32.HANDLE
+@(init)
+init_module :: proc() {
+    info: win32.SYSTEM_INFO
+    win32.GetSystemInfo(&info)
+    PAGE_SIZE = int(info.dwPageSize)
+}
+
+FD             :: win32.HANDLE
 INVALID_HANDLE :: win32.INVALID_HANDLE_VALUE
+
+is_valid_handle :: proc "contextless" (fd: FD) -> bool {
+    return fd != INVALID_HANDLE
+}
+
+is_invalid_handle :: proc "contextless" (fd: FD) -> bool {
+    return fd == INVALID_HANDLE
+}
 
 S_IWRITE :: 0o200
 _ERROR_BAD_NETPATH :: 53
@@ -87,12 +102,7 @@ _get_platform_error :: proc() -> Error {
     return Platform_Error(err)
 }
 
-@(init)
-init_module :: proc() {
-    info: win32.SYSTEM_INFO
-    win32.GetSystemInfo(&info)
-    PAGE_SIZE = int(info.dwPageSize)
-}
+
 
 int64_high :: proc "contextless" (n: i64) -> win32.DWORD {
     return win32.DWORD(n >> 32)
@@ -133,24 +143,30 @@ int64_low :: proc "contextless" (n: i64) -> win32.DWORD {
 //    return fd, .Success
 //}
 
-//query_file_size := proc(handle: FD) -> (err: Error) {
+//query_file_size := proc(fd: FD) -> (err: Error) {
 //    file_size: win32.LARGE_INTEGER
-//    if win32.GetFileSizeEx(handle, &file_size) == 0 {
+//    if win32.GetFileSizeEx(fd, &file_size) == 0 {
 //        err = to_error(win32.GetLastError())
 //        return err
 //    }
 //    return i64(file_size.QuadPart)
 //}
 
-_open_file :: proc(name: string, flags: File_Flags, perm: int) -> (handle: FD, err: Error) {
+_open_file :: proc(
+    name: string,
+    flags: File_Flags,
+    perm: int,
+    temp_allocator: runtime.Allocator,
+) -> (
+    fd: FD,
+    err: Error
+) {
     if len(name) == 0 {
         err = General_Error.Not_Exist
         return
     }
 
-    runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-
-    path := _fix_long_path(name, context.temp_allocator) or_return
+    path := _fix_long_path(name, temp_allocator) or_return
 
     access: u32
     switch flags & {.Read, .Write} {
@@ -188,9 +204,9 @@ _open_file :: proc(name: string, flags: File_Flags, perm: int) -> (handle: FD, e
     if perm & S_IWRITE == 0 {
         attrs = win32.FILE_ATTRIBUTE_READONLY
         if create_mode == win32.CREATE_ALWAYS {
-        // NOTE(bill): Open has just asked to create a file in read-only mode.
-        // If the file already exists, to make it akin to a *nix open call,
-        // the call preserves the existing permissions.
+            // NOTE(bill): Open has just asked to create a file in read-only mode.
+            // If the file already exists, to make it akin to a *nix open call,
+            // the call preserves the existing permissions.
             h := win32.CreateFileW(path, access, share_mode, &sa, win32.TRUNCATE_EXISTING, win32.FILE_ATTRIBUTE_NORMAL, nil)
             if h == win32.INVALID_HANDLE {
                 switch e := win32.GetLastError(); e {
@@ -212,7 +228,7 @@ _open_file :: proc(name: string, flags: File_Flags, perm: int) -> (handle: FD, e
     return FD(h), nil
 }
 
-_map_with_fd :: proc(file_handle: FD, offset: int, length: int, mode: Access_Mode) -> (m: Mapping, err: Error) {
+_mmap :: proc(file_handle: FD, offset: int, length: int, mode: Access_Mode) -> (m: MMAP, err: Error) {
     aligned_offset := make_offset_page_aligned(offset)
     length_to_map := offset - aligned_offset + length
 
@@ -253,20 +269,25 @@ _map_with_fd :: proc(file_handle: FD, offset: int, length: int, mode: Access_Mod
     return m, nil
 }
 
-_sync :: proc(m: ^Mapping) -> (err: Error) {
+_msync :: proc(m: ^MMAP) -> (err: Error) {
     if m.data == nil {
         return os2.General_Error.Invalid_File
     }
     if win32.FlushViewOfFile(win32.LPCVOID(rawptr(m.data)), win32.SIZE_T(m.mapped_size)) == win32.FALSE {
         return _get_platform_error()
     }
-    if win32.FlushFileBuffers(m.fd) == win32.FALSE {
-        return _get_platform_error()
-    }
-    if m.mapping_fd != INVALID_HANDLE && win32.FlushFileBuffers(m.mapping_fd) == win32.FALSE {
+    return nil
+}
+
+_fsync :: proc(fd: FD) -> (err: Error) {
+    if win32.FlushFileBuffers(fd) == win32.FALSE {
         return _get_platform_error()
     }
     return nil
+}
+
+_fdatasync :: proc(fd: FD) -> (err: Error) {
+    return _fsync(fd)
 }
 
 _seek :: proc(handle: FD, offset: i64, whence: io.Seek_From) -> (ret: i64, err: Error) {
@@ -305,25 +326,32 @@ _truncate :: proc(fd: FD, size: i64) -> Error {
     return nil
 }
 
-_close :: proc(m: ^Mapping) -> (err: Error) {
+_close_fd :: proc(fd: FD) -> Error {
+    if !win32.CloseHandle(fd) {
+        return _get_platform_error()
+    }
+    return nil
+}
+
+_close_mmap :: proc(m: ^MMAP) -> (err: Error) {
     if m == nil || m.data == nil {
         return nil
     }
 
-    win32.UnmapViewOfFile(m.data)
-    m.data = nil
-    m.size = 0
-    m.mapped_size = 0
+    data := m.data
+
+    if data != nil {
+        win32.UnmapViewOfFile(data)
+        m.data = nil
+        m.size = 0
+        m.mapped_size = 0
+    }
 
     if m.mapping_fd != INVALID_HANDLE {
         win32.CloseHandle(m.mapping_fd)
         m.mapping_fd = INVALID_HANDLE
     }
 
-    // If `file_handle` was obtained by our opening it (when map is called with
-    // a path, rather than an existing file handle), we need to close it,
-    // otherwise it must not be closed as it may still be used outside this
-    // instance.
     if m.fd != INVALID_HANDLE && m.is_internal {
         win32.CloseHandle(m.fd)
         m.fd = INVALID_HANDLE
@@ -331,20 +359,6 @@ _close :: proc(m: ^Mapping) -> (err: Error) {
 
     return nil
 }
-
-//_close_file :: proc(handle: FD) -> bool {
-//    if handle != INVALID_HANDLE {
-//        return win32.CloseHandle(handle)
-//    }
-//    return true
-//}
-
-
-
-
-
-
-
 
 
 
@@ -355,7 +369,13 @@ init_long_path_support :: proc() {
     can_use_long_paths = false
 
     key: win32.HKEY
-    res := win32.RegOpenKeyExW(win32.HKEY_LOCAL_MACHINE, win32.L(`SYSTEM\CurrentControlSet\Control\FileSystem`), 0, win32.KEY_READ, &key)
+    res := win32.RegOpenKeyExW(
+        win32.HKEY_LOCAL_MACHINE,
+        win32.L(`SYSTEM\CurrentControlSet\Control\FileSystem`),
+        0,
+        win32.KEY_READ,
+        &key,
+    )
     defer win32.RegCloseKey(key)
     if res != 0 {
         return

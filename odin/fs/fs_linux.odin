@@ -1,18 +1,35 @@
 #+build linux
-package mmap
+package fs
 
 import "base:runtime"
 import "core:io"
 import c "core:c/libc"
 import os2 "core:os/os2"
+import "core:strings"
 import "core:sys/posix"
 import "core:sys/linux"
 
 FD :: linux.Fd
+INVALID_HANDLE :: linux.Fd(-1)
+
+foreign import libc "system:c"
+
+@(default_calling_convention="c")
+foreign libc {
+    getpagesize  :: proc() -> c.int ---
+}
 
 @(init)
 init_module :: proc() {
-    PAGE_SIZE = int(posix.sysconf(posix.PAGESIZE))
+    PAGE_SIZE = int(getpagesize())
+}
+
+is_valid_handle :: proc "contextless" (fd: FD) -> bool {
+    return fd > -1
+}
+
+is_invalid_handle :: proc "contextless" (fd: FD) -> bool {
+    return fd < 0
 }
 
 _Platform_Error :: linux.Errno
@@ -188,16 +205,61 @@ _error_string :: proc(errno: i32) -> string {
     return "Unknown Error"
 }
 
-_map_with_fd :: proc(file_handle: FD, offset: int, length: int, mode: Access_Mode) -> (m: Mapping, err: Error) {
+_open_file :: proc(
+    name: string,
+    flags: File_Flags,
+    perm: int,
+    temp_allocator: runtime.Allocator,
+) -> (
+    fd: FD,
+    err: Error
+) {
+    fd = INVALID_HANDLE
+    if name == "" {
+        err = General_Error.Invalid_Path
+        return
+    }
+
+    name_cstr := strings.clone_to_cstring(name, temp_allocator) or_return
+
+    // Just default to using O_NOCTTY because needing to open a controlling
+    // terminal would be incredibly rare. This has no effect on files while
+    // allowing us to open serial devices.
+    sys_flags: linux.Open_Flags = {.NOCTTY, .CLOEXEC}
+    when size_of(rawptr) == 4 {
+        sys_flags += {.LARGEFILE}
+    }
+    switch flags & (O_RDONLY|O_WRONLY|O_RDWR) {
+    case O_RDONLY:
+    case O_WRONLY: sys_flags += {.WRONLY}
+    case O_RDWR:   sys_flags += {.RDWR}
+    }
+    if .Append in flags        { sys_flags += {.APPEND} }
+    if .Create in flags        { sys_flags += {.CREAT} }
+    if .Excl in flags          { sys_flags += {.EXCL} }
+    if .Sync in flags          { sys_flags += {.DSYNC} }
+    if .Trunc in flags         { sys_flags += {.TRUNC} }
+    if .Inheritable in flags   { sys_flags -= {.CLOEXEC} }
+
+    errno: linux.Errno
+    fd, errno = linux.open(name_cstr, sys_flags, transmute(linux.Mode)u32(perm))
+    if errno != .NONE {
+        return INVALID_HANDLE, _get_platform_error(errno)
+    }
+
+    return fd, nil
+}
+
+_mmap :: proc(file_handle: FD, offset: int, length: int, mode: Access_Mode) -> (m: MMAP, err: Error) {
     aligned_offset := make_offset_page_aligned(offset)
     length_to_map := offset - aligned_offset + length
 
     max_file_size := i64(offset + length)
     mapping_start, errno := linux.mmap(
-        nil,
+        0,
         uint(length_to_map),
-        linux.Mem_Protection.READ if mode == .Read else linux.Mem_Protection.READ.WRITE,
-        linux.Map_Flags.SHARED,
+        {linux.Mem_Protection.READ} if mode == .Read else {linux.Mem_Protection.WRITE},
+        {linux.Map_Flags.SHARED},
         file_handle,
         i64(aligned_offset),
     )
@@ -221,63 +283,39 @@ _map_with_fd :: proc(file_handle: FD, offset: int, length: int, mode: Access_Mod
     return m, nil
 }
 
-_open_file :: proc(name: string, flags: File_Flags, perm: int) -> (fd: FD, err: Error) {
-    if name == "" {
-        err = General_Error.Invalid_Path
-        return
-    }
-
-    temp_allocator := runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-    name_cstr := clone_to_cstring(name, temp_allocator) or_return
-
-    // Just default to using O_NOCTTY because needing to open a controlling
-    // terminal would be incredibly rare. This has no effect on files while
-    // allowing us to open serial devices.
-    sys_flags: linux.Open_Flags = {.NOCTTY, .CLOEXEC}
-    when size_of(rawptr) == 4 {
-        sys_flags += {.LARGEFILE}
-    }
-    switch flags & (O_RDONLY|O_WRONLY|O_RDWR) {
-    case O_RDONLY:
-    case O_WRONLY: sys_flags += {.WRONLY}
-    case O_RDWR:   sys_flags += {.RDWR}
-    }
-    if .Append in flags        { sys_flags += {.APPEND} }
-    if .Create in flags        { sys_flags += {.CREAT} }
-    if .Excl in flags          { sys_flags += {.EXCL} }
-    if .Sync in flags          { sys_flags += {.DSYNC} }
-    if .Trunc in flags         { sys_flags += {.TRUNC} }
-    if .Inheritable in flags   { sys_flags -= {.CLOEXEC} }
-
-    fd, errno := linux.open(name_cstr, sys_flags, transmute(linux.Mode)u32(perm))
-    if errno != .NONE {
-        return nil, _get_platform_error(errno)
-    }
-
-    return FD(fd), nil
-}
-
-_sync :: proc(m: ^Mapping) -> (err: Error) {
+_msync :: proc(m: ^MMAP) -> (err: Error) {
     if m.data == nil {
         return os2.General_Error.Invalid_File
     }
-    errno := linux.msync(rawptr(m.data), c.size_t(m.mapped_size), .SYNC)
-    return _get_platform_error(errno)
+    return _get_platform_error(
+        linux.msync(
+            rawptr(m.data),
+            c.size_t(m.mapped_size),
+            {linux.MSync_Flags_Bits.SYNC},
+        )
+    )
 }
 
-_fsync :: proc(m: ^Mapping) -> Error {
-    return _get_platform_error(linux.fsync(m.fd))
+_fsync :: proc(fd: FD) -> Error {
+    return _get_platform_error(linux.fsync(fd))
 }
 
-_fdatasync :: proc(m: ^Mapping) -> Error {
-    return _get_platform_error(linux.fdatasync(m.fd))
+_fdatasync :: proc(fd: FD) -> Error {
+    return _get_platform_error(linux.fdatasync(fd))
 }
 
 _truncate :: proc(fd: FD, size: i64) -> Error {
     return _get_platform_error(linux.ftruncate(fd, size))
 }
 
-_close :: proc(m: ^Mapping) -> Error {
+_close_fd :: proc(fd: FD) -> Error {
+    if fd < 0 {
+        return nil
+    }
+    return _get_platform_error(linux.close(fd))
+}
+
+_close_mmap :: proc(m: ^MMAP) -> Error {
     if m == nil{
         return nil
     }
@@ -300,3 +338,4 @@ _close :: proc(m: ^Mapping) -> Error {
 
     return nil
 }
+

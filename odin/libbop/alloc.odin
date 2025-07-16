@@ -4,11 +4,11 @@ import mem "core:mem"
 
 import c "core:c/libc"
 
-Snmallocator :: #force_inline proc "contextless" () -> mem.Allocator {
-	return mem.Allocator{Snmallocator_Proc, nil}
+snmallocator :: #force_inline proc "contextless" () -> mem.Allocator {
+	return mem.Allocator{snmallocator_proc, nil}
 }
 
-Snmallocator_Proc :: proc(
+snmallocator_proc :: proc(
 	allocator_data: rawptr,
 	mode: mem.Allocator_Mode,
 	size, alignment: int,

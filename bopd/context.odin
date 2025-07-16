@@ -17,7 +17,7 @@ tls_context :: #force_inline proc "contextless" () -> runtime.Context {
         c = runtime.default_context()
         context = c
         context.logger = log.create_console_logger(.Debug)
-        context.allocator = bop.Snmallocator()
+        context.allocator = bop.snmallocator()
         c = context
         log.info("created thread_local context")
         local_context = c
