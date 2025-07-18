@@ -2,10 +2,11 @@ package wal
 
 import "base:intrinsics"
 import "base:runtime"
+
 import "../fs"
 
 Segment :: struct {
-    allocator: runtime.Allocator,
+    allocator:    runtime.Allocator,
     name:         string,
     mmap:         fs.MMAP,
     lsn:          u64le,
@@ -16,9 +17,14 @@ Segment :: struct {
 }
 
 segment_append :: proc(
-    gsn: u64le,
-    data: []byte
-) -> (lsn: u64le, offset: u32le, ok: bool) {
+    self: ^Segment,
+    gsn:  u64le,
+    data: []byte,
+) -> (
+    lsn: u64le,
+    offset: u32le,
+    ok: bool,
+) {
     return
 }
 
