@@ -8,7 +8,7 @@ import "core:thread"
 
 import bop "../../libbop"
 
-@thread_local
+@(thread_local)
 local_context: runtime.Context
 
 load_context :: #force_inline proc "contextless" () -> runtime.Context {
@@ -21,7 +21,7 @@ load_context :: #force_inline proc "contextless" () -> runtime.Context {
 		log.info("created thread_local context")
 		local_context = c
 	}
-    return c
+	return c
 }
 
 /*
@@ -60,7 +60,7 @@ Handler on the commit of a configuration change.
 fsm_commit_config :: proc "c" (
 	user_data: rawptr,
 	log_idx: u64,
-	new_conf: ^bop.Raft_Cluster_Config
+	new_conf: ^bop.Raft_Cluster_Config,
 ) {
 	context = load_context()
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -102,12 +102,7 @@ Same as `commit()`, memory buffer is owned by caller.
 @param log_idx Raft log number to commit.
 @param data Payload of the Raft log.
 */
-fsm_rollback :: proc "c" (
-	user_data: rawptr,
-	log_idx: u64,
-	data: [^]byte,
-	size: uintptr
-) {
+fsm_rollback :: proc "c" (user_data: rawptr, log_idx: u64, data: [^]byte, size: uintptr) {
 
 }
 
@@ -124,7 +119,7 @@ the current `cluster_config`'s log index.
 fsm_rollback_config :: proc "c" (
 	user_data: rawptr,
 	log_idx: u64,
-	new_conf: ^bop.Raft_Cluster_Config
+	new_conf: ^bop.Raft_Cluster_Config,
 ) {
 
 }
@@ -245,10 +240,7 @@ This is an optional API for users who want to use logical snapshot.
 
 @param user_snp_ctx User-defined instance to free.
 */
-fsm_free_user_snapshot_ctx :: proc "c" (
-	user_data: rawptr,
-	user_snapshot_ctx: ^rawptr
-) {
+fsm_free_user_snapshot_ctx :: proc "c" (user_data: rawptr, user_snapshot_ctx: ^rawptr) {
 
 }
 
@@ -344,11 +336,11 @@ fsm_adjust_commit_index :: proc "c" (
 
 import "core:testing"
 
-@test
+@(test)
 test_fsm :: proc(t: ^testing.T) {
-	user_data : rawptr = nil
-	current_conf : ^bop.Raft_Cluster_Config = nil
-	rollback_conf : ^bop.Raft_Cluster_Config = nil
+	user_data: rawptr = nil
+	current_conf: ^bop.Raft_Cluster_Config = nil
+	rollback_conf: ^bop.Raft_Cluster_Config = nil
 	fsm := bop.raft_fsm_make(
 		user_data = user_data,
 		current_conf = current_conf,
@@ -368,7 +360,7 @@ test_fsm :: proc(t: ^testing.T) {
 		create_snapshot = fsm_create_snapshot,
 		chk_create_snapshot = fsm_chk_create_snapshot,
 		allow_leadership_transfer = fsm_allow_leadership_transfer,
-		adjust_commit_index = fsm_adjust_commit_index
+		adjust_commit_index = fsm_adjust_commit_index,
 	)
 
 	fsm_get_next_batch_size_hint_in_bytes(nil)

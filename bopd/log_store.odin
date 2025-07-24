@@ -15,29 +15,29 @@ import bop "../odin/libbop"
 import "../odin/raft"
 
 Log_Entry_Ptr_Map :: struct {
-	allocator:  runtime.Allocator,
-	data: 		map[u64]raft.Log_Entry_Ptr,
+	allocator: runtime.Allocator,
+	data:      map[u64]raft.Log_Entry_Ptr,
 }
 
 Log_Segment_Index :: struct {}
 
 Log_Segment :: struct {
-	allocator:  runtime.Allocator,
-	fsm_id: 	u32,
-	id:     	u32,
-	cache:  	Log_Entry_Ptr_Map,
-	index:  	^Log_Segment_Index,
-	mu:	    	sync.Mutex,
+	allocator: runtime.Allocator,
+	fsm_id:    u32,
+	id:        u32,
+	cache:     Log_Entry_Ptr_Map,
+	index:     ^Log_Segment_Index,
+	mu:        sync.Mutex,
 }
 
 Log_Store :: struct {
-	allocator: runtime.Allocator,
-	log_store: ^raft.Log_Store_Ptr,
-	state_mgr: ^State_Mgr,
-	idx_start: u64,
-	idx_last: u64,
+	allocator:   runtime.Allocator,
+	log_store:   ^raft.Log_Store_Ptr,
+	state_mgr:   ^State_Mgr,
+	idx_start:   u64,
+	idx_last:    u64,
 	idx_durable: u64,
-	segment: ^Log_Segment,
+	segment:     ^Log_Segment,
 }
 
 /*
@@ -119,7 +119,11 @@ a single append_entries request.
 @param start The start log index number (inclusive)
 @param cnt The number of log entries written.
 */
-log_store_end_of_append_batch :: proc "c" (user_data: rawptr, start: u64, count: u64) {
+log_store_end_of_append_batch :: proc "c" (
+	user_data: rawptr,
+	start: u64,
+	count: u64,
+) {
 	ls := cast(^Log_Store)user_data
 }
 
@@ -148,7 +152,10 @@ Get the log entry at the specified log index number.
 @param index Should be equal to or greater than 1.
 @return The log entry or null if index >= this->next_slot().
 */
-log_store_entry_at :: proc "c" (user_data: rawptr, index: u64) -> ^bop.Raft_Log_Entry {
+log_store_entry_at :: proc "c" (
+	user_data: rawptr,
+	index: u64,
+) -> ^bop.Raft_Log_Entry {
 	ls := cast(^Log_Store)user_data
 	return nil
 }
@@ -173,7 +180,11 @@ Pack the given number of log items starting from the given index.
 @param cnt The number of logs to pack.
 @return Packed (encoded) logs.
 */
-log_store_pack :: proc "c" (user_data: rawptr, index: u64, count: i32) -> ^bop.Raft_Buffer {
+log_store_pack :: proc "c" (
+	user_data: rawptr,
+	index: u64,
+	count: i32,
+) -> ^bop.Raft_Buffer {
 	ls := cast(^Log_Store)user_data
 	return nil
 }
@@ -184,7 +195,11 @@ Apply the log pack to current log store, starting from index.
 @param index The start log index number (inclusive).
 @param Packed logs.
 */
-log_store_apply_pack :: proc "c" (user_data: rawptr, index: u64, pack: ^bop.Raft_Buffer) {
+log_store_apply_pack :: proc "c" (
+	user_data: rawptr,
+	index: u64,
+	pack: ^bop.Raft_Buffer,
+) {
 	ls := cast(^Log_Store)user_data
 
 }
@@ -199,7 +214,10 @@ set start log index to `last_log_index + 1`.
 @param last_log_index Log index number that will be purged up to (inclusive).
 @return `true` on success.
 */
-log_store_compact :: proc "c" (user_data: rawptr, last_log_index: u64) -> bool {
+log_store_compact :: proc "c" (
+	user_data: rawptr,
+	last_log_index: u64,
+) -> bool {
 	ls := cast(^Log_Store)user_data
 	return true
 }
@@ -222,7 +240,10 @@ actual job incurring disk IO can run in background. Once the job is done,
 @param when_done Callback function that will be called after
                  the log compaction is done.
 */
-log_store_compact_async :: proc "c" (user_data: rawptr, last_log_index: u64) -> bool {
+log_store_compact_async :: proc "c" (
+	user_data: rawptr,
+	last_log_index: u64,
+) -> bool {
 	ls := cast(^Log_Store)user_data
 	return true
 }
@@ -272,4 +293,3 @@ wire_log_store :: proc() {
 	ensure(log_store != nil, "log_store is nil")
 	bop.raft_log_store_delete(log_store)
 }
-

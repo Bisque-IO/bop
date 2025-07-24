@@ -52,15 +52,14 @@ Use "./bake help <command>" for more information about a command.
 ]]
 
 function main(...)
---     print(logo)
-    local vararg = {...}
+    --     print(logo)
+    local vararg = { ... }
     if vararg[1] == "ide" then
         print("generating compile_commands.json...")
         os.exec("xmake project -k compile_commands")
         os.cp("compile_commands.json", ".vscode/compile_commands.json")
         print("generating CMakeLists.txt...")
         os.exec("xmake project -k cmakelists")
-
     elseif vararg[1] == "configure" or vararg[1] == "c" or vararg[1] == "--debug" or vararg[1] == "--release" then
         os.rm("build")
         os.rm(".xmake")
@@ -71,7 +70,7 @@ function main(...)
         local verbose = false
         local install_packages = true
 
-        for i=2, #vararg do
+        for i = 2, #vararg do
             if vararg[i] == "release" then
                 release = true
             elseif vararg[i] == "--llvm" then
@@ -94,7 +93,7 @@ function main(...)
             local llvm_version = os.iorun(llvm_config .. " --version")
             print("llvm version: " .. llvm_version)
             local index_of_dot = string.find(llvm_version, "[.]")
-            local llvm_major = string.sub(llvm_version, 1, index_of_dot-1)
+            local llvm_major = string.sub(llvm_version, 1, index_of_dot - 1)
             print("llvm major version: " .. llvm_major)
 
             toolchain = " --toolchain=clang-" .. llvm_major
@@ -126,14 +125,12 @@ function main(...)
 
         print("generating CMakeLists.txt...")
         os.exec("xmake project -k cmakelists")
-
     elseif vararg[1] == "clean" then
         os.rm("build")
         os.rm(".xmake")
-
     elseif vararg[1] == "run" then
         local args = ""
-        for i=2, #vararg do
+        for i = 2, #vararg do
             if i > 2 then
                 args = args .. " "
             end
@@ -145,10 +142,8 @@ function main(...)
         print("\t" .. args)
         print()
         os.exec("xmake r " .. args)
-
     elseif vararg[1] == "build" then
         os.exec("xmake")
-
     elseif vararg[1] == "env" then
         print("OS:           " .. os.host())
         print("CPU arch:     " .. os.arch())
@@ -162,8 +157,8 @@ function main(...)
         print("Working Dir:  " .. os.workingdir())
         print("Project Dir:  " .. os.projectdir())
         print("Program Dir:  " .. os.programdir())
---         print("Program Dir:  " .. os.builddir())
---         print(os)
+        --         print("Program Dir:  " .. os.builddir())
+        --         print(os)
         local mem_info = os.meminfo()
         print("Page Size:    " .. mem_info.pagesize)
         print("Total Size:   " .. mem_info.totalsize .. "mb")
@@ -172,7 +167,6 @@ function main(...)
         print()
         print("toolchains:")
         os.exec("xmake show -l toolchains")
-
     elseif vararg[1] == "ls" then
         local debug_dir = "build/" .. os.host() .. "/" .. os.arch() .. "/debug"
         local release_dir = "build/" .. os.host() .. "/" .. os.arch() .. "/release"
@@ -215,7 +209,7 @@ function main(...)
             archive_suffix = ".lib"
             exe_suffix = ".exe"
         end
-        
+
         local ldd = function(binary_name)
             if ldd_app == "" then return end
             local debug_path = debug_dir .. "/" .. binary_name
@@ -269,6 +263,6 @@ function main(...)
     --print(os.iorunv("xmake", {"show"}))
     --print(os.iorunv("whereis", {"xmake"}))
     --print(os)
---     print(os.shell())
---     print(os.host())
+    --     print(os.shell())
+    --     print(os.host())
 end

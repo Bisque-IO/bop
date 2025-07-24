@@ -1,17 +1,16 @@
 package wal
 
-import "core:sync"
 import "../mdbx"
+import "core:sync"
 
 Master :: struct {
-    env: ^mdbx.Env,
+	env: ^mdbx.Env,
 }
 
 Sharded_Map :: struct($K: typeid, $V: typeid, $SHARDS: int) {
-    shards: [SHARDS]struct{
-        allocator: runtime.Allocator,
-        mu:        sync.Mutex,
-        m:         map[K]V
-    }
+	shards: [SHARDS]struct {
+		allocator: runtime.Allocator,
+		mu:        sync.Mutex,
+		m:         map[K]V,
+	},
 }
-

@@ -124,8 +124,16 @@ local target_of = function(kind, use_openssl)
     --add_files("mdbx/mdbx.c")
 
     -- sqlite
-    -- add_includedirs("../lib/sqlite", { public = true })
-    -- add_files("../lib/sqlite/sqlite3.c", { languages = "c99", includedirs = { "./", "../lib/sqlite" }, cflags = "-O3" })
+    add_includedirs("../lib/sqlite", { public = true })
+    if is_plat("linux") then
+        -- add_deps("sqlite")
+        add_files("../lib/sqlite/sqlite3_hctree.c",
+            { languages = "c99", includedirs = { "./", "../lib/sqlite" }, cflags = "-O3" })
+    else
+        add_deps("sqlite")
+        -- add_files("../lib/sqlite/sqlite3.c",
+        -- { languages = "c99", includedirs = { "./", "../lib/sqlite" }, cflags = "-O3" })
+    end
 
     -- usockets
     if is_plat("windows", "mingw") then
@@ -191,7 +199,7 @@ local target_of = function(kind, use_openssl)
 
     -- add_includedirs("../lib/uwebsockets/src")
 
-    if not is_plat("windows") then
+    if not is_plat("windows") and is_arch("x86_64") then
         add_cxflags("-mcx16")
     end
     add_defines(
@@ -217,7 +225,7 @@ local target_of = function(kind, use_openssl)
     -- --"boost"
     -- )
 
-    set_symbols("debug")
+    -- set_symbols("debug")
     --set_strip("all")
 
     --     add_ldflags("-fPIC")

@@ -118,6 +118,8 @@ EOF :: Token {
 Comment_Buf :: struct {}
 
 Numeral :: union {
+    i64,
+    u64,
     i128,
     u128,
     f64,

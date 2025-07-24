@@ -12,22 +12,21 @@ import "../mdbx"
 Segment management for a single WAL.
 */
 Segment_Store :: struct {
-    wal: ^WAL,
-    env: ^mdbx.Env,
-
-    archive_path: string,
+	wal:          ^WAL,
+	env:          ^mdbx.Env,
+	archive_path: string,
 }
 
 segment_store_create :: proc(wal: ^WAL) {
 
 }
 
-import "core:testing"
 import "core:fmt"
+import "core:testing"
 
-@test
+@(test)
 test_segment_store :: proc(t: ^testing.T) {
-    ss := Segment_Store{}
+	ss := Segment_Store{}
 
-    fmt.println(ss)
+	fmt.println(ss)
 }

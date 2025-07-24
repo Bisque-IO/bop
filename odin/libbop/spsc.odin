@@ -1,5 +1,5 @@
 package libbop
 
-SPSC :: struct{}
+SPSC :: struct {}
 
-SPSC_Blocking :: struct{}
+SPSC_Blocking :: struct {}

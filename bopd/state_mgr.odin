@@ -10,27 +10,26 @@ import "core:os/os2"
 import "core:path/filepath"
 import "core:strings"
 import "core:sync"
-import "core:time"
 import "core:thread"
+import "core:time"
 
 import "../odin/mdbx"
 import "../odin/raft"
 
-STATE_MGR_CLUSTER_CONFIG_KEY : u32 : 1
-STATE_MGR_SRV_STATE_KEY 	 : u32 : 2
+STATE_MGR_CLUSTER_CONFIG_KEY: u32 : 1
+STATE_MGR_SRV_STATE_KEY: u32 : 2
 
 State_Mgr :: struct {
-	mu:		   sync.Mutex,
-	allocator: runtime.Allocator,
-	path: 	   cstring,
-	state_mgr: ^raft.State_Mgr_Ptr,
-	log_store: ^Log_Store,
-	env:	   ^mdbx.Env,
-	dbi:	   mdbx.DBI,
-
+	mu:             sync.Mutex,
+	allocator:      runtime.Allocator,
+	path:           cstring,
+	state_mgr:      ^raft.State_Mgr_Ptr,
+	log_store:      ^Log_Store,
+	env:            ^mdbx.Env,
+	dbi:            mdbx.DBI,
 	cluster_config: ^raft.Buffer,
-	srv_state: 		^raft.Buffer,
-	srv_id: 		i32,
+	srv_state:      ^raft.Buffer,
+	srv_id:         i32,
 }
 
 /*
@@ -59,7 +58,10 @@ Save given cluster config.
 
 @param config Cluster config to save.
 */
-state_mgr_save_config :: proc "c" (user_data: rawptr, config: ^raft.Cluster_Config) {
+state_mgr_save_config :: proc "c" (
+	user_data: rawptr,
+	config: ^raft.Cluster_Config,
+) {
 	s := cast(^State_Mgr)user_data
 	context = tls_context()
 	sync.mutex_guard(&s.mu)
@@ -82,10 +84,10 @@ state_mgr_save_config :: proc "c" (user_data: rawptr, config: ^raft.Cluster_Conf
 	}
 
 	id := u32(STATE_MGR_CLUSTER_CONFIG_KEY)
-	key   := mdbx.val_u32(&id)
-	value := mdbx.Val{
+	key := mdbx.val_u32(&id)
+	value := mdbx.Val {
 		base = raft.buffer_data(new_config),
-		len = uint(raft.buffer_size(new_config)),
+		len  = uint(raft.buffer_size(new_config)),
 	}
 
 	err = mdbx.put(txn, s.dbi, &key, &value, .Upsert)
@@ -98,7 +100,10 @@ state_mgr_save_config :: proc "c" (user_data: rawptr, config: ^raft.Cluster_Conf
 	err = mdbx.txn_commit(txn)
 	if err != nil {
 		mdbx.txn_abort(txn)
-		log.errorf("mdbx put cluster_config failed txn_commit: %s", mdbx.liberr2str(err))
+		log.errorf(
+			"mdbx put cluster_config failed txn_commit: %s",
+			mdbx.liberr2str(err),
+		)
 		return
 	}
 }
@@ -151,10 +156,10 @@ state_mgr_save_state :: proc "c" (user_data: rawptr, state: ^raft.Srv_State) {
 	}
 
 	id := u32(STATE_MGR_SRV_STATE_KEY)
-	key   := mdbx.val_u32(&id)
-	value := mdbx.Val{
+	key := mdbx.val_u32(&id)
+	value := mdbx.Val {
 		base = raft.buffer_data(new_config),
-		len = uint(raft.buffer_size(new_config)),
+		len  = uint(raft.buffer_size(new_config)),
 	}
 
 	err = mdbx.put(txn, s.dbi, &key, &value, .Upsert)
@@ -167,7 +172,10 @@ state_mgr_save_state :: proc "c" (user_data: rawptr, state: ^raft.Srv_State) {
 	err = mdbx.txn_commit(txn)
 	if err != nil {
 		mdbx.txn_abort(txn)
-		log.errorf("mdbx put srv_state failed txn_commit: %s", mdbx.liberr2str(err))
+		log.errorf(
+			"mdbx put srv_state failed txn_commit: %s",
+			mdbx.liberr2str(err),
+		)
 		return
 	}
 }
@@ -177,7 +185,9 @@ Get instance of user-defined Raft log store.
 
 @param Raft log store instance.
 */
-state_mgr_load_log_store :: proc "c" (user_data: rawptr) -> ^raft.Log_Store_Ptr {
+state_mgr_load_log_store :: proc "c" (
+	user_data: rawptr,
+) -> ^raft.Log_Store_Ptr {
 	s := cast(^State_Mgr)user_data
 	context = tls_context()
 	sync.mutex_guard(&s.mu)
@@ -258,8 +268,8 @@ state_mgr_make :: proc(
 	s: ^State_Mgr,
 	err: State_Mgr_Make_Error,
 ) {
-	txn : ^mdbx.Txn = nil
-	dir : string = ""
+	txn: ^mdbx.Txn = nil
+	dir: string = ""
 	defer {
 		delete(dir, allocator)
 		if err != nil {
@@ -270,7 +280,7 @@ state_mgr_make :: proc(
 			state_mgr_destroy(s)
 		}
 	}
-	
+
 	s = new(State_Mgr, allocator) or_return
 	s.allocator = allocator
 
@@ -306,11 +316,11 @@ state_mgr_make :: proc(
 	// Setup geometry. Try to utilize only a single file-system page for entire db.
 	mdbx.env_set_geometry(
 		s.env,
-		runtime.Kilobyte*4,
-		runtime.Kilobyte*4,
-		runtime.Kilobyte*64,
-		runtime.Kilobyte*4,
-		runtime.Kilobyte*4,
+		runtime.Kilobyte * 4,
+		runtime.Kilobyte * 4,
+		runtime.Kilobyte * 64,
+		runtime.Kilobyte * 4,
+		runtime.Kilobyte * 4,
 		512,
 	) or_return
 
@@ -366,4 +376,3 @@ state_mgr_make :: proc(
 
 	return
 }
-

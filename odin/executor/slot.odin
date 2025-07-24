@@ -68,7 +68,8 @@ slot_execute :: #force_inline proc(self: ^Slot) {
 
 	atomic_store(&self.flags, Slot_Flags.Executing, .Release)
 	self.counter += 1
-	//	intrinsics.atomic_add_explicit(&core.counter, 1, .Relaxed)
+
+	// intrinsics.atomic_add_explicit(&core.counter, 1, .Relaxed)
 	if self.worker != nil {
 		result = transmute(Slot_Flags)self.worker(self.data)
 	}

@@ -28,71 +28,71 @@ import "core:time"
 //
 // The size of the buffer is constant and must be a power of 2 greater than 0.
 MPSC :: struct($T: typeid, $SIZE: u64) where SIZE > 0 && (SIZE & (SIZE - 1)) == 0 {
-    allocator:   mem.Allocator,
-    // Buffer position of the slot to which the next value will be written.
-    //
-    // The position stores the buffer index in the least significant bits and a
-    // sequence counter in the most significant bits.
-    enqueue_pos: u64,
-    _:           [CACHE_LINE_SIZE - size_of(u64) - size_of(mem.Allocator)]u8,
+	allocator:   mem.Allocator,
+	// Buffer position of the slot to which the next value will be written.
+	//
+	// The position stores the buffer index in the least significant bits and a
+	// sequence counter in the most significant bits.
+	enqueue_pos: u64,
+	_:           [CACHE_LINE_SIZE - size_of(u64) - size_of(mem.Allocator)]u8,
 
-    // Buffer position of the slot from which the next value will be read.
-    //
-    // This is only ever mutated from a single thread but it must be stored in
-    // an atomic or an `UnsafeCell` since it is shared between the consumers
-    // and the producer. The reason it is shared is that the drop handler of
-    // the last `Inner` owner (which may be a producer) needs access to the
-    // dequeue position.
-    dequeue_pos: u64,
-    _:           [CACHE_LINE_SIZE - size_of(u64)]u8,
-    waiter:      sync.Futex,
-    _:           [CACHE_LINE_SIZE - size_of(sync.Futex)]u8,
+	// Buffer position of the slot from which the next value will be read.
+	//
+	// This is only ever mutated from a single thread but it must be stored in
+	// an atomic or an `UnsafeCell` since it is shared between the consumers
+	// and the producer. The reason it is shared is that the drop handler of
+	// the last `Inner` owner (which may be a producer) needs access to the
+	// dequeue position.
+	dequeue_pos: u64,
+	_:           [CACHE_LINE_SIZE - size_of(u64)]u8,
+	waiter:      sync.Futex,
+	_:           [CACHE_LINE_SIZE - size_of(sync.Futex)]u8,
 
-    // Buffer holding the values and their stamps.
-    buffer:      [SIZE]Slot(T),
+	// Buffer holding the values and their stamps.
+	buffer:      [SIZE]Slot(T),
 }
 
 mpsc_make :: proc($T: typeid, $SIZE: u64, allocator := context.allocator) -> ^MPSC(T, SIZE) {
-    #assert(SIZE > 0 && (SIZE & (SIZE - 1)) == 0, "must be power of 2")
-    #assert(SIZE < 1024 * 1024 * 128, "max queue size exceeded")
+	#assert(SIZE > 0 && (SIZE & (SIZE - 1)) == 0, "must be power of 2")
+	#assert(SIZE < 1024 * 1024 * 128, "max queue size exceeded")
 
-    q := new(MPSC(T, SIZE), allocator)
-    q.allocator = allocator
+	q := new(MPSC(T, SIZE), allocator)
+	q.allocator = allocator
 
-    for i := 0; i < len(q.buffer); i += 1 {
-        atomic_store(&q.buffer[i].stamp, u64(i), .Seq_Cst)
-    }
+	for i := 0; i < len(q.buffer); i += 1 {
+		atomic_store(&q.buffer[i].stamp, u64(i), .Seq_Cst)
+	}
 
-    //	q.closed_channel_mask = u64(math.next_power_of_two(SIZE))
-    //	q.right_mask, _ = overflow_sub(q.closed_channel_mask << 1, 1)
+	//	q.closed_channel_mask = u64(math.next_power_of_two(SIZE))
+	//	q.right_mask, _ = overflow_sub(q.closed_channel_mask << 1, 1)
 
-    return q
+	return q
 }
 
 mpsc_destroy :: proc(q: ^MPSC($T, $SIZE)) {
-    assert(q != nil)
-    if !mpsc_is_closed(q) do mpsc_close(q)
-    free(q, q.allocator)
+	assert(q != nil)
+	if !mpsc_is_closed(q) do mpsc_close(q)
+	free(q, q.allocator)
 }
 
 mpsc_destroy_with_deleter :: proc(
-    q: ^MPSC($T, $SIZE),
-    user_data: rawptr,
-    deleter: proc(user_data: rawptr, data: T, allocator: mem.Allocator),
+	q: ^MPSC($T, $SIZE),
+	user_data: rawptr,
+	deleter: proc(user_data: rawptr, data: T, allocator: mem.Allocator),
 ) {
-    assert(q != nil)
+	assert(q != nil)
 
-    if !mpsc_is_closed(q) do mpsc_close(q)
+	if !mpsc_is_closed(q) do mpsc_close(q)
 
-    if deleter != nil {
-        for {
-            value, err := mpsc_pop(q)
-            if err != .Success do break
-            deleter(user_data, value, q.allocator)
-        }
-    }
+	if deleter != nil {
+		for {
+			value, err := mpsc_pop(q)
+			if err != .Success do break
+			deleter(user_data, value, q.allocator)
+		}
+	}
 
-    free(q, q.allocator)
+	free(q, q.allocator)
 }
 
 // next_queue_pos increments the queue position, incrementing the sequence
@@ -101,97 +101,94 @@ mpsc_destroy_with_deleter :: proc(
 // Precondition when used with enqueue positions: the closed-channel flag
 // should be cleared.
 @(private)
-mpsc_next_queue_pos :: #force_inline proc "contextless" (q: ^MPSC($T, $SIZE), queue_pos: u64) -> u64 {
-    // Bit mask covering both the buffer index and the 1-bit flag.
-    CLOSED_CHANNEL_MASK :: SIZE
+mpsc_next_queue_pos :: #force_inline proc "contextless" (
+	q: ^MPSC($T, $SIZE),
+	queue_pos: u64,
+) -> u64 {
+	// Bit mask covering both the buffer index and the 1-bit flag.
+	CLOSED_CHANNEL_MASK :: SIZE
 
-    // Bit mask for the 1-bit flag, used as closed-channel flag in the enqueue
-    // position.
-    RIGHT_MASK :: (SIZE << 1) - 1
-    BUFFER_LEN :: SIZE
+	// Bit mask for the 1-bit flag, used as closed-channel flag in the enqueue
+	// position.
+	RIGHT_MASK :: (SIZE << 1) - 1
+	BUFFER_LEN :: SIZE
 
-    // The queue position cannot wrap around: in the worst case it will
-    // overflow the flag bit.
-    new_queue_pos := queue_pos + 1
-    new_index := new_queue_pos & RIGHT_MASK
-    if new_index < BUFFER_LEN {
-        return new_queue_pos
-    }
+	// The queue position cannot wrap around: in the worst case it will
+	// overflow the flag bit.
+	new_queue_pos := queue_pos + 1
+	new_index := new_queue_pos & RIGHT_MASK
+	if new_index < BUFFER_LEN {
+		return new_queue_pos
+	}
 
-    // The buffer index must wrap to 0 and the sequence count must be incremented.
-    SEQUENCE_INCR :: RIGHT_MASK + 1
-    sequence_count := queue_pos &~ RIGHT_MASK
-    sequence_count, _ = overflow_add(sequence_count, SEQUENCE_INCR)
-    return sequence_count
+	// The buffer index must wrap to 0 and the sequence count must be incremented.
+	SEQUENCE_INCR :: RIGHT_MASK + 1
+	sequence_count := queue_pos &~ RIGHT_MASK
+	sequence_count, _ = overflow_add(sequence_count, SEQUENCE_INCR)
+	return sequence_count
 }
 
 // push attempts to push an item into the queue if space is available.
 mpsc_push :: proc(q: ^MPSC($T, $SIZE), value: T) -> Push_Error #no_bounds_check {
-    assert(q != nil)
+	assert(q != nil)
 
-    // Bit mask covering both the buffer index and the 1-bit flag.
-    CLOSED_CHANNEL_MASK :: SIZE
-    // Bit mask for the 1-bit flag, used as closed-channel flag in the enqueue position.
-    RIGHT_MASK :: (SIZE << 1) - 1
+	// Bit mask covering both the buffer index and the 1-bit flag.
+	CLOSED_CHANNEL_MASK :: SIZE
+	// Bit mask for the 1-bit flag, used as closed-channel flag in the enqueue position.
+	RIGHT_MASK :: (SIZE << 1) - 1
 
-    enqueue_pos := atomic_load(&q.enqueue_pos, .Relaxed)
+	enqueue_pos := atomic_load(&q.enqueue_pos, .Relaxed)
 
-    for {
-        if enqueue_pos & CLOSED_CHANNEL_MASK != 0 {
-            return .Closed
-        }
+	for {
+		if enqueue_pos & CLOSED_CHANNEL_MASK != 0 {
+			return .Closed
+		}
 
-        slot := &q.buffer[enqueue_pos & RIGHT_MASK]
-        stamp := atomic_load(&slot.stamp, .Acquire)
+		slot := &q.buffer[enqueue_pos & RIGHT_MASK]
+		stamp := atomic_load(&slot.stamp, .Acquire)
 
-        stamp_delta, _ := overflow_sub(stamp, enqueue_pos)
+		stamp_delta, _ := overflow_sub(stamp, enqueue_pos)
 
-        if stamp_delta == 0 {
-            // The enqueue position matches the stamp: a push can be attempted.
-            if pos, ok := cas_weak(
-                &q.enqueue_pos,
-                enqueue_pos,
-                mpsc_next_queue_pos(q, enqueue_pos),
-                .Relaxed,
-                .Relaxed,
-            ); ok {
-                slot.value = value
-                stamp, _ = overflow_add(stamp, 1)
-                atomic_store(&slot.stamp, stamp, .Release)
+		if stamp_delta == 0 {
+			// The enqueue position matches the stamp: a push can be attempted.
+			if pos, ok := cas_weak(
+				&q.enqueue_pos,
+				enqueue_pos,
+				mpsc_next_queue_pos(q, enqueue_pos),
+				.Relaxed,
+				.Relaxed,
+			); ok {
+				slot.value = value
+				stamp, _ = overflow_add(stamp, 1)
+				atomic_store(&slot.stamp, stamp, .Release)
 
-                if atomic_load(&q.waiter, .Relaxed) == 0 {
-                    if _, ok := cas_weak(
-                        &q.waiter,
-                        0,
-                        1,
-                        .Relaxed,
-                        .Relaxed,
-                    ); ok {
-                        sync.futex_signal(&q.waiter)
-                    }
-                }
+				if atomic_load(&q.waiter, .Relaxed) == 0 {
+					if _, ok := cas_weak(&q.waiter, 0, 1, .Relaxed, .Relaxed); ok {
+						sync.futex_signal(&q.waiter)
+					}
+				}
 
-                return .Success
-            } else {
-                enqueue_pos = pos
-//                cpu_relax()
-                // cpu_relax()
-            }
-        } else if stamp_delta > 0 {
-//            cpu_relax()
-            // cpu_relax()
-            // The stamp is greater than the enqueue position: this means we
-            // raced with a concurrent producer which has already (i)
-            // incremented the enqueue position and (ii) written a value to
-            // this slot. A retry is required.
-            enqueue_pos = atomic_load(&q.enqueue_pos, .Relaxed)
-        } else {
-            // The sequence count of the stamp is smaller than that of the
-            // enqueue position: the value it contains has not been popped
-            // yet, so report a full queue.
-            return .Full
-        }
-    }
+				return .Success
+			} else {
+				enqueue_pos = pos
+				//                cpu_relax()
+				// cpu_relax()
+			}
+		} else if stamp_delta > 0 {
+			//            cpu_relax()
+			// cpu_relax()
+			// The stamp is greater than the enqueue position: this means we
+			// raced with a concurrent producer which has already (i)
+			// incremented the enqueue position and (ii) written a value to
+			// this slot. A retry is required.
+			enqueue_pos = atomic_load(&q.enqueue_pos, .Relaxed)
+		} else {
+			// The sequence count of the stamp is smaller than that of the
+			// enqueue position: the value it contains has not been popped
+			// yet, so report a full queue.
+			return .Full
+		}
+	}
 }
 
 //push_sp :: proc(q: ^Queue($T, $SIZE), value: T) -> Push_Error #no_bounds_check {
@@ -245,94 +242,47 @@ mpsc_push :: proc(q: ^MPSC($T, $SIZE), value: T) -> Push_Error #no_bounds_check 
 //    return .Full
 //}
 
-push_sp :: proc(q: ^MPSC($T, $SIZE), value: T) -> Push_Error #no_bounds_check {
-    assert(q != nil)
-
-    CLOSED_CHANNEL_MASK :: SIZE
-    RIGHT_MASK :: (SIZE << 1) - 1
-
-    enqueue_pos := q.enqueue_pos
-
-    for {
-        if enqueue_pos & CLOSED_CHANNEL_MASK != 0 {
-            return .Closed
-        }
-
-        slot := &q.buffer[enqueue_pos & RIGHT_MASK]
-        stamp := atomic_load(&slot.stamp, .Acquire)
-        stamp_delta, _ := overflow_sub(stamp, enqueue_pos)
-
-        if stamp_delta == 0 {
-            // Slot is ready, do the push
-            q.enqueue_pos = mpsc_next_queue_pos(q, enqueue_pos)
-
-            slot.value = value
-            stamp, _ = overflow_add(stamp, 1)
-            atomic_store(&slot.stamp, stamp, .Release)
-
-            if atomic_load(&q.waiter, .Relaxed) == 0 {
-                if _, ok := cas_weak(
-                    &q.waiter,
-                    0,
-                    1,
-                    .Acquire,
-                    .Relaxed,
-                ); ok {
-                    sync.futex_signal(&q.waiter)
-                }
-            }
-
-            return .Success
-
-        } else if stamp_delta > 0 {
-            // slot is still completing from a prior op, spin
-            cpu_relax()
-        } else {
-            // slot is full (not yet dequeued), can’t proceed now
-            return .Full
-        }
-
-        // Try again on next iteration
-        enqueue_pos = q.enqueue_pos
-    }
-}
-
 // Attempts to pop an item from the queue.
 //
 // # Safety
 //
 // This method may not be called concurrently from multiple threads.
-mpsc_pop :: #force_inline proc(q: ^MPSC($T, $SIZE)) -> (value: T, err: Pop_Error) #no_bounds_check {
-    assert(q != nil)
+mpsc_pop :: #force_inline proc(
+	q: ^MPSC($T, $SIZE),
+) -> (
+	value: T,
+	err: Pop_Error,
+) #no_bounds_check {
+	assert(q != nil)
 
-    // Bit mask covering both the buffer index and the 1-bit flag.
-    CLOSED_CHANNEL_MASK :: SIZE
-    // Bit mask for the 1-bit flag, used as closed-channel flag in the enqueue position.
-    RIGHT_MASK :: (SIZE << 1) - 1
+	// Bit mask covering both the buffer index and the 1-bit flag.
+	CLOSED_CHANNEL_MASK :: SIZE
+	// Bit mask for the 1-bit flag, used as closed-channel flag in the enqueue position.
+	RIGHT_MASK :: (SIZE << 1) - 1
 
-    dequeue_pos := q.dequeue_pos
-    slot := &q.buffer[dequeue_pos & RIGHT_MASK]
-    stamp := atomic_load(&slot.stamp, .Acquire)
+	dequeue_pos := q.dequeue_pos
+	slot := &q.buffer[dequeue_pos & RIGHT_MASK]
+	stamp := atomic_load(&slot.stamp, .Acquire)
 
-    if dequeue_pos != stamp {
-        q.dequeue_pos = mpsc_next_queue_pos(q, dequeue_pos)
+	if dequeue_pos != stamp {
+		q.dequeue_pos = mpsc_next_queue_pos(q, dequeue_pos)
 
-        // Read the value from the slot and set the stamp to the value of
-        // the dequeue position increased by one sequence increment.
-        value = slot.value
+		// Read the value from the slot and set the stamp to the value of
+		// the dequeue position increased by one sequence increment.
+		value = slot.value
 
-        incr, _ := overflow_add(stamp, RIGHT_MASK)
-        atomic_store(&slot.stamp, incr, .Release)
+		incr, _ := overflow_add(stamp, RIGHT_MASK)
+		atomic_store(&slot.stamp, incr, .Release)
 
-        return value, .Success
-    }
+		return value, .Success
+	}
 
-    if atomic_load(&q.enqueue_pos, .Relaxed) == (dequeue_pos | CLOSED_CHANNEL_MASK) {
-        err = .Closed
-    } else {
-        err = .Empty
-    }
-    return
+	if atomic_load(&q.enqueue_pos, .Relaxed) == (dequeue_pos | CLOSED_CHANNEL_MASK) {
+		err = .Closed
+	} else {
+		err = .Empty
+	}
+	return
 }
 
 // Attempts to pop an item from the queue.
@@ -341,94 +291,94 @@ mpsc_pop :: #force_inline proc(q: ^MPSC($T, $SIZE)) -> (value: T, err: Pop_Error
 //
 // This method may not be called concurrently from multiple threads.
 mpsc_drain :: #force_inline proc(
-    q: ^MPSC($T, $SIZE),
-    target: []T,
+	q: ^MPSC($T, $SIZE),
+	target: []T,
 ) -> (
-    count: int,
-    err: Pop_Error,
+	count: int,
+	err: Pop_Error,
 ) #no_bounds_check {
-    assert(q != nil)
+	assert(q != nil)
 
-    // Bit mask covering both the buffer index and the 1-bit flag.
-    CLOSED_CHANNEL_MASK :: SIZE
-    // Bit mask for the 1-bit flag, used as closed-channel flag in the enqueue position.
-    RIGHT_MASK :: (SIZE << 1) - 1
+	// Bit mask covering both the buffer index and the 1-bit flag.
+	CLOSED_CHANNEL_MASK :: SIZE
+	// Bit mask for the 1-bit flag, used as closed-channel flag in the enqueue position.
+	RIGHT_MASK :: (SIZE << 1) - 1
 
-    for count < len(target) {
-        dequeue_pos := q.dequeue_pos
-        slot := &q.buffer[dequeue_pos & RIGHT_MASK]
-        stamp := atomic_load(&slot.stamp, .Acquire)
+	for count < len(target) {
+		dequeue_pos := q.dequeue_pos
+		slot := &q.buffer[dequeue_pos & RIGHT_MASK]
+		stamp := atomic_load(&slot.stamp, .Acquire)
 
-        if dequeue_pos != stamp {
-            q.dequeue_pos = mpsc_next_queue_pos(q, dequeue_pos)
+		if dequeue_pos != stamp {
+			q.dequeue_pos = mpsc_next_queue_pos(q, dequeue_pos)
 
-            // Read the value from the slot and set the stamp to the value of
-            // the dequeue position increased by one sequence increment.
-            target[count] = slot.value
+			// Read the value from the slot and set the stamp to the value of
+			// the dequeue position increased by one sequence increment.
+			target[count] = slot.value
 
-            incr, _ := overflow_add(stamp, RIGHT_MASK)
-            atomic_store(&slot.stamp, incr, .Release)
-            count += 1
-            continue
-        }
+			incr, _ := overflow_add(stamp, RIGHT_MASK)
+			atomic_store(&slot.stamp, incr, .Release)
+			count += 1
+			continue
+		}
 
-        if atomic_load(&q.enqueue_pos, .Relaxed) == (dequeue_pos | CLOSED_CHANNEL_MASK) {
-            err = .Closed
-        } else {
-            err = .Empty
-        }
-        return
-    }
+		if atomic_load(&q.enqueue_pos, .Relaxed) == (dequeue_pos | CLOSED_CHANNEL_MASK) {
+			err = .Closed
+		} else {
+			err = .Empty
+		}
+		return
+	}
 
-    if atomic_load(&q.enqueue_pos, .Relaxed) == (dequeue_pos | CLOSED_CHANNEL_MASK) {
-        err = .Closed
-    } else {
-        err = .Empty
-    }
-    return
+	if atomic_load(&q.enqueue_pos, .Relaxed) == (dequeue_pos | CLOSED_CHANNEL_MASK) {
+		err = .Closed
+	} else {
+		err = .Empty
+	}
+	return
 }
 
 // pop_wait waits for a new item (blocking)
 mpsc_pop_wait :: proc(q: ^MPSC($T, $SIZE)) -> (value: T, err: Pop_Error) {
-    assert(q != nil)
+	assert(q != nil)
 
-    value, err = mpsc_pop(q)
-    if err >= .Closed {
-        return
-    }
+	value, err = mpsc_pop(q)
+	if err >= .Closed {
+		return
+	}
 
-    for i in 0 ..< SPINS {
-        #unroll for _ in 0 ..< CPU_RELAX_SPINS do cpu_relax()
+	for i in 0 ..< SPINS {
+		#unroll for _ in 0 ..< CPU_RELAX_SPINS do cpu_relax()
 
-        value, err = mpsc_pop(q)
-        if err >= .Closed {
-            return
-        }
-    }
+		value, err = mpsc_pop(q)
+		if err >= .Closed {
+			return
+		}
+	}
 
-    for {
-        count := atomic_load(&q.waiter, .Relaxed)
-        for {
-            sync.futex_wait(&q.waiter, u32(count))
-            count = atomic_load(&q.waiter, .Relaxed)
-            if count != 0 {
-                break
-            }
-            cpu_relax()
-        }
+	for {
+		count := atomic_load(&q.waiter, .Relaxed)
+		for {
+			sync.futex_wait(&q.waiter, u32(count))
+			count = atomic_load(&q.waiter, .Relaxed)
+			if count != 0 {
+				break
+			}
+			cpu_relax()
+		}
 
-        // reset waiter
-        _ = atomic_swap(&q.waiter, 0, .Release)
-//        intrinsics.atomic_compare_exchange_strong_explicit(&q.waiter, count, 0, .Acquire, .Consume)
+		// reset waiter
+		_ = atomic_swap(&q.waiter, 0, .Release)
+		//        intrinsics.atomic_compare_exchange_strong_explicit(&q.waiter, count, 0, .Acquire, .Consume)
 
-        #unroll for _ in 0 ..< CPU_RELAX_SPINS {
-            value, err = mpsc_pop(q)
-            if err >= .Closed {
-                return
-            }
-            #unroll for _ in 0 ..< CPU_RELAX_SPINS do cpu_relax()
-        }
-    }
+		#unroll for _ in 0 ..< CPU_RELAX_SPINS {
+			value, err = mpsc_pop(q)
+			if err >= .Closed {
+				return
+			}
+			#unroll for _ in 0 ..< CPU_RELAX_SPINS do cpu_relax()
+		}
+	}
 }
 
 // pop_wait_timeout waits for a new item up to a specified timeout duration (blocking)
@@ -510,81 +460,81 @@ mpsc_pop_wait :: proc(q: ^MPSC($T, $SIZE)) -> (value: T, err: Pop_Error) {
 //}
 
 mpsc_pop_wait_timeout :: proc(
-    q: ^MPSC($T, $SIZE),
-    duration: time.Duration,
+	q: ^MPSC($T, $SIZE),
+	duration: time.Duration,
 ) -> (
-    value: T,
-    err: Pop_Error,
+	value: T,
+	err: Pop_Error,
 ) {
-    assert(q != nil)
-    assert(duration > -1)
+	assert(q != nil)
+	assert(duration > -1)
 
-    if duration == 0 {
-        return mpsc_pop_wait(q)
-    }
+	if duration == 0 {
+		return mpsc_pop_wait(q)
+	}
 
-    value, err = mpsc_pop(q)
-    if err >= .Closed {
-        return
-    }
-    if duration <= 0 {
-        err = .Timeout
-        return
-    }
+	value, err = mpsc_pop(q)
+	if err >= .Closed {
+		return
+	}
+	if duration <= 0 {
+		err = .Timeout
+		return
+	}
 
-    for i in 0 ..< SPINS {
-        #unroll for _ in 0 ..< CPU_RELAX_SPINS do cpu_relax()
-        value, err = mpsc_pop(q)
-        if err >= .Closed {
-            return
-        }
-    }
+	for i in 0 ..< SPINS {
+		#unroll for _ in 0 ..< CPU_RELAX_SPINS do cpu_relax()
+		value, err = mpsc_pop(q)
+		if err >= .Closed {
+			return
+		}
+	}
 
-    start := time.tick_now()
-    for {
-        count := atomic_load(&q.waiter, .Relaxed)
-        for count == 0 {
-            remaining := duration - time.tick_since(start)
-            if remaining <= 0 {
-                err = .Timeout
-                return
-            }
-            if !sync.futex_wait_with_timeout(&q.waiter, u32(count), remaining) {
-                value, err = mpsc_pop(q)
-                if err >= .Closed {
-                    return
-                }
-                err = .Timeout
-                return
-            }
-            break
-        }
+	start := time.tick_now()
+	for {
+		count := atomic_load(&q.waiter, .Relaxed)
+		for count == 0 {
+			remaining := duration - time.tick_since(start)
+			if remaining <= 0 {
+				err = .Timeout
+				return
+			}
+			if !sync.futex_wait_with_timeout(&q.waiter, u32(count), remaining) {
+				value, err = mpsc_pop(q)
+				if err >= .Closed {
+					return
+				}
+				err = .Timeout
+				return
+			}
+			break
+		}
 
-        _ = atomic_swap(&q.waiter, 0, .Release)
+		_ = atomic_swap(&q.waiter, 0, .Release)
 
-        #unroll for _ in 0 ..< CPU_RELAX_SPINS {
-            value, err = mpsc_pop(q)
-            if err >= .Closed {
-                return
-            }
-            #unroll for _ in 0 ..< CPU_RELAX_SPINS do cpu_relax()
-        }
-    }
+		#unroll for _ in 0 ..< CPU_RELAX_SPINS {
+			value, err = mpsc_pop(q)
+			if err >= .Closed {
+				return
+			}
+			#unroll for _ in 0 ..< CPU_RELAX_SPINS do cpu_relax()
+		}
+	}
 }
 
 // Closes the queue
 mpsc_close :: #force_inline proc(q: ^MPSC($T, $SIZE)) {
-    assert(q != nil)
+	assert(q != nil)
 
-    // Bit mask covering both the buffer index and the 1-bit flag.
-    CLOSED_CHANNEL_MASK :: SIZE
+	// Bit mask covering both the buffer index and the 1-bit flag.
+	CLOSED_CHANNEL_MASK :: SIZE
 
-    // Set the closed-channel flag.
-    //
-    // Ordering: Relaxed ordering is enough here since neither the producers
-    // nor the consumer rely on this flag for synchronizing reads and
-    // writes.
-    atomic_or(&q.enqueue_pos, CLOSED_CHANNEL_MASK, .Relaxed)
+	// Set the closed-channel flag.
+	//
+	// Ordering: Relaxed ordering is enough here since neither the producers
+	// nor the consumer rely on this flag for synchronizing reads and
+	// writes.
+	atomic_or(&q.enqueue_pos, CLOSED_CHANNEL_MASK, .Relaxed)
 }
 
 // Checks if the channel has been closed.
@@ -592,18 +542,18 @@ mpsc_close :: #force_inline proc(q: ^MPSC($T, $SIZE)) {
 // Note that even if the channel is closed, some messages may still be
 // present in the queue so further calls to `pop` may still succeed.
 mpsc_is_closed :: #force_inline proc(q: ^MPSC($T, $SIZE)) -> bool {
-    assert(q != nil)
+	assert(q != nil)
 
-    // Bit mask covering both the buffer index and the 1-bit flag.
-    CLOSED_CHANNEL_MASK :: SIZE
+	// Bit mask covering both the buffer index and the 1-bit flag.
+	CLOSED_CHANNEL_MASK :: SIZE
 
-    // Read the closed-channel flag.
-    //
-    // Ordering: Relaxed ordering is enough here since this is merely an
-    // informational function and cannot lead to any unsafety. If the load
-    // is stale, the worse that can happen is that the queue is seen as open
-    // when it is in fact already closed, which is OK since the caller must
-    // anyway be resilient to the case where the channel closes right after
-    // `is_closed` returns `false`.
-    return atomic_load(&q.enqueue_pos, .Relaxed) & CLOSED_CHANNEL_MASK != 0
+	// Read the closed-channel flag.
+	//
+	// Ordering: Relaxed ordering is enough here since this is merely an
+	// informational function and cannot lead to any unsafety. If the load
+	// is stale, the worse that can happen is that the queue is seen as open
+	// when it is in fact already closed, which is OK since the caller must
+	// anyway be resilient to the case where the channel closes right after
+	// `is_closed` returns `false`.
+	return atomic_load(&q.enqueue_pos, .Relaxed) & CLOSED_CHANNEL_MASK != 0
 }

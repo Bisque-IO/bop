@@ -7,19 +7,24 @@ import c "core:c/libc"
 
 Buffer :: bop.Raft_Buffer
 
-buffer_new_from_io_vec :: proc "c" (io_vec: bop.IO_Vec) -> (b: ^Buffer, err: runtime.Allocator_Error) {
-    if io_vec.base == nil || io_vec.len == 0 {
-        return nil, .Invalid_Argument
-    }
-    b = buffer_new(c.size_t(io_vec.len))
-    if b == nil {
-        return nil, .Out_Of_Memory
-    }
-    data := buffer_data(b)
-    ensure_contextless(data != nil)
-    ensure_contextless(buffer_size(b) == c.size_t(io_vec.len))
-    copy(data[0:io_vec.len], io_vec.base[0:io_vec.len])
-    return b, nil
+buffer_new_from_io_vec :: proc "c" (
+	io_vec: bop.IO_Vec,
+) -> (
+	b: ^Buffer,
+	err: runtime.Allocator_Error,
+) {
+	if io_vec.base == nil || io_vec.len == 0 {
+		return nil, .Invalid_Argument
+	}
+	b = buffer_new(c.size_t(io_vec.len))
+	if b == nil {
+		return nil, .Out_Of_Memory
+	}
+	data := buffer_data(b)
+	ensure_contextless(data != nil)
+	ensure_contextless(buffer_size(b) == c.size_t(io_vec.len))
+	copy(data[0:io_vec.len], io_vec.base[0:io_vec.len])
+	return b, nil
 }
 
 Buffer_Ptr :: bop.Raft_Buffer_Ptr
@@ -188,7 +193,6 @@ CB_Ctx :: bop.Raft_CB_Ctx
 CB_Type :: bop.Raft_CB_Type
 
 Inc_Term_Handler :: bop.Raft_Inc_Term_Handler
-
 
 
 buffer_new :: bop.raft_buffer_new
@@ -477,4 +481,3 @@ server_get_last_snapshot_idx :: bop.raft_server_get_last_snapshot_idx
 mdbx_state_mgr_open :: bop.raft_mdbx_state_mgr_open
 
 mdbx_log_store_open :: bop.raft_mdbx_log_store_open
-

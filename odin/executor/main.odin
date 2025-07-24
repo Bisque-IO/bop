@@ -159,7 +159,7 @@ main2 :: proc() {
 		},
 	)
 
-//	main2()
+	//	main2()
 }
 
 main1 :: proc() #no_bounds_check {
@@ -317,7 +317,7 @@ main1 :: proc() #no_bounds_check {
 	//		},
 	//	)
 
-//	main2()
+	//	main2()
 }
 
 
@@ -431,19 +431,19 @@ main :: proc() {
 
 	stop: bool
 	th := thread.create_and_start_with_poly_data2(
-		slot,
-		&stop,
-		proc(core: ^Slot, stop: ^bool) {
-			for !stop^ {
-				if signal_acquire(core.signal, core.index) {
-					slot_execute(core)
-				} else {
-									intrinsics.cpu_relax()
-				}
-
-				//			vcore_execute(core)
+	slot,
+	&stop,
+	proc(core: ^Slot, stop: ^bool) {
+		for !stop^ {
+			if signal_acquire(core.signal, core.index) {
+				slot_execute(core)
+			} else {
+				intrinsics.cpu_relax()
 			}
-		},
+
+			//			vcore_execute(core)
+		}
+	},
 	)
 
 	sw: time.Stopwatch

@@ -23,32 +23,14 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 		MSVCRT_NAME :: "system:msvcrt.lib"
 	}
 
-	foreign import lib {
-//	    "windows/amd64/libcrypto_static.lib",
-//	    "windows/amd64/libssl_static.lib",
-//		"windows/amd64/libcrypto.a",
-//		"windows/amd64/libssl.a",
-		"windows/amd64/iwasm.lib",
-		"windows/amd64/wolfssl.lib",
-		"system:Kernel32.lib",
-		"system:User32.lib",
-		"system:Advapi32.lib",
-		"system:ntdll.lib",
-		"system:onecore.lib",
-		"system:Synchronization.lib",
-		"system:Dbghelp.lib",
-		"system:ws2_32.lib",
-		"system:bcrypt.lib",
-//		"system:libcmt.lib",
-//		"system:psapi.lib",
-//		"system:iphlpapi.lib",
-//		"system:ole32.lib",
-//		"system:shell32.lib",
-//		"system:uuid.lib",
-//		"system:ucrt.lib",
-		MSVCRT_NAME,
-		LIB_PATH,
- 	}
+	foreign import lib {//	    "windows/amd64/libcrypto_static.lib",
+	//	    "windows/amd64/libssl_static.lib",
+	"windows/amd64/iwasm.lib", "windows/amd64/wolfssl.lib", "system:Kernel32.lib", "system:User32.lib", "system:Advapi32.lib", "system:ntdll.lib", "system:onecore.lib", "system:Synchronization.lib", "system:Dbghelp.lib", "system:ws2_32.lib", "system:bcrypt.lib", //		"windows/amd64/libcrypto.a",//		"windows/amd64/libssl.a",//		"system:libcmt.lib",
+	//		"system:psapi.lib",
+	//		"system:iphlpapi.lib",
+	//		"system:ole32.lib",
+	//		"system:shell32.lib",
+	MSVCRT_NAME, LIB_PATH} //		"system:uuid.lib",//		"system:ucrt.lib",
 } else when ODIN_OS == .Windows && ODIN_ARCH == .arm64 {
 	#panic("libbop does not support Windows ARM64 yet")
 } else when ODIN_OS == .Linux && ODIN_ARCH == .amd64 {
@@ -72,12 +54,7 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 				LIB_PATH :: "linux/amd64/libbop.a"
 			}
 		}
-		foreign import lib {
-			"linux/amd64/libwolfssl.a",
-			"linux/amd64/libiwasm.a",
-			"system:stdc++",
-			LIB_PATH,
-		}
+		foreign import lib {"linux/amd64/libwolfssl.a", "linux/amd64/libiwasm.a", "system:stdc++", LIB_PATH}
 	} else {
 		when #config(BOP_DEBUG, 0) == 1 {
 			when #config(BOP_SHARED, 0) == 1 {
@@ -96,13 +73,7 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 				LIB_PATH :: "linux/amd64/libbop-openssl.a"
 			}
 		}
-		foreign import lib {
-			"system:crypto",
-			"system:ssl",
-			"system:stdc++",
-			"linux/amd64/libiwasm.a",
-			LIB_PATH,
-		}
+		foreign import lib {"system:crypto", "system:ssl", "system:stdc++", "linux/amd64/libiwasm.a", LIB_PATH}
 	}
 } else when ODIN_OS == .Linux && ODIN_ARCH == .arm64 {
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -extra-linker-flags:"-Wl,-rpath,$ORIGIN/libbop.so" -linker:lld
@@ -120,11 +91,7 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 			@(private)
 			LIB_PATH :: "linux/arm64/libbop-wolfssl.a"
 		}
-		foreign import lib {
-			"linux/arm64/libwolfssl.a",
-			"system:stdc++",
-			LIB_PATH,
-		}
+		foreign import lib {"linux/arm64/libwolfssl.a", "system:stdc++", LIB_PATH}
 	} else {
 		when #config(BOP_DEBUG, 1) == 1 {
 			when #config(BOP_SHARED, 0) == 1 {
@@ -138,12 +105,7 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 			@(private)
 			LIB_PATH :: "linux/arm64/libbop.a"
 		}
-		foreign import lib {
-			"system:crypto",
-			"system:ssl",
-			"system:stdc++",
-			LIB_PATH,
-		}
+		foreign import lib {"system:crypto", "system:ssl", "system:stdc++", LIB_PATH}
 	}
 } else when ODIN_OS == .Darwin && ODIN_ARCH == .amd64 {
 	when #config(BOP_DEBUG, 0) == 1 {
@@ -159,20 +121,14 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 	}
 	//odinfmt:enable
 } else when ODIN_OS == .Darwin && ODIN_ARCH == .arm64 {
-    when #config(BOP_DEBUG, 0) == 1 {
+	when #config(BOP_DEBUG, 0) == 1 {
 		@(private)
 		LIB_PATH :: "../../build/macosx/arm64/release/libbop.a"
 	} else {
 		@(private)
 		LIB_PATH :: "macos/arm64/libbop.a"
 	}
-	foreign import lib {
-		"macos/arm64/libwolfssl.a",
-		"system:stdc++",
-		"system:CoreFoundation.framework",
-		"system:Security.framework",
-		LIB_PATH,
-	}
+	foreign import lib {"macos/arm64/libwolfssl.a", "system:stdc++", "system:CoreFoundation.framework", "system:Security.framework", LIB_PATH}
 } else {
 	#panic("libbop does not support this platform yet")
 }
@@ -305,18 +261,8 @@ foreign lib {
 	mpmc_blocking_dequeue_wait_token :: proc(token: ^MPMC_Blocking_Consumer_Token, item: ^u64, timeout_micros: i64) -> bool ---
 	mpmc_blocking_dequeue_bulk :: proc(m: ^MPMC_Blocking, items: [^]u64, max_size: c.size_t) -> i64 ---
 	mpmc_blocking_dequeue_bulk_token :: proc(token: ^MPMC_Blocking_Consumer_Token, items: [^]u64, max_size: c.size_t) -> i64 ---
-	mpmc_blocking_dequeue_bulk_wait :: proc(
-		m: ^MPMC_Blocking,
-		items: [^]u64,
-		max_items: c.size_t,
-		timeout_micros: i64,
-	) -> i64 ---
-	mpmc_blocking_dequeue_bulk_wait_token :: proc(
-		token: ^MPMC_Blocking_Consumer_Token,
-		items: [^]u64,
-		max_items: c.size_t,
-		timeout_micros: i64,
-	) -> i64 ---
+	mpmc_blocking_dequeue_bulk_wait :: proc(m: ^MPMC_Blocking, items: [^]u64, max_items: c.size_t, timeout_micros: i64) -> i64 ---
+	mpmc_blocking_dequeue_bulk_wait_token :: proc(token: ^MPMC_Blocking_Consumer_Token, items: [^]u64, max_items: c.size_t, timeout_micros: i64) -> i64 ---
 }
 
 /*
@@ -852,12 +798,7 @@ foreign lib {
     @retval MDBX_RESULT_TRUE   The specified timeout is reached during load
                                data into memory.
     */
-	mdbx_env_warmup :: proc(
-		env: ^MDBX_Env,
-		txn: ^MDBX_Txn,
-		flags: MDBX_Warmup_Flags,
-		timeout_seconds_16dot16: u32
-	) -> MDBX_Error ---
+	mdbx_env_warmup :: proc(env: ^MDBX_Env, txn: ^MDBX_Txn, flags: MDBX_Warmup_Flags, timeout_seconds_16dot16: u32) -> MDBX_Error ---
 
 	/*
 	Set environment flags.
@@ -1123,15 +1064,7 @@ foreign lib {
 	                       given size, or a 32-bit process requests too much
 	                       bytes for the 32-bit address space.
    	*/
-	mdbx_env_set_geometry :: proc(
-		env: ^MDBX_Env,
-		size_lower: c.ssize_t,
-		size_now: c.ssize_t,
-		size_upper: c.ssize_t,
-		growth_step: c.ssize_t,
-		shrink_threshold: c.ssize_t,
-		page_size: c.ssize_t,
-	) -> MDBX_Error ---
+	mdbx_env_set_geometry :: proc(env: ^MDBX_Env, size_lower: c.ssize_t, size_now: c.ssize_t, size_upper: c.ssize_t, growth_step: c.ssize_t, shrink_threshold: c.ssize_t, page_size: c.ssize_t) -> MDBX_Error ---
 
 	/*
 	Find out whether to use readahead or not, based on the given database
@@ -1261,13 +1194,7 @@ foreign lib {
 	@retval MDBX_BUSY          The write transaction is already started by the
 	                           current thread.
     */
-	mdbx_txn_begin_ex :: proc(
-		env: ^MDBX_Env,
-		parent: ^MDBX_Txn,
-		flags: MDBX_Txn_Flags,
-		txn: ^^MDBX_Txn,
-		ctx: rawptr
-	) -> MDBX_Error ---
+	mdbx_txn_begin_ex :: proc(env: ^MDBX_Env, parent: ^MDBX_Txn, flags: MDBX_Txn_Flags, txn: ^^MDBX_Txn, ctx: rawptr) -> MDBX_Error ---
 
 	/*\brief Sets application information associated (a context pointer) with the
 	transaction.
@@ -1912,12 +1839,7 @@ foreign lib {
     @retval MDBX_NOTFOUND  The key was not in the table.
     @retval MDBX_EINVAL    An invalid parameter was specified.
     */
-	mdbx_get_ex :: proc(
-		txn: ^MDBX_Txn,
-		dbi: MDBX_DBI,
-		key, value: ^MDBX_Val,
-		values_count: ^c.size_t,
-	) -> MDBX_Error ---
+	mdbx_get_ex :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, key, value: ^MDBX_Val, values_count: ^c.size_t) -> MDBX_Error ---
 
 	/*
 	Get equal or great item from a table.
@@ -1948,11 +1870,7 @@ foreign lib {
     @retval MDBX_NOTFOUND      The key was not in the table.
     @retval MDBX_EINVAL        An invalid parameter was specified.
     */
-	mdbx_get_equal_or_great :: proc(
-		txn: ^MDBX_Txn,
-		dbi: MDBX_DBI,
-		key, value: ^MDBX_Val,
-	) -> MDBX_Error ---
+	mdbx_get_equal_or_great :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, key, value: ^MDBX_Val) -> MDBX_Error ---
 
 	/*
 	Store items into a table.
@@ -2036,12 +1954,7 @@ foreign lib {
                            in a read-only transaction.
     @retval MDBX_EINVAL    An invalid parameter was specified.
     */
-	mdbx_put :: proc(
-		txn: ^MDBX_Txn,
-		dbi: MDBX_DBI,
-		key, value: ^MDBX_Val,
-		flags: MDBX_Put_Flags,
-	) -> MDBX_Error ---
+	mdbx_put :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, key, value: ^MDBX_Val, flags: MDBX_Put_Flags) -> MDBX_Error ---
 
 	/*
 	Replace items in a table.
@@ -2087,20 +2000,9 @@ foreign lib {
 
     @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_replace :: proc(
-		txn: ^MDBX_Txn,
-		dbi: MDBX_DBI,
-		key, new_value, old_value: ^MDBX_Val,
-		flags: MDBX_Put_Flags,
-	) -> MDBX_Error ---
+	mdbx_replace :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, key, new_value, old_value: ^MDBX_Val, flags: MDBX_Put_Flags) -> MDBX_Error ---
 
-	mdbx_replace_ex :: proc(
-		txn: ^MDBX_Txn,
-		dbi: MDBX_DBI,
-		key, new_value, old_value: ^MDBX_Val,
-		flags: MDBX_Put_Flags,
-		preserver: MDBX_Preserve_Func,
-	) -> MDBX_Error ---
+	mdbx_replace_ex :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, key, new_value, old_value: ^MDBX_Val, flags: MDBX_Put_Flags, preserver: MDBX_Preserve_Func) -> MDBX_Error ---
 
 	/*
 	Delete items from a table.
@@ -2128,11 +2030,7 @@ foreign lib {
                           in a read-only transaction.
     @retval MDBX_EINVAL   An invalid parameter was specified.
     */
-	mdbx_del :: proc(
-		txn: ^MDBX_Txn,
-		dbi: MDBX_DBI,
-		key, value: ^MDBX_Val,
-	) -> MDBX_Error ---
+	mdbx_del :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, key, value: ^MDBX_Val) -> MDBX_Error ---
 
 	/*
 	Create a cursor handle but not bind it to transaction nor DBI-handle.
@@ -2511,13 +2409,7 @@ foreign lib {
     		is a course positioning error code, or a user-defined search stop code
 			or error condition.
     */
-	mdbx_cursor_scan :: proc(
-		cursor: ^MDBX_Cursor,
-		predicate: MDBX_Predicate_Func,
-		ctx: rawptr,
-		start_op, turn_op: MDBX_Cursor_Op,
-		arg: rawptr,
-	) -> MDBX_Error ---
+	mdbx_cursor_scan :: proc(cursor: ^MDBX_Cursor, predicate: MDBX_Predicate_Func, ctx: rawptr, start_op, turn_op: MDBX_Cursor_Op, arg: rawptr) -> MDBX_Error ---
 
 	/*
 	Scans a table using the passed predicate, starting with the passed key-value pair,
@@ -2599,15 +2491,7 @@ foreign lib {
     		is a course positioning error code, or a user-defined search stop code
 			or error condition.
     */
-	mdbx_cursor_scan_from :: proc(
-		cursor: ^MDBX_Cursor,
-		predicate: MDBX_Predicate_Func,
-		ctx: rawptr,
-		from_op: MDBX_Cursor_Op,
-		from_key, from_value: ^MDBX_Val,
-		turn_op: MDBX_Cursor_Op,
-		arg: rawptr,
-	) -> MDBX_Error ---
+	mdbx_cursor_scan_from :: proc(cursor: ^MDBX_Cursor, predicate: MDBX_Predicate_Func, ctx: rawptr, from_op: MDBX_Cursor_Op, from_key, from_value: ^MDBX_Val, turn_op: MDBX_Cursor_Op, arg: rawptr) -> MDBX_Error ---
 
 	/*
 	Retrieve multiple non-dupsort key/value pairs by cursor.
@@ -2651,13 +2535,7 @@ foreign lib {
                                   and there are no pairs left.
     @retval MDBX_EINVAL           An invalid parameter was specified.
     */
-	mdbx_cursor_get_batch :: proc(
-		cursor: ^MDBX_Cursor,
-		count: ^c.size_t,
-		pairs: ^MDBX_Val,
-		limit: c.size_t,
-		op: MDBX_Cursor_Op,
-	) -> MDBX_Error ---
+	mdbx_cursor_get_batch :: proc(cursor: ^MDBX_Cursor, count: ^c.size_t, pairs: ^MDBX_Val, limit: c.size_t, op: MDBX_Cursor_Op) -> MDBX_Error ---
 
 	/*
 	Store by cursor.
@@ -2740,11 +2618,7 @@ foreign lib {
                                transaction.
     @retval MDBX_EINVAL        An invalid parameter was specified.
     */
-	mdbx_cursor_put :: proc(
-		cursor: ^MDBX_Cursor,
-		key, value: ^MDBX_Val,
-		flags: MDBX_Put_Flags,
-	) -> MDBX_Error ---
+	mdbx_cursor_put :: proc(cursor: ^MDBX_Cursor, key, value: ^MDBX_Val, flags: MDBX_Put_Flags) -> MDBX_Error ---
 
 	/*
 	Delete current key/data pair.
@@ -2777,10 +2651,7 @@ foreign lib {
                                transaction.
     @retval MDBX_EINVAL        An invalid parameter was specified.
     */
-	mdbx_cursor_del :: proc(
-		cursor: ^MDBX_Cursor,
-		flags: MDBX_Put_Flags,
-	) -> MDBX_Error ---
+	mdbx_cursor_del :: proc(cursor: ^MDBX_Cursor, flags: MDBX_Put_Flags) -> MDBX_Error ---
 
 	/*
 	Return count of duplicates for current key.
@@ -2938,12 +2809,7 @@ foreign lib {
 
     @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_estimate_move :: proc(
-		cursor: ^MDBX_Cursor,
-		key, value: ^MDBX_Val,
-		move_op: MDBX_Cursor_Op,
-		distance_items: ^c.ptrdiff_t,
-	) -> MDBX_Error ---
+	mdbx_estimate_move :: proc(cursor: ^MDBX_Cursor, key, value: ^MDBX_Val, move_op: MDBX_Cursor_Op, distance_items: ^c.ptrdiff_t) -> MDBX_Error ---
 
 	/*
 	Estimates the size of a range as a number of elements.
@@ -2969,13 +2835,7 @@ foreign lib {
 
     @returns A non-zero error value on failure and 0 on success.
     */
-	mdbx_estimate_range :: proc(
-		txn: ^MDBX_Txn,
-		dbi: MDBX_DBI,
-		begin_key, begin_value: ^MDBX_Val,
-		end_key, end_value: ^MDBX_Val,
-		distance_items: ^c.ptrdiff_t,
-	) -> MDBX_Error ---
+	mdbx_estimate_range :: proc(txn: ^MDBX_Txn, dbi: MDBX_DBI, begin_key, begin_value: ^MDBX_Val, end_key, end_value: ^MDBX_Val, distance_items: ^c.ptrdiff_t) -> MDBX_Error ---
 
 	/*
 	Determines whether the given address is on a dirty database page of
@@ -3178,12 +3038,7 @@ foreign lib {
 	@note On Windows the @ref mdbx_env_open_for_recoveryW() is recommended
 	to use.
 	*/
-	mdbx_env_open_for_recovery :: proc(
-		env: ^MDBX_Env,
-		pathname: cstring,
-		target_meta: c.uint,
-		writeable: bool,
-	) -> MDBX_Error ---
+	mdbx_env_open_for_recovery :: proc(env: ^MDBX_Env, pathname: cstring, target_meta: c.uint, writeable: bool) -> MDBX_Error ---
 }
 
 /*
@@ -3272,16 +3127,7 @@ foreign lib {
 
 	raft_srv_config_ptr_make :: proc(config: ^Raft_Srv_Config) -> ^Raft_Srv_Config_Ptr ---
 	raft_srv_config_ptr_delete :: proc(config_ptr: ^Raft_Srv_Config_Ptr) ---
-	raft_srv_config_make :: proc(
-		id: i32,
-		dc_id: i32,
-		endpoint: [^]byte,
-		endpoint_size: c.size_t,
-		aux: [^]byte,
-		aux_size: c.size_t,
-		learner: bool,
-		priority: i32,
-	) -> ^Raft_Srv_Config ---
+	raft_srv_config_make :: proc(id: i32, dc_id: i32, endpoint: [^]byte, endpoint_size: c.size_t, aux: [^]byte, aux_size: c.size_t, learner: bool, priority: i32) -> ^Raft_Srv_Config ---
 	raft_srv_config_delete :: proc(config: ^Raft_Srv_Config) ---
 	raft_srv_config_id :: proc(config: ^Raft_Srv_Config) -> i32 ---
 	raft_srv_config_dc_id :: proc(config: ^Raft_Srv_Config) -> i32 ---
@@ -3349,45 +3195,15 @@ foreign lib {
 	raft_asio_rpc_listener_make :: proc(asio_service: ^Raft_Asio_Service_Ptr, listening_port: u16, logger: ^Raft_Logger_Ptr) -> ^Raft_Asio_RPC_Listener_Ptr ---
 	raft_asio_rpc_listener_delete :: proc(rpc_listener: ^Raft_Asio_RPC_Listener_Ptr) ---
 
-	raft_asio_rpc_client_make :: proc(
-		asio_service: ^Raft_Asio_Service_Ptr,
-		endpoint: [^]byte,
-		endpoint_size: c.size_t
-	) -> ^Raft_Asio_RPC_Client_Ptr ---
+	raft_asio_rpc_client_make :: proc(asio_service: ^Raft_Asio_Service_Ptr, endpoint: [^]byte, endpoint_size: c.size_t) -> ^Raft_Asio_RPC_Client_Ptr ---
 
 	raft_asio_rpc_client_delete :: proc(rpc_listener: ^Raft_Asio_RPC_Client_Ptr) ---
 
-	raft_fsm_make :: proc(
-		user_data: rawptr,
-		current_conf: ^Raft_Cluster_Config,
-		rollback_conf: ^Raft_Cluster_Config,
-		commit: Raft_FSM_Commit_Func,
-		commit_config: Raft_FSM_Cluster_Config_Func,
-		pre_commit: Raft_FSM_Commit_Func,
-		rollback: Raft_FSM_Rollback_Func,
-		rollback_config: Raft_FSM_Cluster_Config_Func,
-		get_next_batch_size_hint_in_bytes: Raft_FSM_Get_Next_Batch_Size_Hint_In_Bytes_Func,
-		save_snapshot: Raft_FSM_Save_Snapshot_Func,
-		apply_snapshot: Raft_FSM_Apply_Snapshot_Func,
-		read_snapshot: Raft_FSM_Read_Snapshot_Func,
-		free_snapshot_user_ctx: Raft_FSM_Free_User_Snapshot_Ctx_Func,
-		last_snapshot: Raft_FSM_Last_Snapshot_Func,
-		last_commit_index: Raft_FSM_Last_Commit_Index_Func,
-		create_snapshot: Raft_FSM_Create_Snapshot_Func,
-		chk_create_snapshot: Raft_FSM_Chk_Create_Snapshot_Func,
-		allow_leadership_transfer: Raft_FSM_Allow_Leadership_Transfer_Func,
-		adjust_commit_index: Raft_FSM_Adjust_Commit_Index_Func,
-	) -> ^Raft_FSM_Ptr ---
+	raft_fsm_make :: proc(user_data: rawptr, current_conf: ^Raft_Cluster_Config, rollback_conf: ^Raft_Cluster_Config, commit: Raft_FSM_Commit_Func, commit_config: Raft_FSM_Cluster_Config_Func, pre_commit: Raft_FSM_Commit_Func, rollback: Raft_FSM_Rollback_Func, rollback_config: Raft_FSM_Cluster_Config_Func, get_next_batch_size_hint_in_bytes: Raft_FSM_Get_Next_Batch_Size_Hint_In_Bytes_Func, save_snapshot: Raft_FSM_Save_Snapshot_Func, apply_snapshot: Raft_FSM_Apply_Snapshot_Func, read_snapshot: Raft_FSM_Read_Snapshot_Func, free_snapshot_user_ctx: Raft_FSM_Free_User_Snapshot_Ctx_Func, last_snapshot: Raft_FSM_Last_Snapshot_Func, last_commit_index: Raft_FSM_Last_Commit_Index_Func, create_snapshot: Raft_FSM_Create_Snapshot_Func, chk_create_snapshot: Raft_FSM_Chk_Create_Snapshot_Func, allow_leadership_transfer: Raft_FSM_Allow_Leadership_Transfer_Func, adjust_commit_index: Raft_FSM_Adjust_Commit_Index_Func) -> ^Raft_FSM_Ptr ---
 
 	raft_fsm_delete :: proc(fsm: ^Raft_FSM_Ptr) ---
 
-	raft_log_entry_make :: proc(
-		term: u64,
-		data: ^Raft_Buffer,
-		timestamp: u64,
-		has_crc32: bool,
-		crc32: u32
-	) -> ^Raft_Log_Entry ---
+	raft_log_entry_make :: proc(term: u64, data: ^Raft_Buffer, timestamp: u64, has_crc32: bool, crc32: u32) -> ^Raft_Log_Entry ---
 
 	raft_log_entry_delete :: proc(entry: ^Raft_Log_Entry) ---
 
@@ -3397,46 +3213,13 @@ foreign lib {
 
 	raft_log_entry_ptr_release :: proc(p: ^Raft_Log_Entry_Ptr) ---
 
-	raft_log_entry_vec_push :: proc(
-		vec: ^Raft_Log_Entry_Vec,
-		term: u64,
-		data: ^Raft_Buffer,
-		timestamp: u64,
-		has_crc32: bool,
-		crc32: u32
-	) ---
+	raft_log_entry_vec_push :: proc(vec: ^Raft_Log_Entry_Vec, term: u64, data: ^Raft_Buffer, timestamp: u64, has_crc32: bool, crc32: u32) ---
 
-	raft_log_store_make :: proc(
-		user_data: rawptr,
-		next_slot: Raft_Log_Store_Next_Slot_Func,
-		start_index: Raft_Log_Store_Start_Index_Func,
-		last_entry: Raft_Log_Store_Last_Entry_Func,
-		append: Raft_Log_Store_Append_Func,
-		write_at: Raft_Log_Store_Write_At_Func,
-		end_of_append_batch: Raft_Log_Store_End_Of_Append_Batch_Func,
-		log_entries: Raft_Log_Store_Log_Entries_Func,
-		entry_at: Raft_Log_Store_Entry_At_Func,
-		term_at: Raft_Log_Store_Term_At_Func,
-		pack: Raft_Log_Store_Pack_Func,
-		apply_pack: Raft_Log_Store_Apply_Pack_Func,
-		compact: Raft_Log_Store_Compact_Func,
-		compact_async: Raft_Log_Store_Compact_Async_Func,
-		flush: Raft_Log_Store_Flush_Func,
-		last_durable_index: Raft_Log_Store_Last_Durable_Index_Func,
-	) -> ^Raft_Log_Store_Ptr ---
+	raft_log_store_make :: proc(user_data: rawptr, next_slot: Raft_Log_Store_Next_Slot_Func, start_index: Raft_Log_Store_Start_Index_Func, last_entry: Raft_Log_Store_Last_Entry_Func, append: Raft_Log_Store_Append_Func, write_at: Raft_Log_Store_Write_At_Func, end_of_append_batch: Raft_Log_Store_End_Of_Append_Batch_Func, log_entries: Raft_Log_Store_Log_Entries_Func, entry_at: Raft_Log_Store_Entry_At_Func, term_at: Raft_Log_Store_Term_At_Func, pack: Raft_Log_Store_Pack_Func, apply_pack: Raft_Log_Store_Apply_Pack_Func, compact: Raft_Log_Store_Compact_Func, compact_async: Raft_Log_Store_Compact_Async_Func, flush: Raft_Log_Store_Flush_Func, last_durable_index: Raft_Log_Store_Last_Durable_Index_Func) -> ^Raft_Log_Store_Ptr ---
 
 	raft_log_store_delete :: proc(log_store: ^Raft_Log_Store_Ptr) ---
 
-	raft_state_mgr_make :: proc(
-		user_data: rawptr,
-		load_config: Raft_State_Mgr_Load_Config_Func,
-		save_config: Raft_State_Mgr_Save_Config_Func,
-		read_state: Raft_State_Mgr_Read_State_Func,
-		save_state: Raft_State_Mgr_Save_State_Func,
-		load_log_store: Raft_State_Mgr_Load_Log_Store_Func,
-		server_id: Raft_State_Mgr_Server_ID_Func,
-		system_exit: Raft_State_Mgr_System_Exit_Func,
-	) -> ^Raft_State_Mgr_Ptr ---
+	raft_state_mgr_make :: proc(user_data: rawptr, load_config: Raft_State_Mgr_Load_Config_Func, save_config: Raft_State_Mgr_Save_Config_Func, read_state: Raft_State_Mgr_Read_State_Func, save_state: Raft_State_Mgr_Save_State_Func, load_log_store: Raft_State_Mgr_Load_Log_Store_Func, server_id: Raft_State_Mgr_Server_ID_Func, system_exit: Raft_State_Mgr_System_Exit_Func) -> ^Raft_State_Mgr_Ptr ---
 
 	raft_state_mgr_delete :: proc(state_mgr: ^Raft_State_Mgr_Ptr) ---
 
@@ -3450,50 +3233,27 @@ foreign lib {
 	raft_params_make :: proc() -> ^Raft_Params ---
 	raft_params_delete :: proc(params: ^Raft_Params) ---
 
-	raft_server_launch :: proc(
-		user_data: rawptr,
-		fsm: ^Raft_FSM_Ptr,
-		state_mgr: ^Raft_State_Mgr_Ptr,
-		logger: ^Raft_Logger_Ptr,
-		port_number: i32,
-		asio_service: ^Raft_Asio_Service_Ptr,
-		params_given: ^Raft_Params,
-		skip_initial_election_timeout: bool,
-		start_server_in_constructor: bool,
-		test_mode_flag: bool,
-		cb_func: rawptr
-	) -> ^Raft_Server_Ptr ---
+	raft_server_launch :: proc(user_data: rawptr, fsm: ^Raft_FSM_Ptr, state_mgr: ^Raft_State_Mgr_Ptr, logger: ^Raft_Logger_Ptr, port_number: i32, asio_service: ^Raft_Asio_Service_Ptr, params_given: ^Raft_Params, skip_initial_election_timeout: bool, start_server_in_constructor: bool, test_mode_flag: bool, cb_func: rawptr) -> ^Raft_Server_Ptr ---
 
-	raft_server_stop :: proc(
-		rs_ptr: ^Raft_Server_Ptr,
-		time_limit_sec: c.size_t
-	) -> bool ---
+	raft_server_stop :: proc(rs_ptr: ^Raft_Server_Ptr, time_limit_sec: c.size_t) -> bool ---
 
-	raft_server_get :: proc(
-		rs_ptr: ^Raft_Server_Ptr
-	) -> ^Raft_Server ---
+	raft_server_get :: proc(rs_ptr: ^Raft_Server_Ptr) -> ^Raft_Server ---
 
 	/*
 	Check if this server is ready to serve operation.
 
 	@return `true` if it is ready.
 	*/
-	raft_server_is_initialized :: proc(
-		rs: ^Raft_Server,
-	) -> bool ---
+	raft_server_is_initialized :: proc(rs: ^Raft_Server) -> bool ---
 
 
 	/*
 	*/
-	raft_server_is_catching_up :: proc(
-		rs: ^Raft_Server,
-	) -> bool ---
+	raft_server_is_catching_up :: proc(rs: ^Raft_Server) -> bool ---
 
 	/*
 	*/
-	raft_server_is_receiving_snapshot :: proc(
-		rs: ^Raft_Server,
-	) -> bool ---
+	raft_server_is_receiving_snapshot :: proc(rs: ^Raft_Server) -> bool ---
 
 	/*
 	Add a new server to the current cluster. Only leader will accept this operation.
@@ -3503,11 +3263,7 @@ foreign lib {
 	@param srv Configuration of server to add.
 	@return `get_accepted()` will be true on success.
 	*/
-	raft_server_add_srv :: proc(
-		rs: ^Raft_Server,
-		srv: ^Raft_Srv_Config_Ptr,
-		handler: Raft_Async_Buffer_Ptr,
-	) -> bool ---
+	raft_server_add_srv :: proc(rs: ^Raft_Server, srv: ^Raft_Srv_Config_Ptr, handler: Raft_Async_Buffer_Ptr) -> bool ---
 
 	/*
 	Remove a server from the current cluster. Only leader will accept this operation.
@@ -3516,11 +3272,7 @@ foreign lib {
 	@param srv_id ID of server to remove.
 	@return `get_accepted()` will be true on success.
 	*/
-	raft_server_remove_srv :: proc(
-		rs: ^Raft_Server,
-		srv_id: i32,
-		handler: Raft_Async_Buffer_Ptr,
-	) -> bool ---
+	raft_server_remove_srv :: proc(rs: ^Raft_Server, srv_id: i32, handler: Raft_Async_Buffer_Ptr) -> bool ---
 
 	/*
 	Flip learner flag of given server. Learner will be excluded from the quorum. Only
@@ -3530,12 +3282,7 @@ foreign lib {
 	@param to If `true`, set the server as a learner, otherwise, clear learner flag.
 	@return `ret->get_result_code()` will be OK on success.
 	*/
-	raft_server_flip_learner_flag :: proc(
-		rs: ^Raft_Server,
-		srv_id: i32,
-		to: bool,
-		handler: Raft_Async_Buffer_Ptr,
-	) -> bool ---
+	raft_server_flip_learner_flag :: proc(rs: ^Raft_Server, srv_id: i32, to: bool, handler: Raft_Async_Buffer_Ptr) -> bool ---
 
 	/*
 	Append and replicate the given logs. Only leader will accept this operation.
@@ -3549,11 +3296,7 @@ foreign lib {
 		In async mode, this function will return immediately, and the commit
 		results will be set to returned `cmd_result` instance later.
 	*/
-	raft_server_append_entries :: proc(
-		rs: ^Raft_Server,
-		entries: ^Raft_Append_Entries_Ptr,
-		handler: Raft_Async_Buffer_Ptr,
-	) -> bool ---
+	raft_server_append_entries :: proc(rs: ^Raft_Server, entries: ^Raft_Append_Entries_Ptr, handler: Raft_Async_Buffer_Ptr) -> bool ---
 
 	/*
 	Update the priority of given server.
@@ -3578,12 +3321,7 @@ foreign lib {
 	@return IGNORED If we're not a leader and broadcast_when_leader_exists = false.
 			We ignored the request.
 	*/
-	raft_server_set_priority :: proc(
-		rs: ^Raft_Server,
-		srv_id: i32,
-		new_priority: i32,
-		broadcast_when_leader_exists: bool,
-	) -> Raft_Server_Priority_Set_Result ---
+	raft_server_set_priority :: proc(rs: ^Raft_Server, srv_id: i32, new_priority: i32, broadcast_when_leader_exists: bool) -> Raft_Server_Priority_Set_Result ---
 
 	/*
 	Broadcast the priority change of given server to all peers. This function should be used
@@ -3595,11 +3333,7 @@ foreign lib {
 	@param srv_id ID of server to update priority
 	@param new_priority New priority.
 	*/
-	raft_server_broadcast_priority_change :: proc(
-		rs: ^Raft_Server,
-		srv_id: i32,
-		new_priority: i32,
-	) ---
+	raft_server_broadcast_priority_change :: proc(rs: ^Raft_Server, srv_id: i32, new_priority: i32) ---
 
 	/*
 	Yield current leadership and becomes a follower. Only a leader will accept this operation.
@@ -3620,11 +3354,7 @@ foreign lib {
 	@param successor_id The server ID of the successor.
 						If `-1`, the successor will be chosen automatically.
 	*/
-	raft_server_yield_leadership :: proc(
-		rs: ^Raft_Server,
-		immediate_yield: bool,
-		successor_id: i32,
-	) ---
+	raft_server_yield_leadership :: proc(rs: ^Raft_Server, immediate_yield: bool, successor_id: i32) ---
 
 	/*
 	Send a request to the current leader to yield its leadership, and become the next leader.
@@ -3632,17 +3362,13 @@ foreign lib {
 	@return `true` on success. But it does not guarantee to become
 	        the next leader due to various failures.
 	*/
-	raft_server_request_leadership :: proc(
-		rs: ^Raft_Server,
-	) -> bool ---
+	raft_server_request_leadership :: proc(rs: ^Raft_Server) -> bool ---
 
 	/*
 	Start the election timer on this server, if this server is a follower. It will
 	allow the election timer permanently, if it was disabled by state manager.
 	*/
-	raft_server_restart_election_timer :: proc(
-		rs: ^Raft_Server,
-	) ---
+	raft_server_restart_election_timer :: proc(rs: ^Raft_Server) ---
 
 	/*
 	Set custom context to Raft cluster config. It will create a new configuration log and
@@ -3651,11 +3377,7 @@ foreign lib {
 	@param data custom context data
 	@param size number of bytes in data
 	*/
-	raft_server_set_user_ctx :: proc(
-		rs: ^Raft_Server,
-		data: [^]byte,
-		size: c.size_t,
-	) ---
+	raft_server_set_user_ctx :: proc(rs: ^Raft_Server, data: [^]byte, size: c.size_t) ---
 
 	/*
 	Get custom context from the current cluster config.
@@ -3664,36 +3386,28 @@ foreign lib {
 			Any non-null value must be freed by calling `raft_buffer_delete` or
 			transfer ownership.
 	*/
-	raft_server_get_user_ctx :: proc(
-		rs: ^Raft_Server,
-	) -> ^Raft_Buffer ---
+	raft_server_get_user_ctx :: proc(rs: ^Raft_Server) -> ^Raft_Buffer ---
 
 	/*
 	Get timeout for snapshot_sync_ctx
 
 	@return snapshot_sync_ctx_timeout
 	*/
-	raft_server_get_snapshot_sync_ctx_timeout :: proc(
-		rs: ^Raft_Server,
-	) -> i32 ---
+	raft_server_get_snapshot_sync_ctx_timeout :: proc(rs: ^Raft_Server) -> i32 ---
 
 	/*
 	Get ID of this server.
 
 	@return Server ID
 	*/
-	raft_server_get_id :: proc(
-		rs: ^Raft_Server,
-	) -> i32 ---
+	raft_server_get_id :: proc(rs: ^Raft_Server) -> i32 ---
 
 	/*
 	Get the current term of this server.
 
 	@return Term
 	*/
-	raft_server_get_term :: proc(
-		rs: ^Raft_Server,
-	) -> u64 ---
+	raft_server_get_term :: proc(rs: ^Raft_Server) -> u64 ---
 
 	/*
 	Get the term of given log index number.
@@ -3701,55 +3415,42 @@ foreign lib {
 	@param log_idx Log index number
 	@return Term of given log
 	*/
-	raft_server_get_log_term :: proc(
-		rs: ^Raft_Server,
-		log_idx: u64,
-	) -> u64 ---
+	raft_server_get_log_term :: proc(rs: ^Raft_Server, log_idx: u64) -> u64 ---
 
 	/*
 	Get the term of the last log.
 
 	@return Term of the last log
 	*/
-	raft_server_get_last_log_term :: proc(
-		rs: ^Raft_Server,
-	) -> u64 ---
+	raft_server_get_last_log_term :: proc(rs: ^Raft_Server) -> u64 ---
 
 	/*
 	Get the last log index number.
 
 	@return Last log index number.
 	*/
-	raft_server_get_last_log_idx :: proc(
-		rs: ^Raft_Server,
-	) -> u64 ---
+	raft_server_get_last_log_idx :: proc(rs: ^Raft_Server) -> u64 ---
 
 	/*
 	Get the last committed log index number of state machine.
 
 	@return Last committed log index number of state machine.
 	*/
-	raft_server_get_committed_log_idx :: proc(
-		rs: ^Raft_Server,
-	) -> u64 ---
+	raft_server_get_committed_log_idx :: proc(rs: ^Raft_Server) -> u64 ---
 
 	/*
 	Get the target log index number we are required to commit.
 
 	@return Target committed log index number.
 	*/
-	raft_server_get_target_committed_log_idx :: proc(
-		rs: ^Raft_Server,
-	) -> u64 ---
+	raft_server_get_target_committed_log_idx :: proc(rs: ^Raft_Server) -> u64 ---
 
 	/*
 	Get the leader's last committed log index number.
 
 	@return The leader's last committed log index number.
 	*/
-	raft_server_get_leader_committed_log_idx :: proc(
-		rs: ^Raft_Server,
-	) -> u64 ---
+	raft_server_get_leader_committed_log_idx :: proc(rs: ^Raft_Server) -> u64 ---
 
 	/*
 	Get the log index of the first config when this server became a leader.
@@ -3761,18 +3462,14 @@ foreign lib {
 
 	@return The log index of the first config when this server became a leader.
 	*/
-	raft_server_get_log_idx_at_becoming_leader :: proc(
-		rs: ^Raft_Server,
-	) -> u64 ---
+	raft_server_get_log_idx_at_becoming_leader :: proc(rs: ^Raft_Server) -> u64 ---
 
 	/*
 	Calculate the log index to be committed from current peers' matched indexes.
 
 	@return Expected committed log index.
 	*/
-	raft_server_get_expected_committed_log_idx :: proc(
-		rs: ^Raft_Server,
-	) -> u64 ---
+	raft_server_get_expected_committed_log_idx :: proc(rs: ^Raft_Server) -> u64 ---
 
 	/*
 	Get the current Raft cluster config.
@@ -3780,10 +3477,7 @@ foreign lib {
 	@param rs raft server instance
 	@param cluster_config Wrapper for holding ^Raft_Cluster_Config_Ptr
 	*/
-	raft_server_get_config :: proc(
-		rs: ^Raft_Server,
-		cluster_config: ^Raft_Cluster_Config_Ptr,
-	) ---
+	raft_server_get_config :: proc(rs: ^Raft_Server, cluster_config: ^Raft_Cluster_Config_Ptr) ---
 
 	/*
 	Get data center ID of the given server.
@@ -3792,9 +3486,7 @@ foreign lib {
 	@return -1 if given server ID does not exist.
 	         0 if data center ID was not assigned.
 	*/
-	raft_server_get_dc_id :: proc(
-		rs: ^Raft_Server,
-	) -> i32 ---
+	raft_server_get_dc_id :: proc(rs: ^Raft_Server) -> i32 ---
 
 	/*
 	Get auxiliary context stored in the server config.
@@ -3804,10 +3496,7 @@ foreign lib {
 			Any non-null value must be freed by calling `raft_buffer_delete` or
 			transfer ownership.
 	*/
-	raft_server_get_aux :: proc(
-		rs: ^Raft_Server,
-		srv_id: i32,
-	) -> ^Raft_Buffer ---
+	raft_server_get_aux :: proc(rs: ^Raft_Server, srv_id: i32) -> ^Raft_Buffer ---
 
 	/*
 	Get the ID of current leader.
@@ -3815,27 +3504,21 @@ foreign lib {
 	@return Leader ID
 	        -1 if there is no live leader.
 	*/
-	raft_server_get_leader :: proc(
-		rs: ^Raft_Server,
-	) -> i32 ---
+	raft_server_get_leader :: proc(rs: ^Raft_Server) -> i32 ---
 
 	/*
 	Check if this server is leader.
 
 	@return `true` if it is leader.
 	*/
-	raft_server_is_leader :: proc(
-		rs: ^Raft_Server,
-	) -> bool ---
+	raft_server_is_leader :: proc(rs: ^Raft_Server) -> bool ---
 
 	/*
 	Check if there is live leader in the current cluster.
 
 	@return `true` if live leader exists.
 	*/
-	raft_server_is_leader_alive :: proc(
-		rs: ^Raft_Server,
-	) -> bool ---
+	raft_server_is_leader_alive :: proc(rs: ^Raft_Server) -> bool ---
 
 	/*
 	Get the configuration of given server.
@@ -3843,21 +3526,14 @@ foreign lib {
 	@param srv_id Server ID
 	@return Server configuration
 	*/
-	raft_server_get_srv_config :: proc(
-		rs: ^Raft_Server,
-		svr_config: ^Raft_Srv_Config_Ptr,
-		srv_id: i32,
-	) ---
+	raft_server_get_srv_config :: proc(rs: ^Raft_Server, svr_config: ^Raft_Srv_Config_Ptr, srv_id: i32) ---
 
 	/*
 	Get the configuration of all servers.
 
 	@param[out] configs_out Set of server configurations.
 	*/
-	raft_server_get_srv_config_all :: proc(
-		rs: ^Raft_Server,
-		configs_out: ^Raft_Srv_Config_Vec,
-	) ---
+	raft_server_get_srv_config_all :: proc(rs: ^Raft_Server, configs_out: ^Raft_Srv_Config_Vec) ---
 
 	/*
 	Update the server configuration, only leader will accept this operation.
@@ -3872,10 +3548,7 @@ foreign lib {
 	@param new_config Server configuration to update.
 	@return `true` on success, `false` if rejected.
 	*/
-	raft_server_update_srv_config :: proc(
-		rs: ^Raft_Server,
-		new_config: ^Raft_Srv_Config_Ptr,
-	) ---
+	raft_server_update_srv_config :: proc(rs: ^Raft_Server, new_config: ^Raft_Srv_Config_Ptr) ---
 
 	/*
 	Get the peer info of the given ID. Only leader will return peer info.
@@ -3883,61 +3556,42 @@ foreign lib {
 	@param srv_id Server ID
 	@return Peer info
 	*/
-	raft_server_get_peer_info :: proc(
-		rs: ^Raft_Server,
-		srv_id: i32,
-		peer: ^Raft_Server_Peer_Info,
-	) -> bool ---
+	raft_server_get_peer_info :: proc(rs: ^Raft_Server, srv_id: i32, peer: ^Raft_Server_Peer_Info) -> bool ---
 
 	/*
 	Get the info of all peers. Only leader will return peer info.
 
 	@param[out] peers_out vector of peers
 	*/
-	raft_server_get_peer_info_all :: proc(
-		rs: ^Raft_Server,
-		peers_out: ^Raft_Server_Peer_Info_Vec,
-	) ---
+	raft_server_get_peer_info_all :: proc(rs: ^Raft_Server, peers_out: ^Raft_Server_Peer_Info_Vec) ---
 
 	/*
 	Shut down server instance.
 	*/
-	raft_server_shutdown :: proc(
-		rs: ^Raft_Server,
-	) ---
+	raft_server_shutdown :: proc(rs: ^Raft_Server) ---
 
 	/*
 	Start internal background threads, initialize election
 	*/
-	raft_server_start_server :: proc(
-		rs: ^Raft_Server,
-		skip_initial_election_timeout: bool,
-	) ---
+	raft_server_start_server :: proc(rs: ^Raft_Server, skip_initial_election_timeout: bool) ---
 
 	/*
 	Stop background commit thread.
 	*/
-	raft_server_stop_server :: proc(
-		rs: ^Raft_Server,
-	) ---
+	raft_server_stop_server :: proc(rs: ^Raft_Server) ---
 
 	/*
 	Send reconnect request to leader. Leader will re-establish the connection to this server
 	in a few seconds. Only follower will accept this operation.
 	*/
-	raft_server_send_reconnect_request :: proc(
-		rs: ^Raft_Server,
-	) ---
+	raft_server_send_reconnect_request :: proc(rs: ^Raft_Server) ---
 
 	/*
 	Update Raft parameters.
 
 	@param new_params Parameters to set
 	*/
-	raft_server_update_params :: proc(
-		rs: ^Raft_Server,
-		new_params: ^Raft_Params,
-	) ---
+	raft_server_update_params :: proc(rs: ^Raft_Server, new_params: ^Raft_Params) ---
 
 	/*
 	Get the current Raft parameters. Returned instance is the clone of the original one,
@@ -3945,10 +3599,7 @@ foreign lib {
 
 	@return Clone of Raft parameters.
 	*/
-	raft_server_get_current_params :: proc(
-		rs: ^Raft_Server,
-		params: ^Raft_Params,
-	) ---
+	raft_server_get_current_params :: proc(rs: ^Raft_Server, params: ^Raft_Params) ---
 
 	/*
 	Get the counter number of given stat name.
@@ -3956,10 +3607,7 @@ foreign lib {
 	@param name Stat name to retrieve.
 	@return Counter value.
 	*/
-	raft_server_get_stat_counter :: proc(
-		rs: ^Raft_Server,
-		counter: ^Raft_Counter,
-	) -> u64 ---
+	raft_server_get_stat_counter :: proc(rs: ^Raft_Server, counter: ^Raft_Counter) -> u64 ---
 
 	/*
 	Get the gauge number of given stat name.
@@ -3967,10 +3615,7 @@ foreign lib {
 	@param name Stat name to retrieve.
 	@return Gauge value.
 	*/
-	raft_server_get_stat_gauge :: proc(
-		rs: ^Raft_Server,
-		gauge: ^Raft_Gauge,
-	) -> i64 ---
+	raft_server_get_stat_gauge :: proc(rs: ^Raft_Server, gauge: ^Raft_Gauge) -> i64 ---
 
 	/*
 	Get the histogram of given stat name.
@@ -3981,57 +3626,38 @@ foreign lib {
 	@return `true` on success.
 	        `false` if stat does not exist, or is not histogram type.
 	*/
-	raft_server_get_stat_histogram :: proc(
-		rs: ^Raft_Server,
-		histogram: ^Raft_Histogram,
-	) -> bool ---
+	raft_server_get_stat_histogram :: proc(rs: ^Raft_Server, histogram: ^Raft_Histogram) -> bool ---
 
 	/*
 	Reset given stat to zero.
 
 	@param name Stat name to reset.
 	*/
-	raft_server_reset_counter :: proc(
-		rs: ^Raft_Server,
-		counter: ^Raft_Counter,
-	) ---
+	raft_server_reset_counter :: proc(rs: ^Raft_Server, counter: ^Raft_Counter) ---
 
 	/*
 	Reset given stat to zero.
 
 	@param name Stat name to reset.
 	*/
-	raft_server_reset_gauge :: proc(
-		rs: ^Raft_Server,
-		gauge: ^Raft_Gauge,
-	) ---
+	raft_server_reset_gauge :: proc(rs: ^Raft_Server, gauge: ^Raft_Gauge) ---
 
 	/*
 	Reset given stat to zero.
 
 	@param name Stat name to reset.
 	*/
-	raft_server_reset_histogram :: proc(
-		rs: ^Raft_Server,
-		histogram: ^Raft_Histogram,
-	) ---
+	raft_server_reset_histogram :: proc(rs: ^Raft_Server, histogram: ^Raft_Histogram) ---
 
 	/*
 	Reset all existing stats to zero.
 	*/
-	raft_server_reset_all_stats :: proc(
-		rs: ^Raft_Server,
-		histogram: ^Raft_Histogram,
-	) ---
+	raft_server_reset_all_stats :: proc(rs: ^Raft_Server, histogram: ^Raft_Histogram) ---
 
 	/*
 	Set a custom callback function for increasing term.
 	*/
-	raft_server_set_inc_term_func :: proc(
-		rs: ^Raft_Server,
-		user_data: rawptr,
-		handler: Raft_Inc_Term_Handler,
-	) ---
+	raft_server_set_inc_term_func :: proc(rs: ^Raft_Server, user_data: rawptr, handler: Raft_Inc_Term_Handler) ---
 
 	/*
 	Pause the background execution of the state machine. If an operation execution is
@@ -4044,26 +3670,19 @@ foreign lib {
 	                  is a possibility that the state machine execution
 	                  is still happening.
 	*/
-	raft_server_pause_state_machine_execution :: proc(
-		rs: ^Raft_Server,
-		timeout_ms: c.size_t,
-	) ---
+	raft_server_pause_state_machine_execution :: proc(rs: ^Raft_Server, timeout_ms: c.size_t) ---
 
 	/*
 	Resume the background execution of state machine.
 	*/
-	raft_server_resume_state_machine_execution :: proc(
-		rs: ^Raft_Server,
-	) ---
+	raft_server_resume_state_machine_execution :: proc(rs: ^Raft_Server) ---
 
 	/*
 	Check if the state machine execution is paused.
 
 	@return `true` if paused.
 	*/
-	raft_server_is_state_machine_execution_paused :: proc(
-		rs: ^Raft_Server,
-	) -> bool ---
+	raft_server_is_state_machine_execution_paused :: proc(rs: ^Raft_Server) -> bool ---
 
 	/*
 	Block the current thread and wake it up when the state machine execution is paused.
@@ -4072,10 +3691,7 @@ foreign lib {
 	                  even though the state machine is not paused yet.
   	@return `true` if the state machine is paused.
 	*/
-	raft_server_wait_for_state_machine_pause :: proc(
-		rs: ^Raft_Server,
-		timeout_ms: c.size_t,
-	) -> bool ---
+	raft_server_wait_for_state_machine_pause :: proc(rs: ^Raft_Server, timeout_ms: c.size_t) -> bool ---
 
 	/*
 	(Experimental)
@@ -4087,10 +3703,7 @@ foreign lib {
 
 	@param ok `true` if appending succeeded.
 	*/
-	raft_server_notify_log_append_completion :: proc(
-		rs: ^Raft_Server,
-		ok: bool,
-	) ---
+	raft_server_notify_log_append_completion :: proc(rs: ^Raft_Server, ok: bool) ---
 
 	/*
 	Manually create a snapshot based on the latest committed log index of the state machine.
@@ -4106,10 +3719,7 @@ foreign lib {
 
     @return Log index number of the created snapshot or`0` if failed.
 	*/
-	raft_server_create_snapshot :: proc(
-		rs: ^Raft_Server,
-		serialize_commit: bool,
-	) -> u64 ---
+	raft_server_create_snapshot :: proc(rs: ^Raft_Server, serialize_commit: bool) -> u64 ---
 
 	/*
 	Manually and asynchronously create a snapshot on the next earliest available commited
@@ -4122,50 +3732,18 @@ foreign lib {
 	@param `handler` instance.
 		   `nullptr` if there is already a scheduled snapshot creation.
 	*/
-	raft_server_schedule_snapshot_creation :: proc(
-		rs: ^Raft_Server,
-		handler: ^Raft_Async_U64_Ptr,
-	) ---
+	raft_server_schedule_snapshot_creation :: proc(rs: ^Raft_Server, handler: ^Raft_Async_U64_Ptr) ---
 
 	/*
 	Get the log index number of the last snapshot.
 
 	@return Log index number of the last snapshot. `0` if snapshot does not exist.
 	*/
-	raft_server_get_last_snapshot_idx :: proc(
-		rs: ^Raft_Server,
-	) -> u64 ---
+	raft_server_get_last_snapshot_idx :: proc(rs: ^Raft_Server) -> u64 ---
 
-	raft_mdbx_state_mgr_open :: proc(
-		my_srv_config: ^Raft_Srv_Config_Ptr,
-		dir: [^]byte,
-		dir_size: c.size_t,
-		logger: ^Raft_Logger_Ptr,
-		size_lower: c.size_t,
-		size_now: c.size_t,
-		size_upper: c.size_t,
-		growth_step: c.size_t,
-		shirnk_threshold: c.size_t,
-		page_size: c.size_t,
-		flags: u32,
-		mode: u16,
-		log_store: ^Raft_Log_Store_Ptr,
-	) -> ^Raft_State_Mgr_Ptr ---
+	raft_mdbx_state_mgr_open :: proc(my_srv_config: ^Raft_Srv_Config_Ptr, dir: [^]byte, dir_size: c.size_t, logger: ^Raft_Logger_Ptr, size_lower: c.size_t, size_now: c.size_t, size_upper: c.size_t, growth_step: c.size_t, shirnk_threshold: c.size_t, page_size: c.size_t, flags: u32, mode: u16, log_store: ^Raft_Log_Store_Ptr) -> ^Raft_State_Mgr_Ptr ---
 
-	raft_mdbx_log_store_open :: proc(
-		dir: [^]byte,
-		dir_size: c.size_t,
-		logger: ^Raft_Logger_Ptr,
-		size_lower: c.size_t,
-		size_now: c.size_t,
-		size_upper: c.size_t,
-		growth_step: c.size_t,
-		shirnk_threshold: c.size_t,
-		page_size: c.size_t,
-		flags: u32,
-		mode: u16,
-		compact_batch_size: c.size_t,
-	) -> ^Raft_Log_Store_Ptr ---
+	raft_mdbx_log_store_open :: proc(dir: [^]byte, dir_size: c.size_t, logger: ^Raft_Logger_Ptr, size_lower: c.size_t, size_now: c.size_t, size_upper: c.size_t, growth_step: c.size_t, shirnk_threshold: c.size_t, page_size: c.size_t, flags: u32, mode: u16, compact_batch_size: c.size_t) -> ^Raft_Log_Store_Ptr ---
 }
 
 /*
@@ -4216,14 +3794,7 @@ foreign lib {
 	*/
 	us_udp_socket_receive :: proc(s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer) -> c.int ---
 
-	us_udp_buffer_set_packet_payload :: proc(
-		send_buf: ^US_UDP_Packet_Buffer,
-		index: c.int,
-		offset: c.int,
-		payload: [^]byte,
-		length: c.int,
-		peer_addr: cstring,
-	) ---
+	us_udp_buffer_set_packet_payload :: proc(send_buf: ^US_UDP_Packet_Buffer, index: c.int, offset: c.int, payload: [^]byte, length: c.int, peer_addr: cstring) ---
 
 	us_udp_socket_send :: proc(s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer, num: c.int) -> c.int ---
 
@@ -4232,15 +3803,7 @@ foreign lib {
 	*/
 	us_create_udp_packet_buffer :: proc() -> ^US_UDP_Packet_Buffer ---
 
-	us_create_udp_socket :: proc(
-		loop: ^US_Loop,
-		buf: ^US_UDP_Packet_Buffer,
-		data_cb: proc "c" (s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer, index: c.int),
-		drain_cb: proc "c" (s: ^US_UDP_Socket),
-		host: cstring,
-		port: c.ushort,
-		user: rawptr,
-	) -> ^US_UDP_Socket ---
+	us_create_udp_socket :: proc(loop: ^US_Loop, buf: ^US_UDP_Packet_Buffer, data_cb: proc "c" (s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer, index: c.int), drain_cb: proc "c" (s: ^US_UDP_Socket), host: cstring, port: c.ushort, user: rawptr) -> ^US_UDP_Socket ---
 
 	/*
 	This one is ugly, should be ext! not user
@@ -4255,7 +3818,7 @@ foreign lib {
 	/*
 	Create a new high precision, low performance timer. May fail and return null
 	*/
-	us_create_timer :: proc(loop: ^US_Loop, _fallthrough: c.int, ext_size: c.uint) ->  ^US_Timer ---
+	us_create_timer :: proc(loop: ^US_Loop, _fallthrough: c.int, ext_size: c.uint) -> ^US_Timer ---
 
 	/*
 	Returns user data extension for this timer
@@ -4279,29 +3842,14 @@ foreign lib {
 
 	/* Adds SNI domain and cert in asn1 format */
 
-	us_socket_context_add_server_name :: proc(
-		ssl: c.int,
-		ctx: ^US_Socket_Context,
-		hostname_pattern: cstring,
-		options: US_Socket_Context_Options,
-		user: rawptr,
-	) ---
+	us_socket_context_add_server_name :: proc(ssl: c.int, ctx: ^US_Socket_Context, hostname_pattern: cstring, options: US_Socket_Context_Options, user: rawptr) ---
 
 	us_socket_context_remove_server_name :: proc(ssl: c.int, ctx: ^US_Socket_Context, hostname_pattern: cstring) ---
 
-	us_socket_context_on_server_name :: proc(
-		ssl: c.int,
-		ctx: ^US_Socket_Context,
-		cb: proc "c" (c: ^US_Socket_Context),
-		hostname: cstring,
-	) ---
+	us_socket_context_on_server_name :: proc(ssl: c.int, ctx: ^US_Socket_Context, cb: proc "c" (c: ^US_Socket_Context), hostname: cstring) ---
 
 	us_socket_server_name_userdata :: proc(ssl: c.int, s: ^US_Socket) -> rawptr ---
-	us_socket_context_find_server_name_userdata :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-	    hostname_pattern: cstring,
-	) -> rawptr ---
+	us_socket_context_find_server_name_userdata :: proc(ssl: c.int, ctx: ^US_Socket_Context, hostname_pattern: cstring) -> rawptr ---
 
 	/*
 	Returns the underlying SSL native handle, such as SSL_CTX or nullptr
@@ -4311,12 +3859,7 @@ foreign lib {
 	/*
 	A socket context holds shared callbacks and user data extension for associated sockets
 	*/
-	us_create_socket_context :: proc(
-	    ssl: c.int,
-		loop: ^US_Loop,
-		ext_size: c.int,
-		options: US_Socket_Context_Options,
-	) -> ^US_Socket_Context ---
+	us_create_socket_context :: proc(ssl: c.int, loop: ^US_Loop, ext_size: c.int, options: US_Socket_Context_Options) -> ^US_Socket_Context ---
 
 	/*
 	Delete resources allocated at creation time.
@@ -4325,136 +3868,60 @@ foreign lib {
 
 	/* Setters of various async callbacks */
 
-	us_socket_context_on_pre_open :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		on_pre_open: proc "c" (ctx: ^US_Socket_Context, fd: SOCKET) -> SOCKET,
-	) ---
+	us_socket_context_on_pre_open :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_pre_open: proc "c" (ctx: ^US_Socket_Context, fd: SOCKET) -> SOCKET) ---
 
-	us_socket_context_on_open :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		on_open: proc "c" (s: ^US_Socket, is_client: c.int, ip: [^]byte, ip_length: c.int) -> ^US_Socket,
-	) ---
+	us_socket_context_on_open :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_open: proc "c" (s: ^US_Socket, is_client: c.int, ip: [^]byte, ip_length: c.int) -> ^US_Socket) ---
 
-	us_socket_context_on_close :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		on_close: proc "c" (s: ^US_Socket, code: c.int, reason: rawptr) -> ^US_Socket,
-	) ---
+	us_socket_context_on_close :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_close: proc "c" (s: ^US_Socket, code: c.int, reason: rawptr) -> ^US_Socket) ---
 
-	us_socket_context_on_data :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		on_data: proc "c" (s: ^US_Socket, data: [^]byte, length: c.int) -> ^US_Socket,
-	) ---
+	us_socket_context_on_data :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_data: proc "c" (s: ^US_Socket, data: [^]byte, length: c.int) -> ^US_Socket) ---
 
-	us_socket_context_on_writable :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		on_writable: proc "c" (s: ^US_Socket) -> ^US_Socket,
-	) ---
+	us_socket_context_on_writable :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_writable: proc "c" (s: ^US_Socket) -> ^US_Socket) ---
 
-	us_socket_context_on_timeout :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		on_timeout: proc "c" (s: ^US_Socket) -> ^US_Socket,
-	) ---
+	us_socket_context_on_timeout :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_timeout: proc "c" (s: ^US_Socket) -> ^US_Socket) ---
 
-	us_socket_context_on_long_timeout :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		on_timeout: proc "c" (s: ^US_Socket, ctx: ^US_Socket_Context) -> ^US_Socket,
-	) ---
+	us_socket_context_on_long_timeout :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_timeout: proc "c" (s: ^US_Socket, ctx: ^US_Socket_Context) -> ^US_Socket) ---
 
 	/*
 	This one is only used for when a connecting socket fails in a late stage.
 	*/
-	us_socket_context_on_connect_error :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		on_connect_error: proc "c" (s: ^US_Socket, code: c.int) -> ^US_Socket,
-	) ---
+	us_socket_context_on_connect_error :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_connect_error: proc "c" (s: ^US_Socket, code: c.int) -> ^US_Socket) ---
 
 	/*
 	Emitted when a socket has been half-closed
 	*/
-	us_socket_context_on_end :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		on_end: proc "c" (s: ^US_Socket) -> ^US_Socket,
-	) ---
+	us_socket_context_on_end :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_end: proc "c" (s: ^US_Socket) -> ^US_Socket) ---
 
 	/*
 	Returns user data extension for this socket context
 	*/
-	us_socket_context_ext :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-	) -> rawptr ---
+	us_socket_context_ext :: proc(ssl: c.int, ctx: ^US_Socket_Context) -> rawptr ---
 
 	/*
 	Closes all open sockets, including listen sockets. Does not invalidate the socket context.
 	*/
-	us_socket_context_close :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-	) ---
+	us_socket_context_close :: proc(ssl: c.int, ctx: ^US_Socket_Context) ---
 
 	/*
 	Listen for connections. Acts as the main driving cog in a server. Will call set async callbacks.
 	*/
-	us_socket_context_listen :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		host: cstring,
-		port: c.int,
-		options: c.int,
-		socket_ext_size: c.int,
-	) -> ^US_Listen_Socket ---
+	us_socket_context_listen :: proc(ssl: c.int, ctx: ^US_Socket_Context, host: cstring, port: c.int, options: c.int, socket_ext_size: c.int) -> ^US_Listen_Socket ---
 
-	us_socket_context_listen_unix :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		path: cstring,
-		options: c.int,
-		socket_ext_size: c.int,
-	) -> ^US_Listen_Socket ---
+	us_socket_context_listen_unix :: proc(ssl: c.int, ctx: ^US_Socket_Context, path: cstring, options: c.int, socket_ext_size: c.int) -> ^US_Listen_Socket ---
 
 	us_listen_socket_close :: proc(ssl: c.int, ls: ^US_Listen_Socket) ---
 
 	/*
 	Adopt a socket which was accepted either internally, or from another accept() outside libusockets
 	*/
-	us_adopt_accepted_socket :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		client_fd: SOCKET,
-		socket_ext_size: c.uint,
-		addr_ip: [^]byte,
-		addr_ip_length: c.int,
-	) -> ^US_Socket ---
+	us_adopt_accepted_socket :: proc(ssl: c.int, ctx: ^US_Socket_Context, client_fd: SOCKET, socket_ext_size: c.uint, addr_ip: [^]byte, addr_ip_length: c.int) -> ^US_Socket ---
 
 	/*
 	Land in on_open or on_connection_error or return null or return socket
 	*/
-	us_socket_context_connect :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		host: cstring,
-		port: c.int,
-		source_host: cstring,
-		options: c.int,
-		socket_ext_size: c.int,
-	) -> ^US_Socket ---
+	us_socket_context_connect :: proc(ssl: c.int, ctx: ^US_Socket_Context, host: cstring, port: c.int, source_host: cstring, options: c.int, socket_ext_size: c.int) -> ^US_Socket ---
 
-	us_socket_context_connect_unix :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		server_path: cstring,
-		options: c.int,
-		socket_ext_size: c.int,
-	) -> ^US_Socket ---
+	us_socket_context_connect_unix :: proc(ssl: c.int, ctx: ^US_Socket_Context, server_path: cstring, options: c.int, socket_ext_size: c.int) -> ^US_Socket ---
 
 	/*
 	Is this socket established? Can be used to check if a connecting socket has
@@ -4481,12 +3948,7 @@ foreign lib {
 	different socket context. Used mainly for "socket upgrades" such as when
 	transitioning from HTTP to WebSocket.
 	*/
-	us_socket_context_adopt_socket :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		s: ^US_Socket,
-		ext_size: c.int,
-	) -> ^US_Socket ---
+	us_socket_context_adopt_socket :: proc(ssl: c.int, ctx: ^US_Socket_Context, s: ^US_Socket, ext_size: c.int) -> ^US_Socket ---
 
 	/*
 	Create a child socket context which acts much like its own socket context with
@@ -4494,22 +3956,12 @@ foreign lib {
 	resources. Child socket contexts should be used together with socket adoptions
 	and nothing else.
 	*/
-	us_create_child_socket_context :: proc(
-	    ssl: c.int,
-		ctx: ^US_Socket_Context,
-		ctx_ext_size: c.int,
-	) -> ^US_Socket ---
+	us_create_child_socket_context :: proc(ssl: c.int, ctx: ^US_Socket_Context, ctx_ext_size: c.int) -> ^US_Socket ---
 
 	/* Public interfaces for loops */
 
 	/* Returns a new event loop with user data extension */
-	us_create_loop :: proc(
-	    hint: rawptr,
-		wakeup_cb: proc "c" (loop: ^US_Loop),
-		pre_cb: proc "c" (loop: ^US_Loop),
-		post_cb: proc "c" (loop: ^US_Loop),
-		ext_size: c.uint,
-	) -> ^US_Loop ---
+	us_create_loop :: proc(hint: rawptr, wakeup_cb: proc "c" (loop: ^US_Loop), pre_cb: proc "c" (loop: ^US_Loop), post_cb: proc "c" (loop: ^US_Loop), ext_size: c.uint) -> ^US_Loop ---
 
 	/*
 	Frees the loop immediately
@@ -4571,7 +4023,7 @@ foreign lib {
 	/*
 	Return what events we are polling for
 	*/
-	us_poll_events :: proc (p: ^US_Poll) -> c.int ---
+	us_poll_events :: proc(p: ^US_Poll) -> c.int ---
 
 	/*
 	Returns the user data extension of this poll
@@ -4602,142 +4054,84 @@ foreign lib {
 	everything off in one go. Set hint msg_more if you have more immediate data
 	to write.
 	*/
-	us_socket_write :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-		data: [^]byte,
-		length: c.int,
-		msg_more: c.int,
-	) -> c.int ---
+	us_socket_write :: proc(ssl: c.int, s: ^US_Socket, data: [^]byte, length: c.int, msg_more: c.int) -> c.int ---
 
 	/*
 	Special path for non-SSL sockets. Used to send header and payload in
 	one go. Works like us_socket_write.
 	*/
-	us_socket_write2 :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-		header: [^]byte,
-		header_length: c.int,
-		payload: [^]byte,
-		payload_length: c.int,
-	) -> c.int ---
+	us_socket_write2 :: proc(ssl: c.int, s: ^US_Socket, header: [^]byte, header_length: c.int, payload: [^]byte, payload_length: c.int) -> c.int ---
 
 	/*
 	Set a low precision, high performance timer on a socket. A socket can
 	only have one single active timer at any given point in time. Will remove
 	any such pre set timer
 	*/
-	us_socket_timeout :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-		seconds: c.uint,
-	) ---
+	us_socket_timeout :: proc(ssl: c.int, s: ^US_Socket, seconds: c.uint) ---
 
 	/*
 	Set a low precision, high performance timer on a socket. Suitable for
 	per-minute precision.
 	*/
-	us_socket_long_timeout :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-		minutes: c.uint,
-	) ---
+	us_socket_long_timeout :: proc(ssl: c.int, s: ^US_Socket, minutes: c.uint) ---
 
 	/*
 	Return the user data extension of this socket
 	*/
-	us_socket_ext :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-	) -> rawptr ---
+	us_socket_ext :: proc(ssl: c.int, s: ^US_Socket) -> rawptr ---
 
 	/*
 	Return the socket context of this socket
 	*/
-	us_socket_context :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-	) -> ^US_Socket_Context ---
+	us_socket_context :: proc(ssl: c.int, s: ^US_Socket) -> ^US_Socket_Context ---
 
 	/*
 	Withdraw any msg_more status and flush any pending data
 	*/
-	us_socket_flush :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-	) ---
+	us_socket_flush :: proc(ssl: c.int, s: ^US_Socket) ---
 
 	/*
 	Shuts down the connection by sending FIN and/or close_notify
 	*/
-	us_socket_shutdown :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-	) ---
+	us_socket_shutdown :: proc(ssl: c.int, s: ^US_Socket) ---
 
 	/*
 	Shuts down the connection in terms of read, meaning next event loop
 	iteration will catch the socket being closed. Can be used to defer
 	closing to next event loop iteration.
 	*/
-	us_socket_shutdown_read :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-	) ---
+	us_socket_shutdown_read :: proc(ssl: c.int, s: ^US_Socket) ---
 
 	/*
 	Returns whether the socket has been shut down or not
 	*/
-	us_socket_is_shut_down :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-	) -> c.int ---
+	us_socket_is_shut_down :: proc(ssl: c.int, s: ^US_Socket) -> c.int ---
 
 	/*
 	Returns whether this socket has been closed. Only valid if memory
 	has not yet been released.
 	*/
-	us_socket_is_closed :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-	) -> c.int ---
+	us_socket_is_closed :: proc(ssl: c.int, s: ^US_Socket) -> c.int ---
 
 	/*
 	Immediately closes the socket
 	*/
-	us_socket_close :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-		code: c.int,
-		reason: rawptr,
-	) -> ^US_Socket ---
+	us_socket_close :: proc(ssl: c.int, s: ^US_Socket, code: c.int, reason: rawptr) -> ^US_Socket ---
 
 	/*
 	Returns local port or -1 on failure.
 	*/
-	us_socket_local_port :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-	) -> c.int ---
+	us_socket_local_port :: proc(ssl: c.int, s: ^US_Socket) -> c.int ---
 
 	/*
 	Returns remote ephemeral port or -1 on failure.
 	*/
-	us_socket_remote_port :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-	) -> c.int ---
+	us_socket_remote_port :: proc(ssl: c.int, s: ^US_Socket) -> c.int ---
 
 	/*
 	Copy remote (IP) address of socket, or fail with zero length.
 	*/
-	us_socket_remote_address :: proc(
-	    ssl: c.int,
-		s: ^US_Socket,
-		buf: [^]byte,
-		length: ^c.int,
-	) -> c.int ---
+	us_socket_remote_address :: proc(ssl: c.int, s: ^US_Socket, buf: [^]byte, length: ^c.int) -> c.int ---
 }
 
 main :: proc() {

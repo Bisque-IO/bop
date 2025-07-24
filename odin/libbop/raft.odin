@@ -13,7 +13,7 @@ header followed by the actual data payload. The layout is designed to
 allow fast access to metadata (size and position) without needing an
 external structure.
 
-Buffer Memory Layout (in bytes):
+Buffer Memory Layout (in bytes)
 
 +------------+------------+----------------------+
 |   Size     |   Pos      |      Data[...]       |
@@ -102,10 +102,18 @@ Notes:
 Raft_Buffer_Ptr :: struct {}
 
 Raft_Async_U64_Ptr :: struct {}
-Raft_Async_U64_Done :: #type proc "c" (user_data: rawptr, result: u64, err: cstring)
+Raft_Async_U64_Done :: #type proc "c" (
+	user_data: rawptr,
+	result: u64,
+	err: cstring,
+)
 
 Raft_Async_Buffer_Ptr :: struct {}
-Raft_Async_Buffer_Done :: #type proc "c" (user_data: rawptr, result: ^Raft_Buffer, err: cstring)
+Raft_Async_Buffer_Done :: #type proc "c" (
+	user_data: rawptr,
+	result: ^Raft_Buffer,
+	err: cstring,
+)
 
 Raft_Cluster_Config :: struct {}
 Raft_Cluster_Config_Ptr :: struct {}
@@ -143,6 +151,13 @@ Raft_Log_Level_To_Odin_Level: [Raft_Log_Level]runtime.Logger_Level = {
 	.Trace   = .Debug,
 }
 
+Odin_Log_Level_To_Raft_Level: #sparse[runtime.Logger_Level]Raft_Log_Level = {
+	.Fatal   = .Fatal,
+	.Error   = .Error,
+	.Warning = .Warning,
+	.Info    = .Info,
+	.Debug   = .Debug,
+}
 
 /*
 Put a log with level, line number, function name,
@@ -191,7 +206,11 @@ SSL_CTX :: struct {}
 Raft_Asio_Ssl_Ctx_Provider :: #type proc "c" (user_data: rawptr) -> ^SSL_CTX
 Raft_Asio_Worker_Start :: #type proc "c" (user_data: rawptr, value: u32)
 Raft_Asio_Worker_Stop :: #type proc "c" (user_data: rawptr, value: u32)
-Raft_Asio_Verify_Sn :: #type proc "c" (user_data: rawptr, data: [^]byte, size: uintptr) -> bool
+Raft_Asio_Verify_Sn :: #type proc "c" (
+	user_data: rawptr,
+	data: [^]byte,
+	size: uintptr,
+) -> bool
 Raft_Asio_Custom_Resolver_Response :: #type proc "c" (
 	response_impl: rawptr,
 	v1: [^]byte,
@@ -216,74 +235,89 @@ Raft_Asio_Corrupted_Msg_Handler :: #type proc "c" (
 	payload_size: uintptr,
 )
 
-Raft_Delayed_Task :: struct{}
-Raft_Asio_RPC_Listener_Ptr :: struct{}
-Raft_Asio_RPC_Client_Ptr :: struct{}
+Raft_Delayed_Task :: struct {}
+Raft_Asio_RPC_Listener_Ptr :: struct {}
+Raft_Asio_RPC_Client_Ptr :: struct {}
 
 Raft_Asio_Options :: struct {
 	/*
     Number of ASIO worker threads.
     If zero, it will be automatically set to number of cores.
     */
-	thread_pool_size:                      uintptr,
+	thread_pool_size:                     
+	uintptr,
 
 	/*
     Lifecycle callback function on worker thread start.
     */
-	worker_start_user_data:                rawptr,
+	worker_start_user_data:               
+	rawptr,
 
 	/*
     Lifecycle callback function on worker thread start.
     */
-	worker_start:                          Raft_Asio_Worker_Start,
+	worker_start:                         
+	Raft_Asio_Worker_Start,
 
 	/*
     Lifecycle callback function on worker thread start.
     */
-	worker_stop_user_data:                 rawptr,
+	worker_stop_user_data:                
+	rawptr,
 
 	/*
     Lifecycle callback function on worker thread start.
     */
-	worker_stop:                           Raft_Asio_Worker_Stop,
+	worker_stop:                          
+	Raft_Asio_Worker_Stop,
 
 	/*
     If `true`, enable SSL/TLS secure connection.
     */
-	enable_ssl:                            bool,
+	enable_ssl:                           
+	bool,
 
 	/*
     If `true`, skip certificate verification.
     */
-	skip_verification:                     bool,
+	skip_verification:                    
+	bool,
 
 	/*
     Path to server certificate file.
     */
-	server_cert_file:                      cstring,
+	server_cert_file:                     
+	cstring,
 
 	/*
     Path to server key file.
     */
-	server_key_file:                       cstring,
+	server_key_file:                      
+	cstring,
 
 	/*
     Path to root certificate file.
     */
-	root_cert_file:                        cstring,
+	root_cert_file:                       
+	cstring,
 
 	/*
     If `true`, it will invoke `read_req_meta_` even though the received meta is empty.
     */
-	invoke_req_cb_on_empty_meta:           bool,
+	invoke_req_cb_on_empty_meta:          
+	bool,
 
 	/*
     If `true`, it will invoke `read_resp_meta_` even though the received meta is empty.
     */
-	invoke_resp_cb_on_empty_meta:          bool,
-	verify_sn_user_data:                   rawptr,
-	verify_sn:                             Raft_Asio_Verify_Sn,
-	ssl_context_provider_server_user_data: rawptr,
+	invoke_resp_cb_on_empty_meta:         
+	bool,
+	verify_sn_user_data:                  
+	rawptr,
+	verify_sn:                            
+	Raft_Asio_Verify_Sn,
+	ssl_context_provider_server_user_data:
+	rawptr,
 
 	/*
     Callback function that provides pre-configured SSL_CTX.
@@ -296,8 +330,10 @@ Raft_Asio_Options :: struct {
     Note that it might be unsafe to share SSL_CTX with other threads,
     consult with your OpenSSL library documentation/guidelines.
     */
-	ssl_context_provider_server:           Raft_Asio_Ssl_Ctx_Provider,
-	ssl_context_provider_client_user_data: rawptr,
+	ssl_context_provider_server:          
+	Raft_Asio_Ssl_Ctx_Provider,
+	ssl_context_provider_client_user_data:
+	rawptr,
 
 	/*
     Callback function that provides pre-configured SSL_CTX.
@@ -311,8 +347,10 @@ Raft_Asio_Options :: struct {
     share SSL_CTX with other threads, consult with your OpenSSL library
     documentation/guidelines.
     */
-	ssl_context_provider_client:           Raft_Asio_Ssl_Ctx_Provider,
-	custom_resolver_user_data:             rawptr,
+	ssl_context_provider_client:          
+	Raft_Asio_Ssl_Ctx_Provider,
+	custom_resolver_user_data:            
+	rawptr,
 
 	/*
     Custom IP address resolver. If given, it will be invoked
@@ -321,7 +359,8 @@ Raft_Asio_Options :: struct {
     If you want to selectively bypass some hosts, just pass the given
     host and port to the response function as they are.
     */
-	custom_resolver:                       Raft_Asio_Ssl_Ctx_Provider,
+	custom_resolver:                      
+	Raft_Asio_Ssl_Ctx_Provider,
 
 	/*
     If `true`, each log entry will contain timestamp when it was generated
@@ -335,13 +374,15 @@ Raft_Asio_Options :: struct {
     should not be any member running with old version before supporting this
     flag.
     */
-	replicate_log_timestamp:               bool,
+	replicate_log_timestamp:              
+	bool,
 
 	/*
     If `true`, NuRaft will validate the entire message with CRC. Otherwise, it
     validates the header part only.
     */
-	crc_on_entire_message:                 bool,
+	crc_on_entire_message:                
+	bool,
 
 	/*
     If `true`, each log entry will contain a CRC checksum of the entry's
@@ -354,22 +395,26 @@ Raft_Asio_Options :: struct {
     should not be any member running with the old version before supporting
     this flag.
     */
-	crc_on_payload:                        bool,
-	corrupted_msg_handler_user_data:       rawptr,
+	crc_on_payload:                       
+	bool,
+	corrupted_msg_handler_user_data:      
+	rawptr,
 	/*
     Callback function that will be invoked when the received message is corrupted.
 
     The first `buffer` contains the raw binary of message header, and the second `buffer`
     contains the user payload including metadata, if it is not null.
     */
-	corrupted_msg_handler:                 Raft_Asio_Corrupted_Msg_Handler,
+	corrupted_msg_handler:                
+	Raft_Asio_Corrupted_Msg_Handler,
 
 	/*
     If `true`,  NuRaft will use streaming mode, which allows it to send subsequent
     requests without waiting for the response to previous requests. The order of responses
     will be identical to the order of requests.
     */
-	streaming_mode:                        bool,
+	streaming_mode:                       
+	bool,
 }
 
 Raft_Asio_Service_Ptr :: struct {}
@@ -713,9 +758,7 @@ Raft_FSM_Last_Snapshot_Func :: #type proc "c" (
 	user_data: rawptr,
 ) -> ^Raft_Snapshot
 
-Raft_FSM_Last_Commit_Index_Func :: #type proc "c" (
-	user_data: rawptr,
-) -> u64
+Raft_FSM_Last_Commit_Index_Func :: #type proc "c" (user_data: rawptr) -> u64
 
 Raft_FSM_Create_Snapshot_Func :: #type proc "c" (
 	user_data: rawptr,
@@ -725,9 +768,7 @@ Raft_FSM_Create_Snapshot_Func :: #type proc "c" (
 	snp_data_size: uintptr,
 )
 
-Raft_FSM_Chk_Create_Snapshot_Func :: #type proc "c" (
-	user_data: rawptr,
-) -> bool
+Raft_FSM_Chk_Create_Snapshot_Func :: #type proc "c" (user_data: rawptr) -> bool
 
 Raft_FSM_Allow_Leadership_Transfer_Func :: #type proc "c" (
 	user_data: rawptr,
@@ -743,25 +784,25 @@ Raft_FSM_Adjust_Commit_Index_Func :: #type proc "c" (
 )
 
 Raft_FSM_Funcs :: struct {
-	user_data: rawptr,
-	current_conf: ^Raft_Cluster_Config,
-	rollback_conf: ^Raft_Cluster_Config,
-	commit: Raft_FSM_Commit_Func,
-	commit_config: Raft_FSM_Cluster_Config_Func,
-	pre_commit: Raft_FSM_Commit_Func,
-	rollback: Raft_FSM_Rollback_Func,
-	rollback_config: Raft_FSM_Cluster_Config_Func,
+	user_data:                         rawptr,
+	current_conf:                      ^Raft_Cluster_Config,
+	rollback_conf:                     ^Raft_Cluster_Config,
+	commit:                            Raft_FSM_Commit_Func,
+	commit_config:                     Raft_FSM_Cluster_Config_Func,
+	pre_commit:                        Raft_FSM_Commit_Func,
+	rollback:                          Raft_FSM_Rollback_Func,
+	rollback_config:                   Raft_FSM_Cluster_Config_Func,
 	get_next_batch_size_hint_in_bytes: Raft_FSM_Get_Next_Batch_Size_Hint_In_Bytes_Func,
-	save_snapshot: Raft_FSM_Save_Snapshot_Func,
-	apply_snapshot: Raft_FSM_Apply_Snapshot_Func,
-	read_snapshot: Raft_FSM_Read_Snapshot_Func,
-	free_snapshot_user_ctx: Raft_FSM_Free_User_Snapshot_Ctx_Func,
-	last_snapshot: Raft_FSM_Last_Snapshot_Func,
-	last_commit_index: Raft_FSM_Last_Commit_Index_Func,
-	create_snapshot: Raft_FSM_Create_Snapshot_Func,
-	chk_create_snapshot: Raft_FSM_Chk_Create_Snapshot_Func,
-	allow_leadership_transfer: Raft_FSM_Allow_Leadership_Transfer_Func,
-	adjust_commit_index: Raft_FSM_Adjust_Commit_Index_Func,
+	save_snapshot:                     Raft_FSM_Save_Snapshot_Func,
+	apply_snapshot:                    Raft_FSM_Apply_Snapshot_Func,
+	read_snapshot:                     Raft_FSM_Read_Snapshot_Func,
+	free_snapshot_user_ctx:            Raft_FSM_Free_User_Snapshot_Ctx_Func,
+	last_snapshot:                     Raft_FSM_Last_Snapshot_Func,
+	last_commit_index:                 Raft_FSM_Last_Commit_Index_Func,
+	create_snapshot:                   Raft_FSM_Create_Snapshot_Func,
+	chk_create_snapshot:               Raft_FSM_Chk_Create_Snapshot_Func,
+	allow_leadership_transfer:         Raft_FSM_Allow_Leadership_Transfer_Func,
+	adjust_commit_index:               Raft_FSM_Adjust_Commit_Index_Func,
 }
 
 Raft_FSM_Ptr :: struct {}
@@ -778,7 +819,9 @@ Raft_Log_Store_Next_Slot_Func :: #type proc "c" (user_data: rawptr) -> u64
 
 Raft_Log_Store_Start_Index_Func :: #type proc "c" (user_data: rawptr) -> u64
 
-Raft_Log_Store_Last_Entry_Func :: #type proc "c" (user_data: rawptr) -> ^Raft_Log_Entry
+Raft_Log_Store_Last_Entry_Func :: #type proc "c" (
+	user_data: rawptr,
+) -> ^Raft_Log_Entry
 
 Raft_Log_Store_Append_Func :: #type proc "c" (
 	user_data: rawptr,
@@ -787,7 +830,7 @@ Raft_Log_Store_Append_Func :: #type proc "c" (
 	data_size: uintptr,
 	log_timestamp: u64,
 	has_crc32: bool,
-	crc32: u32
+	crc32: u32,
 ) -> u64
 
 Raft_Log_Store_Write_At_Func :: #type proc "c" (
@@ -798,81 +841,91 @@ Raft_Log_Store_Write_At_Func :: #type proc "c" (
 	data_size: uintptr,
 	log_timestamp: u64,
 	has_crc32: bool,
-	crc32: u32
+	crc32: u32,
 )
 
 Raft_Log_Store_End_Of_Append_Batch_Func :: #type proc "c" (
 	user_data: rawptr,
 	start: u64,
-	count: u64
+	count: u64,
 )
 
 Raft_Log_Store_Log_Entries_Func :: #type proc "c" (
 	user_data: rawptr,
 	entries: ^Raft_Log_Entry_Vec,
 	start: u64,
-	end: u64
+	end: u64,
 )
 
 Raft_Log_Store_Entry_At_Func :: #type proc "c" (
 	user_data: rawptr,
-	index: u64
+	index: u64,
 ) -> ^Raft_Log_Entry
 
 Raft_Log_Store_Term_At_Func :: #type proc "c" (
 	user_data: rawptr,
-	index: u64
+	index: u64,
 ) -> u64
 
 Raft_Log_Store_Pack_Func :: #type proc "c" (
 	user_data: rawptr,
 	index: u64,
-	count: i32
+	count: i32,
 ) -> ^Raft_Buffer
 
 Raft_Log_Store_Apply_Pack_Func :: #type proc "c" (
 	user_data: rawptr,
 	index: u64,
-	pack: ^Raft_Buffer
+	pack: ^Raft_Buffer,
 )
 
 Raft_Log_Store_Compact_Func :: #type proc "c" (
 	user_data: rawptr,
-	last_log_index: u64
+	last_log_index: u64,
 ) -> bool
 
 Raft_Log_Store_Compact_Async_Func :: #type proc "c" (
 	user_data: rawptr,
-	last_log_index: u64
+	last_log_index: u64,
 ) -> bool
 
-Raft_Log_Store_Flush_Func :: #type proc "c" (
-	user_data: rawptr
-) -> bool
+Raft_Log_Store_Flush_Func :: #type proc "c" (user_data: rawptr) -> bool
 
 Raft_Log_Store_Last_Durable_Index_Func :: #type proc "c" (
-	user_data: rawptr
+	user_data: rawptr,
 ) -> u64
 
 Raft_Log_Store_Ptr :: struct {}
 
 
-Raft_State_Mgr_Load_Config_Func :: #type proc "c" (user_data: rawptr) -> ^Raft_Cluster_Config
+Raft_State_Mgr_Load_Config_Func :: #type proc "c" (
+	user_data: rawptr,
+) -> ^Raft_Cluster_Config
 
 Raft_State_Mgr_Save_Config_Func :: #type proc "c" (
 	user_data: rawptr,
-	config: ^Raft_Cluster_Config
+	config: ^Raft_Cluster_Config,
 )
 
-Raft_State_Mgr_Read_State_Func :: #type proc "c" (user_data: rawptr) -> ^Raft_Srv_State
+Raft_State_Mgr_Read_State_Func :: #type proc "c" (
+	user_data: rawptr,
+) -> ^Raft_Srv_State
 
-Raft_State_Mgr_Save_State_Func :: #type proc "c" (user_data: rawptr, state: ^Raft_Srv_State)
+Raft_State_Mgr_Save_State_Func :: #type proc "c" (
+	user_data: rawptr,
+	state: ^Raft_Srv_State,
+)
 
-Raft_State_Mgr_Load_Log_Store_Func :: #type proc "c" (user_data: rawptr) -> ^Raft_Log_Store_Ptr
+Raft_State_Mgr_Load_Log_Store_Func :: #type proc "c" (
+	user_data: rawptr,
+) -> ^Raft_Log_Store_Ptr
 
 Raft_State_Mgr_Server_ID_Func :: #type proc "c" (user_data: rawptr) -> i32
 
-Raft_State_Mgr_System_Exit_Func :: #type proc "c" (user_data: rawptr, exit_code: i32)
+Raft_State_Mgr_System_Exit_Func :: #type proc "c" (
+	user_data: rawptr,
+	exit_code: i32,
+)
 
 Raft_State_Mgr_Ptr :: struct {}
 
@@ -884,9 +937,9 @@ Raft_Append_Entries_Ptr :: struct {}
 
 Raft_Server_Peer_Info :: struct {
 	// Peer ID
-	id: i32,
+	id:                i32,
 	// The last log index that the peer has, from this server's point of view.
-	last_log_idx: u64,
+	last_log_idx:      u64,
 	// The elapsed time since the last successful response from this peer, in microseconds.
 	last_succ_resp_us: u64,
 }
@@ -917,63 +970,35 @@ Raft_CB_Type :: enum i32 {
 
 	ctx: pointer to request
 	*/
-	Process_Req = 1,
-
-	Got_Append_Entry_Resp_From_Peer = 2,
-
-	Append_Logs = 3,
-
-	Heartbeat = 4,
-
-	Joined_Cluster = 5,
-
-	Become_Leader = 6,
-
-	Request_Append_Entries = 7,
-
-	Save_Snapshot = 8,
-
-	New_Config = 9,
-
-	Removed_From_Cluster = 10,
-
-	Become_Follower = 11,
-
-	Become_Fresh = 12,
-
-	Become_Stale = 13,
-
+	Process_Req                      = 1,
+	Got_Append_Entry_Resp_From_Peer  = 2,
+	Append_Logs                      = 3,
+	Heartbeat                        = 4,
+	Joined_Cluster                   = 5,
+	Become_Leader                    = 6,
+	Request_Append_Entries           = 7,
+	Save_Snapshot                    = 8,
+	New_Config                       = 9,
+	Removed_From_Cluster             = 10,
+	Become_Follower                  = 11,
+	Become_Fresh                     = 12,
+	Become_Stale                     = 13,
 	Got_Append_Entry_Req_From_Leader = 14,
-
-	Out_Of_Log_Range_Warning = 15,
-
-	Connection_Opened = 16,
-
-	Connection_Closed = 17,
-
-	New_Session_From_Leader = 18,
-
-	State_Machine_Execution = 19,
-
-	Sent_Append_Entries_Req = 20,
-
-	Received_Append_Entries_Req = 21,
-
-	Sent_Append_Entries_Resp = 22,
-
-	Received_Append_Entries_Resp = 23,
-
-	Auto_Adjust_Quorum = 24,
-
-	Server_Join_Failed = 25,
-
-	Snapshot_Creation_Begin = 26,
-
-	Resignation_From_Leader = 27,
-
-	Follower_Lost = 28,
-
-	Received_Misbehaving_Message = 29,
+	Out_Of_Log_Range_Warning         = 15,
+	Connection_Opened                = 16,
+	Connection_Closed                = 17,
+	New_Session_From_Leader          = 18,
+	State_Machine_Execution          = 19,
+	Sent_Append_Entries_Req          = 20,
+	Received_Append_Entries_Req      = 21,
+	Sent_Append_Entries_Resp         = 22,
+	Received_Append_Entries_Resp     = 23,
+	Auto_Adjust_Quorum               = 24,
+	Server_Join_Failed               = 25,
+	Snapshot_Creation_Begin          = 26,
+	Resignation_From_Leader          = 27,
+	Follower_Lost                    = 28,
+	Received_Misbehaving_Message     = 29,
 }
 
 Raft_Inc_Term_Handler :: #type proc "c" (user_data: rawptr) -> u64

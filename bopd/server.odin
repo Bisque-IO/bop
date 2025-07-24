@@ -3,38 +3,38 @@ package bopd
 import bop "../odin/libbop"
 import "base:runtime"
 import c "core:c/libc"
-import "core:strings"
 import "core:fmt"
 import "core:log"
+import "core:strings"
 import "core:sync"
 import "core:time"
 
 import us "../odin/usockets"
 
 Server_Listener_State :: enum {
-	Opened	  = 0,
-	Running   = 1,
-	Stopping  = 2,
-	Stopped   = 3,
+	Opened   = 0,
+	Running  = 1,
+	Stopping = 2,
+	Stopped  = 3,
 }
 
 /*
 
 */
 Server_Listener :: struct {
-	mu:				sync.Mutex,
-	allocator: 		runtime.Allocator,
-	host: 			string,
-	port: 			u16,
-	loop: 			^us.Loop,
+	mu:             sync.Mutex,
+	allocator:      runtime.Allocator,
+	host:           string,
+	port:           u16,
+	loop:           ^us.Loop,
 	socket_context: ^us.Socket_Context,
 	listen_socket:  ^us.Listen_Socket,
-	ctx: 			runtime.Context,
-	ssl_options: 	us.Socket_Context_Options,
-	state:			Server_Listener_State,
-	ssl: 			c.int,
-	sockets_mu:		sync.RW_Mutex,
-	sockets:		map[uintptr]^Server_Socket
+	ctx:            runtime.Context,
+	ssl_options:    us.Socket_Context_Options,
+	state:          Server_Listener_State,
+	ssl:            c.int,
+	sockets_mu:     sync.RW_Mutex,
+	sockets:        map[uintptr]^Server_Socket,
 }
 
 Server_Context :: struct {
@@ -49,7 +49,7 @@ Server_Socket :: struct {
 }
 
 server_on_wakeup :: proc "c" (loop: ^us.Loop) {
-//	log.debug("server_on_wakeup")
+	//	log.debug("server_on_wakeup")
 }
 
 server_on_pre :: proc "c" (loop: ^us.Loop) {}
@@ -80,13 +80,13 @@ server_on_writeable :: proc($SSL: c.int, s: ^us.Socket) -> ^us.Socket {
 	)
 
 	// Stream whatever is remaining of the response
-//	socket.offset += us.socket_write(
-//		SSL,
-//		s,
-//		raw_data(socket_context.response[socket.offset:]),
-//		c.int(int(len(socket_context.response)) - int(socket.offset)),
-//		0,
-//	)
+	//	socket.offset += us.socket_write(
+	//		SSL,
+	//		s,
+	//		raw_data(socket_context.response[socket.offset:]),
+	//		c.int(int(len(socket_context.response)) - int(socket.offset)),
+	//		0,
+	//	)
 
 	return s
 }
@@ -187,17 +187,17 @@ server_on_data :: proc(
 	fmt.println(string(data[0:int(length)]))
 
 
-//	log.debugf("on_data: %s", string(data[:length]))
+	//	log.debugf("on_data: %s", string(data[:length]))
 
 
 	// We treat all data events as a request
-//	client_socket.offset = us.socket_write(
-//		SSL,
-//		s,
-//		raw_data(socket_context.response),
-//		c.int(len(socket_context.response)),
-//		0,
-//	)
+	//	client_socket.offset = us.socket_write(
+	//		SSL,
+	//		s,
+	//		raw_data(socket_context.response),
+	//		c.int(len(socket_context.response)),
+	//		0,
+	//	)
 
 	// Reset idle timer
 	us.socket_timeout(SSL, s, 30)
@@ -287,10 +287,10 @@ listener_state :: proc(listener: ^Server_Listener) -> Server_Listener_State {
 }
 
 Listener_Make_Error_Code :: enum {
-	Success      = 0,
-	Create_Loop  = 1,
-	SSL			 = 2,
-	Port_Taken	 = 3,
+	Success     = 0,
+	Create_Loop = 1,
+	SSL         = 2,
+	Port_Taken  = 3,
 }
 
 Listener_Make_Error :: union #shared_nil {
@@ -310,12 +310,18 @@ listener_make :: proc(
 	listener: ^Server_Listener,
 	err: Listener_Make_Error,
 ) {
-	loop := us.create_loop(nil, server_on_wakeup, server_on_pre, server_on_post, 0)
+	loop := us.create_loop(
+		nil,
+		server_on_wakeup,
+		server_on_pre,
+		server_on_post,
+		0,
+	)
 	if loop == nil {
 		return nil, Listener_Make_Error_Code.Create_Loop
 	}
 
-	SSL : c.int = 1 if len(ssl_options.cert_file_name) > 0 else 0
+	SSL: c.int = 1 if len(ssl_options.cert_file_name) > 0 else 0
 
 	// create socket context
 	socket_context := us.create_socket_context(
@@ -331,22 +337,43 @@ listener_make :: proc(
 	}
 
 	// init server context on the socket context
-	server_context := cast(^Server_Context)us.socket_context_ext(SSL, socket_context)
+	server_context := cast(^Server_Context)us.socket_context_ext(
+		SSL,
+		socket_context,
+	)
 	server_context^ = Server_Context{}
 
 	// wire callbacks
-	us.socket_context_on_open(SSL, socket_context,
-		server_on_open_ssl if SSL == 1 else server_on_open_nossl)
-	us.socket_context_on_data(SSL, socket_context,
-		server_on_data_ssl if SSL == 1 else server_on_data_nossl)
-	us.socket_context_on_writable(SSL, socket_context,
-		server_on_writeable_ssl if SSL == 1 else server_on_writeable_nossl)
-	us.socket_context_on_close(SSL, socket_context,
-		server_on_close_ssl if SSL == 1 else server_on_close_nossl)
-	us.socket_context_on_timeout(SSL, socket_context,
-		server_on_timeout_ssl if SSL == 1 else server_on_timeout_nossl)
-	us.socket_context_on_end(SSL, socket_context,
-		server_on_end_ssl if SSL == 1 else server_on_end_nossl)
+	us.socket_context_on_open(
+		SSL,
+		socket_context,
+		server_on_open_ssl if SSL == 1 else server_on_open_nossl,
+	)
+	us.socket_context_on_data(
+		SSL,
+		socket_context,
+		server_on_data_ssl if SSL == 1 else server_on_data_nossl,
+	)
+	us.socket_context_on_writable(
+		SSL,
+		socket_context,
+		server_on_writeable_ssl if SSL == 1 else server_on_writeable_nossl,
+	)
+	us.socket_context_on_close(
+		SSL,
+		socket_context,
+		server_on_close_ssl if SSL == 1 else server_on_close_nossl,
+	)
+	us.socket_context_on_timeout(
+		SSL,
+		socket_context,
+		server_on_timeout_ssl if SSL == 1 else server_on_timeout_nossl,
+	)
+	us.socket_context_on_end(
+		SSL,
+		socket_context,
+		server_on_end_ssl if SSL == 1 else server_on_end_nossl,
+	)
 
 	// create listener socket and start listening
 	listen_socket := us.socket_context_listen(
@@ -355,7 +382,7 @@ listener_make :: proc(
 		host,
 		c.int(port),
 		0,
-		c.int(size_of(Server_Socket))
+		c.int(size_of(Server_Socket)),
 	)
 	if listen_socket != nil {
 		log.infof("listening on port %d", port)
@@ -483,7 +510,10 @@ supplied timeout elapses.
 
 @return true if deleted or false if timed out
 */
-listener_delete_with_timeout :: proc(listener: ^Server_Listener, duration: time.Duration) -> bool {
+listener_delete_with_timeout :: proc(
+	listener: ^Server_Listener,
+	duration: time.Duration,
+) -> bool {
 	if listener == nil {
 		return true
 	}
@@ -491,14 +521,14 @@ listener_delete_with_timeout :: proc(listener: ^Server_Listener, duration: time.
 	if duration > 0 {
 		start := time.tick_now()
 		for !listener_stop(listener) {
-			time.sleep(time.Millisecond*100)
+			time.sleep(time.Millisecond * 100)
 			if time.tick_diff(start, time.tick_now()) >= duration {
 				return false
 			}
 		}
 	} else {
 		for !listener_stop(listener) {
-			time.sleep(time.Millisecond*100)
+			time.sleep(time.Millisecond * 100)
 		}
 	}
 

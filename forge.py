@@ -414,6 +414,7 @@ def build(args: List[str]):
     warnings_as_errors = False
     microarch = ""
     no_cmt = False
+    no_strip = False
 
     for arg in args:
         if arg == "-h" or arg == "-help":
@@ -425,6 +426,9 @@ def build(args: List[str]):
         if arg == "-release":
             release = True
             opt = "aggressive"
+            continue
+        if arg == "-no-strip":
+            no_strip = True
             continue
         if arg == "-openssl":
             openssl = True
@@ -608,6 +612,8 @@ def build(args: List[str]):
         cmd += ["-linker:lld"]
         cmd += ["-show-timings"]
         linker_flags = "-rdynamic"
+        if not no_strip:
+            linker_flags += " -Wl,--strip-all"
         if static_exe:
             linker_flags += " -static"
         cmd += [f"-extra-linker-flags:\"{linker_flags}\""]
@@ -926,6 +932,27 @@ def wolfssl_build(args: List[str]):
     print("only nix systems are supported")
     sys.exit(-1)
     # xmake f -v -p cross -a arm64 --cross=aarch64-linux-gnu-
+
+"""
+rustup target add \
+    s390x-unknown-linux-gnu \
+    riscv64gc-unknown-linux-gnu \
+    aarch64-unknown-linux-gnu
+
+sudo apt install \
+    gcc-s390x-linux-gnu \
+    gcc-riscv64-linux-gnu \
+    gcc-aarch64-linux-gnu
+
+sudo apt install qemu-user
+
+cargo build -p wasmtime-c-api --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads"
+cargo build -p wasmtime-c-api --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads" --target aarch64-unknown-linux-gnu
+cargo build -p wasmtime-c-api --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads" --target riscv64gc-unknown-linux-gnu
+cargo build -p wasmtime-cli --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads,wat,parallel-compilation,cranelift,winch,compile,objdump,pulley,clap/default,clap/wrap_help"
+cargo build -p wasmtime-cli --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads,wat,parallel-compilation,cranelift,winch,compile,objdump,pulley,clap/default,clap/wrap_help" --target aarch64-unknown-linux-gnu
+cargo build -p wasmtime-cli --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads,wat,parallel-compilation,cranelift,winch,compile,objdump,pulley,clap/default,clap/wrap_help" --target riscv64gc-unknown-linux-gnu
+"""
 
 def main():
     if len(sys.argv) < 2:
