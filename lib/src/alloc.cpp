@@ -17,11 +17,11 @@
 extern "C" {
 #endif
 BOP_API void *bop_alloc(size_t size) {
-    return snmalloc::ThreadAlloc::get().alloc<snmalloc::ZeroMem::NoZero>(size);
+    return snmalloc::ThreadAlloc::get().alloc<snmalloc::Uninit>(size);
 }
 
 BOP_API void *bop_zalloc(size_t size) {
-    return snmalloc::ThreadAlloc::get().alloc<snmalloc::ZeroMem::YesZero>(size);
+    return snmalloc::ThreadAlloc::get().alloc<snmalloc::Zero>(size);
 }
 
 BOP_API void *bop_calloc(size_t element_size, size_t count) {

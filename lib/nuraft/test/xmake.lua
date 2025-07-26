@@ -8,62 +8,95 @@ function add_nuraft_target(name, src, is_test)
         target_name = "nuraft-" .. name
     end
     target(target_name)
-        set_kind("binary")
-        set_languages("c++23")
-        add_cxflags("-O3")
-        set_optimize("aggressive")
-        --add_toolchains("@llvm")
+    set_kind("binary")
+    set_languages("c++23")
+    add_cxflags("-O3")
+    set_optimize("aggressive")
+    -- add_toolchains("@llvm")
+    -- add_languages("c++20")
 
-        if is_plat("windows") then
-            add_syslinks("onecore", "Synchronization", "msvcrt")
-        end
+    if is_plat("windows") then
+        add_defines("_WIN32_WINNT=0x0602")
+        -- add_cxflags("/MT")
+        add_defines("NOMINMAX")
+        add_defines("WIN32_LEAN_AND_MEAN")
+        add_syslinks("ntdll", "shell32", "advapi32", "user32", "ws2_32")
+        add_cxflags("/Zc:preprocessor", "/experimental:c11atomics")
+        -- add_syslinks("onecore", "Synchronization", "msvcrt", "ws2_32")
+    end
 
-        add_includedirs(
-            nuraft_dir .. "bench",
-            nuraft_dir .. "examples",
-            nuraft_dir .. "examples/calculator",
-            nuraft_dir .. "examples/echo",
-            nuraft_dir .. "include",
-            nuraft_dir .. "include/libnuraft",
-            nuraft_dir .. "test",
-            nuraft_dir .. "test/asio",
-            nuraft_dir .. "test/unit",
-            nuraft_dir
-        )
-        set_default(true)
-        --add_deps("snmalloc")
-        --add_deps("nuraft")
-        add_packages("boost")
-        add_files(nuraft_dir .. "*.cxx")
-        add_files(src)
+    add_includedirs(
+        nuraft_dir .. "bench",
+        nuraft_dir .. "examples",
+        nuraft_dir .. "examples/calculator",
+        nuraft_dir .. "examples/echo",
+        nuraft_dir .. "include",
+        nuraft_dir .. "include/libnuraft",
+        nuraft_dir .. "test",
+        nuraft_dir .. "test/asio",
+        nuraft_dir .. "test/unit",
+        nuraft_dir
+    )
+    set_default(true)
+    --add_deps("snmalloc")
+    --add_deps("nuraft")
+    add_files(nuraft_dir .. "*.cxx")
+    add_files(src)
 
-        --add_defines("USE_BOOST_ASIO=1")
-        add_includedirs("../../asio")
+    add_defines(
+        "ASIO_STANDALONE=1",
+        "ASIO_USE_WOLFSSL=1",
+        "BOOST_ASIO_USE_WOLFSSL=1",
+        "HAVE_WOLFSSL_ASIO=1"
+    )
 
-        if is_plat("linux") then
-            -- add_defines("ASIO_HAS_IO_URING", "ASIO_DISABLE_EPOLL", "BOOST_ASIO_HAS_IO_URING", "BOOST_ASIO_DISABLE_EPOLL")
-            add_packages("libaio", "liburing")
-        end
+    add_includedirs(os.projectdir() .. "/lib/wolfssl", os.projectdir() .. "/lib/wolfssl/wolfssl", { public = true })
 
+    if is_plat("linux") and is_arch("x86_64") then
+        add_links(os.projectdir() .. "/odin/libbop/linux/amd64/libwolfssl.a")
+    elseif is_plat("linux") and is_arch("arm64", "aarch64") then
+        add_links(os.projectdir() .. "/odin/libbop/linux/arm64/libwolfssl.a")
+    elseif is_plat("linux") and is_arch("riscv64") then
+        add_links(os.projectdir() .. "/odin/libbop/linux/riscv64/libwolfssl.a")
+    elseif is_plat("macosx", "macos", "darwin") and is_arch("x86_64") then
+        add_links(os.projectdir() .. "/odin/libbop/macos/amd64/libwolfssl.a")
+    elseif is_plat("macosx", "macos", "darwin") and is_arch("arm64", "aarch64") then
+        add_links(os.projectdir() .. "/odin/libbop/macos/arm64/libwolfssl.a")
+    elseif is_plat("windows", "mingw") and is_arch("x64", "x86_64") then
+        add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
+    end
 
-       add_defines(
-           "SNMALLOC_ENABLE_WAIT_ON_ADDRESS=1",
-           "SNMALLOC_USE_WAIT_ON_ADDRESS=1",
-   --         "SNMALLOC_NO_UNIQUE_ADDRESS=1",
-           "SNMALLOC_STATIC_LIBRARY=1"
-       )
-       add_includedirs("../../snmalloc/src")
-       add_files("../../snmalloc/src/snmalloc/override/new.cc")
+    --add_defines("USE_BOOST_ASIO=1")
+    add_includedirs("../../asio")
 
-        -- add_defines("USE_BOOST_ASIO")
-        add_packages("openssl3")
-        set_configdir("$(builddir)/$(plat)/$(arch)/$(mode)")
-        add_configfiles(nuraft_dir .. "test/cert.pem", {onlycopy = true})
-        add_configfiles(nuraft_dir .. "test/key.pem", {onlycopy = true})
+    if is_plat("linux") then
+        -- add_defines("ASIO_HAS_IO_URING", "ASIO_DISABLE_EPOLL", "BOOST_ASIO_HAS_IO_URING", "BOOST_ASIO_DISABLE_EPOLL")
+        add_packages("libaio", "liburing")
+    end
 
-        if is_test then
-            add_tests("default")
-        end
+    if not is_plat("windows") and is_arch("x86_64") then
+        add_cxflags("-mcx16")
+    end
+
+    add_defines(
+        "SNMALLOC_ENABLE_WAIT_ON_ADDRESS=1",
+        "SNMALLOC_USE_WAIT_ON_ADDRESS=1",
+        --         "SNMALLOC_NO_UNIQUE_ADDRESS=1",
+        "SNMALLOC_STATIC_LIBRARY=1"
+    )
+    add_includedirs("../../snmalloc/src")
+    add_files("../../snmalloc/src/snmalloc/override/new.cc")
+
+    -- add_defines("USE_BOOST_ASIO")
+    -- add_packages("boost")
+    -- add_packages("openssl3")
+    set_configdir("$(builddir)/$(plat)/$(arch)/$(mode)")
+    add_configfiles(nuraft_dir .. "test/cert.pem", { onlycopy = true })
+    add_configfiles(nuraft_dir .. "test/key.pem", { onlycopy = true })
+
+    if is_test then
+        add_tests("default")
+    end
     target_end()
 end
 

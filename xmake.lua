@@ -167,38 +167,28 @@ end
 add_requires("zig ~0.14.0")
 
 if is_plat("windows") then
-    -- add_requires("openssl3 ~3.3.2", {
-    add_requires("conan::openssl/3.5.0", {
+    add_requires("openssl3 ~3.3.2", {
+        -- add_requires("conan::openssl/3.5.0", {
         alias = "openssl3",
         configs = {
             fPIC = true,
             shared = true
         }
     })
+    -- else
+    --     add_requires("conan::openssl/3.5.0", {
+    --         alias = "openssl3",
+    --         configs = {
+    --             fPIC = true,
+    --             shared = true
+    --         }
+    --     })
 end
 
 -- add_requires("conan::boost/1.88.0", {
+-- add_requires("boost ~1.88.0", {
 --     alias = "boost",
 --     configs = {
---         asio = true,
---         charconv = true,
---         chrono = true,
---         cobalt = false,
---         container = true,
---         coroutine = true,
---         date_time = false,
---         headers = true,
---         json = false,
---         random = false,
---         regex = true,
---         stacktrace = false,
---         system = true,
---         thread = false,
---         timer = false,
---         test = false,
---         url = true,
---         zlib = true,
---         zstd = true,
 --         header_only = true
 --     }
 -- })

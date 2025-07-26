@@ -1,5 +1,7 @@
 package wasmtime
 
+import c "core:c/libc"
+
 when ODIN_OS == .Linux && ODIN_ARCH == .amd64 {
     foreign import wasmtimelib {
         "lib/linux_amd64/libwasmtime.a",
@@ -270,6 +272,8 @@ wasmtime_module :: distinct rawptr
 
 wasmtime_store :: distinct rawptr
 
+wasmtime_store_t :: struct {}
+
 wasmtime_context :: distinct rawptr
 
 wasmtime_func_t :: struct {
@@ -381,8 +385,19 @@ wasmtime_val_raw_t :: struct #raw_union {
 }
 wasmtime_val_raw :: ^wasmtime_val_raw_t
 
+wasmtime_tls_state_t :: struct {
+    tls: rawptr,
+    stack_limit: c.size_t,
+}
+
 @(default_calling_convention = "c")
 foreign wasmtimelib {
+    wasmtime_tls_init :: proc() ---
+
+    wasmtime_tls_save :: proc(store: ^wasmtime_store_t, state: ^wasmtime_tls_state_t) ---
+
+    wasmtime_tls_restore :: proc(store: ^wasmtime_store_t, state: ^wasmtime_tls_state_t) ---
+
     wasmtime_tls_get :: proc() -> rawptr ---
 
 	wasm_byte_vec_new_empty :: proc(out: wasm_byte_vec) ---

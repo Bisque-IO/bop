@@ -1,8 +1,8 @@
 Raft Examples
 ---------
 
-* [Replicated Calculator](calculator)
-* [Echo Server](echo)
+* [Replicated Calculator](./calculator)
+* [Echo Server](./echo)
 
 Common Files
 -----

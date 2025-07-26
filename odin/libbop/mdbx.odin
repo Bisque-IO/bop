@@ -16,12 +16,7 @@ MDBX_Txn :: struct {}
 
 MDBX_Val :: IO_Vec
 
-MDBX_Assert_Func :: #type proc "c" (
-	env: ^MDBX_Env,
-	msg: cstring,
-	function: cstring,
-	line: u32,
-)
+MDBX_Assert_Func :: #type proc "c" (env: ^MDBX_Env, msg: cstring, function: cstring, line: u32)
 
 /*
 Callback function for enumerating user-defined named tables.
@@ -50,12 +45,7 @@ MDBX_Table_Enum_Func :: #type proc "c" (
 	dbi: MDBX_DBI,
 ) -> MDBX_Error
 
-MDBX_Preserve_Func :: #type proc "c" (
-	ctx: rawptr,
-	target: ^MDBX_Val,
-	src: [^]byte,
-	bytes: uintptr,
-) -> MDBX_Error
+MDBX_Preserve_Func :: #type proc "c" (ctx: rawptr, target: ^MDBX_Val, src: [^]byte, bytes: uintptr) -> MDBX_Error
 
 /*
 The type of predictive callback functions used by
@@ -86,11 +76,7 @@ as the result from the functions @ref mdbx_cursor_scan() or
 @see mdbx_cursor_scan()
 @see mdbx_cursor_scan_from()
 */
-MDBX_Predicate_Func :: #type proc "c" (
-	ctx: rawptr,
-	key, value: ^MDBX_Val,
-	arg: rawptr,
-) -> MDBX_Error
+MDBX_Predicate_Func :: #type proc "c" (ctx: rawptr, key, value: ^MDBX_Val, arg: rawptr) -> MDBX_Error
 
 /*
 A callback function used to enumerate the reader lock table.
@@ -701,9 +687,7 @@ MDBX_Txn_Flags :: enum u32 {
 	preallocate memory and assign a reader slot, thus avoiding these operations
 	at the next start of the transaction.
 	*/
-	Read_Only_Prepare = u32(
-		MDBX_Env_Flags.Read_Only | MDBX_Env_Flags.No_Mem_Init,
-	),
+	Read_Only_Prepare = u32(MDBX_Env_Flags.Read_Only | MDBX_Env_Flags.No_Mem_Init),
 
 	/*
 	Do not block when starting a write transaction.
@@ -1744,44 +1728,37 @@ MDBX_Stat :: struct {
 	/*
 	Size of a table page. This is the same for all tables in a database.
 	*/
-	psize:         
-	u32,
+	psize:          u32,
 
 	/*
 	Depth (height) of the B-tree
 	*/
-	depth:         
-	u32,
+	depth:          u32,
 
 	/*
 	Number of internal (non-leaf) pages
 	*/
-	branch_pages:  
-	u64,
+	branch_pages:   u64,
 
 	/*
 	Number of leaf pages
 	*/
-	leaf_pages:    
-	u64,
+	leaf_pages:     u64,
 
 	/*
 	Number of large/overflow pages
 	*/
-	overflow_pages:
-	u64,
+	overflow_pages: u64,
 
 	/*
 	Number of data items
 	*/
-	entries:       
-	u64,
+	entries:        u64,
 
 	/*
 	Transaction ID of committed last modification
 	*/
-	mod_txnid:     
-	u64,
+	mod_txnid:      u64,
 }
 
 MDBX_Env_Info :: struct {
@@ -2072,52 +2049,44 @@ MDBX_Commit_Latency :: struct {
 	Duration of preparation (commit child transactions, update
 	table's records and cursors destroying).
 	*/
-	preparation:  
-	u32,
+	preparation:   u32,
 
 	/*
 	Duration of GC update by wall clock.
 	*/
-	gc_wall_clock:
-	u32,
+	gc_wall_clock: u32,
 
 	/*
 	Duration of internal audit if enabled.
 	*/
-	audit:        
-	u32,
+	audit:         u32,
 
 	/*
 	Duration of writing dirty/modified data pages to a filesystem,
     i.e. the summary duration of a `write()` syscalls during commit.
     */
-	write:        
-	u32,
+	write:         u32,
 
 	/*
 	Duration of syncing written data to the disk/storage, i.e.
 	the duration of a `fdatasync()` or a `msync()` syscall during commit.
 	*/
-	sync:         
-	u32,
+	sync:          u32,
 
 	/*
 	Duration of transaction ending (releasing resources).
 	*/
-	ending:       
-	u32,
+	ending:        u32,
 
 	/*
 	The total duration of a commit.
 	*/
-	whole:        
-	u32,
+	whole:         u32,
 
 	/*
 	User-mode CPU time spent on GC update.
 	*/
-	gc_cpu_time:  
-	u32,
+	gc_cpu_time:   u32,
 
 	/*
 	Information for profiling GC work. @note Statistics are common for all
@@ -2128,126 +2097,107 @@ MDBX_Commit_Latency :: struct {
 	simultaneously reset when top-level transactions (not nested) are
 	completed.
 	*/
-	gc_prof:      
-	struct
-	{
+	gc_prof:       struct {
 		/*
 		Number of GC update iterations, greater than 1 if there
 		were retries/restarts.
 	 	*/
-		wloops:              
-		u32,
+		wloops:               u32,
 
 		/*
 		Number of GC record merge iterations.
 		*/
-		coalescences:        
-		u32,
+		coalescences:         u32,
 
 		/*
 		The number of previous reliable/stable commit points destroyed
 		when operating in @ref MDBX_UTTERLY_NOSYNC mode.
     	*/
-		wipes:               
-		u32,
+		wipes:                u32,
 
 		/*
 		The number of forced commits to disk to avoid database growth when
 		working outside the mode
 		@ref MDBX_UTTERLY_NOSYNC.
 		*/
-		flushes:             
-		u32,
+		flushes:              u32,
 
 		/*
 		Number of calls to the Handle-Slow-Readers mechanism to avoid
 		database growth.
 		@see MDBX_hsr_func
 		*/
-		kicks:               
-		u32,
+		kicks:                u32,
 
 		/*
 		Slow path execution count of GC for user data.
         */
-		work_counter:        
-		u32,
+		work_counter:         u32,
 
 		/*
 		The "wall clock" time spent reading and searching within the GC for
 		user data.
         */
-		work_rtime_monotonic:
-		u32,
+		work_rtime_monotonic: u32,
 
 		/*
 		CPU time in user mode spent preparing pages fetched from the GC for
 		user data, including swapping from disk.
         */
-		work_xtime_cpu:      
-		u32,
+		work_xtime_cpu:       u32,
 
 		/*
 		The number of iterations of search inside the GC when allocating
 		pages for user data.
         */
-		work_rsteps:         
-		u32,
+		work_rsteps:          u32,
 
 		/*
 		The number of requests to allocate page sequences for user data.
         */
-		work_xpages:         
-		u32,
+		work_xpages:          u32,
 
 		/*
 		The number of page faults within the GC when allocating and preparing pages
 		for user data.
         */
-		work_majflt:         
-		u32,
+		work_majflt:          u32,
 
 		/*
 		The slow path execution count of the GC for the purposes of maintaining
 		and updating the GC itself.
 		*/
-		self_counter:        
-		u32,
+		self_counter:         u32,
 
 		/*
 		The "wall clock" time spent reading and searching within the GC for the
 		purposes of maintaining and updating the GC itself.
         */
-		self_rtime_monotonic:
-		u32,
+		self_rtime_monotonic: u32,
 
 		/*
 		CPU time in user mode spent preparing pages fetched from the GC for the
 		purpose of maintaining and updating the GC itself, including swapping
 		from disk.
         */
-		self_xtime_cpu:      
-		u32,
+		self_xtime_cpu:       u32,
 
 		/*
 		The number of iterations of searches inside the GC when allocating pages
 		for the purposes of maintaining and updating the GC itself.
         */
-		self_rsteps:         
-		u32,
+		self_rsteps:          u32,
 
 		/*
 		The number of requests to allocate page sequences for the GC itself.
         */
-		self_xpages:         
-		u32,
+		self_xpages:          u32,
 
 		/*
 		The number of page faults inside the GC when allocating and preparing
 		pages for the GC itself.
 		*/
-		self_majflt:         
-		u32,
+		self_majflt:          u32,
 	},
 }
 

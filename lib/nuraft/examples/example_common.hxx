@@ -163,7 +163,7 @@ void init_raft(ptr<state_machine> sm_instance) {
 
     // ASIO options.
     asio_service::options asio_opt;
-    asio_opt.thread_pool_size_ = 1;
+    asio_opt.thread_pool_size_ = 4;
 
     // Raft parameters.
     raft_params params;
@@ -177,8 +177,6 @@ void init_raft(ptr<state_machine> sm_instance) {
     params.heart_beat_interval_ = 100;
     params.election_timeout_lower_bound_ = 200;
     params.election_timeout_upper_bound_ = 400;
-    params.auto_forwarding_ = true;
-    params.auto_forwarding_max_connections_ = 10;
 #endif
     // Upto 5 logs will be preserved ahead the last snapshot.
     params.reserved_log_items_ = 5;

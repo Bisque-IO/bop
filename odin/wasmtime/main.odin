@@ -14,7 +14,7 @@ main :: proc() {
     wasmtime_config_epoch_interruption_set(config, true)
     wasmtime_config_debug_info_set(config, true)
 
-    wasmtime_tls_get()
+    wasmtime_tls_init()
 
 
     engine := wasm_engine_new_with_config(config)

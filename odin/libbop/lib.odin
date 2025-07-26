@@ -23,14 +23,22 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 		MSVCRT_NAME :: "system:msvcrt.lib"
 	}
 
-	foreign import lib {//	    "windows/amd64/libcrypto_static.lib",
-	//	    "windows/amd64/libssl_static.lib",
-	"windows/amd64/iwasm.lib", "windows/amd64/wolfssl.lib", "system:Kernel32.lib", "system:User32.lib", "system:Advapi32.lib", "system:ntdll.lib", "system:onecore.lib", "system:Synchronization.lib", "system:Dbghelp.lib", "system:ws2_32.lib", "system:bcrypt.lib", //		"windows/amd64/libcrypto.a",//		"windows/amd64/libssl.a",//		"system:libcmt.lib",
-	//		"system:psapi.lib",
-	//		"system:iphlpapi.lib",
-	//		"system:ole32.lib",
-	//		"system:shell32.lib",
-	MSVCRT_NAME, LIB_PATH} //		"system:uuid.lib",//		"system:ucrt.lib",
+	@(extra_linker_flags="/NODEFAULTLIB:libcmt")
+	foreign import lib {
+	    "windows/amd64/iwasm.lib",
+		"windows/amd64/wolfssl.lib",
+		"system:Kernel32.lib",
+		"system:User32.lib",
+		"system:Advapi32.lib",
+		"system:ntdll.lib",
+		"system:onecore.lib",
+		"system:Synchronization.lib",
+		"system:Dbghelp.lib",
+		"system:ws2_32.lib",
+		"system:bcrypt.lib",
+	    MSVCRT_NAME,
+		LIB_PATH,
+	}
 } else when ODIN_OS == .Windows && ODIN_ARCH == .arm64 {
 	#panic("libbop does not support Windows ARM64 yet")
 } else when ODIN_OS == .Linux && ODIN_ARCH == .amd64 {
@@ -3089,6 +3097,13 @@ foreign lib {
 	raft_buffer_pos :: proc(buf: ^Raft_Buffer) -> c.size_t ---
 	raft_buffer_set_pos :: proc(buf: ^Raft_Buffer, pos: c.size_t) -> c.size_t ---
 
+	raft_async_bool_make :: proc(user_data: rawptr, when_ready: Raft_Async_Bool_Done) -> ^Raft_Async_Bool_Ptr ---
+	raft_async_bool_delete :: proc(ptr: ^Raft_Async_Bool_Ptr) ---
+	raft_async_bool_get_user_data :: proc(ptr: ^Raft_Async_Bool_Ptr) -> rawptr ---
+	raft_async_bool_set_user_data :: proc(ptr: ^Raft_Async_Bool_Ptr, user_data: rawptr) ---
+	raft_async_bool_get_when_ready :: proc(ptr: ^Raft_Async_Bool_Ptr) -> Raft_Async_Bool_Done ---
+	raft_async_bool_set_when_ready :: proc(ptr: ^Raft_Async_Bool_Ptr, when_ready: Raft_Async_Bool_Done) ---
+
 	raft_async_u64_make :: proc(user_data: rawptr, when_ready: Raft_Async_U64_Done) -> ^Raft_Async_U64_Ptr ---
 	raft_async_u64_delete :: proc(ptr: ^Raft_Async_U64_Ptr) ---
 	raft_async_u64_get_user_data :: proc(ptr: ^Raft_Async_U64_Ptr) -> rawptr ---
@@ -3740,6 +3755,41 @@ foreign lib {
 	@return Log index number of the last snapshot. `0` if snapshot does not exist.
 	*/
 	raft_server_get_last_snapshot_idx :: proc(rs: ^Raft_Server) -> u64 ---
+
+	/*
+	Set the self mark down flag of this server.
+
+	@return The self mark down flag before the update.
+	*/
+	raft_server_set_self_mark_down :: proc(rs: ^Raft_Server, to: bool) -> bool ---
+
+	/*
+	Check if this server is the part of the quorum of full consensus.
+	What it means is that, as long as the return value is `true`, this server
+	has the latest committed log at the moment that `true` was returned.
+
+	@return `true` if this server is the part of the full consensus.
+	*/
+	raft_server_is_part_of_full_consensus :: proc(rs: ^Raft_Server) -> bool ---
+
+	/*
+	Check if this server is excluded from the quorum by the leader,
+	when it runs in full consensus mode.
+
+	@return `true` if this server is excluded by the current leader and
+         not the part of the full consensus.
+	*/
+	raft_server_is_excluded_by_leader :: proc(rs: ^Raft_Server) -> bool ---
+
+	/*
+	Wait for the state machine to commit the log at the given index.
+	This function will return immediately, and the commit results will be
+	set to the returned `cmd_result` instance later.
+
+	@return `cmd_result` instance. It will contain `true` if the commit
+	        has been invoked, and `false` if not.
+	*/
+	raft_server_wait_for_state_machine_commit :: proc(rs: ^Raft_Server, result: ^Raft_Async_Bool_Ptr, target_idx: u64) -> bool ---
 
 	raft_mdbx_state_mgr_open :: proc(my_srv_config: ^Raft_Srv_Config_Ptr, dir: [^]byte, dir_size: c.size_t, logger: ^Raft_Logger_Ptr, size_lower: c.size_t, size_now: c.size_t, size_upper: c.size_t, growth_step: c.size_t, shirnk_threshold: c.size_t, page_size: c.size_t, flags: u32, mode: u16, log_store: ^Raft_Log_Store_Ptr) -> ^Raft_State_Mgr_Ptr ---
 

@@ -693,7 +693,16 @@ struct llco_asmctx {
     void *rip, *rsp, *rbp, *rbx, *r12, *r13, *r14, *r15;
 };
 
+// struct llco_asmctx {
+//      void *rip;
+//      void *rsp;
+//      // void *r12;
+//      // void *r13;
+// };
+
+
 void _llco_asm_entry(void);
+
 int _llco_asm_switch(struct llco_asmctx *from, struct llco_asmctx *to);
 
 __asm__(
@@ -748,12 +757,12 @@ __asm__(
 #endif
 );
 
-static void llco_asmctx_make(struct llco_asmctx *ctx, 
+static void llco_asmctx_make(struct llco_asmctx *ctx,
     void* stack_base, size_t stack_size, void *arg)
 {
     // Reserve 128 bytes for the Red Zone space (System V AMD64 ABI).
-    stack_size = stack_size - 128; 
-    void** stack_high_ptr = (void**)((size_t)stack_base + stack_size - 
+    stack_size = stack_size - 128;
+    void** stack_high_ptr = (void**)((size_t)stack_base + stack_size -
         sizeof(size_t));
     stack_high_ptr[0] = (void*)(0xdeaddeaddeaddead);  // Dummy return address.
     ctx->rip = (void*)(_llco_asm_entry);
@@ -761,6 +770,41 @@ static void llco_asmctx_make(struct llco_asmctx *ctx,
     ctx->r12 = (void*)(llco_entry);
     ctx->r13 = (void*)(arg);
 }
+
+// __attribute__((no_callee_saved_registers))
+// static inline void _llco_asm_switch(struct llco_asmctx *from, struct llco_asmctx *to) {
+//     __asm__ __volatile__ (
+//         "leaq 1f(%%rip), %%rax\n\t"
+//         "movq %%rax, 0(%%rdi)\n\t"    // from->rip = current rip
+//         "movq %%rsp, 8(%%rdi)\n\t"    // from->rsp = current rsp
+//         "movq 8(%%rsi), %%rsp\n\t"     // rsp = to->rsp
+//         "movq 0(%%rsi), %%rax\n\t"     // rax = to->rip
+//         "jmp *%%rax\n\t"
+//         "1:\n\t"
+//         :
+//         : "D"(from), "S"(to)
+//         : "rax", "memory"
+//     );
+// }
+//
+// static void llco_asmctx_make(struct llco_asmctx *ctx, void* stack_base,
+//                              size_t stack_size, void *arg) {
+//     // Reserve 128 bytes for the Red Zone space (System V AMD64 ABI).
+//     stack_size = stack_size - 128;
+//     void** stack_high_ptr = (void**)((size_t)stack_base + stack_size - sizeof(void*));
+//     stack_high_ptr[0] = (void*)(0xdeaddeaddeaddead);  // Dummy return address.
+//     ctx->rip = (void*)(_llco_asm_entry);
+//     ctx->rsp = (void*)(stack_high_ptr);
+//
+//     // Pass r13 = arg, r12 = llco_entry to _llco_asm_entry via callee-saved registers
+//     __asm__ __volatile__ (
+//         "movq %0, %%r13\n\t"
+//         "movq %1, %%r12\n\t"
+//         :
+//         : "r"(arg), "r"(llco_entry)
+//         : "r12", "r13"
+//     );
+// }
 
 #endif
 #endif // x64
@@ -1086,6 +1130,7 @@ void llco_switch(struct llco *co, bool final) {
 #if defined(LLCO_ASM)
     // fast track context switch. Saves a few nanoseconds by checking the
     // exception condition first.
+    // if (!final) {
     if (!llco_cleanup_active && cur && co && cur != co && !final) {
         //struct llco *from = llco_cur;
         llco_cur = co;

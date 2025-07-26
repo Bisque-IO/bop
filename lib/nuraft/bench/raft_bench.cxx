@@ -220,7 +220,7 @@ int init_raft(server_stuff& stuff) {
     stuff.asio_listener_->listen( stuff.raft_instance_ );
 
     // Wait until Raft server is ready (upto 10 seconds).
-    const size_t MAX_TRY = 60;
+    const size_t MAX_TRY = 40;
     _msg("init Raft instance ");
     for (size_t ii=0; ii<MAX_TRY; ++ii) {
         if (stuff.raft_instance_->is_initialized()) {

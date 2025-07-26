@@ -147,8 +147,7 @@ local target_of = function(kind, use_openssl)
             add_defines("BOOST_ASIO_USE_WOLFSSL=1")
             add_defines("ASIO_USE_WOLFSSL=1")
             add_defines("HAVE_WOLFSSL_ASIO=1")
-            add_ldflags("-l:./odin/libbop/windows/amd64/wolfssl.lib")
-            --add_ldflags("-lodin/libbop/windows/amd64/wolfssl.lib")
+            add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
             add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
         end
 
@@ -169,15 +168,17 @@ local target_of = function(kind, use_openssl)
             add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
 
             if is_plat("linux") and is_arch("x86_64") then
-                add_ldflags("-l:./odin/libbop/linux/amd64/libwolfssl.a")
+                add_links(os.projectdir() .. "/odin/libbop/linux/amd64/libwolfssl.a")
             elseif is_plat("linux") and is_arch("arm64", "aarch64") then
-                add_ldflags("-l:./odin/libbop/linux/arm64/libwolfssl.a")
+                add_links(os.projectdir() .. "/odin/libbop/linux/arm64/libwolfssl.a")
             elseif is_plat("linux") and is_arch("riscv64") then
-                add_ldflags("-l:./odin/libbop/linux/riscv64/libwolfssl.a")
+                add_links(os.projectdir() .. "/odin/libbop/linux/riscv64/libwolfssl.a")
             elseif is_plat("macosx", "macos", "darwin") and is_arch("x86_64") then
-                add_ldflags("-l:./odin/libbop/macos/amd64/libwolfssl.a")
+                add_links(os.projectdir() .. "/odin/libbop/macos/amd64/libwolfssl.a")
             elseif is_plat("macosx", "macos", "darwin") and is_arch("arm64", "aarch64") then
-                add_ldflags("-l:./odin/libbop/macos/arm64/libwolfssl.a")
+                add_links(os.projectdir() .. "/odin/libbop/macos/arm64/libwolfssl.a")
+            elseif is_plat("windows", "mingw") and is_arch("x64", "x86_64") then
+                add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
             end
         else
             add_defines("LIBUS_USE_OPENSSL")

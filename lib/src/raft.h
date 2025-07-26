@@ -37,32 +37,62 @@ BOP_API void bop_raft_buffer_set_pos(bop_raft_buffer *buf, size_t pos);
 
 ////////////////////////////////////////////////////////////////
 //
+// nuraft::cmd_result<bool>
+//
+//
+
+typedef void (*bop_raft_async_bool_when_ready)(
+    void *user_data, bool result, const char *error
+);
+
+struct bop_raft_async_bool_ptr;
+
+BOP_API bop_raft_async_bool_ptr *bop_raft_async_bool_make(
+    void *user_data, bop_raft_async_bool_when_ready when_ready
+);
+
+BOP_API void bop_raft_async_bool_delete(const bop_raft_async_bool_ptr *self);
+
+BOP_API void *bop_raft_async_bool_get_user_data(const bop_raft_async_bool_ptr *self);
+
+BOP_API void bop_raft_async_bool_set_user_data(bop_raft_async_bool_ptr *self, void *user_data);
+
+BOP_API bop_raft_async_bool_when_ready
+bop_raft_async_bool_get_when_ready(const bop_raft_async_bool_ptr *self);
+
+BOP_API void bop_raft_async_bool_set_when_ready(
+    bop_raft_async_bool_ptr *self, void *user_data,
+    bop_raft_async_bool_when_ready when_ready
+);
+
+////////////////////////////////////////////////////////////////
+//
 // nuraft::cmd_result<uint64_t>
 //
 //
 
-typedef void (*bop_raft_async_uint64_when_ready)(
+typedef void (*bop_raft_async_u64_when_ready)(
     void *user_data, uint64_t result, const char *error
 );
 
-struct bop_raft_async_uint64_ptr;
+struct bop_raft_async_u64_ptr;
 
-BOP_API bop_raft_async_uint64_ptr *bop_raft_async_u64_make(
-    void *user_data, bop_raft_async_uint64_when_ready when_ready
+BOP_API bop_raft_async_u64_ptr *bop_raft_async_u64_make(
+    void *user_data, bop_raft_async_u64_when_ready when_ready
 );
 
-BOP_API void bop_raft_async_u64_delete(const bop_raft_async_uint64_ptr *self);
+BOP_API void bop_raft_async_u64_delete(const bop_raft_async_u64_ptr *self);
 
-BOP_API void *bop_raft_async_u64_get_user_data(const bop_raft_async_uint64_ptr *self);
+BOP_API void *bop_raft_async_u64_get_user_data(const bop_raft_async_u64_ptr *self);
 
-BOP_API void bop_raft_async_u64_set_user_data(bop_raft_async_uint64_ptr *self, void *user_data);
+BOP_API void bop_raft_async_u64_set_user_data(bop_raft_async_u64_ptr *self, void *user_data);
 
-BOP_API bop_raft_async_uint64_when_ready
-bop_raft_async_u64_get_when_ready(const bop_raft_async_uint64_ptr *self);
+BOP_API bop_raft_async_u64_when_ready
+bop_raft_async_u64_get_when_ready(const bop_raft_async_u64_ptr *self);
 
 BOP_API void bop_raft_async_u64_set_when_ready(
-    bop_raft_async_uint64_ptr *self, void *user_data,
-    bop_raft_async_uint64_when_ready when_ready
+    bop_raft_async_u64_ptr *self, void *user_data,
+    bop_raft_async_u64_when_ready when_ready
 );
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -877,6 +907,13 @@ struct bop_raft_params {
      * * request for a configured time (`response_limit_`).
      */
     bool use_full_consensus_among_healthy_members;
+
+    /**
+     * (Experimental)
+     * If `true`, the leader will track the commit index of each peers' state machine.
+     * It can be used along with `use_full_consensus_among_healthy_members_`
+     */
+    bool track_peers_sm_commit_idx;
 
     /**
      * (Experimental)
@@ -2214,7 +2251,7 @@ BOP_API uint64_t bop_raft_server_create_snapshot(
  *        `nullptr` if there is already a scheduled snapshot creation.
  */
 BOP_API void bop_raft_server_schedule_snapshot_creation(
-    bop_raft_server *rs, bop_raft_async_uint64_ptr *result_handler
+    bop_raft_server *rs, bop_raft_async_u64_ptr *result_handler
 );
 
 /**
@@ -2223,6 +2260,45 @@ BOP_API void bop_raft_server_schedule_snapshot_creation(
  * @return Log index number of the last snapshot. `0` if snapshot does not exist.
  */
 BOP_API uint64_t bop_raft_server_get_last_snapshot_idx(const bop_raft_server *rs);
+
+/**
+ * Set the self mark down flag of this server.
+ *
+ * @return The self mark down flag before the update.
+ */
+BOP_API bool bop_raft_server_set_self_mark_down(bop_raft_server *rs, bool to);
+
+/**
+ * Check if this server is the part of the quorum of full consensus.
+ * What it means is that, as long as the return value is `true`, this server
+ * has the latest committed log at the moment that `true` was returned.
+ *
+ * @return `true` if this server is the part of the full consensus.
+ */
+BOP_API bool bop_raft_server_is_part_of_full_consensus(bop_raft_server *rs);
+
+/**
+ * Check if this server is excluded from the quorum by the leader,
+ * when it runs in full consensus mode.
+ *
+ * @return `true` if this server is excluded by the current leader and
+ *         not the part of the full consensus.
+ */
+BOP_API bool bop_raft_server_is_excluded_by_leader(bop_raft_server *rs);
+
+/**
+ * Wait for the state machine to commit the log at the given index.
+ * This function will return immediately, and the commit results will be
+ * set to the returned `cmd_result` instance later.
+ *
+ * @return `cmd_result` instance. It will contain `true` if the commit
+ *         has been invoked, and `false` if not.
+ */
+bool bop_raft_server_wait_for_state_machine_commit(
+    bop_raft_server *rs,
+    bop_raft_async_bool_ptr* result,
+    uint64_t target_idx
+); // ptr<cmd_result<bool>>
 
 BOP_API bop_raft_state_mgr_ptr* bop_raft_mdbx_state_mgr_open(
     bop_raft_srv_config_ptr* my_srv_config,

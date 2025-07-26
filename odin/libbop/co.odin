@@ -10,11 +10,7 @@ Co :: struct {}
 
 Co_Entry :: #type proc "c" (udata: rawptr)
 
-Co_Cleanup :: #type proc "c" (
-	stack: rawptr,
-	stack_size: uintptr,
-	udata: rawptr,
-)
+Co_Cleanup :: #type proc "c" (stack: rawptr, stack_size: uintptr, udata: rawptr)
 
 Co_Descriptor :: struct {
 	stack:      rawptr,
@@ -70,6 +66,7 @@ coro_entry :: proc "c" (udata: rawptr) {
 	fmt.println("coroutine 1!")
 	// coro.yield(co)
 	co_switch(nil, false)
+	//	co_switch_quick(nil)
 	// llco.llco_switch(nil, false)
 	fmt.println("coroutine 2!")
 	log.debug("coroutine 2!")
@@ -88,16 +85,18 @@ perf2co: ^Co
 perfstart := time.tick_now()
 perf_dur: time.Duration
 perf_count := 0
-NUM_YIELDS :: 1000000
+NUM_YIELDS :: 10000000
 
 perf1_do_swap :: proc "c" () {
 	co_switch(perf2co, false)
+	//	co_switch_quick(perf2co)
 }
 
 perf1 :: proc "c" (udata: rawptr) {
 	defer co_switch(nil, true)
 	perf1co = co_current()
 	co_switch(nil, false)
+	//	co_switch_quick(nil)
 
 	for perf_count < NUM_YIELDS {
 		perf_count += 1
@@ -114,6 +113,7 @@ perf2 :: proc "c" (udata: rawptr) {
 	for perf_count < NUM_YIELDS {
 		perf_count += 1
 		co_switch(perf1co, false)
+		//		co_switch_quick(perf1co)
 	}
 
 	perf_dur = time.tick_diff(perfstart, time.tick_now())
@@ -140,10 +140,5 @@ test_perf :: proc() {
 	}
 	co_start(&desc2, false)
 
-	fmt.printf(
-		"perf: %d switches in %s, %d / switch\n",
-		perf_count,
-		perf_dur,
-		perf_dur / NUM_YIELDS,
-	)
+	fmt.printf("perf: %d switches in %s, %d / switch\n", perf_count, perf_dur, perf_dur / NUM_YIELDS)
 }

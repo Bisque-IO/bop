@@ -949,9 +949,9 @@ sudo apt install qemu-user
 cargo build -p wasmtime-c-api --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads"
 cargo build -p wasmtime-c-api --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads" --target aarch64-unknown-linux-gnu
 cargo build -p wasmtime-c-api --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads" --target riscv64gc-unknown-linux-gnu
-cargo build -p wasmtime-cli --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads,wat,parallel-compilation,cranelift,winch,compile,objdump,pulley,clap/default,clap/wrap_help"
-cargo build -p wasmtime-cli --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads,wat,parallel-compilation,cranelift,winch,compile,objdump,pulley,clap/default,clap/wrap_help" --target aarch64-unknown-linux-gnu
-cargo build -p wasmtime-cli --release --no-default-features --features "gc,gc-drc,gc-null,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads,wat,parallel-compilation,cranelift,winch,compile,objdump,pulley,clap/default,clap/wrap_help" --target riscv64gc-unknown-linux-gnu
+cargo build -p wasmtime-cli --release --no-default-features --features "gc,gc-drc,gc-null,cache,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads,wat,parallel-compilation,cranelift,winch,compile,objdump,clap/default,clap/wrap_help"
+cargo build -p wasmtime-cli --release --no-default-features --features "gc,gc-drc,gc-null,cache,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads,wat,parallel-compilation,cranelift,winch,compile,objdump,clap/default,clap/wrap_help" --target aarch64-unknown-linux-gnu
+cargo build -p wasmtime-cli --release --no-default-features --features "gc,gc-drc,gc-null,cache,debug-builtins,demangle,addr2line,coredump,profiling,pooling-allocator,threads,wat,parallel-compilation,cranelift,winch,compile,objdump,clap/default,clap/wrap_help" --target riscv64gc-unknown-linux-gnu
 """
 
 def main():

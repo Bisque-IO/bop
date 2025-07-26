@@ -50,6 +50,7 @@ public:
         , max_hb_interval_( ctx.get_params()->max_hb_interval() )
         , next_log_idx_(0)
         , last_accepted_log_idx_(0)
+        , sm_committed_idx_(0)
         , next_batch_size_hint_in_bytes_(0)
         , matched_idx_(0)
         , busy_flag_(false)
@@ -82,6 +83,7 @@ public:
         , last_streamed_log_idx_(0)
         , bytes_in_flight_(0)
         , snapshot_sync_is_needed_(false)
+        , self_mark_down_(false)
         , l_(logger)
     {
         reset_ls_timer();
@@ -168,6 +170,14 @@ public:
 
     void set_last_accepted_log_idx(uint64_t to) {
         last_accepted_log_idx_ = to;
+    }
+
+    uint64_t get_sm_committed_idx() const {
+        return sm_committed_idx_;
+    }
+
+    void set_sm_committed_idx(uint64_t to) {
+        sm_committed_idx_ = to;
     }
 
     int64 get_next_batch_size_hint_in_bytes() const {
@@ -359,6 +369,17 @@ public:
         return snapshot_sync_is_needed_;
     }
 
+    bool is_self_mark_down() const {
+        return self_mark_down_;
+    }
+    bool set_self_mark_down(bool to) {
+        bool old = self_mark_down_;
+        if (old != to) {
+            self_mark_down_ = to;
+        }
+        return old;
+    }
+
 private:
     void handle_rpc_result(ptr<peer> myself,
                            ptr<rpc_client> my_rpc_client,
@@ -418,6 +439,11 @@ private:
      * The last log index accepted by this server.
      */
     std::atomic<uint64_t> last_accepted_log_idx_;
+
+    /**
+     * The committed log index of the state machine of this peer.
+     */
+    std::atomic<uint64_t> sm_committed_idx_;
 
     /**
      * Hint of the next log batch size in bytes.
@@ -594,6 +620,11 @@ private:
      * `next_log_idx_` is within the range, we should send a snapshot.
      */
     std::atomic<bool> snapshot_sync_is_needed_;
+
+    /**
+     * If `true`, this peer marks itself down.
+     */
+    std::atomic<bool> self_mark_down_;
 
     /**
      * Logger instance.

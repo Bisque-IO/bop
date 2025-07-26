@@ -23,10 +23,7 @@ limitations under the License.
 #include <string>
 #include <system_error>
 
-#ifdef BOOST_ASIO_USE_WOLFSSL
-#include "wolfssl/options.h"
-#include "wolfssl/ssl.h"
-#elifdef ASIO_USE_WOLFSSL
+#ifdef ASIO_USE_WOLFSSL
 #include "wolfssl/options.h"
 #include "wolfssl/ssl.h"
 #else
@@ -316,4 +313,3 @@ struct asio_service_options {
 };
 
 }
-
