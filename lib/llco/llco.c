@@ -84,7 +84,7 @@ static void llco_exit(void) {
 #define LLCO_NOASM
 #endif
 
-// Passing the entry function into assembly requires casting the function 
+// Passing the entry function into assembly requires casting the function
 // pointer to an object pointer, which is forbidden in the ISO C spec but
 // allowed in posix. Ignore the warning attributed to this  requirement when
 // the -pedantic compiler flag is provide.
@@ -99,7 +99,7 @@ static void llco_exit(void) {
 ////////////////////////////////////////////////////////////////////////////////
 
 /*
-Lua Coco (coco.luajit.org) 
+Lua Coco (coco.luajit.org)
 Copyright (C) 2004-2016 Mike Pall. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining
@@ -189,7 +189,7 @@ __asm__(
 #endif
 );
 
-static void llco_asmctx_make(struct llco_asmctx *ctx, void* stack_base, 
+static void llco_asmctx_make(struct llco_asmctx *ctx, void* stack_base,
     size_t stack_size, void *arg)
 {
     ctx->d[0] = (void*)(arg);
@@ -290,7 +290,7 @@ static void llco_asmctx_make(struct llco_asmctx *ctx, void* stack_base,
     ctx->sp = (void*)((size_t)stack_base + stack_size);
     ctx->lr = (void*)(_llco_asm_entry);
 }
-#endif 
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 // RISC-V (rv64/rv32)
@@ -489,7 +489,7 @@ __asm__(
   ".size _llco_asm_switch, .-_llco_asm_switch\n"
 );
 
-static void llco_asmctx_make(struct llco_asmctx *ctx, 
+static void llco_asmctx_make(struct llco_asmctx *ctx,
     void* stack_base, size_t stack_size, void *arg)
 {
     ctx->s[0] = (void*)(arg);
@@ -557,7 +557,7 @@ __asm__(
 static void llco_asmctx_make(struct llco_asmctx *ctx,
     void* stack_base, size_t stack_size, void *arg)
 {
-    void** stack_high_ptr = (void**)((size_t)stack_base + stack_size - 16 - 
+    void** stack_high_ptr = (void**)((size_t)stack_base + stack_size - 16 -
         1*sizeof(size_t));
     stack_high_ptr[0] = (void*)(0xdeaddead);  // Dummy return address.
     stack_high_ptr[1] = (void*)(arg);
@@ -578,7 +578,7 @@ static void llco_asmctx_make(struct llco_asmctx *ctx,
 
 struct llco_asmctx {
     void *rip, *rsp, *rbp, *rbx, *r12, *r13, *r14, *r15, *rdi, *rsi;
-    void* xmm[20]; /* xmm6, xmm7, xmm8, xmm9, xmm10, xmm11, xmm12, xmm13, 
+    void* xmm[20]; /* xmm6, xmm7, xmm8, xmm9, xmm10, xmm11, xmm12, xmm13,
         xmm14, xmm15 */
     void* fiber_storage;
     void* dealloc_stack;
@@ -664,17 +664,17 @@ LLCO_ASM_BLOB static unsigned char llco_asm_switch_code[] = {
     0x90,0x90,                                    // nop
 };
 
-void (*_llco_asm_entry)(void) = 
+void (*_llco_asm_entry)(void) =
     (void(*)(void))(void*)llco_wrap_main_code_entry;
-void (*_llco_asm_switch)(struct llco_asmctx *from, 
-    struct llco_asmctx *to) = (void(*)(struct llco_asmctx *from, 
+void (*_llco_asm_switch)(struct llco_asmctx *from,
+    struct llco_asmctx *to) = (void(*)(struct llco_asmctx *from,
     struct llco_asmctx *to))(void*)llco_asm_switch_code;
 
-static void llco_asmctx_make(struct llco_asmctx *ctx, 
+static void llco_asmctx_make(struct llco_asmctx *ctx,
     void* stack_base, size_t stack_size, void *arg)
 {
     stack_size = stack_size - 32; // Reserve 32 bytes for the shadow space.
-    void** stack_high_ptr = (void**)((size_t)stack_base + stack_size - 
+    void** stack_high_ptr = (void**)((size_t)stack_base + stack_size -
         sizeof(size_t));
     stack_high_ptr[0] = (void*)(0xdeaddeaddeaddead);  // Dummy return address.
     ctx->rip = (void*)(_llco_asm_entry);
@@ -820,7 +820,7 @@ static void llco_asmctx_make(struct llco_asmctx *ctx,
 ////////////////////////////////////////////////////////////////////////////////
 #if defined(LLCO_READY) && defined(LLCO_STACKJMP)
 LLCO_NOINLINE LLCO_NORETURN
-static void llco_stackjmp(void *stack, size_t stack_size, 
+static void llco_stackjmp(void *stack, size_t stack_size,
     void(*entry)(void *arg))
 {
     struct llco_asmctx ctx = { 0 };
@@ -849,7 +849,7 @@ static void llco_stackjmp(void *stack, size_t stack_size,
 
 #error Windows fibers unsupported
 
-#endif 
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 // Webassembly Fibers
@@ -893,17 +893,17 @@ static __thread ucontext_t stackjmp_ucallee;
 static __thread int stackjmp_ucallee_gotten = 0;
 
 #if defined(__APPLE__) && defined(__aarch64__) && !defined(LLCO_NOSTACKADJUST)
-// Here we ensure that the initial context switch will *not* page the 
+// Here we ensure that the initial context switch will *not* page the
 // entire stack into process memory before executing the entry point
 // function. Which is a behavior that can be observed on Mac OS with
 // Apple Silicon. This "trick" can be optionally removed at the expense
 // of slower initial jumping into large stacks.
-enum llco_stack_grows { DOWNWARDS, UPWARDS }; 
+enum llco_stack_grows { DOWNWARDS, UPWARDS };
 
-static enum llco_stack_grows llco_stack_grows0(int *addr0) { 
-    int addr1; 
+static enum llco_stack_grows llco_stack_grows0(int *addr0) {
+    int addr1;
     return addr0 < &addr1 ? UPWARDS : DOWNWARDS;
-} 
+}
 
 static enum llco_stack_grows llco_stack_grows(void) {
     int addr0;
@@ -916,14 +916,14 @@ static void llco_adjust_ucontext_stack(ucontext_t *ucp) {
         ucp->uc_stack.ss_size = 0;
     }
 }
-#else 
+#else
 #define llco_adjust_ucontext_stack(ucp)
 #endif
 
 // Ucontext always uses stackjmp with setjmp/longjmp, instead of swapcontext
 // becuase it's much faster.
 LLCO_NOINLINE LLCO_NORETURN
-static void llco_stackjmp(void *stack, size_t stack_size, 
+static void llco_stackjmp(void *stack, size_t stack_size,
     void(*entry)(void *arg))
 {
     if (!stackjmp_ucallee_gotten) {
@@ -1000,7 +1000,7 @@ static void llco_cleanup_last(void) {
 #ifdef LLCO_VALGRIND
             VALGRIND_STACK_DEREGISTER(llco_cleanup_valgrind_stack_id);
 #endif
-            llco_cleanup_desc.cleanup(llco_cleanup_desc.stack, 
+            llco_cleanup_desc.cleanup(llco_cleanup_desc.stack,
                 llco_cleanup_desc.stack_size, llco_cleanup_desc.udata);
             llco_cleanup_active = false;
         }
@@ -1036,7 +1036,7 @@ static void llco_entry(void *arg) {
 }
 
 LLCO_NOINLINE
-static void llco_switch1(struct llco *from, struct llco *to, 
+static void llco_switch1(struct llco *from, struct llco *to,
     void *stack, size_t stack_size)
 {
 #ifdef LLCO_VALGRIND
@@ -1065,7 +1065,7 @@ static void llco_switch1(struct llco *from, struct llco *to,
         emscripten_fiber_swap(&from->fiber, &to->fiber);
     } else {
         if (from == &llco_thread) {
-            emscripten_fiber_init_from_current_context(&from->fiber, 
+            emscripten_fiber_init_from_current_context(&from->fiber,
                 llco_main_stack, LLCO_ASYNCIFY_STACK_SIZE);
         }
         stack_size -= LLCO_ASYNCIFY_STACK_SIZE;
@@ -1073,7 +1073,7 @@ static void llco_switch1(struct llco *from, struct llco *to,
         size_t astack_size = LLCO_ASYNCIFY_STACK_SIZE - sizeof(struct llco);
         struct llco *self = (void*)(astack + astack_size);
         memset(self, 0, sizeof(struct llco));
-        emscripten_fiber_init(&self->fiber, llco_entry, 
+        emscripten_fiber_init(&self->fiber, llco_entry,
            self, stack, stack_size, astack, astack_size);
         emscripten_fiber_swap(&from->fiber, &self->fiber);
     }
@@ -1082,7 +1082,7 @@ static void llco_switch1(struct llco *from, struct llco *to,
 #endif
 }
 
-static void llco_switch0(struct llco_desc *desc, struct llco *co, 
+static void llco_switch0(struct llco_desc *desc, struct llco *co,
     bool final)
 {
     struct llco *from = llco_cur ? llco_cur : &llco_thread;
@@ -1130,7 +1130,6 @@ void llco_switch(struct llco *co, bool final) {
 #if defined(LLCO_ASM)
     // fast track context switch. Saves a few nanoseconds by checking the
     // exception condition first.
-    // if (!final) {
     if (!llco_cleanup_active && cur && co && cur != co && !final) {
         //struct llco *from = llco_cur;
         llco_cur = co;
@@ -1141,6 +1140,12 @@ void llco_switch(struct llco *co, bool final) {
 #endif
     llco_cleanup_guard();
     llco_switch0(0, co, final);
+}
+
+LLCO_EXTERN void llco_switch_fast(struct llco *from, struct llco *to) {
+    llco_cur = to;
+    _llco_asm_switch(&from->ctx, &to->ctx);
+    llco_cleanup_last();
 }
 
 // Return the current coroutine or NULL if not currently running in a
@@ -1181,7 +1186,7 @@ struct llco_dlinfo {
 int dladdr(const void *, void *);
 #endif
 
-static void llco_getsymbol(struct _Unwind_Context *uwc, 
+static void llco_getsymbol(struct _Unwind_Context *uwc,
     struct llco_symbol *sym)
 {
     memset(sym, 0, sizeof(struct llco_symbol));
@@ -1210,7 +1215,7 @@ struct llco_unwind_context {
 
 static _Unwind_Reason_Code llco_func(struct _Unwind_Context *uwc, void *ptr) {
     struct llco_unwind_context *ctx = ptr;
-    
+
     struct llco *cur = llco_current();
     if (cur && !cur->uw_stop_ip) {
         return _URC_END_OF_STACK;
@@ -1244,12 +1249,12 @@ static _Unwind_Reason_Code llco_func(struct _Unwind_Context *uwc, void *ptr) {
 
 LLCO_EXTERN
 int llco_unwind(bool(*func)(struct llco_symbol *sym, void *udata), void *udata){
-    struct llco_unwind_context ctx = { 
+    struct llco_unwind_context ctx = {
 #if defined(__GNUC__) && !defined(__EMSCRIPTEN__)
         .start_ip = __builtin_return_address(0),
 #endif
-        .func = func, 
-        .udata = udata 
+        .func = func,
+        .udata = udata
     };
     _Unwind_Backtrace(llco_func, &ctx);
     return ctx.nsymbols_actual;

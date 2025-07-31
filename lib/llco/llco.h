@@ -25,6 +25,7 @@ struct llco;
 LLCO_API struct llco *llco_current(void);
 LLCO_API void llco_start(struct llco_desc *desc, bool final);
 LLCO_API void llco_switch(struct llco *co, bool final);
+LLCO_API void llco_switch_fast(struct llco *from, struct llco *to);
 LLCO_API const char *llco_method(void *caps);
 
 // Coroutine stack unwinding

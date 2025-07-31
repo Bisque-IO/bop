@@ -3,6 +3,7 @@
 #include <snmalloc/snmalloc.h>
 #include <snmalloc/pal/pal_consts.h>
 #include <snmalloc/mem/sizeclasstable.h>
+#include <snmalloc/global/libc.h>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -17,11 +18,13 @@
 extern "C" {
 #endif
 BOP_API void *bop_alloc(size_t size) {
-    return snmalloc::ThreadAlloc::get().alloc<snmalloc::Uninit>(size);
+    return snmalloc::libc::malloc(size);
+    // return snmalloc::ThreadAlloc::get().alloc<snmalloc::Uninit>(size);
 }
 
 BOP_API void *bop_zalloc(size_t size) {
-    return snmalloc::ThreadAlloc::get().alloc<snmalloc::Zero>(size);
+    return snmalloc::libc::calloc(size, 1);
+    // return snmalloc::ThreadAlloc::get().alloc<snmalloc::Zero>(size);
 }
 
 BOP_API void *bop_calloc(size_t element_size, size_t count) {

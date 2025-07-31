@@ -8,19 +8,19 @@ local target_of = function(kind, use_openssl)
     end
     if kind == "static" then
         if not use_openssl then
+            target("bop-wolfssl")
+            set_basename("bop-wolfssl")
+        else
             target("bop")
             set_basename("bop")
-        else
-            target("bop-openssl")
-            set_basename("bop-openssl")
         end
     else
         if not use_openssl then
             target("bop-shared")
-            set_basename("bop")
+            set_basename("bop-wolfssl")
         else
-            target("bop-shared-openssl")
-            set_basename("bop-openssl")
+            target("bop-shared")
+            set_basename("bop")
         end
     end
     set_kind(kind)
@@ -124,7 +124,7 @@ local target_of = function(kind, use_openssl)
     --add_files("mdbx/mdbx.c")
 
     -- sqlite
-    add_includedirs("../lib/sqlite", { public = true })
+    add_includedirs("sqlite", { public = true })
     if is_plat("linux") then
         -- add_deps("sqlite")
         add_files("../lib/sqlite/sqlite3_hctree.c",
@@ -160,30 +160,55 @@ local target_of = function(kind, use_openssl)
         add_includedirs("libuv/src", { public = false })
         add_includedirs("libuv/include", { public = true })
     else
-        if not use_openssl then
-            add_defines("ASIO_USE_WOLFSSL=1")
-            --add_defines("BOOST_ASIO_USE_WOLFSSL=1")
-            add_defines("LIBUS_USE_WOLFSSL")
-            -- add_packages("wolfssl")
-            add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
+        -- if not use_openssl then
+        --     add_defines("ASIO_USE_WOLFSSL=1")
+        --     --add_defines("BOOST_ASIO_USE_WOLFSSL=1")
+        --     add_defines("LIBUS_USE_WOLFSSL")
+        --     -- add_packages("wolfssl")
+        --     add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
 
-            if is_plat("linux") and is_arch("x86_64") then
-                add_links(os.projectdir() .. "/odin/libbop/linux/amd64/libwolfssl.a")
-            elseif is_plat("linux") and is_arch("arm64", "aarch64") then
-                add_links(os.projectdir() .. "/odin/libbop/linux/arm64/libwolfssl.a")
-            elseif is_plat("linux") and is_arch("riscv64") then
-                add_links(os.projectdir() .. "/odin/libbop/linux/riscv64/libwolfssl.a")
-            elseif is_plat("macosx", "macos", "darwin") and is_arch("x86_64") then
-                add_links(os.projectdir() .. "/odin/libbop/macos/amd64/libwolfssl.a")
-            elseif is_plat("macosx", "macos", "darwin") and is_arch("arm64", "aarch64") then
-                add_links(os.projectdir() .. "/odin/libbop/macos/arm64/libwolfssl.a")
-            elseif is_plat("windows", "mingw") and is_arch("x64", "x86_64") then
-                add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
-            end
-        else
-            add_defines("LIBUS_USE_OPENSSL")
-            add_packages("openssl3")
-        end
+        --     if is_plat("linux") and is_arch("x86_64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/linux/amd64/libwolfssl.a")
+        --     elseif is_plat("linux") and is_arch("arm64", "aarch64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/linux/arm64/libwolfssl.a")
+        --     elseif is_plat("linux") and is_arch("riscv64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/linux/riscv64/libwolfssl.a")
+        --     elseif is_plat("macosx", "macos", "darwin") and is_arch("x86_64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/macos/amd64/libwolfssl.a")
+        --     elseif is_plat("macosx", "macos", "darwin") and is_arch("arm64", "aarch64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/macos/arm64/libwolfssl.a")
+        --     elseif is_plat("windows", "mingw") and is_arch("x64", "x86_64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
+        --     end
+        -- else
+        --     add_defines("LIBUS_USE_OPENSSL")
+        --     add_packages("openssl3")
+        -- end        -- if not use_openssl then
+        --     add_defines("ASIO_USE_WOLFSSL=1")
+        --     --add_defines("BOOST_ASIO_USE_WOLFSSL=1")
+        --     add_defines("LIBUS_USE_WOLFSSL")
+        --     -- add_packages("wolfssl")
+        --     add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
+
+        --     if is_plat("linux") and is_arch("x86_64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/linux/amd64/libwolfssl.a")
+        --     elseif is_plat("linux") and is_arch("arm64", "aarch64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/linux/arm64/libwolfssl.a")
+        --     elseif is_plat("linux") and is_arch("riscv64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/linux/riscv64/libwolfssl.a")
+        --     elseif is_plat("macosx", "macos", "darwin") and is_arch("x86_64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/macos/amd64/libwolfssl.a")
+        --     elseif is_plat("macosx", "macos", "darwin") and is_arch("arm64", "aarch64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/macos/arm64/libwolfssl.a")
+        --     elseif is_plat("windows", "mingw") and is_arch("x64", "x86_64") then
+        --         add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
+        --     end
+        -- else
+        --     add_defines("LIBUS_USE_OPENSSL")
+        --     add_packages("openssl3")
+        -- end
+        add_defines("LIBUS_USE_OPENSSL")
+        add_packages("openssl3")
     end
     add_files("usockets/src/**.c", { languages = "c23", includedirs = "include", cflags = "-O3" })
     add_files("usockets/src/**.cpp", { languages = "c++23", includedirs = "include", cflags = "-O3" })

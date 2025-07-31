@@ -25,7 +25,6 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 
 	@(extra_linker_flags="/NODEFAULTLIB:libcmt")
 	foreign import lib {
-	    "windows/amd64/iwasm.lib",
 		"windows/amd64/wolfssl.lib",
 		"system:Kernel32.lib",
 		"system:User32.lib",
@@ -44,7 +43,7 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 } else when ODIN_OS == .Linux && ODIN_ARCH == .amd64 {
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -extra-linker-flags:"-Wl,-rpath,$ORIGIN/libbop.so" -linker:lld
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -linker:lld -extra-linker-flags:"-rdynamic -static"
-	when #config(BOP_OPENSSL, 0) == 0 {
+	when #config(BOP_OPENSSL, 1) == 1 {
 		when #config(BOP_DEBUG, 0) == 1 {
 			when #config(BOP_SHARED, 0) == 1 {
 				@(private)
@@ -62,26 +61,26 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 				LIB_PATH :: "linux/amd64/libbop.a"
 			}
 		}
-		foreign import lib {"linux/amd64/libwolfssl.a", "linux/amd64/libiwasm.a", "system:stdc++", LIB_PATH}
+		foreign import lib {"system:crypto", "system:ssl", "system:stdc++", "system:zstd", "system:z", LIB_PATH}
 	} else {
 		when #config(BOP_DEBUG, 0) == 1 {
 			when #config(BOP_SHARED, 0) == 1 {
 				@(private)
-				LIB_PATH :: "../../build/linux/x86_64/release/libbop-openssl.so"
+				LIB_PATH :: "../../build/linux/x86_64/release/libbop-wolfssl.so"
 			} else {
 				@(private)
-				LIB_PATH :: "../../build/linux/x86_64/release/libbop-openssl.a"
+				LIB_PATH :: "../../build/linux/x86_64/release/libbop-wolfssl.a"
 			}
 		} else {
 			when #config(BOP_SHARED, 0) == 1 {
 				@(private)
-				LIB_PATH :: "linux/amd64/libbop-openssl.so"
+				LIB_PATH :: "linux/amd64/libbop-wolfssl.so"
 			} else {
 				@(private)
-				LIB_PATH :: "linux/amd64/libbop-openssl.a"
+				LIB_PATH :: "linux/amd64/libbop-wolfssl.a"
 			}
 		}
-		foreign import lib {"system:crypto", "system:ssl", "system:stdc++", "linux/amd64/libiwasm.a", LIB_PATH}
+		foreign import lib {"linux/amd64/libwolfssl.a", "linux/amd64/libiwasm.a", "system:stdc++", LIB_PATH}
 	}
 } else when ODIN_OS == .Linux && ODIN_ARCH == .arm64 {
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -extra-linker-flags:"-Wl,-rpath,$ORIGIN/libbop.so" -linker:lld
@@ -346,6 +345,8 @@ foreign lib {
 	co_start :: proc(desc: ^Co_Descriptor, final: bool) ---
 	@(link_name = "llco_switch")
 	co_switch :: proc(co: ^Co, final: bool) ---
+	@(link_name = "llco_switch_fast")
+	co_switch_fast :: proc(from, to: ^Co) ---
 	@(link_name = "llco_method")
 	co_method :: proc(co: ^Co) -> cstring ---
 }
