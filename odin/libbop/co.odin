@@ -6,8 +6,6 @@ import "core:fmt"
 import "core:log"
 import "core:testing"
 import "core:time"
-import "core:sys/linux"
-import "core:sys/posix"
 
 Co :: struct {}
 

@@ -1,0 +1,357 @@
+.
+├── bun.lock
+├── index.html
+├── package.json
+├── postcss.config.mjs
+├── src
+│   ├── __tests__
+│   │   ├── ddl-extended.test.ts
+│   │   ├── lib.test.ts
+│   │   └── logs.test.ts
+│   ├── app
+│   │   └── App.tsx
+│   ├── blocks
+│   │   ├── calendar-01.tsx
+│   │   ├── calendar-02.tsx
+│   │   ├── calendar-03.tsx
+│   │   ├── calendar-04.tsx
+│   │   ├── calendar-05.tsx
+│   │   ├── calendar-06.tsx
+│   │   ├── calendar-07.tsx
+│   │   ├── calendar-08.tsx
+│   │   ├── calendar-09.tsx
+│   │   ├── calendar-10.tsx
+│   │   ├── calendar-11.tsx
+│   │   ├── calendar-12.tsx
+│   │   ├── calendar-13.tsx
+│   │   ├── calendar-14.tsx
+│   │   ├── calendar-15.tsx
+│   │   ├── calendar-16.tsx
+│   │   ├── calendar-17.tsx
+│   │   ├── calendar-18.tsx
+│   │   ├── calendar-19.tsx
+│   │   ├── calendar-20.tsx
+│   │   ├── calendar-21.tsx
+│   │   ├── calendar-22.tsx
+│   │   ├── calendar-23.tsx
+│   │   ├── calendar-24.tsx
+│   │   ├── calendar-25.tsx
+│   │   ├── calendar-26.tsx
+│   │   ├── calendar-27.tsx
+│   │   ├── calendar-28.tsx
+│   │   ├── calendar-29.tsx
+│   │   ├── calendar-30.tsx
+│   │   ├── calendar-31.tsx
+│   │   ├── calendar-32.tsx
+│   │   ├── dashboard-01
+│   │   │   ├── components
+│   │   │   │   ├── app-sidebar.tsx
+│   │   │   │   ├── chart-area-interactive.tsx
+│   │   │   │   ├── data-table.tsx
+│   │   │   │   ├── nav-documents.tsx
+│   │   │   │   ├── nav-main.tsx
+│   │   │   │   ├── nav-secondary.tsx
+│   │   │   │   ├── nav-user.tsx
+│   │   │   │   ├── section-cards.tsx
+│   │   │   │   └── site-header.tsx
+│   │   │   ├── data.json
+│   │   │   └── page.tsx
+│   │   ├── login-01
+│   │   │   ├── components
+│   │   │   │   └── login-form.tsx
+│   │   │   └── page.tsx
+│   │   ├── login-02
+│   │   │   ├── components
+│   │   │   │   └── login-form.tsx
+│   │   │   └── page.tsx
+│   │   ├── login-03
+│   │   │   ├── components
+│   │   │   │   └── login-form.tsx
+│   │   │   └── page.tsx
+│   │   ├── login-04
+│   │   │   ├── components
+│   │   │   │   └── login-form.tsx
+│   │   │   └── page.tsx
+│   │   ├── login-05
+│   │   │   ├── components
+│   │   │   │   └── login-form.tsx
+│   │   │   └── page.tsx
+│   │   ├── products-01
+│   │   │   ├── components
+│   │   │   │   └── products-table.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-01
+│   │   │   ├── components
+│   │   │   │   ├── app-sidebar.tsx
+│   │   │   │   ├── search-form.tsx
+│   │   │   │   └── version-switcher.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-02
+│   │   │   ├── components
+│   │   │   │   ├── app-sidebar.tsx
+│   │   │   │   ├── search-form.tsx
+│   │   │   │   └── version-switcher.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-03
+│   │   │   ├── components
+│   │   │   │   └── app-sidebar.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-04
+│   │   │   ├── components
+│   │   │   │   └── app-sidebar.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-05
+│   │   │   ├── components
+│   │   │   │   ├── app-sidebar.tsx
+│   │   │   │   └── search-form.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-06
+│   │   │   ├── components
+│   │   │   │   ├── app-sidebar.tsx
+│   │   │   │   ├── nav-main.tsx
+│   │   │   │   └── sidebar-opt-in-form.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-07
+│   │   │   ├── components
+│   │   │   │   ├── app-sidebar.tsx
+│   │   │   │   ├── nav-main.tsx
+│   │   │   │   ├── nav-projects.tsx
+│   │   │   │   ├── nav-user.tsx
+│   │   │   │   └── team-switcher.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-08
+│   │   │   ├── components
+│   │   │   │   ├── app-sidebar.tsx
+│   │   │   │   ├── nav-main.tsx
+│   │   │   │   ├── nav-projects.tsx
+│   │   │   │   ├── nav-secondary.tsx
+│   │   │   │   └── nav-user.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-09
+│   │   │   ├── components
+│   │   │   │   ├── app-sidebar.tsx
+│   │   │   │   └── nav-user.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-10
+│   │   │   ├── components
+│   │   │   │   ├── app-sidebar.tsx
+│   │   │   │   ├── nav-actions.tsx
+│   │   │   │   ├── nav-favorites.tsx
+│   │   │   │   ├── nav-main.tsx
+│   │   │   │   ├── nav-secondary.tsx
+│   │   │   │   ├── nav-workspaces.tsx
+│   │   │   │   └── team-switcher.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-11
+│   │   │   ├── components
+│   │   │   │   └── app-sidebar.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-12
+│   │   │   ├── components
+│   │   │   │   ├── app-sidebar.tsx
+│   │   │   │   ├── calendars.tsx
+│   │   │   │   ├── date-picker.tsx
+│   │   │   │   └── nav-user.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-13
+│   │   │   ├── components
+│   │   │   │   └── settings-dialog.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-14
+│   │   │   ├── components
+│   │   │   │   └── app-sidebar.tsx
+│   │   │   └── page.tsx
+│   │   ├── sidebar-15
+│   │   │   ├── components
+│   │   │   │   ├── calendars.tsx
+│   │   │   │   ├── date-picker.tsx
+│   │   │   │   ├── nav-favorites.tsx
+│   │   │   │   ├── nav-main.tsx
+│   │   │   │   ├── nav-secondary.tsx
+│   │   │   │   ├── nav-user.tsx
+│   │   │   │   ├── nav-workspaces.tsx
+│   │   │   │   ├── sidebar-left.tsx
+│   │   │   │   ├── sidebar-right.tsx
+│   │   │   │   └── team-switcher.tsx
+│   │   │   └── page.tsx
+│   │   └── sidebar-16
+│   │       ├── components
+│   │       │   ├── app-sidebar.tsx
+│   │       │   ├── nav-main.tsx
+│   │       │   ├── nav-projects.tsx
+│   │       │   ├── nav-secondary.tsx
+│   │       │   ├── nav-user.tsx
+│   │       │   ├── search-form.tsx
+│   │       │   └── site-header.tsx
+│   │       └── page.tsx
+│   ├── charts
+│   │   ├── chart-area-axes.tsx
+│   │   ├── chart-area-default.tsx
+│   │   ├── chart-area-gradient.tsx
+│   │   ├── chart-area-icons.tsx
+│   │   ├── chart-area-interactive.tsx
+│   │   ├── chart-area-legend.tsx
+│   │   ├── chart-area-linear.tsx
+│   │   ├── chart-area-stacked-expand.tsx
+│   │   ├── chart-area-stacked.tsx
+│   │   ├── chart-area-step.tsx
+│   │   ├── chart-bar-active.tsx
+│   │   ├── chart-bar-default.tsx
+│   │   ├── chart-bar-horizontal.tsx
+│   │   ├── chart-bar-interactive.tsx
+│   │   ├── chart-bar-label-custom.tsx
+│   │   ├── chart-bar-label.tsx
+│   │   ├── chart-bar-mixed.tsx
+│   │   ├── chart-bar-multiple.tsx
+│   │   ├── chart-bar-negative.tsx
+│   │   ├── chart-bar-stacked.tsx
+│   │   ├── chart-line-default.tsx
+│   │   ├── chart-line-dots-colors.tsx
+│   │   ├── chart-line-dots-custom.tsx
+│   │   ├── chart-line-dots.tsx
+│   │   ├── chart-line-interactive.tsx
+│   │   ├── chart-line-label-custom.tsx
+│   │   ├── chart-line-label.tsx
+│   │   ├── chart-line-linear.tsx
+│   │   ├── chart-line-multiple.tsx
+│   │   ├── chart-line-step.tsx
+│   │   ├── chart-pie-donut-active.tsx
+│   │   ├── chart-pie-donut-text.tsx
+│   │   ├── chart-pie-donut.tsx
+│   │   ├── chart-pie-interactive.tsx
+│   │   ├── chart-pie-label-custom.tsx
+│   │   ├── chart-pie-label-list.tsx
+│   │   ├── chart-pie-label.tsx
+│   │   ├── chart-pie-legend.tsx
+│   │   ├── chart-pie-separator-none.tsx
+│   │   ├── chart-pie-simple.tsx
+│   │   ├── chart-pie-stacked.tsx
+│   │   ├── chart-radar-default.tsx
+│   │   ├── chart-radar-dots.tsx
+│   │   ├── chart-radar-grid-circle-fill.tsx
+│   │   ├── chart-radar-grid-circle-no-lines.tsx
+│   │   ├── chart-radar-grid-circle.tsx
+│   │   ├── chart-radar-grid-custom.tsx
+│   │   ├── chart-radar-grid-fill.tsx
+│   │   ├── chart-radar-grid-none.tsx
+│   │   ├── chart-radar-icons.tsx
+│   │   ├── chart-radar-label-custom.tsx
+│   │   ├── chart-radar-legend.tsx
+│   │   ├── chart-radar-lines-only.tsx
+│   │   ├── chart-radar-multiple.tsx
+│   │   ├── chart-radar-radius.tsx
+│   │   ├── chart-radial-grid.tsx
+│   │   ├── chart-radial-label.tsx
+│   │   ├── chart-radial-shape.tsx
+│   │   ├── chart-radial-simple.tsx
+│   │   ├── chart-radial-stacked.tsx
+│   │   ├── chart-radial-text.tsx
+│   │   ├── chart-tooltip-advanced.tsx
+│   │   ├── chart-tooltip-default.tsx
+│   │   ├── chart-tooltip-formatter.tsx
+│   │   ├── chart-tooltip-icons.tsx
+│   │   ├── chart-tooltip-indicator-line.tsx
+│   │   ├── chart-tooltip-indicator-none.tsx
+│   │   ├── chart-tooltip-label-custom.tsx
+│   │   ├── chart-tooltip-label-formatter.tsx
+│   │   └── chart-tooltip-label-none.tsx
+│   ├── components
+│   │   ├── layout
+│   │   │   ├── Layout.tsx
+│   │   │   ├── Sidebar.tsx
+│   │   │   ├── Topbar.tsx
+│   │   │   └── sidebar-context.tsx
+│   │   └── ui
+│   │       ├── accordion.tsx
+│   │       ├── alert-dialog.tsx
+│   │       ├── alert.tsx
+│   │       ├── aspect-ratio.tsx
+│   │       ├── avatar.tsx
+│   │       ├── badge.tsx
+│   │       ├── breadcrumb.tsx
+│   │       ├── button.tsx
+│   │       ├── calendar.tsx
+│   │       ├── card.tsx
+│   │       ├── carousel.tsx
+│   │       ├── chart.tsx
+│   │       ├── checkbox.tsx
+│   │       ├── collapsible.tsx
+│   │       ├── command.tsx
+│   │       ├── context-menu.tsx
+│   │       ├── dialog.tsx
+│   │       ├── drawer.tsx
+│   │       ├── dropdown-menu.tsx
+│   │       ├── form.tsx
+│   │       ├── hover-card.tsx
+│   │       ├── input-otp.tsx
+│   │       ├── input.tsx
+│   │       ├── label.tsx
+│   │       ├── menubar.tsx
+│   │       ├── navigation-menu.tsx
+│   │       ├── pagination.tsx
+│   │       ├── popover.tsx
+│   │       ├── progress.tsx
+│   │       ├── radio-group.tsx
+│   │       ├── resizable.tsx
+│   │       ├── scroll-area.tsx
+│   │       ├── select.tsx
+│   │       ├── separator.tsx
+│   │       ├── sheet.tsx
+│   │       ├── sidebar.tsx
+│   │       ├── skeleton.tsx
+│   │       ├── slider.tsx
+│   │       ├── sonner.tsx
+│   │       ├── switch.tsx
+│   │       ├── table.tsx
+│   │       ├── tabs.tsx
+│   │       ├── textarea.tsx
+│   │       ├── toggle-group.tsx
+│   │       ├── toggle.tsx
+│   │       └── tooltip.tsx
+│   ├── globals.css
+│   ├── hooks
+│   │   └── use-mobile.ts
+│   ├── index.css
+│   ├── internal
+│   │   ├── sidebar-controlled.tsx
+│   │   ├── sidebar-demo.tsx
+│   │   ├── sidebar-footer.tsx
+│   │   ├── sidebar-group-action.tsx
+│   │   ├── sidebar-group-collapsible.tsx
+│   │   ├── sidebar-group.tsx
+│   │   ├── sidebar-header.tsx
+│   │   ├── sidebar-menu-action.tsx
+│   │   ├── sidebar-menu-badge.tsx
+│   │   ├── sidebar-menu-collapsible.tsx
+│   │   ├── sidebar-menu-sub.tsx
+│   │   ├── sidebar-menu.tsx
+│   │   └── sidebar-rsc.tsx
+│   ├── lib
+│   │   ├── mock.ts
+│   │   ├── types.ts
+│   │   └── utils.ts
+│   ├── main.tsx
+│   ├── pages
+│   │   ├── Code
+│   │   │   ├── CodePage.tsx
+│   │   │   └── monacoLoader.ts
+│   │   ├── Logs
+│   │   │   ├── LogsPage copy.tsx
+│   │   │   ├── LogsPage.tsx
+│   │   │   ├── logic.ts
+│   │   │   └── useLogColumns.ts
+│   │   ├── Monitoring.tsx
+│   │   ├── Overview.tsx
+│   │   ├── Raft.tsx
+│   │   ├── Schemas.tsx
+│   │   └── Settings.tsx
+│   └── themes.css
+├── structure.txt
+├── styles
+│   ├── globals.css
+│   └── themes.css
+├── tailwind.config.ts
+├── tsconfig.json
+└── vite.config.ts
+
+62 directories, 293 files

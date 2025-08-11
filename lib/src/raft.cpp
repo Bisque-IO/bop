@@ -5243,26 +5243,6 @@ auto Log_Store::append(log_entry_ptr &entry) -> nuraft::ulong {
     return index;
 }
 
-/**
- * Overwrite a log entry at the given `index`.
- * This API should make sure that all
- * log
- *
- * entries
- * after the given
- * `index` should be truncated (if exist),
- * as a
- * result of this
-
- * * function call.
- *
- * @param index Log index number to
- * overwrite.
- *
- * @param entry New log
-
- * * entry to overwrite.
- */
 void Log_Store::write_at(nuraft::ulong index, log_entry_ptr &entry) {
     BISQUE_TRACE(logger_, "write_at(index={})", index);
 
@@ -5275,24 +5255,12 @@ void Log_Store::write_at(nuraft::ulong index, log_entry_ptr &entry) {
     }
 }
 
-/**
- * Invoked after a batch of logs is written as a part of
- * a single append_entries
- *
- * request.
-
- * *
- * @param start The
- * start log index number (inclusive)
- * @param cnt The
- *
- * number of log
- * entries written.
- */
 void Log_Store::end_of_append_batch(nuraft::ulong start, nuraft::ulong cnt) {
     BISQUE_TRACE(logger_, "end_of_append_batch(start={}, cnt={})", start, cnt);
 
-    bool is_write_at = false; {
+    bool is_write_at = false;
+
+    {
         std::lock_guard<std::mutex> lock(tail_mutex_);
         is_write_at = write_at_;
         tail_.swap(append_);
@@ -5454,81 +5422,12 @@ void Log_Store::end_of_append_batch(nuraft::ulong start, nuraft::ulong cnt) {
     last_durable_index_.store(start + cnt - 1);
 }
 
-/**
- * Get log entries with index [start, end).
- *
- * Return nullptr to indicate error if
- * any
- * log
- * entry within the
- * requested range
- * could not be retrieved (e.g. due to
- * external
- * log
- * truncation).
- *
- * @param start The start log
- * index number
- * (inclusive).
- * @param
- * end The
- * end log index number (exclusive).
- * @return The log
- * entries between
- * [start,
- * end).
- */
 auto Log_Store::log_entries(nuraft::ulong start, nuraft::ulong end)
     -> nuraft::ptr<std::vector<log_entry_ptr> > {
     BISQUE_TRACE(logger_, "log_entries(start={}, end={})", start, end);
     return log_entries_ext(start, end, 1024 * 1024 * 128);
 }
 
-/**
- * (Optional)
- * Get log entries with index [start, end).
- *
- * The total size of the
- *
- *
- * returned entries is limited by
- * batch_size_hint.
- *
- * Return nullptr to indicate
- * error if
-
- * * any log entry within the requested range
- * could not be
- * retrieved (e.g.
- * due to external
-
- * * log truncation).
- *
- * @param start The start log index number
- * (inclusive).
- * @param
- *
- * end
- * The end log index number (exclusive).
- * @param
- * batch_size_hint_in_bytes Total size (in
- * bytes)
- * of the returned
- * entries,
- * see the
- * detailed comment at
- *
- *
- * `state_machine::get_next_batch_size_hint_in_bytes()`.
- *
-
- * * @return The log entries between
- *
- * [start, end) and limited by the total size
- * given
- * by the
- * batch_size_hint_in_bytes.
- */
 auto Log_Store::log_entries_ext(
     nuraft::ulong start, nuraft::ulong end, nuraft::int64 batch_size_hint_in_bytes
 ) -> nuraft::ptr<std::vector<log_entry_ptr> > {
@@ -5633,18 +5532,6 @@ auto Log_Store::log_entries_ext(
     return result;
 }
 
-/**
- * Get the log entry at the specified log index number.
- *
- * @param index Should be
- * equal
- * to
- * or greater than 1.
- *
- * @return The log entry or null if index >=
- * this->next_slot().
-
- */
 log_entry_ptr Log_Store::entry_at(nuraft::ulong index) {
     BISQUE_TRACE(logger_, "entry_at(index={})", index); {
         std::lock_guard<std::mutex> lock(tail_mutex_);
@@ -5717,25 +5604,6 @@ log_entry_ptr Log_Store::entry_at(nuraft::ulong index) {
     return result;
 }
 
-/**
- * Get the term for the log entry at the specified index.
- * Suggest to stop the
- * system if
- *
- * the index >=
- * this->next_slot()
- *
- * @param index Should be equal to or
- * greater than 1.
- *
-
- * * @return The term for the specified log
- * entry, or
- *         0 if
- * index <
- *
- * this->start_index().
- */
 nuraft::ulong Log_Store::term_at(nuraft::ulong index) {
     BISQUE_TRACE(logger_, "term_at(index={})", index); {
         std::lock_guard<decltype(last_entry_mutex_)> lock(last_entry_mutex_);
@@ -5788,20 +5656,6 @@ nuraft::ulong Log_Store::term_at(nuraft::ulong index) {
     return term;
 }
 
-/**
- * Pack the given number of log items starting from the given index.
- *
- * @param
- * index The
-
- * * start log index number
- * (inclusive).
- * @param cnt The number of logs to
- * pack.
- * @return
-
- * * Packed (encoded) logs.
- */
 nuraft::ptr<nuraft::buffer> Log_Store::pack(nuraft::ulong index, nuraft::int32 cnt) {
     BISQUE_TRACE(logger_, "pack(index={}, cnt={})", index, cnt);
 
@@ -6186,24 +6040,11 @@ void Log_Store::apply_pack(nuraft::ulong index, nuraft::buffer &pack) {
 }
 
 /**
- * Compact the log store by purging all log entries,
- * including the given log index
+ * Compact the log store by purging all log entries, including the given log index number.
+ * If current maximum log index is smaller than given `last_log_index`, set
+ * start log index to `last_log_index + 1`.
  *
- *
- * number.
- *
- * If current
- * maximum log index is smaller than given `last_log_index`,
-
- * * set
-
- * * start log index to `last_log_index + 1`.
- *
- *
- * @param last_log_index Log index
- * number
- * that
- * will be purged up to (inclusive).
+ * @param last_log_index Log index number that will be purged up to (inclusive).
  * @return `true` on success.
  */
 bool Log_Store::compact(nuraft::ulong last_log_index) {
@@ -6287,8 +6128,7 @@ bool Log_Store::compact(nuraft::ulong last_log_index) {
                                        : index + compact_batch_size_;
 
         // calculate remaining entries to delete with
-        // last_log_index inclusive
-        // (+1).
+        // last_log_index inclusive (+1).
         nuraft::ulong remaining = last_index - index + 1;
         bool no_more = false;
 
@@ -6429,33 +6269,19 @@ void Log_Store::compact_async(
 
 /**
  * Synchronously flush all log entries in this log store to the backing storage
- * so
- * that
+ * so that all log entries are guaranteed to be durable upon process crash.
  *
- * all log entries are
- * guaranteed to be durable upon process crash.
- *
- * @return
- * `true` on
- *
- * success.
+ * @return `true` on success.
  */
 bool Log_Store::flush() {
     return flush(true);
 }
 
 /**
- * Synchronously flush all log entries in this log store to the backing storage
- * so
- * that
+ * Synchronously flush all log entries in this log store to the backing storage so
+ * that all log entries are guaranteed to be durable upon process crash.
  *
- * all log entries are
- * guaranteed to be durable upon process crash.
- *
- * @return
- * `true` on
- *
- * success.
+ * @return `true` on success.
  */
 bool Log_Store::flush(bool sync) {
     BISQUE_TRACE(logger_, "flush()");
@@ -6476,17 +6302,10 @@ bool Log_Store::flush(bool sync) {
 
 /**
  * (Experimental)
- * This API is used only when `raft_params::parallel_log_appending_`
- * flag
-
- * * is set.
- * Please refer
- * to the comment of the flag.
+ * This API is used only when `raft_params::parallel_log_appending_` flag is set.
+ * Please refer to the comment of the flag.
  *
- * @return The last
- * durable log
- *
- * index.
+ * @return The last durable log index.
  */
 FORCE_INLINE nuraft::ulong Log_Store::last_durable_index() {
     // l_trace("last_durable_index()");

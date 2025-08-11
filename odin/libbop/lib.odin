@@ -3215,7 +3215,27 @@ foreign lib {
 
 	raft_asio_rpc_client_delete :: proc(rpc_listener: ^Raft_Asio_RPC_Client_Ptr) ---
 
-	raft_fsm_make :: proc(user_data: rawptr, current_conf: ^Raft_Cluster_Config, rollback_conf: ^Raft_Cluster_Config, commit: Raft_FSM_Commit_Func, commit_config: Raft_FSM_Cluster_Config_Func, pre_commit: Raft_FSM_Commit_Func, rollback: Raft_FSM_Rollback_Func, rollback_config: Raft_FSM_Cluster_Config_Func, get_next_batch_size_hint_in_bytes: Raft_FSM_Get_Next_Batch_Size_Hint_In_Bytes_Func, save_snapshot: Raft_FSM_Save_Snapshot_Func, apply_snapshot: Raft_FSM_Apply_Snapshot_Func, read_snapshot: Raft_FSM_Read_Snapshot_Func, free_snapshot_user_ctx: Raft_FSM_Free_User_Snapshot_Ctx_Func, last_snapshot: Raft_FSM_Last_Snapshot_Func, last_commit_index: Raft_FSM_Last_Commit_Index_Func, create_snapshot: Raft_FSM_Create_Snapshot_Func, chk_create_snapshot: Raft_FSM_Chk_Create_Snapshot_Func, allow_leadership_transfer: Raft_FSM_Allow_Leadership_Transfer_Func, adjust_commit_index: Raft_FSM_Adjust_Commit_Index_Func) -> ^Raft_FSM_Ptr ---
+	raft_fsm_make :: proc(
+	    user_data:                         rawptr,
+		current_conf:                      ^Raft_Cluster_Config,
+		rollback_conf:                     ^Raft_Cluster_Config,
+		commit:                            Raft_FSM_Commit_Func,
+		commit_config:                     Raft_FSM_Cluster_Config_Func,
+		pre_commit:                        Raft_FSM_Commit_Func,
+		rollback:                          Raft_FSM_Rollback_Func,
+		rollback_config:                   Raft_FSM_Cluster_Config_Func,
+		get_next_batch_size_hint_in_bytes: Raft_FSM_Get_Next_Batch_Size_Hint_In_Bytes_Func,
+		save_snapshot:                     Raft_FSM_Save_Snapshot_Func,
+		apply_snapshot:                    Raft_FSM_Apply_Snapshot_Func,
+		read_snapshot:                     Raft_FSM_Read_Snapshot_Func,
+		free_snapshot_user_ctx:            Raft_FSM_Free_User_Snapshot_Ctx_Func,
+		last_snapshot:                     Raft_FSM_Last_Snapshot_Func,
+		last_commit_index:                 Raft_FSM_Last_Commit_Index_Func,
+		create_snapshot:                   Raft_FSM_Create_Snapshot_Func,
+		chk_create_snapshot:               Raft_FSM_Chk_Create_Snapshot_Func,
+		allow_leadership_transfer:         Raft_FSM_Allow_Leadership_Transfer_Func,
+		adjust_commit_index:               Raft_FSM_Adjust_Commit_Index_Func,
+	) -> ^Raft_FSM_Ptr ---
 
 	raft_fsm_delete :: proc(fsm: ^Raft_FSM_Ptr) ---
 
@@ -3249,7 +3269,19 @@ foreign lib {
 	raft_params_make :: proc() -> ^Raft_Params ---
 	raft_params_delete :: proc(params: ^Raft_Params) ---
 
-	raft_server_launch :: proc(user_data: rawptr, fsm: ^Raft_FSM_Ptr, state_mgr: ^Raft_State_Mgr_Ptr, logger: ^Raft_Logger_Ptr, port_number: i32, asio_service: ^Raft_Asio_Service_Ptr, params_given: ^Raft_Params, skip_initial_election_timeout: bool, start_server_in_constructor: bool, test_mode_flag: bool, cb_func: rawptr) -> ^Raft_Server_Ptr ---
+	raft_server_launch :: proc(
+	    user_data:                     rawptr,
+		fsm:                           ^Raft_FSM_Ptr,
+		state_mgr:                     ^Raft_State_Mgr_Ptr,
+		logger:                        ^Raft_Logger_Ptr,
+		port_number:                   i32,
+		asio_service:                  ^Raft_Asio_Service_Ptr,
+		params_given:                  ^Raft_Params,
+		skip_initial_election_timeout: bool,
+		start_server_in_constructor:   bool,
+		test_mode_flag:                bool,
+		cb_func:                       rawptr,
+	) -> ^Raft_Server_Ptr ---
 
 	raft_server_stop :: proc(rs_ptr: ^Raft_Server_Ptr, time_limit_sec: c.size_t) -> bool ---
 
@@ -3279,7 +3311,11 @@ foreign lib {
 	@param srv Configuration of server to add.
 	@return `get_accepted()` will be true on success.
 	*/
-	raft_server_add_srv :: proc(rs: ^Raft_Server, srv: ^Raft_Srv_Config_Ptr, handler: Raft_Async_Buffer_Ptr) -> bool ---
+	raft_server_add_srv :: proc(
+	    rs:      ^Raft_Server,
+		srv:     ^Raft_Srv_Config_Ptr,
+		handler: Raft_Async_Buffer_Ptr,
+	) -> bool ---
 
 	/*
 	Remove a server from the current cluster. Only leader will accept this operation.
@@ -3790,11 +3826,42 @@ foreign lib {
 	@return `cmd_result` instance. It will contain `true` if the commit
 	        has been invoked, and `false` if not.
 	*/
-	raft_server_wait_for_state_machine_commit :: proc(rs: ^Raft_Server, result: ^Raft_Async_Bool_Ptr, target_idx: u64) -> bool ---
+	raft_server_wait_for_state_machine_commit :: proc(
+	    rs: ^Raft_Server,
+		result: ^Raft_Async_Bool_Ptr,
+		target_idx: u64,
+	) -> bool ---
 
-	raft_mdbx_state_mgr_open :: proc(my_srv_config: ^Raft_Srv_Config_Ptr, dir: [^]byte, dir_size: c.size_t, logger: ^Raft_Logger_Ptr, size_lower: c.size_t, size_now: c.size_t, size_upper: c.size_t, growth_step: c.size_t, shirnk_threshold: c.size_t, page_size: c.size_t, flags: u32, mode: u16, log_store: ^Raft_Log_Store_Ptr) -> ^Raft_State_Mgr_Ptr ---
+	raft_mdbx_state_mgr_open :: proc(
+	    my_srv_config: ^Raft_Srv_Config_Ptr,
+		dir: [^]byte,
+		dir_size: c.size_t,
+		logger: ^Raft_Logger_Ptr,
+		size_lower: c.size_t,
+		size_now: c.size_t,
+		size_upper: c.size_t,
+		growth_step: c.size_t,
+		shirnk_threshold: c.size_t,
+		page_size: c.size_t,
+		flags: u32,
+		mode: u16,
+		log_store: ^Raft_Log_Store_Ptr,
+	) -> ^Raft_State_Mgr_Ptr ---
 
-	raft_mdbx_log_store_open :: proc(dir: [^]byte, dir_size: c.size_t, logger: ^Raft_Logger_Ptr, size_lower: c.size_t, size_now: c.size_t, size_upper: c.size_t, growth_step: c.size_t, shirnk_threshold: c.size_t, page_size: c.size_t, flags: u32, mode: u16, compact_batch_size: c.size_t) -> ^Raft_Log_Store_Ptr ---
+	raft_mdbx_log_store_open :: proc(
+	    dir: [^]byte,
+		dir_size: c.size_t,
+		logger: ^Raft_Logger_Ptr,
+		size_lower: c.size_t,
+		size_now: c.size_t,
+		size_upper: c.size_t,
+		growth_step: c.size_t,
+		shirnk_threshold: c.size_t,
+		page_size: c.size_t,
+		flags: u32,
+		mode: u16,
+		compact_batch_size: c.size_t,
+	) -> ^Raft_Log_Store_Ptr ---
 }
 
 /*
@@ -3845,7 +3912,14 @@ foreign lib {
 	*/
 	us_udp_socket_receive :: proc(s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer) -> c.int ---
 
-	us_udp_buffer_set_packet_payload :: proc(send_buf: ^US_UDP_Packet_Buffer, index: c.int, offset: c.int, payload: [^]byte, length: c.int, peer_addr: cstring) ---
+	us_udp_buffer_set_packet_payload :: proc(
+	    send_buf:  ^US_UDP_Packet_Buffer,
+		index:     c.int,
+		offset:    c.int,
+		payload:   [^]byte,
+		length:    c.int,
+		peer_addr: cstring,
+	) ---
 
 	us_udp_socket_send :: proc(s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer, num: c.int) -> c.int ---
 
@@ -3854,7 +3928,15 @@ foreign lib {
 	*/
 	us_create_udp_packet_buffer :: proc() -> ^US_UDP_Packet_Buffer ---
 
-	us_create_udp_socket :: proc(loop: ^US_Loop, buf: ^US_UDP_Packet_Buffer, data_cb: proc "c" (s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer, index: c.int), drain_cb: proc "c" (s: ^US_UDP_Socket), host: cstring, port: c.ushort, user: rawptr) -> ^US_UDP_Socket ---
+	us_create_udp_socket :: proc(
+	    loop:     ^US_Loop,
+		buf:      ^US_UDP_Packet_Buffer,
+		data_cb:  proc "c" (s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer, index: c.int),
+		drain_cb: proc "c" (s: ^US_UDP_Socket),
+		host:     cstring,
+		port:     c.ushort,
+		user:     rawptr,
+	) -> ^US_UDP_Socket ---
 
 	/*
 	This one is ugly, should be ext! not user
@@ -3900,6 +3982,7 @@ foreign lib {
 	us_socket_context_on_server_name :: proc(ssl: c.int, ctx: ^US_Socket_Context, cb: proc "c" (c: ^US_Socket_Context), hostname: cstring) ---
 
 	us_socket_server_name_userdata :: proc(ssl: c.int, s: ^US_Socket) -> rawptr ---
+
 	us_socket_context_find_server_name_userdata :: proc(ssl: c.int, ctx: ^US_Socket_Context, hostname_pattern: cstring) -> rawptr ---
 
 	/*

@@ -161,7 +161,7 @@ toolchain_end()
 
 if is_plat("linux") then
     add_requires("conan::libaio/0.3.113", { alias = "libaio", configs = { shared = false } })
-    add_requires("conan::liburing/2.8", { alias = "liburing", configs = { shared = false } })
+    add_requires("conan::liburing/2.11", { alias = "liburing", configs = { shared = false } })
 end
 
 add_requires("zig ~0.14.0")
@@ -175,23 +175,33 @@ if is_plat("windows") then
             shared = true
         }
     })
-    -- else
-    --     add_requires("conan::openssl/3.5.0", {
-    --         alias = "openssl3",
-    --         configs = {
-    --             fPIC = true,
-    --             shared = true
-    --         }
-    --     })
+else
+    add_requires("conan::openssl/3.5.0", {
+        alias = "openssl3",
+        configs = {
+            fPIC = true,
+            shared = true
+        }
+    })
 end
 
--- add_requires("conan::boost/1.88.0", {
--- add_requires("boost ~1.88.0", {
---     alias = "boost",
---     configs = {
---         header_only = true
---     }
--- })
+add_requires("c-ares ~1.34.3", {
+    configs = {
+        fPIC = true,
+        fpic = true,
+        shared = false,
+    }
+})
+
+add_requires("asio ~1.34.2")
+
+add_requires("conan::boost/1.88.0", {
+    -- add_requires("boost ~1.88.0", {
+    alias = "boost",
+    configs = {
+        header_only = true
+    }
+})
 
 -- add_requires("wolfssl ~5.7.2", {
 --     --add_requires("conan::wolfssl/5.7.0", {

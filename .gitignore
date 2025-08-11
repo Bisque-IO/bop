@@ -68,3 +68,4 @@ compile_commands.json
 .next
 .node_modules
 .VSCodeCounter
+dist

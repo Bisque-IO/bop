@@ -1,27 +1,27 @@
 package wasmtime
 
+import "base:runtime"
 import c "core:c/libc"
 import "core:fmt"
 import "core:os"
-import "base:runtime"
 import "core:strings"
 
 main :: proc() {
-    fmt.println("wasmtime")
+	fmt.println("wasmtime")
 
-    config := config_new()
-    // config_threads_set(config, false)
-    // config_epoch_interruption_set(config, true)
-    // config_debug_info_set(config, true)
+	config := config_new()
+	// config_threads_set(config, false)
+	// config_epoch_interruption_set(config, true)
+	// config_debug_info_set(config, true)
 
-    tls_init()
+	tls_init()
 
-    engine := engine_new_with_config(config)
-    defer engine_delete(engine)
+	engine := engine_new_with_config(config)
+	defer engine_delete(engine)
 
-    store := store_new(engine, nil, nil)
+	store := store_new(engine, nil, nil)
 
-    buffer, ok := os.read_entire_file("odin/wasm/wasm.wasm")
+	buffer, ok := os.read_entire_file("odin/wasm/wasm.wasm")
 	// buffer, ok := os.read_entire_file("../../wasm/wasm.wasm")
 	defer delete(buffer)
 
@@ -30,9 +30,10 @@ main :: proc() {
 	error := module_deserialize_file(engine, cstring("odin/wasm/wasm.cwasm"), &module)
 	// error := module_new(engine, raw_data(buffer), c.size_t(len(buffer)), &module)
 	if error != nil {
-	    name: Name
-        error_message(error, &name)
-	    fmt.println("failed", string(name.data[0:name.size]))
+		defer error_delete(error)
+		name: Name
+		error_message(error, &name)
+		fmt.println("failed", string(name.data[0:name.size]))
 		return
 	}
 
@@ -43,9 +44,9 @@ main :: proc() {
 	error = instance_new(ctx, module, nil, 0, &instance, &trap)
 	if error != nil {
 		defer error_delete(error)
-	    name: Name
-        error_message(error, &name)
-	    fmt.println("failed to create instance", string(name.data[0:name.size]))
+		name: Name
+		error_message(error, &name)
+		fmt.println("failed to create instance", string(name.data[0:name.size]))
 		return
 	}
 	// defer instance_delete(&instance)
@@ -54,7 +55,7 @@ main :: proc() {
 	name := "hellope"
 	ok = instance_export_get(ctx, &instance, raw_data(name), 7, &item)
 	if !ok {
-	    fmt.println("failed to get hellope")
+		fmt.println("failed to get hellope")
 		return
 	}
 

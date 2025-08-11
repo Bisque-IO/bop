@@ -2443,4 +2443,3 @@ ptr<asio_service> nuraft_global_mgr::get_asio_service() {
     std::lock_guard<std::mutex> l(mgr->asio_service_lock_);
     return mgr->asio_service_;
 }
-
