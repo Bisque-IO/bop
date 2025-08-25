@@ -1,4 +1,4 @@
-package bopd
+package movd
 
 import bop "../odin/libbop"
 import "base:runtime"

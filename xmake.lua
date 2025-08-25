@@ -166,37 +166,37 @@ end
 
 add_requires("zig ~0.14.0")
 
-if is_plat("windows") then
-    add_requires("openssl3 ~3.3.2", {
-        -- add_requires("conan::openssl/3.5.0", {
-        alias = "openssl3",
-        configs = {
-            fPIC = true,
-            shared = true
-        }
-    })
-else
-    add_requires("conan::openssl/3.5.0", {
-        alias = "openssl3",
-        configs = {
-            fPIC = true,
-            shared = true
-        }
-    })
-end
+-- if is_plat("windows") then
+--     add_requires("openssl3 ~3.3.2", {
+--         -- add_requires("conan::openssl/3.5.0", {
+--         alias = "openssl3",
+--         configs = {
+--             fPIC = true,
+--             shared = true
+--         }
+--     })
+-- else
+--     add_requires("conan::openssl/3.5.0", {
+--         alias = "openssl3",
+--         configs = {
+--             fPIC = true,
+--             shared = true
+--         }
+--     })
+-- end
 
-add_requires("c-ares ~1.34.3", {
-    configs = {
-        fPIC = true,
-        fpic = true,
-        shared = false,
-    }
-})
+-- add_requires("c-ares ~1.34.3", {
+--     configs = {
+--         fPIC = true,
+--         fpic = true,
+--         shared = false,
+--     }
+-- })
 
 add_requires("asio ~1.34.2")
 
-add_requires("conan::boost/1.88.0", {
-    -- add_requires("boost ~1.88.0", {
+-- add_requires("conan::boost/1.88.0", {
+add_requires("boost ~1.88.0", {
     alias = "boost",
     configs = {
         header_only = true

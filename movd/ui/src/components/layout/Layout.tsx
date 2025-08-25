@@ -66,7 +66,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <PanelResizeHandle
             className={`transition-colors cursor-col-resize ${
               collapsed
-                ? "w-1"
+                ? "w-0"
                 : "w-1 bg-zinc-900 hover:bg-zinc-800 active:bg-zinc-700"
             }`}
           />
@@ -74,7 +74,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <Panel order={2}>
             <div className="flex flex-col h-screen min-h-0">
               <Topbar />
-              <main className="h-full p-4 gap-4 flex-1 overflow-hidden min-h-0">
+              <main className="h-full p-4 gap-4 flex-1 overflow-auto min-h-0">
               {/* <div className="h-full min-h-0 overflow-hidden"> */}
                 <Outlet />
               </main>

@@ -35,6 +35,7 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 		"system:Dbghelp.lib",
 		"system:ws2_32.lib",
 		"system:bcrypt.lib",
+		"windows/amd64/zlibstatic.lib",
 	    MSVCRT_NAME,
 		LIB_PATH,
 	}
@@ -43,7 +44,33 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 } else when ODIN_OS == .Linux && ODIN_ARCH == .amd64 {
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -extra-linker-flags:"-Wl,-rpath,$ORIGIN/libbop.so" -linker:lld
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -linker:lld -extra-linker-flags:"-rdynamic -static"
-	when #config(BOP_OPENSSL, 1) == 1 {
+	when #config(BOP_OPENSSL, 0) == 1 {
+		when #config(BOP_DEBUG, 0) == 1 {
+			when #config(BOP_SHARED, 0) == 1 {
+				@(private)
+				LIB_PATH :: "../../build/linux/x86_64/release/libbop-openssl.so"
+			} else {
+				@(private)
+				LIB_PATH :: "../../build/linux/x86_64/release/libbop-openssl.a"
+			}
+		} else {
+			when #config(BOP_SHARED, 0) == 1 {
+				@(private)
+				LIB_PATH :: "linux/amd64/libbop-openssl.so"
+			} else {
+				@(private)
+				LIB_PATH :: "linux/amd64/libbop-openssl.a"
+			}
+		}
+		foreign import lib {
+			"system:crypto",
+			"system:ssl",
+			"system:stdc++",
+			"linux/amd64/libz.a",
+			"linux/amd64/libzstd.a",
+			LIB_PATH,
+		}
+	} else {
 		when #config(BOP_DEBUG, 0) == 1 {
 			when #config(BOP_SHARED, 0) == 1 {
 				@(private)
@@ -61,26 +88,13 @@ when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 				LIB_PATH :: "linux/amd64/libbop.a"
 			}
 		}
-		foreign import lib {"system:crypto", "system:ssl", "system:stdc++", "system:zstd", "system:z", LIB_PATH}
-	} else {
-		when #config(BOP_DEBUG, 0) == 1 {
-			when #config(BOP_SHARED, 0) == 1 {
-				@(private)
-				LIB_PATH :: "../../build/linux/x86_64/release/libbop-wolfssl.so"
-			} else {
-				@(private)
-				LIB_PATH :: "../../build/linux/x86_64/release/libbop-wolfssl.a"
-			}
-		} else {
-			when #config(BOP_SHARED, 0) == 1 {
-				@(private)
-				LIB_PATH :: "linux/amd64/libbop-wolfssl.so"
-			} else {
-				@(private)
-				LIB_PATH :: "linux/amd64/libbop-wolfssl.a"
-			}
+		foreign import lib {
+			"linux/amd64/libwolfssl.a",
+			"system:stdc++",
+			"linux/amd64/libz.a",
+			"linux/amd64/libzstd.a",
+			LIB_PATH,
 		}
-		foreign import lib {"linux/amd64/libwolfssl.a", "linux/amd64/libiwasm.a", "system:stdc++", LIB_PATH}
 	}
 } else when ODIN_OS == .Linux && ODIN_ARCH == .arm64 {
 	// odin build . -o:aggressive -define:BOP_DEBUG=1 -define:BOP_WOLFSSL=1 -extra-linker-flags:"-Wl,-rpath,$ORIGIN/libbop.so" -linker:lld
@@ -4279,6 +4293,185 @@ run_alloc :: proc() {
 	p := zalloc(16)
 	fmt.println("pointer", cast(uint)uintptr(p))
 	dealloc(p)
+}
+
+@(default_calling_convention = "c")
+foreign lib {
+	uws_create_app :: proc() -> uws_app_t ---
+
+	uws_create_ssl_app :: proc(options: uws_ssl_options_t) -> uws_app_t ---
+
+	uws_app_destroy :: proc(app: uws_app_t) ---
+
+	uws_app_get :: proc(
+		user_data: rawptr,
+		app: uws_app_t,
+		pattern: [^]u8,
+		pattern_length: c.size_t,
+		handler: uws_http_handler_t,
+	) ---
+
+	uws_app_post :: proc(
+		user_data: rawptr,
+		app: uws_app_t,
+		pattern: [^]u8,
+		pattern_length: c.size_t,
+		handler: uws_http_handler_t,
+	) ---
+
+	uws_app_put :: proc(
+		user_data: rawptr,
+		app: uws_app_t,
+		pattern: [^]u8,
+		pattern_length: c.size_t,
+		handler: uws_http_handler_t,
+	) ---
+
+	uws_app_del :: proc(
+		user_data: rawptr,
+		app: uws_app_t,
+		pattern: [^]u8,
+		pattern_length: c.size_t,
+		handler: uws_http_handler_t,
+	) ---
+
+	uws_app_patch :: proc(
+		user_data: rawptr,
+		app: uws_app_t,
+		pattern: [^]u8,
+		pattern_length: c.size_t,
+		handler: uws_http_handler_t,
+	) ---
+
+	uws_app_options :: proc(
+		user_data: rawptr,
+		app: uws_app_t,
+		pattern: [^]u8,
+		pattern_length: c.size_t,
+		handler: uws_http_handler_t,
+	) ---
+
+	uws_app_any :: proc(
+		user_data: rawptr,
+		app: uws_app_t,
+		pattern: [^]u8,
+		pattern_length: c.size_t,
+		handler: uws_http_handler_t,
+	) ---
+
+	uws_app_ws :: proc(
+		app: uws_app_t,
+		pattern: [^]u8,
+		pattern_length: c.size_t,
+		behavior: uws_ws_behavior_t,
+	) ---
+
+	uws_app_listen :: proc(
+		user_data: rawptr,
+		app: uws_app_t,
+		port: c.int,
+		cb: uws_listen_handler_t,
+	) ---
+
+	uws_app_run :: proc(app: uws_app_t) ---
+
+	// HTTP Response functions
+
+	uws_res_write_status :: proc(
+		res: uws_res_t,
+		status: [^]u8,
+		status_length: c.size_t,
+	) ---
+
+	uws_res_write_header :: proc(
+		res: uws_res_t,
+		key: [^]u8,
+		key_length: c.size_t,
+		value: [^]u8,
+		value_length: c.size_t,
+	) ---
+
+	uws_res_write :: proc(
+		res: uws_res_t,
+		data: [^]u8,
+		data_length: c.size_t,
+	) ---
+
+	uws_res_end :: proc(
+		res: uws_res_t,
+		data: [^]u8,
+		data_length: c.size_t,
+		close_connection: c.bool,
+	) ---
+
+	// HTTP Request functions
+
+	uws_req_get_method :: proc(req: uws_req_t, length: ^c.size_t) -> [^]u8 ---
+	uws_req_get_url :: proc(req: uws_req_t, length: ^c.size_t) -> [^]u8 ---
+	uws_req_get_query :: proc(req: uws_req_t, length: ^c.size_t) -> [^]u8 ---
+	uws_req_get_header :: proc(req: uws_req_t, lower_case_name: [^]u8, length: ^c.size_t) -> [^]u8 ---
+
+	// WebSocket functions
+
+	uws_ws_send :: proc(
+		ws: uws_socket_t,
+		message: [^]u8,
+		message_length: c.size_t,
+		opcode: uws_opcode_t,
+		compress: c.bool,
+		fin: c.bool
+	) -> c.bool ---
+
+	uws_ws_close :: proc(
+		ws: uws_socket_t,
+		code: c.int,
+		message: [^]u8,
+		message_length: c.size_t,
+	) ---
+
+	uws_ws_get_user_data :: proc(ws: uws_socket_t) -> rawptr ---
+
+	uws_ws_subscribe :: proc(
+		ws: uws_socket_t,
+		topic: [^]u8,
+		topic_length: c.size_t,
+	) -> c.bool ---
+
+	uws_ws_unsubscribe :: proc(
+		ws: uws_socket_t,
+		topic: [^]u8,
+		topic_length: c.size_t,
+	) -> c.bool ---
+
+	uws_ws_is_subscribed :: proc(
+		ws: uws_socket_t,
+		topic: [^]u8,
+		topic_length: c.size_t,
+	) -> c.bool ---
+
+	uws_ws_publish :: proc(
+		ws: uws_socket_t,
+		topic: [^]u8,
+		topic_length: c.size_t,
+		message: [^]u8,
+		message_length: c.size_t,
+		opcode: uws_opcode_t,
+		compress: c.bool,
+	) -> c.bool ---
+
+	uws_ws_get_buffered_amount :: proc(ws: uws_socket_t) -> u32 ---
+
+	uws_ws_get_remote_address :: proc(ws: uws_socket_t, length: ^c.size_t) -> u32 ---
+
+	uws_app_publish :: proc(
+		app: uws_app_t,
+		topic: [^]u8,
+		topic_length: c.size_t,
+		message: [^]u8,
+		message_length: c.size_t,
+		opcode: uws_opcode_t,
+		compress: c.bool,
+	) -> c.int ---
 }
 
 

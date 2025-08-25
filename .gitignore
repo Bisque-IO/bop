@@ -69,3 +69,14 @@ compile_commands.json
 .node_modules
 .VSCodeCounter
 dist
+__pycache__/
+
+ui/kotlin-js-store/
+
+lib/wamr/.github/
+
+lib/wamr/.devcontainer/
+
+lib/zstd/.github/
+
+lib/zlib/.github/

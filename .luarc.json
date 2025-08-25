@@ -1,0 +1,11 @@
+{
+  "workspace.userThirdParty": [
+    "C:/Users/info//LLS-Addons/addons"
+  ],
+  "workspace.library": [
+    "C:/Users/info/repos/xmake-luals-addon/library"
+  ],
+  "runtime.builtin": {
+    "os": "disable"
+  }
+}

@@ -1,7 +1,7 @@
 package wasm
 
-import "base:runtime"
-import "core:fmt"
+// import "base:runtime"
+// import "core:fmt"
 
 @(export)
 hellope :: proc "c" () {

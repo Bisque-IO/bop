@@ -1,4 +1,4 @@
-package bopd
+package movd
 
 import "base:runtime"
 import "core:flags"

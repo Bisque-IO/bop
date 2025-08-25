@@ -9,19 +9,19 @@ local target_of = function(kind, use_openssl)
     end
     if kind == "static" then
         if not use_openssl and not is_plat("windows") then
-            target("bop-wolfssl")
-            set_basename("bop-wolfssl")
-        else
             target("bop")
             set_basename("bop")
+        else
+            target("bop-openssl")
+            set_basename("bop-openssl")
         end
     else
         if not use_openssl then
             target("bop-shared")
-            set_basename("bop-wolfssl")
+            set_basename("bop")
         else
             target("bop-shared")
-            set_basename("bop")
+            set_basename("bop-openssl")
         end
     end
     set_kind(kind)
@@ -76,6 +76,7 @@ local target_of = function(kind, use_openssl)
     --add_syslinks("c++")
 
     add_defines(
+        "UWS_HTTPRESPONSE_NO_WRITEMARK",
     -- "ASIO_STANDALONE=1",
         "SNMALLOC_USE_WAIT_ON_ADDRESS",
         "USE_BOOST_ASIO",
@@ -150,7 +151,7 @@ local target_of = function(kind, use_openssl)
             add_defines("BOOST_ASIO_USE_WOLFSSL=1")
             add_defines("ASIO_USE_WOLFSSL=1")
             add_defines("HAVE_WOLFSSL_ASIO=1")
-            add_links(os.projectdir() .. "\\odin\\libbop\\windows\\amd64\\wolfssl.lib")
+            add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
             add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
         end
 
