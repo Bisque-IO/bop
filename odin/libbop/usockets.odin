@@ -10,23 +10,23 @@ US_EXT_ALIGNMENT :: 16
 US_LISTEN_DEFAULT :: 0
 US_LISTEN_EXCLUSIVE_PORT :: 1
 
-US_Socket :: struct {}
+us_socket_t :: struct {}
 
-US_Listen_Socket :: struct {}
+us_listen_socket_t :: struct {}
 
-US_Timer :: struct {}
+us_timer_t :: struct {}
 
-US_Socket_Context :: struct {}
+us_socket_context_t :: struct {}
 
-US_Loop :: struct {}
+us_loop_t :: struct {}
 
-US_Poll :: struct {}
+us_poll_t :: struct {}
 
-US_UDP_Socket :: struct {}
+us_udp_socket_t :: struct {}
 
-US_UDP_Packet_Buffer :: struct {}
+us_udp_packet_buffer_t :: struct {}
 
-US_Socket_Context_Options :: struct {
+us_socket_context_options_t :: struct {
 	key_file_name:               cstring,
 	cert_file_name:              cstring,
 	passphrase:                  cstring,

@@ -20,19 +20,19 @@ HTTP_Context :: struct {
     response: string,
 }
 
-on_wakeup :: proc "c" (loop: ^bop.US_Loop) {
+on_wakeup :: proc "c" (loop: ^bop.us_loop_t) {
 
 }
 
-on_pre :: proc "c" (loop: ^bop.US_Loop) {
+on_pre :: proc "c" (loop: ^bop.us_loop_t) {
 
 }
 
-on_post :: proc "c" (loop: ^bop.US_Loop) {
+on_post :: proc "c" (loop: ^bop.us_loop_t) {
 
 }
 
-on_http_socket_writeable :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
+on_http_socket_writeable :: proc "c" (s: ^bop.us_socket_t) -> ^bop.us_socket_t {
     http_socket := cast(^HTTP_Socket)bop.us_socket_ext(SSL, s)
     http_context := cast(^HTTP_Context)bop.us_socket_context_ext(SSL, bop.us_socket_context(SSL, s))
 
@@ -47,19 +47,19 @@ on_http_socket_writeable :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
     return s
 }
 
-on_http_socket_close :: proc "c" (s: ^bop.US_Socket, code: c.int, reason: rawptr) -> ^bop.US_Socket {
+on_http_socket_close :: proc "c" (s: ^bop.us_socket_t, code: c.int, reason: rawptr) -> ^bop.us_socket_t {
     context = runtime.default_context()
     fmt.println("client disconnected")
     return s
 }
 
-on_http_socket_end :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
+on_http_socket_end :: proc "c" (s: ^bop.us_socket_t) -> ^bop.us_socket_t {
     // HTTP does not support half-closed sockets
     bop.us_socket_shutdown(SSL, s)
     return bop.us_socket_close(SSL, s, 0, nil)
 }
 
-on_http_socket_data :: proc "c" (s: ^bop.US_Socket, data: [^]byte, length: c.int) -> ^bop.US_Socket {
+on_http_socket_data :: proc "c" (s: ^bop.us_socket_t, data: [^]byte, length: c.int) -> ^bop.us_socket_t {
     http_socket := cast(^HTTP_Socket)bop.us_socket_ext(SSL, s)
     http_context := cast(^HTTP_Context)bop.us_socket_context_ext(SSL, bop.us_socket_context(SSL, s))
 
@@ -73,11 +73,11 @@ on_http_socket_data :: proc "c" (s: ^bop.US_Socket, data: [^]byte, length: c.int
 }
 
 on_http_socket_open :: proc "c" (
-    s: ^bop.US_Socket,
+    s: ^bop.us_socket_t,
     is_client: c.int,
     ip: [^]byte,
     ip_length: c.int,
-) -> ^bop.US_Socket {
+) -> ^bop.us_socket_t {
     http_socket := cast(^HTTP_Socket)bop.us_socket_ext(SSL, s)
 
     /* Reset offset */
@@ -93,7 +93,7 @@ on_http_socket_open :: proc "c" (
     return s
 }
 
-on_http_socket_timeout :: proc "c" (s: ^bop.US_Socket) -> ^bop.US_Socket {
+on_http_socket_timeout :: proc "c" (s: ^bop.us_socket_t) -> ^bop.us_socket_t {
     /* Close idle HTTP sockets */
     return bop.us_socket_close(SSL, s, 0, nil)
 }
@@ -105,7 +105,7 @@ main :: proc() {
 
     loop := us_create_loop(nil, on_wakeup, on_pre, on_post, 0)
 
-    options := US_Socket_Context_Options{}
+    options := us_socket_context_options_t{}
     options.key_file_name = "key.pem"
     options.cert_file_name = "cert.pem"
     options.passphrase = "1234"

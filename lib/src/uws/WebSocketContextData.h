@@ -65,6 +65,8 @@ public:
     MoveOnlyFunction<void(WebSocket<SSL, true, USERDATA> *, int, std::string_view)> closeHandler = nullptr;
     MoveOnlyFunction<void(WebSocket<SSL, true, USERDATA> *, std::string_view)> pingHandler = nullptr;
     MoveOnlyFunction<void(WebSocket<SSL, true, USERDATA> *, std::string_view)> pongHandler = nullptr;
+    /* Client-specific callback for connection errors */
+    MoveOnlyFunction<void(WebSocket<SSL, false, USERDATA> *, int)> connectErrorHandler = nullptr;
 
     /* Settings for this context */
     size_t maxPayloadLength = 0;

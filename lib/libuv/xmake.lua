@@ -5,7 +5,7 @@ function target_libuv(kind)
     end
     target(name)
     set_kind(kind)
-    set_languages("c++23", "c23")
+    set_languages("c++23")
     add_toolchains("@llvm")
     add_cxflags("-O3", "-fPIC")
 

@@ -9,15 +9,15 @@ EXT_ALIGNMENT           :: bop.US_EXT_ALIGNMENT
 LISTEN_DEFAULT          :: bop.US_LISTEN_DEFAULT
 LISTEN_EXCLUSIVE_PORT   :: bop.US_LISTEN_EXCLUSIVE_PORT
 
-Socket                  :: bop.US_Socket
-Listen_Socket           :: bop.US_Listen_Socket
-Timer                   :: bop.US_Timer
-Socket_Context          :: bop.US_Socket_Context
-Loop                    :: bop.US_Loop
-Poll                    :: bop.US_Poll
-UDP_Socket              :: bop.US_UDP_Socket
-UDP_Packet_Buffer       :: bop.US_UDP_Packet_Buffer
-Socket_Context_Options  :: bop.US_Socket_Context_Options
+Socket                  :: bop.us_socket_t
+Listen_Socket           :: bop.us_listen_socket_t
+Timer                   :: bop.us_timer_t
+Socket_Context          :: bop.us_socket_context_t
+Loop                    :: bop.us_loop_t
+Poll                    :: bop.us_poll_t
+UDP_Socket              :: bop.us_udp_socket_t
+UDP_Packet_Buffer       :: bop.us_udp_packet_buffer_t
+Socket_Context_Options  :: bop.us_socket_context_options_t
 
 socket_send_buffer :: bop.us_socket_send_buffer
 

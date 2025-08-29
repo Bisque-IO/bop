@@ -385,7 +385,7 @@ def build(args: List[str]):
     os.makedirs(bin_dir, 755, True)
     os.chmod(bin_dir, 755)
 
-    debug = True
+    debug = False
     shared = False
     release = False
     openssl = False
@@ -848,13 +848,17 @@ def wolfssl_do_configure_build(
 
     args += [
         "--enable-static",
-        # "--enable-pic",
+        "--enable-pic",
         "--enable-opensslall",
         "--enable-opensslextra",
         "--enable-asio"
     ]
     if IS_LINUX and host.startswith("x86_64"):
         args += ["--enable-aesni"]
+    elif IS_LINUX and host.startswith("aarch64"):
+        args += ["--enable-armasm"]
+    elif IS_LINUX and host.startswith("riscv64"):
+        args += ["--enable-riscv-asm"]
 
     # ./configure --host=aarch64-linux-gnu CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ --enable-static --enable-pic --enable-opensslall --enable-opensslextra --enable-asio
     # print(" ".join(args))
@@ -909,16 +913,16 @@ def wolfssl_build(args: List[str]):
             "x86_64-linux-gnu-gcc",
             "x86_64-linux-gnu-g++"
         )
-        # wolfssl_do_configure_build(
-        #     "aarch64-linux-gnu",
-        #     "aarch64-linux-gnu-gcc",
-        #     "aarch64-linux-gnu-g++"
-        # )
-        # wolfssl_do_configure_build(
-        #     "riscv64-linux-gnu",
-        #     "riscv64-linux-gnu-gcc",
-        #     "riscv64-linux-gnu-g++"
-        # )
+        wolfssl_do_configure_build(
+            "aarch64-linux-gnu",
+            "aarch64-linux-gnu-gcc",
+            "aarch64-linux-gnu-g++"
+        )
+        wolfssl_do_configure_build(
+            "riscv64-linux-gnu",
+            "riscv64-linux-gnu-gcc",
+            "riscv64-linux-gnu-g++"
+        )
         return
 
     if IS_MAC:
@@ -984,9 +988,9 @@ cmake .. -DCMAKE_TOOLCHAIN_FILE=../build-scripts/linux_riscv64_toolchain.cmake -
 
 zlib
 
-cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE="-O3" -DCMAKE_CXX_FLAGS_RELEASE="-O3" -DZLIB_COMPAT=ON -DZLIB_ENABLE_TESTS=OFF -DZLIB_ENABLE_EXAMPLES=OFF -DZLIB_ENABLE_INSTALL=OFF
-cmake .. -DCMAKE_TOOLCHAIN_FILE=../scripts/linux_aarch64_toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE="-O3" -DCMAKE_CXX_FLAGS_RELEASE="-O3" -DZLIB_COMPAT=ON -DZLIB_ENABLE_TESTS=OFF -DZLIB_ENABLE_EXAMPLES=OFF -DZLIB_ENABLE_INSTALL=OFF
-cmake .. -DCMAKE_TOOLCHAIN_FILE=../scripts/linux_riscv64_toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE="-O3" -DCMAKE_CXX_FLAGS_RELEASE="-O3" -DZLIB_COMPAT=ON -DZLIB_ENABLE_TESTS=OFF -DZLIB_ENABLE_EXAMPLES=OFF -DZLIB_ENABLE_INSTALL=OFF
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE="-O3" -DCMAKE_CXX_FLAGS_RELEASE="-O3" -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+cmake .. -DCMAKE_TOOLCHAIN_FILE=../scripts/linux_aarch64_toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE="-O3" -DCMAKE_CXX_FLAGS_RELEASE="-O3" -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+cmake .. -DCMAKE_TOOLCHAIN_FILE=../scripts/linux_riscv64_toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE="-O3" -DCMAKE_CXX_FLAGS_RELEASE="-O3" -DCMAKE_POSITION_INDEPENDENT_CODE=ON
 
 """
 

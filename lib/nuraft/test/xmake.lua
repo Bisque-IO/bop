@@ -21,7 +21,7 @@ function add_nuraft_target(name, src, is_test)
         add_defines("NOMINMAX")
         add_defines("WIN32_LEAN_AND_MEAN")
         add_syslinks("ntdll", "shell32", "advapi32", "user32", "ws2_32")
-        add_cxflags("/Zc:preprocessor", "/experimental:c11atomics")
+        -- add_cxflags("/Zc:preprocessor", "/experimental:c11atomics")
         -- add_syslinks("onecore", "Synchronization", "msvcrt", "ws2_32")
     end
 

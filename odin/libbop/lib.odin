@@ -6,6 +6,7 @@ import "core:testing"
 
 #assert(size_of(c.int) == size_of(i32))
 
+//odinfmt:disable
 when ODIN_OS == .Windows && ODIN_ARCH == .amd64 {
 	when #config(BOP_DEBUG, 0) == 1 {
 		@(private)
@@ -161,6 +162,7 @@ when !#exists(LIB_PATH) {
 		"\", they can be compiled by running `xmake b` on the bop repo root",
 	)
 }
+//odinfmt:enable
 
 /*
 */
@@ -203,6 +205,7 @@ for returning memory to remote threads has remained, but most of the meta-data l
 We recommend you read docs/security to find out about the current design, and if you want to dive
 into the code docs/AddressSpace.md provides a good overview of the allocation and deallocation paths.
 */
+//odinfmt:disable
 @(link_prefix = "bop_")
 @(default_calling_convention = "c")
 foreign lib {
@@ -3891,43 +3894,43 @@ https://github.com/uNetworking/uSockets
 
 @(default_calling_convention = "c")
 foreign lib {
-	us_socket_send_buffer :: proc(ssl: c.int, s: ^US_Socket) -> rawptr ---
+	us_socket_send_buffer :: proc(ssl: c.int, s: ^us_socket_t) -> rawptr ---
 
 	/* Public interface for UDP sockets */
 
 	/*
 	Peeks data and length of UDP payload
 	*/
-	us_udp_packet_buffer_payload :: proc(buf: ^US_UDP_Packet_Buffer, index: c.int) -> [^]byte ---
-	us_udp_packet_buffer_payload_length :: proc(buf: ^US_UDP_Packet_Buffer, index: c.int) -> c.int ---
+	us_udp_packet_buffer_payload :: proc(buf: ^us_udp_packet_buffer_t, index: c.int) -> [^]byte ---
+	us_udp_packet_buffer_payload_length :: proc(buf: ^us_udp_packet_buffer_t, index: c.int) -> c.int ---
 
 	/*
 	Copies out local (received destination) ip (4 or 16 bytes) of received packet
 	*/
-	us_udp_packet_buffer_local_ip :: proc(buf: ^US_UDP_Packet_Buffer, index: c.int, ip: cstring) -> c.int ---
+	us_udp_packet_buffer_local_ip :: proc(buf: ^us_udp_packet_buffer_t, index: c.int, ip: cstring) -> c.int ---
 
 	/*
 	Get the bound port in host byte order
 	*/
-	us_udp_socket_bound_port :: proc(s: ^US_UDP_Socket) -> c.int ---
+	us_udp_socket_bound_port :: proc(s: ^us_udp_socket_t) -> c.int ---
 
 	/*
 	Peeks peer addr (sockaddr) of received packet
 	*/
-	us_udp_packet_buffer_peer :: proc(buf: ^US_UDP_Packet_Buffer, index: c.int) -> cstring ---
+	us_udp_packet_buffer_peer :: proc(buf: ^us_udp_packet_buffer_t, index: c.int) -> cstring ---
 
 	/*
 	Peeks ECN of received packet
 	*/
-	us_udp_packet_buffer_ecn :: proc(buf: ^US_UDP_Packet_Buffer, index: c.int) -> c.int ---
+	us_udp_packet_buffer_ecn :: proc(buf: ^us_udp_packet_buffer_t, index: c.int) -> c.int ---
 
 	/*
 	Receives a set of packets into specified packet buffer
 	*/
-	us_udp_socket_receive :: proc(s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer) -> c.int ---
+	us_udp_socket_receive :: proc(s: ^us_udp_socket_t, buf: ^us_udp_packet_buffer_t) -> c.int ---
 
 	us_udp_buffer_set_packet_payload :: proc(
-	    send_buf:  ^US_UDP_Packet_Buffer,
+	    send_buf:  ^us_udp_packet_buffer_t,
 		index:     c.int,
 		offset:    c.int,
 		payload:   [^]byte,
@@ -3935,148 +3938,148 @@ foreign lib {
 		peer_addr: cstring,
 	) ---
 
-	us_udp_socket_send :: proc(s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer, num: c.int) -> c.int ---
+	us_udp_socket_send :: proc(s: ^us_udp_socket_t, buf: ^us_udp_packet_buffer_t, num: c.int) -> c.int ---
 
 	/*
 	Allocates a packet buffer that is reuable per thread. Mutated by us_udp_socket_receive.
 	*/
-	us_create_udp_packet_buffer :: proc() -> ^US_UDP_Packet_Buffer ---
+	us_create_udp_packet_buffer :: proc() -> ^us_udp_packet_buffer_t ---
 
 	us_create_udp_socket :: proc(
-	    loop:     ^US_Loop,
-		buf:      ^US_UDP_Packet_Buffer,
-		data_cb:  proc "c" (s: ^US_UDP_Socket, buf: ^US_UDP_Packet_Buffer, index: c.int),
-		drain_cb: proc "c" (s: ^US_UDP_Socket),
+	    loop:     ^us_loop_t,
+		buf:      ^us_udp_packet_buffer_t,
+		data_cb:  proc "c" (s: ^us_udp_socket_t, buf: ^us_udp_packet_buffer_t, index: c.int),
+		drain_cb: proc "c" (s: ^us_udp_socket_t),
 		host:     cstring,
 		port:     c.ushort,
 		user:     rawptr,
-	) -> ^US_UDP_Socket ---
+	) -> ^us_udp_socket_t ---
 
 	/*
 	This one is ugly, should be ext! not user
 	*/
-	us_udp_socket_user :: proc(s: ^US_UDP_Socket) -> rawptr ---
+	us_udp_socket_user :: proc(s: ^us_udp_socket_t) -> rawptr ---
 
 	/*
 	Binds the UDP socket to an interface and port
 	*/
-	us_udp_socket_bind :: proc(s: ^US_UDP_Socket, hostname: cstring, port: c.ushort) -> c.int ---
+	us_udp_socket_bind :: proc(s: ^us_udp_socket_t, hostname: cstring, port: c.ushort) -> c.int ---
 
 	/*
 	Create a new high precision, low performance timer. May fail and return null
 	*/
-	us_create_timer :: proc(loop: ^US_Loop, _fallthrough: c.int, ext_size: c.uint) -> ^US_Timer ---
+	us_create_timer :: proc(loop: ^us_loop_t, _fallthrough: c.int, ext_size: c.uint) -> ^us_timer_t ---
 
 	/*
 	Returns user data extension for this timer
 	*/
-	us_timer_ext :: proc(timer: ^US_Timer) -> rawptr ---
+	us_timer_ext :: proc(timer: ^us_timer_t) -> rawptr ---
 
-	us_timer_close :: proc(timer: ^US_Timer) ---
+	us_timer_close :: proc(timer: ^us_timer_t) ---
 
 	/*
 	Arm a timer with a delay from now and eventually a repeat delay.
  	Specify 0 as repeat delay to disable repeating. Specify both 0 to disarm.
  	*/
-	us_timer_set :: proc(timer: ^US_Timer, cb: proc "c" (t: ^US_Timer), ms: c.int, repeat_ms: c.int) ---
+	us_timer_set :: proc(timer: ^us_timer_t, cb: proc "c" (t: ^us_timer_t), ms: c.int, repeat_ms: c.int) ---
 
 	/*
 	Returns the loop for this timer
 	*/
-	us_timer_loop :: proc(timer: ^US_Timer) -> ^US_Loop ---
+	us_timer_loop :: proc(timer: ^us_timer_t) -> ^us_loop_t ---
 
-	us_socket_context_timestamp :: proc(ssl: c.int, ctx: ^US_Socket_Context) -> c.ushort ---
+	us_socket_context_timestamp :: proc(ssl: c.int, ctx: ^us_socket_context_t) -> c.ushort ---
 
 	/* Adds SNI domain and cert in asn1 format */
 
-	us_socket_context_add_server_name :: proc(ssl: c.int, ctx: ^US_Socket_Context, hostname_pattern: cstring, options: US_Socket_Context_Options, user: rawptr) ---
+	us_socket_context_add_server_name :: proc(ssl: c.int, ctx: ^us_socket_context_t, hostname_pattern: cstring, options: us_socket_context_options_t, user: rawptr) ---
 
-	us_socket_context_remove_server_name :: proc(ssl: c.int, ctx: ^US_Socket_Context, hostname_pattern: cstring) ---
+	us_socket_context_remove_server_name :: proc(ssl: c.int, ctx: ^us_socket_context_t, hostname_pattern: cstring) ---
 
-	us_socket_context_on_server_name :: proc(ssl: c.int, ctx: ^US_Socket_Context, cb: proc "c" (c: ^US_Socket_Context), hostname: cstring) ---
+	us_socket_context_on_server_name :: proc(ssl: c.int, ctx: ^us_socket_context_t, cb: proc "c" (c: ^us_socket_context_t), hostname: cstring) ---
 
-	us_socket_server_name_userdata :: proc(ssl: c.int, s: ^US_Socket) -> rawptr ---
+	us_socket_server_name_userdata :: proc(ssl: c.int, s: ^us_socket_t) -> rawptr ---
 
-	us_socket_context_find_server_name_userdata :: proc(ssl: c.int, ctx: ^US_Socket_Context, hostname_pattern: cstring) -> rawptr ---
+	us_socket_context_find_server_name_userdata :: proc(ssl: c.int, ctx: ^us_socket_context_t, hostname_pattern: cstring) -> rawptr ---
 
 	/*
 	Returns the underlying SSL native handle, such as SSL_CTX or nullptr
 	*/
-	us_socket_context_get_native_handle :: proc(ssl: c.int, ctx: ^US_Socket_Context) -> rawptr ---
+	us_socket_context_get_native_handle :: proc(ssl: c.int, ctx: ^us_socket_context_t) -> rawptr ---
 
 	/*
 	A socket context holds shared callbacks and user data extension for associated sockets
 	*/
-	us_create_socket_context :: proc(ssl: c.int, loop: ^US_Loop, ext_size: c.int, options: US_Socket_Context_Options) -> ^US_Socket_Context ---
+	us_create_socket_context :: proc(ssl: c.int, loop: ^us_loop_t, ext_size: c.int, options: us_socket_context_options_t) -> ^us_socket_context_t ---
 
 	/*
 	Delete resources allocated at creation time.
 	*/
-	us_socket_context_free :: proc(ssl: c.int, ctx: ^US_Socket_Context) ---
+	us_socket_context_free :: proc(ssl: c.int, ctx: ^us_socket_context_t) ---
 
 	/* Setters of various async callbacks */
 
-	us_socket_context_on_pre_open :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_pre_open: proc "c" (ctx: ^US_Socket_Context, fd: SOCKET) -> SOCKET) ---
+	us_socket_context_on_pre_open :: proc(ssl: c.int, ctx: ^us_socket_context_t, on_pre_open: proc "c" (ctx: ^us_socket_context_t, fd: SOCKET) -> SOCKET) ---
 
-	us_socket_context_on_open :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_open: proc "c" (s: ^US_Socket, is_client: c.int, ip: [^]byte, ip_length: c.int) -> ^US_Socket) ---
+	us_socket_context_on_open :: proc(ssl: c.int, ctx: ^us_socket_context_t, on_open: proc "c" (s: ^us_socket_t, is_client: c.int, ip: [^]byte, ip_length: c.int) -> ^us_socket_t) ---
 
-	us_socket_context_on_close :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_close: proc "c" (s: ^US_Socket, code: c.int, reason: rawptr) -> ^US_Socket) ---
+	us_socket_context_on_close :: proc(ssl: c.int, ctx: ^us_socket_context_t, on_close: proc "c" (s: ^us_socket_t, code: c.int, reason: rawptr) -> ^us_socket_t) ---
 
-	us_socket_context_on_data :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_data: proc "c" (s: ^US_Socket, data: [^]byte, length: c.int) -> ^US_Socket) ---
+	us_socket_context_on_data :: proc(ssl: c.int, ctx: ^us_socket_context_t, on_data: proc "c" (s: ^us_socket_t, data: [^]byte, length: c.int) -> ^us_socket_t) ---
 
-	us_socket_context_on_writable :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_writable: proc "c" (s: ^US_Socket) -> ^US_Socket) ---
+	us_socket_context_on_writable :: proc(ssl: c.int, ctx: ^us_socket_context_t, on_writable: proc "c" (s: ^us_socket_t) -> ^us_socket_t) ---
 
-	us_socket_context_on_timeout :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_timeout: proc "c" (s: ^US_Socket) -> ^US_Socket) ---
+	us_socket_context_on_timeout :: proc(ssl: c.int, ctx: ^us_socket_context_t, on_timeout: proc "c" (s: ^us_socket_t) -> ^us_socket_t) ---
 
-	us_socket_context_on_long_timeout :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_timeout: proc "c" (s: ^US_Socket, ctx: ^US_Socket_Context) -> ^US_Socket) ---
+	us_socket_context_on_long_timeout :: proc(ssl: c.int, ctx: ^us_socket_context_t, on_timeout: proc "c" (s: ^us_socket_t, ctx: ^us_socket_context_t) -> ^us_socket_t) ---
 
 	/*
 	This one is only used for when a connecting socket fails in a late stage.
 	*/
-	us_socket_context_on_connect_error :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_connect_error: proc "c" (s: ^US_Socket, code: c.int) -> ^US_Socket) ---
+	us_socket_context_on_connect_error :: proc(ssl: c.int, ctx: ^us_socket_context_t, on_connect_error: proc "c" (s: ^us_socket_t, code: c.int) -> ^us_socket_t) ---
 
 	/*
 	Emitted when a socket has been half-closed
 	*/
-	us_socket_context_on_end :: proc(ssl: c.int, ctx: ^US_Socket_Context, on_end: proc "c" (s: ^US_Socket) -> ^US_Socket) ---
+	us_socket_context_on_end :: proc(ssl: c.int, ctx: ^us_socket_context_t, on_end: proc "c" (s: ^us_socket_t) -> ^us_socket_t) ---
 
 	/*
 	Returns user data extension for this socket context
 	*/
-	us_socket_context_ext :: proc(ssl: c.int, ctx: ^US_Socket_Context) -> rawptr ---
+	us_socket_context_ext :: proc(ssl: c.int, ctx: ^us_socket_context_t) -> rawptr ---
 
 	/*
 	Closes all open sockets, including listen sockets. Does not invalidate the socket context.
 	*/
-	us_socket_context_close :: proc(ssl: c.int, ctx: ^US_Socket_Context) ---
+	us_socket_context_close :: proc(ssl: c.int, ctx: ^us_socket_context_t) ---
 
 	/*
 	Listen for connections. Acts as the main driving cog in a server. Will call set async callbacks.
 	*/
-	us_socket_context_listen :: proc(ssl: c.int, ctx: ^US_Socket_Context, host: cstring, port: c.int, options: c.int, socket_ext_size: c.int) -> ^US_Listen_Socket ---
+	us_socket_context_listen :: proc(ssl: c.int, ctx: ^us_socket_context_t, host: cstring, port: c.int, options: c.int, socket_ext_size: c.int) -> ^us_listen_socket_t ---
 
-	us_socket_context_listen_unix :: proc(ssl: c.int, ctx: ^US_Socket_Context, path: cstring, options: c.int, socket_ext_size: c.int) -> ^US_Listen_Socket ---
+	us_socket_context_listen_unix :: proc(ssl: c.int, ctx: ^us_socket_context_t, path: cstring, options: c.int, socket_ext_size: c.int) -> ^us_listen_socket_t ---
 
-	us_listen_socket_close :: proc(ssl: c.int, ls: ^US_Listen_Socket) ---
+	us_listen_socket_close :: proc(ssl: c.int, ls: ^us_listen_socket_t) ---
 
 	/*
 	Adopt a socket which was accepted either internally, or from another accept() outside libusockets
 	*/
-	us_adopt_accepted_socket :: proc(ssl: c.int, ctx: ^US_Socket_Context, client_fd: SOCKET, socket_ext_size: c.uint, addr_ip: [^]byte, addr_ip_length: c.int) -> ^US_Socket ---
+	us_adopt_accepted_socket :: proc(ssl: c.int, ctx: ^us_socket_context_t, client_fd: SOCKET, socket_ext_size: c.uint, addr_ip: [^]byte, addr_ip_length: c.int) -> ^us_socket_t ---
 
 	/*
 	Land in on_open or on_connection_error or return null or return socket
 	*/
-	us_socket_context_connect :: proc(ssl: c.int, ctx: ^US_Socket_Context, host: cstring, port: c.int, source_host: cstring, options: c.int, socket_ext_size: c.int) -> ^US_Socket ---
+	us_socket_context_connect :: proc(ssl: c.int, ctx: ^us_socket_context_t, host: cstring, port: c.int, source_host: cstring, options: c.int, socket_ext_size: c.int) -> ^us_socket_t ---
 
-	us_socket_context_connect_unix :: proc(ssl: c.int, ctx: ^US_Socket_Context, server_path: cstring, options: c.int, socket_ext_size: c.int) -> ^US_Socket ---
+	us_socket_context_connect_unix :: proc(ssl: c.int, ctx: ^us_socket_context_t, server_path: cstring, options: c.int, socket_ext_size: c.int) -> ^us_socket_t ---
 
 	/*
 	Is this socket established? Can be used to check if a connecting socket has
 	fired the on_open event yet. Can also be used to determine if a socket is a
 	listen_socket or not, but you probably know that already.
 	*/
-	us_socket_is_established :: proc(ssl: c.int, s: ^US_Socket) -> c.int ---
+	us_socket_is_established :: proc(ssl: c.int, s: ^us_socket_t) -> c.int ---
 
 	/*
 	Cancel a connecting socket. Can be used together with us_socket_timeout to
@@ -4084,19 +4087,19 @@ foreign lib {
 	like us_socket_close but does not trigger on_close event since you never
 	got the on_open event first.
 	*/
-	us_socket_close_connecting :: proc(ssl: c.int, s: ^US_Socket) -> ^US_Socket ---
+	us_socket_close_connecting :: proc(ssl: c.int, s: ^us_socket_t) -> ^us_socket_t ---
 
 	/*
 	Returns the loop for this socket context.
 	*/
-	us_socket_context_loop :: proc(ssl: c.int, ctx: ^US_Socket_Context) -> ^US_Loop ---
+	us_socket_context_loop :: proc(ssl: c.int, ctx: ^us_socket_context_t) -> ^us_loop_t ---
 
 	/*
 	Invalidates passed socket, returning a new resized socket which belongs to a
 	different socket context. Used mainly for "socket upgrades" such as when
 	transitioning from HTTP to WebSocket.
 	*/
-	us_socket_context_adopt_socket :: proc(ssl: c.int, ctx: ^US_Socket_Context, s: ^US_Socket, ext_size: c.int) -> ^US_Socket ---
+	us_socket_context_adopt_socket :: proc(ssl: c.int, ctx: ^us_socket_context_t, s: ^us_socket_t, ext_size: c.int) -> ^us_socket_t ---
 
 	/*
 	Create a child socket context which acts much like its own socket context with
@@ -4104,89 +4107,89 @@ foreign lib {
 	resources. Child socket contexts should be used together with socket adoptions
 	and nothing else.
 	*/
-	us_create_child_socket_context :: proc(ssl: c.int, ctx: ^US_Socket_Context, ctx_ext_size: c.int) -> ^US_Socket ---
+	us_create_child_socket_context :: proc(ssl: c.int, ctx: ^us_socket_context_t, ctx_ext_size: c.int) -> ^us_socket_t ---
 
 	/* Public interfaces for loops */
 
 	/* Returns a new event loop with user data extension */
-	us_create_loop :: proc(hint: rawptr, wakeup_cb: proc "c" (loop: ^US_Loop), pre_cb: proc "c" (loop: ^US_Loop), post_cb: proc "c" (loop: ^US_Loop), ext_size: c.uint) -> ^US_Loop ---
+	us_create_loop :: proc(hint: rawptr, wakeup_cb: proc "c" (loop: ^us_loop_t), pre_cb: proc "c" (loop: ^us_loop_t), post_cb: proc "c" (loop: ^us_loop_t), ext_size: c.uint) -> ^us_loop_t ---
 
 	/*
 	Frees the loop immediately
 	*/
-	us_loop_free :: proc(loop: ^US_Loop) ---
+	us_loop_free :: proc(loop: ^us_loop_t) ---
 
 	/*
 	Returns the loop user data extension
 	*/
-	us_loop_ext :: proc(loop: ^US_Loop) -> rawptr ---
+	us_loop_ext :: proc(loop: ^us_loop_t) -> rawptr ---
 
 	/*
 	Blocks the calling thread and drives the event loop until no more non-fallthrough
 	polls are scheduled
 	*/
-	us_loop_run :: proc(loop: ^US_Loop) ---
+	us_loop_run :: proc(loop: ^us_loop_t) ---
 
 	/*
 	Signals the loop from any thread to wake up and execute its wakeup handler from
 	the loop's own running thread. This is the only fully thread-safe function and
 	serves as the basis for thread safety
 	*/
-	us_wakeup_loop :: proc(loop: ^US_Loop) ---
+	us_wakeup_loop :: proc(loop: ^us_loop_t) ---
 
 	/*
 	Hook up timers in existing loop
 	*/
-	us_loop_integrate :: proc(loop: ^US_Loop) ---
+	us_loop_integrate :: proc(loop: ^us_loop_t) ---
 
 	/*
 	Returns the loop iteration number
 	*/
-	us_loop_iteration_number :: proc(loop: ^US_Loop) -> c.longlong ---
+	us_loop_iteration_number :: proc(loop: ^us_loop_t) -> c.longlong ---
 
 	/* Public interfaces for polls */
 
 	/*
 	A fallthrough poll does not keep the loop running, it falls through
 	*/
-	us_create_poll :: proc(loop: ^US_Loop, _fallthrough: c.int, ext_size: c.uint) -> ^US_Poll ---
+	us_create_poll :: proc(loop: ^us_loop_t, _fallthrough: c.int, ext_size: c.uint) -> ^us_poll_t ---
 
 	/*
 	After stopping a poll you must manually free the memory
 	*/
-	us_poll_free :: proc(p: ^US_Poll, loop: ^US_Loop) ---
+	us_poll_free :: proc(p: ^us_poll_t, loop: ^us_loop_t) ---
 
 	/*
 	Associate this poll with a socket descriptor and poll type
 	*/
-	us_poll_init :: proc(p: ^US_Poll, fd: SOCKET, poll_type: c.int) ---
+	us_poll_init :: proc(p: ^us_poll_t, fd: SOCKET, poll_type: c.int) ---
 
 	/*
 	Start, change and stop polling for events
 	*/
-	us_poll_start :: proc(p: ^US_Poll, loop: ^US_Loop, events: c.int) ---
-	us_poll_change :: proc(p: ^US_Poll, loop: ^US_Loop, events: c.int) ---
-	us_poll_stop :: proc(p: ^US_Poll, loop: ^US_Loop) ---
+	us_poll_start :: proc(p: ^us_poll_t, loop: ^us_loop_t, events: c.int) ---
+	us_poll_change :: proc(p: ^us_poll_t, loop: ^us_loop_t, events: c.int) ---
+	us_poll_stop :: proc(p: ^us_poll_t, loop: ^us_loop_t) ---
 
 	/*
 	Return what events we are polling for
 	*/
-	us_poll_events :: proc(p: ^US_Poll) -> c.int ---
+	us_poll_events :: proc(p: ^us_poll_t) -> c.int ---
 
 	/*
 	Returns the user data extension of this poll
 	*/
-	us_poll_ext :: proc(p: ^US_Poll) -> rawptr ---
+	us_poll_ext :: proc(p: ^us_poll_t) -> rawptr ---
 
 	/*
 	Get associated socket descriptor from a poll
 	*/
-	us_poll_fd :: proc(p: ^US_Poll) -> SOCKET ---
+	us_poll_fd :: proc(p: ^us_poll_t) -> SOCKET ---
 
 	/*
 	Resize an active poll
 	*/
-	us_poll_resize :: proc(p: ^US_Poll, loop: ^US_Loop, ext_size: c.uint) -> ^US_Poll ---
+	us_poll_resize :: proc(p: ^us_poll_t, loop: ^us_loop_t, ext_size: c.uint) -> ^us_poll_t ---
 
 	/* Public interfaces for sockets */
 
@@ -4194,7 +4197,7 @@ foreign lib {
 	Returns the underlying native handle for a socket, such as SSL or file
 	descriptor. In the case of file descriptor, the value of pointer is fd.
 	*/
-	us_socket_get_native_handle :: proc(ssl: c.int, s: ^US_Socket) -> rawptr ---
+	us_socket_get_native_handle :: proc(ssl: c.int, s: ^us_socket_t) -> rawptr ---
 
 	/*
 	Write up to length bytes of data. Returns actual bytes written. Will call
@@ -4202,84 +4205,84 @@ foreign lib {
 	everything off in one go. Set hint msg_more if you have more immediate data
 	to write.
 	*/
-	us_socket_write :: proc(ssl: c.int, s: ^US_Socket, data: [^]byte, length: c.int, msg_more: c.int) -> c.int ---
+	us_socket_write :: proc(ssl: c.int, s: ^us_socket_t, data: [^]byte, length: c.int, msg_more: c.int) -> c.int ---
 
 	/*
 	Special path for non-SSL sockets. Used to send header and payload in
 	one go. Works like us_socket_write.
 	*/
-	us_socket_write2 :: proc(ssl: c.int, s: ^US_Socket, header: [^]byte, header_length: c.int, payload: [^]byte, payload_length: c.int) -> c.int ---
+	us_socket_write2 :: proc(ssl: c.int, s: ^us_socket_t, header: [^]byte, header_length: c.int, payload: [^]byte, payload_length: c.int) -> c.int ---
 
 	/*
 	Set a low precision, high performance timer on a socket. A socket can
 	only have one single active timer at any given point in time. Will remove
 	any such pre set timer
 	*/
-	us_socket_timeout :: proc(ssl: c.int, s: ^US_Socket, seconds: c.uint) ---
+	us_socket_timeout :: proc(ssl: c.int, s: ^us_socket_t, seconds: c.uint) ---
 
 	/*
 	Set a low precision, high performance timer on a socket. Suitable for
 	per-minute precision.
 	*/
-	us_socket_long_timeout :: proc(ssl: c.int, s: ^US_Socket, minutes: c.uint) ---
+	us_socket_long_timeout :: proc(ssl: c.int, s: ^us_socket_t, minutes: c.uint) ---
 
 	/*
 	Return the user data extension of this socket
 	*/
-	us_socket_ext :: proc(ssl: c.int, s: ^US_Socket) -> rawptr ---
+	us_socket_ext :: proc(ssl: c.int, s: ^us_socket_t) -> rawptr ---
 
 	/*
 	Return the socket context of this socket
 	*/
-	us_socket_context :: proc(ssl: c.int, s: ^US_Socket) -> ^US_Socket_Context ---
+	us_socket_context :: proc(ssl: c.int, s: ^us_socket_t) -> ^us_socket_context_t ---
 
 	/*
 	Withdraw any msg_more status and flush any pending data
 	*/
-	us_socket_flush :: proc(ssl: c.int, s: ^US_Socket) ---
+	us_socket_flush :: proc(ssl: c.int, s: ^us_socket_t) ---
 
 	/*
 	Shuts down the connection by sending FIN and/or close_notify
 	*/
-	us_socket_shutdown :: proc(ssl: c.int, s: ^US_Socket) ---
+	us_socket_shutdown :: proc(ssl: c.int, s: ^us_socket_t) ---
 
 	/*
 	Shuts down the connection in terms of read, meaning next event loop
 	iteration will catch the socket being closed. Can be used to defer
 	closing to next event loop iteration.
 	*/
-	us_socket_shutdown_read :: proc(ssl: c.int, s: ^US_Socket) ---
+	us_socket_shutdown_read :: proc(ssl: c.int, s: ^us_socket_t) ---
 
 	/*
 	Returns whether the socket has been shut down or not
 	*/
-	us_socket_is_shut_down :: proc(ssl: c.int, s: ^US_Socket) -> c.int ---
+	us_socket_is_shut_down :: proc(ssl: c.int, s: ^us_socket_t) -> c.int ---
 
 	/*
 	Returns whether this socket has been closed. Only valid if memory
 	has not yet been released.
 	*/
-	us_socket_is_closed :: proc(ssl: c.int, s: ^US_Socket) -> c.int ---
+	us_socket_is_closed :: proc(ssl: c.int, s: ^us_socket_t) -> c.int ---
 
 	/*
 	Immediately closes the socket
 	*/
-	us_socket_close :: proc(ssl: c.int, s: ^US_Socket, code: c.int, reason: rawptr) -> ^US_Socket ---
+	us_socket_close :: proc(ssl: c.int, s: ^us_socket_t, code: c.int, reason: rawptr) -> ^us_socket_t ---
 
 	/*
 	Returns local port or -1 on failure.
 	*/
-	us_socket_local_port :: proc(ssl: c.int, s: ^US_Socket) -> c.int ---
+	us_socket_local_port :: proc(ssl: c.int, s: ^us_socket_t) -> c.int ---
 
 	/*
 	Returns remote ephemeral port or -1 on failure.
 	*/
-	us_socket_remote_port :: proc(ssl: c.int, s: ^US_Socket) -> c.int ---
+	us_socket_remote_port :: proc(ssl: c.int, s: ^us_socket_t) -> c.int ---
 
 	/*
 	Copy remote (IP) address of socket, or fail with zero length.
 	*/
-	us_socket_remote_address :: proc(ssl: c.int, s: ^US_Socket, buf: [^]byte, length: ^c.int) -> c.int ---
+	us_socket_remote_address :: proc(ssl: c.int, s: ^us_socket_t, buf: [^]byte, length: ^c.int) -> c.int ---
 }
 
 main :: proc() {
@@ -4303,57 +4306,59 @@ foreign lib {
 
 	uws_app_destroy :: proc(app: uws_app_t) ---
 
+	uws_app_is_ssl :: proc(app: uws_app_t) -> c.bool ---
+
 	uws_app_get :: proc(
-		user_data: rawptr,
 		app: uws_app_t,
+		user_data: rawptr,
 		pattern: [^]u8,
 		pattern_length: c.size_t,
 		handler: uws_http_handler_t,
 	) ---
 
 	uws_app_post :: proc(
-		user_data: rawptr,
 		app: uws_app_t,
+		user_data: rawptr,
 		pattern: [^]u8,
 		pattern_length: c.size_t,
 		handler: uws_http_handler_t,
 	) ---
 
 	uws_app_put :: proc(
-		user_data: rawptr,
 		app: uws_app_t,
+		user_data: rawptr,
 		pattern: [^]u8,
 		pattern_length: c.size_t,
 		handler: uws_http_handler_t,
 	) ---
 
 	uws_app_del :: proc(
-		user_data: rawptr,
 		app: uws_app_t,
+		user_data: rawptr,
 		pattern: [^]u8,
 		pattern_length: c.size_t,
 		handler: uws_http_handler_t,
 	) ---
 
 	uws_app_patch :: proc(
-		user_data: rawptr,
 		app: uws_app_t,
+		user_data: rawptr,
 		pattern: [^]u8,
 		pattern_length: c.size_t,
 		handler: uws_http_handler_t,
 	) ---
 
 	uws_app_options :: proc(
-		user_data: rawptr,
 		app: uws_app_t,
+		user_data: rawptr,
 		pattern: [^]u8,
 		pattern_length: c.size_t,
 		handler: uws_http_handler_t,
 	) ---
 
 	uws_app_any :: proc(
-		user_data: rawptr,
 		app: uws_app_t,
+		user_data: rawptr,
 		pattern: [^]u8,
 		pattern_length: c.size_t,
 		handler: uws_http_handler_t,
@@ -4367,22 +4372,79 @@ foreign lib {
 	) ---
 
 	uws_app_listen :: proc(
-		user_data: rawptr,
 		app: uws_app_t,
+		user_data: rawptr,
+		host: [^]u8,
+		host_length: c.size_t,
 		port: c.int,
+		options: c.int,
 		cb: uws_listen_handler_t,
 	) ---
+
+	uws_app_listen_unix :: proc(
+		app: uws_app_t,
+		user_data: rawptr,
+		path: [^]u8,
+		path_length: c.size_t,
+		options: c.int,
+		cb: uws_listen_handler_t,
+	) ---
+
+	uws_app_loop :: proc(app: uws_app_t) -> uws_loop_t ---
+
+	uws_loop_defer :: proc(loop: uws_loop_t, user_data: rawptr, handler: uws_loop_defer_handler_t) ---
 
 	uws_app_run :: proc(app: uws_app_t) ---
 
 	// HTTP Response functions
 
+	/*
+	Manually upgrade to WebSocket. Typically called in upgrade handler. Immediately calls open handler.
+    NOTE: Will invalidate 'this' as socket might change location in memory. Throw away after use.
+	*/
+	uws_res_upgrade :: proc(
+		res: uws_res_t,
+		user_data: rawptr,
+		sec_web_socket_key: [^]u8,
+		sec_web_socket_key_length: c.size_t,
+		sec_web_socket_protocol: [^]u8,
+		sec_web_socket_protocol_length: c.size_t,
+		sec_web_socket_extensions: [^]u8,
+		sec_web_socket_extensions_length: c.size_t,
+		web_socket_context: ^us_socket_context_t,
+	) ---
+
+	uws_res_loop :: proc(res: uws_res_t) -> uws_loop_t ---
+
+	uws_res_defer :: proc(res: uws_res_t, user_data: rawptr, handler: uws_res_defer_handler_t) ---
+
+	uws_res_pause :: proc(res: uws_res_t) ---
+	uws_res_resume :: proc(res: uws_res_t) ---
+
+	/* Immediately close socket */
+	uws_res_close :: proc(res: uws_res_t) ---
+
+	/* Returns SSL pointer or FD as pointer */
+	uws_res_native_handle :: proc(res: uws_res_t) -> rawptr ---
+
+	/*
+	Returns the remote IP address or empty string on failure.
+	Returned value is borrowed and attached to current thread:
+		static thread_local char buf[16];
+	*/
+	uws_res_remote_address :: proc(res: uws_res_t, length: ^c.size_t) -> [^]u8 ---
+
+	/* Write 100 Continue, can be done any amount of times */
+	uws_res_write_continue :: proc(res: uws_res_t) ---
+
+	/* Write the HTTP status */
 	uws_res_write_status :: proc(
 		res: uws_res_t,
 		status: [^]u8,
 		status_length: c.size_t,
 	) ---
 
+	/* Write an HTTP header with string value */
 	uws_res_write_header :: proc(
 		res: uws_res_t,
 		key: [^]u8,
@@ -4391,12 +4453,30 @@ foreign lib {
 		value_length: c.size_t,
 	) ---
 
+	/* Write an HTTP header with unsigned int value */
+	uws_res_write_header_int :: proc(
+		res: uws_res_t,
+		key: [^]u8,
+		key_length: c.size_t,
+		value: u64,
+	) ---
+
+	/* Write parts of the response in chunking fashion. Starts timeout if failed. */
 	uws_res_write :: proc(
 		res: uws_res_t,
 		data: [^]u8,
 		data_length: c.size_t,
 	) ---
 
+	/* End without a body (no content-length) or end with a spoofed content-length. */
+	uws_res_end_without_body :: proc(
+		res: uws_res_t,
+		reported_content_length: c.size_t,
+		reported_content_length_set: c.bool,
+		close_connection: c.bool,
+	) ---
+
+	/* End the response with an optional data chunk. Always starts a timeout. */
 	uws_res_end :: proc(
 		res: uws_res_t,
 		data: [^]u8,
@@ -4404,17 +4484,52 @@ foreign lib {
 		close_connection: c.bool,
 	) ---
 
+	/*
+	Try and end the response. Returns [true, true] on success.
+    Starts a timeout in some cases. Returns [ok, hasResponded]
+	*/
+	uws_res_try_end :: proc(
+		res: uws_res_t,
+		total_size: c.size_t,
+		close_connection: c.bool,
+		has_responded: ^c.bool,
+	) -> bool ---
+
+	/* Get the current byte write offset for this Http response */
+	uws_res_write_offset :: proc(res: uws_res_t) -> c.size_t ---
+
+	/* If you are messing around with sendfile you might want to override the offset. */
+	uws_res_override_write_offset :: proc(res: uws_res_t, offset: c.size_t) ---
+
+	/* Checking if we have fully responded and are ready for another request */
+	uws_res_has_responded :: proc(res: uws_res_t) -> c.bool ---
+
+	/* Corks the response if possible. Leaves already corked socket be. */
+	uws_res_cork :: proc(res: uws_res_t, user_data: rawptr, handler: uws_res_cork_handler_t) ---
+
+	/* Attach handler for writable HTTP response */
+	uws_res_on_writable :: proc(res: uws_res_t, user_data: rawptr, handler: uws_res_on_writable_handler_t) ---
+
+	/* Attach handler for aborted HTTP request */
+	uws_res_on_aborted :: proc(res: uws_res_t, user_data: rawptr, handler: uws_res_on_aborted_handler_t) ---
+
+	/* Attach a read handler for data sent. Will be called with FIN set true if last segment. */
+	uws_res_on_data :: proc(res: uws_res_t, user_data: rawptr, handler: uws_res_on_data_handler_t) ---
+
 	// HTTP Request functions
 
 	uws_req_get_method :: proc(req: uws_req_t, length: ^c.size_t) -> [^]u8 ---
 	uws_req_get_url :: proc(req: uws_req_t, length: ^c.size_t) -> [^]u8 ---
 	uws_req_get_query :: proc(req: uws_req_t, length: ^c.size_t) -> [^]u8 ---
 	uws_req_get_header :: proc(req: uws_req_t, lower_case_name: [^]u8, length: ^c.size_t) -> [^]u8 ---
+	uws_req_get_header_count :: proc(req: uws_req_t) -> c.size_t ---
+	uws_req_get_header_at :: proc(req: uws_req_t, index: c.size_t, header: ^uws_http_header_t) ---
+	uws_req_get_headers :: proc(req: uws_req_t, headers: [^]uws_http_header_t, max_headers: c.size_t) -> c.size_t ---
 
 	// WebSocket functions
 
 	uws_ws_send :: proc(
-		ws: uws_socket_t,
+		ws: uws_web_socket_t,
 		message: [^]u8,
 		message_length: c.size_t,
 		opcode: uws_opcode_t,
@@ -4422,35 +4537,70 @@ foreign lib {
 		fin: c.bool
 	) -> c.bool ---
 
-	uws_ws_close :: proc(
-		ws: uws_socket_t,
+	uws_ws_send_first_fragment :: proc(
+		ws: uws_web_socket_t,
+		message: [^]u8,
+		message_length: c.size_t,
+		opcode: uws_opcode_t,
+		compress: c.bool
+	) -> uws_ws_send_status_t ---
+
+	uws_ws_send_fragment :: proc(
+		ws: uws_web_socket_t,
+		message: [^]u8,
+		message_length: c.size_t,
+		compress: c.bool
+	) -> uws_ws_send_status_t ---
+
+	uws_ws_send_last_fragment :: proc(
+		ws: uws_web_socket_t,
+		message: [^]u8,
+		message_length: c.size_t,
+		compress: c.bool
+	) -> uws_ws_send_status_t ---
+
+	uws_ws_has_negotiated_compression :: proc(ws: uws_web_socket_t) -> c.bool ---
+
+	uws_ws_end :: proc(
+		ws: uws_web_socket_t,
 		code: c.int,
 		message: [^]u8,
 		message_length: c.size_t,
 	) ---
 
-	uws_ws_get_user_data :: proc(ws: uws_socket_t) -> rawptr ---
+	uws_ws_close :: proc(
+		ws: uws_web_socket_t,
+		code: c.int,
+		message: [^]u8,
+		message_length: c.size_t,
+	) ---
+
+	uws_ws_pause :: proc(ws: uws_web_socket_t) ---
+
+	uws_ws_get_user_data :: proc(ws: uws_web_socket_t) -> rawptr ---
+
+	uws_ws_cork :: proc(ws: uws_web_socket_t, user_data: rawptr, handler: uws_ws_cork_handler_t) ---
 
 	uws_ws_subscribe :: proc(
-		ws: uws_socket_t,
+		ws: uws_web_socket_t,
 		topic: [^]u8,
 		topic_length: c.size_t,
 	) -> c.bool ---
 
 	uws_ws_unsubscribe :: proc(
-		ws: uws_socket_t,
+		ws: uws_web_socket_t,
 		topic: [^]u8,
 		topic_length: c.size_t,
 	) -> c.bool ---
 
 	uws_ws_is_subscribed :: proc(
-		ws: uws_socket_t,
+		ws: uws_web_socket_t,
 		topic: [^]u8,
 		topic_length: c.size_t,
 	) -> c.bool ---
 
 	uws_ws_publish :: proc(
-		ws: uws_socket_t,
+		ws: uws_web_socket_t,
 		topic: [^]u8,
 		topic_length: c.size_t,
 		message: [^]u8,
@@ -4459,9 +4609,9 @@ foreign lib {
 		compress: c.bool,
 	) -> c.bool ---
 
-	uws_ws_get_buffered_amount :: proc(ws: uws_socket_t) -> u32 ---
+	uws_ws_get_buffered_amount :: proc(ws: uws_web_socket_t) -> u32 ---
 
-	uws_ws_get_remote_address :: proc(ws: uws_socket_t, length: ^c.size_t) -> u32 ---
+	uws_ws_get_remote_address :: proc(ws: uws_web_socket_t, length: ^c.size_t) -> [^]u8 ---
 
 	uws_app_publish :: proc(
 		app: uws_app_t,
@@ -4471,9 +4621,9 @@ foreign lib {
 		message_length: c.size_t,
 		opcode: uws_opcode_t,
 		compress: c.bool,
-	) -> c.int ---
+	) -> c.bool ---
 }
-
+//odinfmt:enable
 
 @(test)
 test_alloc :: proc(t: ^testing.T) {

@@ -80,10 +80,10 @@ private:
 
         /* You can disable this altogether */
 #ifndef UWS_HTTPRESPONSE_NO_WRITEMARK
-        // if (!Super::getLoopData()->noMark) {
-        //     /* We only expose major version */
-        //     writeHeader("uWebSockets", "20");
-        // }
+        if (!Super::getLoopData()->noMark) {
+            /* We only expose major version */
+            writeHeader("uWebSockets", "20");
+        }
 #endif
     }
 

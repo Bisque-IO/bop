@@ -22,6 +22,7 @@
 
 /* The HTTP parser is an independent module subject to unit testing / fuzz testing */
 
+#include <cstddef>
 #include <string>
 #include <cstring>
 #include <algorithm>
@@ -61,6 +62,7 @@ private:
     struct Header {
         std::string_view key, value;
     } headers[UWS_HTTP_MAX_HEADERS_COUNT];
+    size_t headerCount = 0;
     bool ancientHttp;
     unsigned int querySeparator;
     bool didYield;
@@ -485,7 +487,7 @@ private:
         data[length] = '\r';
         data[length + 1] = 'a'; /* Anything that is not \n, to trigger "invalid request" */
 
-        for (unsigned int consumed; length && (consumed = getHeaders(data, data + length, req->headers, reserved, err)); ) {
+        for (unsigned int consumed; length && (consumed = getHeaders(data, data + length, req->headers, reserved, err, &req->headerCount)); ) {
             data += consumed;
             length -= consumed;
             consumedTotal += consumed;

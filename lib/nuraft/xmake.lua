@@ -27,14 +27,14 @@ local target_of = function(kind)
 
     if is_plat("windows") then
         if kind == "static" then
-            add_cxflags("/MT")
+            -- add_cxflags("/MT")
         else
             --add_cxflags("/MD")
             --add_syslinks("MSVCRT")
         end
         add_defines("_WIN32_WINNT=0x0602")
         add_defines("NOMINMAX")
-        add_cxflags("/Zc:preprocessor", "/std:c23", "/experimental:c11atomics")
+        -- add_cxflags("/Zc:preprocessor", "/std:c23", "/experimental:c11atomics")
         add_syslinks("Advapi32", "User32", "Kernel32", "onecore", "ntdll", "Synchronization", "msvcrt")
     end
 

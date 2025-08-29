@@ -6,31 +6,31 @@ set_project("bop")
 
 set_description("data platform for modern computing")
 
-set_languages("c++23", "c23")
+set_languages("c++23")
 --set_warnings("all")
 add_rules("mode.debug", "mode.release")
 
--- Linux ARM64
-toolchain("linux_arm64")
-set_kind("standalone")
-set_toolset("cc", "aarch64-linux-gnu-gcc")
-set_toolset("cxx", "aarch64-linux-gnu-g++")
-set_toolset("ld", "aarch64-linux-gnu-ld")
-toolchain_end()
+-- -- Linux ARM64
+-- toolchain("linux_arm64")
+-- set_kind("standalone")
+-- set_toolset("cc", "aarch64-linux-gnu-gcc")
+-- set_toolset("cxx", "aarch64-linux-gnu-g++")
+-- set_toolset("ld", "aarch64-linux-gnu-ld")
+-- toolchain_end()
 
--- Linux RISCV64
-toolchain("linux_riscv64")
-set_kind("standalone")
-set_toolset("cc", "riscv64-linux-gnu-gcc")
-set_toolset("cxx", "riscv64-linux-gnu-g++")
-toolchain_end()
+-- -- Linux RISCV64
+-- toolchain("linux_riscv64")
+-- set_kind("standalone")
+-- set_toolset("cc", "riscv64-linux-gnu-gcc")
+-- set_toolset("cxx", "riscv64-linux-gnu-g++")
+-- toolchain_end()
 
--- Windows ARM64 (MinGW)
-toolchain("mingw_arm64")
-set_kind("standalone")
-set_toolset("cc", "aarch64-w64-mingw32-gcc")
-set_toolset("cxx", "aarch64-w64-mingw32-g++")
-toolchain_end()
+-- -- Windows ARM64 (MinGW)
+-- toolchain("mingw_arm64")
+-- set_kind("standalone")
+-- set_toolset("cc", "aarch64-w64-mingw32-gcc")
+-- set_toolset("cxx", "aarch64-w64-mingw32-g++")
+-- toolchain_end()
 
 -- package("wamr2")
 -- add_deps("cmake")
@@ -75,57 +75,6 @@ toolchain_end()
 -- end
 
 -- add_deps("cmake")
--- set_sourcedir(path.join(os.scriptdir(), "lib/wamr"))
-
--- on_install("windows", "linux", "macosx", "bsd", "android", function(package)
---     local configs = {
---         -- "-DWAMR_BUILD_INVOKE_NATIVE_GENERAL=1",
---         -- "-DCMAKE_POLICY_DEFAULT_CMP0057=NEW"
---     }
---     table.insert(configs, "-DCMAKE_BUILD_TYPE=" .. (package:is_debug() and "Debug" or "Release"))
---     table.insert(configs, "-DBUILD_SHARED_LIBS=" .. (package:config("shared") and "ON" or "OFF"))
---     if package:is_plat("windows") and (not package:config("shared")) then
---         package:add("defines", "COMPILING_WASM_RUNTIME_API=1")
---     end
-
---     table.insert(configs, "-DWAMR_BUILD_INTERP=" .. (package:config("interp") and "1" or "0"))
---     table.insert(configs, "-DWAMR_BUILD_FAST_INTERP=" .. (package:config("fast_interp") and "1" or "0"))
---     table.insert(configs, "-DWAMR_BUILD_AOT=" .. (package:config("aot") and "1" or "0"))
---     table.insert(configs, "-DWAMR_BUILD_JIT=" .. (package:config("jit") and "1" or "0"))
---     table.insert(configs, "-DWAMR_BUILD_FAST_JIT=" .. (package:config("fast_jit") and "1" or "0"))
-
---     table.insert(configs,
---         "-DWAMR_BUILD_LIBC_BUILTIN=" ..
---         ((package:config("libc_builtin") or package:config("libc") == "builtin") and "1" or "0"))
---     table.insert(configs,
---         "-DWAMR_BUILD_LIBC_WASI=" .. ((package:config("libc_wasi") or package:config("libc") == "wasi") and "1" or "0"))
---     table.insert(configs,
---         "-DWAMR_BUILD_LIBC_UVWASI=" ..
---         ((package:config("libc_uvwasi") or package:config("libc") == "uvwasi") and "1" or "0"))
-
---     table.insert(configs, "-DWAMR_BUILD_MULTI_MODULE=" .. (package:config("multi_module") and "1" or "0"))
---     table.insert(configs, "-DWAMR_BUILD_MINI_LOADER=" .. (package:config("mini_loader") and "1" or "0"))
---     table.insert(configs, "-DWAMR_BUILD_LIB_WASI_THREADS=" .. (package:config("wasi_threads") and "1" or "0"))
---     table.insert(configs, "-DWAMR_BUILD_SIMD=" .. (package:config("simd") and "1" or "0"))
---     table.insert(configs, "-DWAMR_BUILD_REF_TYPES=" .. (package:config("ref_types") and "1" or "0"))
-
---     local packagedeps
---     -- if package:config("libc_uvwasi") or package:config("libc") == "uvwasi" then
---     --     if package:is_plat("windows", "linux", "macosx") then
---     --         packagedeps = { "uvwasi", "libuv" }
---     --     end
---     -- end
---     -- if package:is_plat("android") then
---     --     table.insert(configs, "-DWAMR_BUILD_PLATFORM=android")
---     -- end
---     import("package.tools.cmake").install(package, configs, { packagedeps = packagedeps })
--- end)
--- on_test(function(package)
---     assert(package:has_cfuncs("wasm_engine_new", { includes = "wasm_c_api.h" }))
--- end)
--- package_end()
-
--- add_requires("wamr2")
 
 -- add_requires("conan::zstd/1.5.7", {
 --     alias = "zstd",
@@ -134,6 +83,30 @@ toolchain_end()
 --         fPIC = true
 --     }
 -- })
+
+add_requires("zstd ~1.5.7", {
+    alias = "zstd",
+    configs = {
+        shared = false,
+        fPIC = true
+    }
+})
+
+add_requires("zlib ~1.3.1", {
+    alias = "zlib",
+    configs = {
+        shared = false,
+        fPIC = true
+    }
+})
+
+add_requires("brotli ~1.1.0", {
+    alias = "brotli",
+    configs = {
+        shared = false,
+        fPIC = true
+    }
+})
 
 -- add_requires("conan::zlib/1.3.1", {
 --     alias = "zlib",
@@ -185,49 +158,107 @@ add_requires("zig ~0.14.0")
 --     })
 -- end
 
--- add_requires("c-ares ~1.34.3", {
---     configs = {
---         fPIC = true,
---         fpic = true,
---         shared = false,
---     }
--- })
-
-add_requires("asio ~1.34.2")
-
--- add_requires("conan::boost/1.88.0", {
-add_requires("boost ~1.88.0", {
-    alias = "boost",
+add_requires("openssl3 ~3.3.2", {
+    -- add_requires("conan::openssl/3.5.0", {
+    alias = "openssl3",
     configs = {
-        header_only = true
+        fPIC = true,
+        fpic = true,
+        shared = true
     }
 })
 
--- add_requires("wolfssl ~5.7.2", {
---     --add_requires("conan::wolfssl/5.7.0", {
---     alias = "wolfssl1",
---     configs = {
---         shared = false,
---         asio = true,
---         quic = true,
---         fPIC = true,
---         sslv3 = true,
---         certgen = true,
---         dsa = true,
---         ripemd = true,
---         sessioncerts = true,
---         testcert = true,
---         openssl_all = true,
---         openssl_extra = true,
---         opensslall = true,
---         opensslextra = true,
---         tls13 = true,
---         sni = true,
---         with_quic = true,
---         with_experimental = true,
---         with_rpk = true
---     }
--- })
+add_requires("c-ares ~1.34.3", {
+    configs = {
+        fPIC = true,
+        fpic = true,
+        shared = false,
+    }
+})
+
+add_requires("asio ~1.34.2")
+
+add_requires("conan::boost/1.88.0", {
+-- add_requires("boost ~1.88.0", {
+    alias = "boost",
+    configs = {
+        shared = false,
+        charconv = false,
+        chrono = false,
+        cobalt = false,
+        container = false,
+        context = false,
+        contract = false,
+        coroutine = false,
+        date_time = false,
+        exception = false,
+        fiber = false,
+        filesystem = true,
+        graph = false,
+        graph_parallel = false,
+        iostreams = false,
+        json = false,
+        locale = false,
+        log = false,
+        math = false,
+        mpi = false,
+        nowide = false,
+        process = false,
+        program_options = false,
+        python = false,
+        random = false,
+        regex = false,
+        serialization = false,
+        stacktrace = false,
+        system = true,
+        test = false,
+        thread = false,
+        timer = false,
+        type_erasure = false,
+        url = false,
+        wave = false,
+        header_only = true,
+        filesystem_use_std_fs = true,
+        zlib = true,
+        bzip2 = false,
+        lzma = false,
+        zstd = true,
+        segmented_stacks = false,
+        debug_level = 0,
+        pch = false,
+        i18n_backend = "none",
+        fPIC = true,
+        i18n_backend_iconv = "off",
+        i18n_backend_icu = false,
+        multithreading = false,
+    }
+})
+
+add_requires("wolfssl ~5.7.2", {
+    --add_requires("conan::wolfssl/5.7.0", {
+    alias = "wolfssl1",
+    configs = {
+        shared = false,
+        asio = true,
+        quic = true,
+        fPIC = true,
+        sslv3 = true,
+        certgen = true,
+        dsa = true,
+        ripemd = true,
+        sessioncerts = true,
+        testcert = true,
+        openssl_all = true,
+        openssl_extra = true,
+        opensslall = true,
+        opensslextra = true,
+        tls13 = true,
+        sni = true,
+        with_quic = true,
+        with_experimental = true,
+        with_rpk = true
+    }
+})
 
 -- add_requires(
 -- -- "onnxruntime ~1.19.2",
@@ -245,4 +276,4 @@ add_requires("boost ~1.88.0", {
 
 --add_requires("fmt ~11.1.4", { configs = { header_only = true } })
 
-includes("lib")
+includes("lib", "tests")

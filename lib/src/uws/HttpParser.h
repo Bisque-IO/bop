@@ -1,5 +1,6 @@
 /*
  * Authored by Alex Hultman, 2018-2024.
+ * Authored by Clay Molocznik, 2025.
  * Intellectual property of third-party.
 
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,11 +24,13 @@
 /* The HTTP parser is an independent module subject to unit testing / fuzz testing */
 
 #include <string>
+#include <string_view>
 #include <cstring>
 #include <algorithm>
 #include <climits>
 #include <string_view>
 #include <map>
+#include <optional>
 #include "MoveOnlyFunction.h"
 #include "ChunkedEncoding.h"
 
@@ -53,6 +56,14 @@ static const size_t MAX_FALLBACK_SIZE = (size_t) atoi(optional_ptr(getenv("UWS_H
 #define UWS_HTTP_MAX_HEADERS_COUNT 100
 #endif
 
+enum class compression_t : uint8_t {
+    none = 0,
+    deflate = 1,
+    gzip = 2,
+    brotli = 3,
+    zstd = 4
+};
+
 struct HttpRequest {
 
     friend struct HttpParser;
@@ -61,6 +72,7 @@ private:
     struct Header {
         std::string_view key, value;
     } headers[UWS_HTTP_MAX_HEADERS_COUNT];
+    size_t headerCount = 0;
     bool ancientHttp;
     unsigned int querySeparator;
     bool didYield;
@@ -75,6 +87,26 @@ public:
 
     bool getYield() {
         return didYield;
+    }
+
+    Header* getHeaders() {
+        return &headers[1];
+    }
+
+    Header* getHeader(size_t index) {
+        return &headers[index + 1];
+    }
+    
+    size_t getHeaderCount() {
+        if (headerCount == 0) {
+            for (int i = 0; i < UWS_HTTP_MAX_HEADERS_COUNT; i++) {
+                if (!headers[i].key.length()) {
+                    headerCount = i;
+                    break;
+                }
+            }
+        }
+        return headerCount;
     }
 
     /* Iteration over headers (key, value) */
@@ -189,7 +221,123 @@ public:
             return currentParameters.second[index];
         }
     }
+};
 
+struct HttpResponseHeaders {
+
+    friend struct HttpParser;
+
+private:
+    struct Header {
+        std::string_view key, value;
+    } headers[UWS_HTTP_MAX_HEADERS_COUNT];
+    size_t headerCount = 0;
+    
+    // Response-specific fields
+    int statusCode = 0;
+    std::string_view statusMessage;
+    int minorVersion = 0;
+    BloomFilter bf;
+
+public:
+    int getStatusCode() const {
+        return statusCode;
+    }
+
+    std::string_view getStatusMessage() const {
+        return statusMessage;
+    }
+
+    int getMinorVersion() const {
+        return minorVersion;
+    }
+
+    Header* getHeaders() {
+        return &headers[1];
+    }
+
+    Header* getHeader(size_t index) {
+        return &headers[index + 1];
+    }
+    
+    size_t getHeaderCount() {
+        if (headerCount == 0) {
+            for (int i = 0; i < UWS_HTTP_MAX_HEADERS_COUNT; i++) {
+                if (!headers[i].key.length()) {
+                    headerCount = i;
+                    break;
+                }
+            }
+        }
+        return headerCount;
+    }
+
+    /* Iteration over headers (key, value) */
+    struct HeaderIterator {
+        Header *ptr;
+
+        bool operator!=(const HeaderIterator &other) const {
+            /* Comparison with end is a special case */
+            if (ptr != other.ptr) {
+                return other.ptr || ptr->key.length();
+            }
+            return false;
+        }
+
+        HeaderIterator &operator++() {
+            ptr++;
+            return *this;
+        }
+
+        std::pair<std::string_view, std::string_view> operator*() const {
+            return {ptr->key, ptr->value};
+        }
+    };
+
+    HeaderIterator begin() {
+        return {headers + 1};
+    }
+
+    HeaderIterator end() {
+        return {nullptr};
+    }
+
+    std::string_view getHeader(std::string_view lowerCasedHeader) {
+        if (bf.mightHave(lowerCasedHeader)) {
+            for (Header *h = headers; (++h)->key.length(); ) {
+                if (h->key.length() == lowerCasedHeader.length() && !strncmp(h->key.data(), lowerCasedHeader.data(), lowerCasedHeader.length())) {
+                    return h->value;
+                }
+            }
+        }
+        return std::string_view(nullptr, 0);
+    }
+
+    bool isChunked() const {
+        return getHeader("transfer-encoding") == "chunked";
+    }
+
+    bool hasContentLength() const {
+        return getHeader("content-length").length() > 0;
+    }
+
+    uint64_t getContentLength() const {
+        std::string_view contentLengthStr = getHeader("content-length");
+        if (contentLengthStr.length() == 0) {
+            return 0;
+        }
+        
+        // Parse content-length header
+        uint64_t contentLength = 0;
+        std::from_chars(contentLengthStr.data(), contentLengthStr.data() + contentLengthStr.size(), contentLength);
+        // for (char c : contentLengthStr) {
+        //     if (c < '0' || c > '9') {
+        //         return UINT64_MAX; // Invalid content-length
+        //     }
+        //     contentLength = contentLength * 10 + (c - '0');
+        // }
+        return contentLength;
+    }
 };
 
 struct HttpParser {
@@ -198,6 +346,15 @@ private:
     std::string fallback;
     /* This guy really has only 30 bits since we reserve two highest bits to chunked encoding parsing state */
     uint64_t remainingStreamingBytes = 0;
+
+public:
+    /* Internal method to reset parser state - called automatically after response completion */
+    void resetParserState() {
+        remainingStreamingBytes = 0;
+        fallback.clear();
+    }
+
+private:
 
     /* Returns UINT64_MAX on error. Maximum 999999999 is allowed. */
     static uint64_t toUnsignedInteger(std::string_view str) {
@@ -337,6 +494,57 @@ private:
         return (char *) 0x1;
     }
 
+    /* Puts version as key, status code and message as value and returns non-null (or nullptr on error). */
+    static inline char *consumeResponseLine(char *data, char *end, HttpResponseHeaders::Header &header) {
+        /* Scan for "HTTP/" prefix */
+        if (data + 5 >= end || memcmp(data, "HTTP/", 5) != 0) {
+            return (char *) 0x1;
+        }
+        data += 5;
+
+        /* Parse version (e.g., "1.1") */
+        char *start = data;
+        while (data < end && *data != ' ') {
+            data++;
+        }
+        if (data >= end) {
+            return nullptr; // Incomplete
+        }
+        
+        /* Store version as key */
+        header.key = {start, (size_t)(data - start)};
+        data++; // Skip space
+
+        /* Parse status code */
+        start = data;
+        while (data < end && *data >= '0' && *data <= '9') {
+            data++;
+        }
+        if (data >= end || *data != ' ') {
+            return nullptr; // Incomplete or invalid
+        }
+        
+        /* Parse status message */
+        data++; // Skip space
+        start = data;
+        while (data < end && *data != '\r') {
+            data++;
+        }
+        if (data >= end) {
+            return nullptr; // Incomplete
+        }
+        
+        /* Store status code and message as value */
+        header.value = {start, (size_t)(data - start)};
+        
+        /* Check for "\r\n" */
+        if (data + 1 >= end || data[0] != '\r' || data[1] != '\n') {
+            return nullptr; // Incomplete
+        }
+        
+        return data + 2;
+    }
+
     /* RFC 9110: 5.5 Field Values (TLDR; anything above 31 is allowed; htab (9) is also allowed)
      * Field values are usually constrained to the range of US-ASCII characters [...]
      * Field values containing CR, LF, or NUL characters are invalid and dangerous [...]
@@ -353,8 +561,12 @@ private:
     }
 
     /* End is only used for the proxy parser. The HTTP parser recognizes "\ra" as invalid "\r\n" scan and breaks. */
-    static unsigned int getHeaders(char *postPaddedBuffer, char *end, struct HttpRequest::Header *headers, void *reserved, unsigned int &err) {
+    static unsigned int getHeaders(
+        char *postPaddedBuffer, char *end, struct HttpRequest::Header *headers, void *reserved, unsigned int &err, size_t *headerCount = nullptr, bool isResponse = false
+    ) {
         char *preliminaryKey, *preliminaryValue, *start = postPaddedBuffer;
+
+        size_t count = 0;
 
         #ifdef UWS_WITH_PROXY
             /* ProxyParser is passed as reserved parameter */
@@ -382,12 +594,21 @@ private:
          * for PROXY means we can end up succeeding, yet leaving bytes in the fallback buffer
          * which is then removed, and our counters to flip due to overflow and we end up with a crash */
 
-        /* The request line is different from the field names / field values */
-        if ((char *) 2 > (postPaddedBuffer = consumeRequestLine(postPaddedBuffer, end, headers[0]))) {
-            /* Error - invalid request line */
-            /* Assuming it is 505 HTTP Version Not Supported */
-            err = postPaddedBuffer ? HTTP_ERROR_505_HTTP_VERSION_NOT_SUPPORTED : 0;
-            return 0;
+        /* The request/response line is different from the field names / field values */
+        if (isResponse) {
+            if ((char *) 2 > (postPaddedBuffer = consumeResponseLine(postPaddedBuffer, end, (HttpResponseHeaders::Header&)headers[0]))) {
+                /* Error - invalid response line */
+                /* Assuming it is 505 HTTP Version Not Supported */
+                err = postPaddedBuffer ? HTTP_ERROR_505_HTTP_VERSION_NOT_SUPPORTED : 0;
+                return 0;
+            }
+        } else {
+            if ((char *) 2 > (postPaddedBuffer = consumeRequestLine(postPaddedBuffer, end, headers[0]))) {
+                /* Error - invalid request line */
+                /* Assuming it is 505 HTTP Version Not Supported */
+                err = postPaddedBuffer ? HTTP_ERROR_505_HTTP_VERSION_NOT_SUPPORTED : 0;
+                return 0;
+            }
         }
         headers++;
 
@@ -444,12 +665,16 @@ private:
                 }
                 
                 headers++;
+                count++;
 
                 /* We definitely have at least one header (or request line), so check if we are done */
                 if (*postPaddedBuffer == '\r') {
                     if (postPaddedBuffer[1] == '\n') {
                         /* This cann take the very last header space */
                         headers->key = std::string_view(nullptr, 0);
+                        if (headerCount) {
+                            *headerCount = count;
+                        }
                         return (unsigned int) ((postPaddedBuffer + 2) - start);
                     } else {
                         /* \r\n\r plus non-\n letter is malformed request, or simply out of search space */
@@ -485,7 +710,7 @@ private:
         data[length] = '\r';
         data[length + 1] = 'a'; /* Anything that is not \n, to trigger "invalid request" */
 
-        for (unsigned int consumed; length && (consumed = getHeaders(data, data + length, req->headers, reserved, err)); ) {
+        for (unsigned int consumed; length && (consumed = getHeaders(data, data + length, req->headers, reserved, err, &req->headerCount)); ) {
             data += consumed;
             length -= consumed;
             consumedTotal += consumed;
@@ -614,6 +839,94 @@ private:
         return {consumedTotal, user};
     }
 
+    /* Helper method for parsing response from fallback buffer */
+    std::pair<unsigned int, void *> fenceAndConsumeResponsePostPadded(char *data, unsigned int length, void *user, void *reserved, HttpResponseHeaders *resp, MoveOnlyFunction<void *(void *, HttpResponseHeaders *)> &responseHandler, MoveOnlyFunction<void *(void *, std::string_view, bool)> &dataHandler) {
+        /* Fence two bytes past end of our buffer */
+        data[length] = '\r';
+        data[length + 1] = 'a';
+        
+        unsigned int err = 0;
+        unsigned int consumed = getHeaders(data, data + length, (HttpRequest::Header*)resp->headers, reserved, err, &resp->headerCount, true);
+        
+        if (err) {
+            return {err, FULLPTR};
+        }
+        
+        if (consumed) {
+            /* Parse response line to extract status code and message */
+            if (resp->headerCount > 0) {
+                std::string_view responseLine = resp->headers[0].value;
+                size_t firstSpace = responseLine.find(' ');
+                if (firstSpace != std::string_view::npos) {
+                    size_t secondSpace = responseLine.find(' ', firstSpace + 1);
+                    if (secondSpace != std::string_view::npos) {
+                        std::string_view statusCodeStr = responseLine.substr(firstSpace + 1, secondSpace - firstSpace - 1);
+                        resp->statusMessage = responseLine.substr(secondSpace + 1);
+                        
+                        // Parse status code
+                        resp->statusCode = 0;
+                        for (char c : statusCodeStr) {
+                            if (c >= '0' && c <= '9') {
+                                resp->statusCode = resp->statusCode * 10 + (c - '0');
+                            } else {
+                                resp->statusCode = 0;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* Add all headers to bloom filter */
+            resp->bf.reset();
+            for (HttpResponseHeaders::Header *h = resp->headers; (++h)->key.length(); ) {
+                resp->bf.add(h->key);
+            }
+
+            /* Call response handler */
+            void *returnedUser = responseHandler(user, resp);
+            if (returnedUser != user) {
+                return {consumed, returnedUser};
+            }
+
+            /* Handle response body parsing */
+            std::string_view transferEncodingString = resp->getHeader("transfer-encoding");
+            std::string_view contentLengthString = resp->getHeader("content-length");
+
+            if (transferEncodingString == "chunked") {
+                remainingStreamingBytes = STATE_IS_CHUNKED;
+                char* bodyData = data + consumed;
+                int bodyLength = length - consumed;
+                
+                std::string_view dataToConsume(bodyData, bodyLength);
+                for (auto chunk : uWS::ChunkIterator(&dataToConsume, &remainingStreamingBytes)) {
+                    dataHandler(user, chunk, chunk.length() == 0);
+                }
+                if (isParsingInvalidChunkedEncoding(remainingStreamingBytes)) {
+                    return {HTTP_ERROR_400_BAD_REQUEST, FULLPTR};
+                }
+                consumed += (bodyLength - (int) dataToConsume.length());
+            } else if (contentLengthString.length()) {
+                remainingStreamingBytes = toUnsignedInteger(contentLengthString);
+                if (remainingStreamingBytes == UINT64_MAX) {
+                    return {HTTP_ERROR_400_BAD_REQUEST, FULLPTR};
+                }
+
+                char* bodyData = data + consumed;
+                int bodyLength = length - consumed;
+                
+                unsigned int emittable = (unsigned int) std::min<uint64_t>(remainingStreamingBytes, bodyLength);
+                dataHandler(user, std::string_view(bodyData, emittable), emittable == remainingStreamingBytes);
+                remainingStreamingBytes -= emittable;
+                consumed += emittable;
+            } else {
+                dataHandler(user, {}, true);
+            }
+        }
+        
+        return {consumed, user};
+    }
+
 public:
     std::pair<unsigned int, void *> consumePostPadded(char *data, unsigned int length, void *user, void *reserved, MoveOnlyFunction<void *(void *, HttpRequest *)> &&requestHandler, MoveOnlyFunction<void *(void *, std::string_view, bool)> &&dataHandler) {
 
@@ -738,6 +1051,254 @@ public:
 
         // added for now
         return {0, user};
+    }
+
+    /* Response-specific consume method */
+    std::pair<unsigned int, void *> consumeResponsePostPadded(char *data, unsigned int length, void *user, void *reserved, HttpResponseHeaders *resp, MoveOnlyFunction<void *(void *, HttpResponseHeaders *)> &responseHandler, MoveOnlyFunction<void *(void *, std::string_view, bool)> &dataHandler) {
+
+        /* How much data we CONSUMED (to throw away) */
+        unsigned int consumedTotal = 0;
+        unsigned int err = 0;
+
+        /* Check if we're already in streaming mode (ongoing response body) */
+        if (remainingStreamingBytes) {
+            /* It's either chunked or with a content-length */
+            if (isParsingChunkedEncoding(remainingStreamingBytes)) {
+                std::string_view dataToConsume(data, length);
+                for (auto chunk : uWS::ChunkIterator(&dataToConsume, &remainingStreamingBytes)) {
+                    dataHandler(user, chunk, chunk.length() == 0);
+                }
+                if (isParsingInvalidChunkedEncoding(remainingStreamingBytes)) {
+                    return {HTTP_ERROR_400_BAD_REQUEST, FULLPTR};
+                }
+                data = (char *) dataToConsume.data();
+                length = (unsigned int) dataToConsume.length();
+                consumedTotal += (length - (unsigned int) dataToConsume.length());
+                
+                /* If chunked encoding is complete, reset parser state for next response */
+                if (!isParsingChunkedEncoding(remainingStreamingBytes)) {
+                    resetParserState();
+                }
+            } else {
+                /* Content-length based streaming */
+                if (remainingStreamingBytes >= length) {
+                    void *returnedUser = dataHandler(user, std::string_view(data, length), remainingStreamingBytes == length);
+                    remainingStreamingBytes -= length;
+                    return {consumedTotal, returnedUser};
+                } else {
+                    void *returnedUser = dataHandler(user, std::string_view(data, remainingStreamingBytes), true);
+                    data += (unsigned int) remainingStreamingBytes;
+                    length -= (unsigned int) remainingStreamingBytes;
+                    consumedTotal += (unsigned int) remainingStreamingBytes;
+                    resetParserState();
+                    
+                    if (returnedUser != user) {
+                        return {consumedTotal, returnedUser};
+                    }
+                }
+            }
+        }
+
+        /* Handle fallback buffer for incomplete headers */
+        if (fallback.length()) {
+            unsigned int had = (unsigned int) fallback.length();
+            size_t maxCopyDistance = std::min<size_t>(MAX_FALLBACK_SIZE - fallback.length(), (size_t) length);
+            
+            fallback.reserve(fallback.length() + maxCopyDistance + std::max<unsigned int>(MINIMUM_HTTP_POST_PADDING, sizeof(std::string)));
+            fallback.append(data, maxCopyDistance);
+            
+            /* Try to parse headers from fallback buffer */
+            std::pair<unsigned int, void *> consumed = fenceAndConsumeResponsePostPadded(fallback.data(), (unsigned int) fallback.length(), user, reserved, resp, responseHandler, dataHandler);
+            if (consumed.second != user) {
+                return consumed;
+            }
+            
+            if (consumed.first) {
+                /* Headers successfully parsed from fallback */
+                fallback.clear();
+                data += consumed.first - had;
+                length -= consumed.first - had;
+                consumedTotal += consumed.first - had;
+                
+                /* Handle any remaining streaming data */
+                if (remainingStreamingBytes) {
+                    if (isParsingChunkedEncoding(remainingStreamingBytes)) {
+                        std::string_view dataToConsume(data, length);
+                        for (auto chunk : uWS::ChunkIterator(&dataToConsume, &remainingStreamingBytes)) {
+                            dataHandler(user, chunk, chunk.length() == 0);
+                        }
+                        if (isParsingInvalidChunkedEncoding(remainingStreamingBytes)) {
+                            return {HTTP_ERROR_400_BAD_REQUEST, FULLPTR};
+                        }
+                        data = (char *) dataToConsume.data();
+                        length = (unsigned int) dataToConsume.length();
+                        consumedTotal += (length - (unsigned int) dataToConsume.length());
+                        
+                                        /* If chunked encoding is complete, reset parser state for next response */
+                if (!isParsingChunkedEncoding(remainingStreamingBytes)) {
+                    resetParserState();
+                }
+                    } else {
+                        if (remainingStreamingBytes >= (unsigned int) length) {
+                            void *returnedUser = dataHandler(user, std::string_view(data, length), remainingStreamingBytes == (unsigned int) length);
+                            remainingStreamingBytes -= length;
+                            return {consumedTotal, returnedUser};
+                        } else {
+                            void *returnedUser = dataHandler(user, std::string_view(data, remainingStreamingBytes), true);
+                            data += (unsigned int) remainingStreamingBytes;
+                            length -= (unsigned int) remainingStreamingBytes;
+                            consumedTotal += (unsigned int) remainingStreamingBytes;
+                            resetParserState();
+                            
+                            if (returnedUser != user) {
+                                return {consumedTotal, returnedUser};
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (fallback.length() == MAX_FALLBACK_SIZE) {
+                    return {HTTP_ERROR_431_REQUEST_HEADER_FIELDS_TOO_LARGE, FULLPTR};
+                }
+                return {0, user};
+            }
+        }
+
+        /* Fence two bytes past end of our buffer (buffer has post padded margins).
+         * This is to always catch scan for \r but not for \r\n. */
+        data[length] = '\r';
+        data[length + 1] = 'a'; /* Anything that is not \n, to trigger "invalid request" */
+
+        for (unsigned int consumed; length && (consumed = getHeaders(data, data + length, (HttpRequest::Header*)resp->headers, reserved, err, &resp->headerCount, true)); ) {
+            data += consumed;
+            length -= consumed;
+            consumedTotal += consumed;
+
+            /* Even if we could parse it, check for length here as well */
+            if (consumed > MAX_FALLBACK_SIZE) {
+                return {HTTP_ERROR_431_REQUEST_HEADER_FIELDS_TOO_LARGE, FULLPTR};
+            }
+
+            /* Parse response line to extract status code and message */
+            if (resp->headerCount > 0) {
+                std::string_view responseLine = resp->headers[0].value;
+                size_t firstSpace = responseLine.find(' ');
+                if (firstSpace != std::string_view::npos) {
+                    size_t secondSpace = responseLine.find(' ', firstSpace + 1);
+                    if (secondSpace != std::string_view::npos) {
+                        std::string_view statusCodeStr = responseLine.substr(firstSpace + 1, secondSpace - firstSpace - 1);
+                        resp->statusMessage = responseLine.substr(secondSpace + 1);
+                        
+                        // Parse status code
+                        resp->statusCode = 0;
+                        for (char c : statusCodeStr) {
+                            if (c >= '0' && c <= '9') {
+                                resp->statusCode = resp->statusCode * 10 + (c - '0');
+                            } else {
+                                resp->statusCode = 0;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* Add all headers to bloom filter */
+            resp->bf.reset();
+            for (HttpResponseHeaders::Header *h = resp->headers; (++h)->key.length(); ) {
+                resp->bf.add(h->key);
+            }
+
+            /* If returned socket is not what we put in we need
+             * to break here as we either have upgraded to
+             * WebSockets or otherwise closed the socket. */
+            void *returnedUser = responseHandler(user, resp);
+            if (returnedUser != user) {
+                /* We are upgraded to WebSocket or otherwise broken */
+                return {consumedTotal, returnedUser};
+            }
+
+            /* Handle response body parsing similar to request body */
+            std::string_view transferEncodingString = resp->getHeader("transfer-encoding");
+            std::string_view contentLengthString = resp->getHeader("content-length");
+
+            if (transferEncodingString == "chunked") {
+                remainingStreamingBytes = STATE_IS_CHUNKED;
+                /* Go ahead and parse it */
+                std::string_view dataToConsume(data, length);
+                for (auto chunk : uWS::ChunkIterator(&dataToConsume, &remainingStreamingBytes)) {
+                    dataHandler(user, chunk, chunk.length() == 0);
+                }
+                if (isParsingInvalidChunkedEncoding(remainingStreamingBytes)) {
+                    return {HTTP_ERROR_400_BAD_REQUEST, FULLPTR};
+                }
+                unsigned int consumed = (length - (unsigned int) dataToConsume.length());
+                data = (char *) dataToConsume.data();
+                length = (unsigned int) dataToConsume.length();
+                consumedTotal += consumed;
+                
+                /* If chunked encoding is complete, reset state for next response */
+                if (!isParsingChunkedEncoding(remainingStreamingBytes)) {
+                    remainingStreamingBytes = 0;
+                }
+            } else if (contentLengthString.length()) {
+                remainingStreamingBytes = toUnsignedInteger(contentLengthString);
+                if (remainingStreamingBytes == UINT64_MAX) {
+                    /* Parser error */
+                    return {HTTP_ERROR_400_BAD_REQUEST, FULLPTR};
+                }
+
+                unsigned int emittable = (unsigned int) std::min<uint64_t>(remainingStreamingBytes, length);
+                dataHandler(user, std::string_view(data, emittable), emittable == remainingStreamingBytes);
+                remainingStreamingBytes -= emittable;
+
+                data += emittable;
+                length -= emittable;
+                consumedTotal += emittable;
+                
+                /* If content-length is complete, reset state for next response */
+                if (remainingStreamingBytes == 0) {
+                    /* Content-length response is complete */
+                }
+            } else {
+                            /* If we came here without a body; emit an empty data chunk to signal no data */
+            dataHandler(user, {}, true);
+            /* Reset parser state for next response */
+            resetParserState();
+            }
+        }
+        
+        /* Handle remaining data for pipelining - this could be the start of the next response */
+        if (length && !err) {
+            /* Check if we have enough data to potentially start parsing the next response */
+            if (length >= 4) { /* Minimum for "HTTP" */
+                /* Try to detect if this looks like the start of a new HTTP response */
+                if ((data[0] == 'H' && data[1] == 'T' && data[2] == 'T' && data[3] == 'P') ||
+                    (data[0] == 'h' && data[1] == 't' && data[2] == 't' && data[3] == 'p')) {
+                    /* This looks like the start of a new response - don't accumulate in fallback */
+                    /* The remaining data will be processed in the next call */
+                } else {
+                    /* This might be incomplete data from the current response or start of next response */
+                    /* Accumulate in fallback buffer for next call */
+                    size_t maxCopyDistance = std::min<size_t>(MAX_FALLBACK_SIZE - fallback.length(), (size_t) length);
+                    fallback.reserve(fallback.length() + maxCopyDistance + std::max<unsigned int>(MINIMUM_HTTP_POST_PADDING, sizeof(std::string)));
+                    fallback.append(data, maxCopyDistance);
+                    consumedTotal += (unsigned int) maxCopyDistance;
+                }
+            } else {
+                /* Not enough data to determine - accumulate in fallback */
+                size_t maxCopyDistance = std::min<size_t>(MAX_FALLBACK_SIZE - fallback.length(), (size_t) length);
+                fallback.reserve(fallback.length() + maxCopyDistance + std::max<unsigned int>(MINIMUM_HTTP_POST_PADDING, sizeof(std::string)));
+                fallback.append(data, maxCopyDistance);
+                consumedTotal += (unsigned int) maxCopyDistance;
+            }
+        }
+        
+        /* Whenever we return FULLPTR, the interpretation of "consumed" should be the HttpError enum. */
+        if (err) {
+            return {err, FULLPTR};
+        }
+        return {consumedTotal, user};
     }
 };
 

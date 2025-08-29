@@ -1,5 +1,5 @@
 local target_of = function(kind, use_openssl)
-    if is_plat("windows") then
+    if is_plat("windows", "mingw") then
         -- if kind == "shared" then
         --     use_openssl = true
         -- else
@@ -8,12 +8,22 @@ local target_of = function(kind, use_openssl)
         use_openssl = false
     end
     if kind == "static" then
-        if not use_openssl and not is_plat("windows") then
-            target("bop")
-            set_basename("bop")
+        if is_plat("windows", "mingw") then
+            if not use_openssl then
+                target("bop")
+                set_basename("bop")
+            else
+                target("bop-openssl")
+                set_basename("bop-openssl")
+            end
         else
-            target("bop-openssl")
-            set_basename("bop-openssl")
+            if not use_openssl then
+                target("bop")
+                set_basename("bop")
+            else
+                target("bop-openssl")
+                set_basename("bop-openssl")
+            end
         end
     else
         if not use_openssl then
@@ -43,7 +53,7 @@ local target_of = function(kind, use_openssl)
 
     if is_plat("windows") then
         if kind == "static" then
-            add_cxflags("/MT")
+            -- add_cxflags("/MT")
         else
             --add_cxflags("/MD")
             --add_syslinks("MSVCRT")
@@ -54,7 +64,7 @@ local target_of = function(kind, use_openssl)
         --add_ldflags("/NODEFAULTLIB:libcmt")
         --add_cxflags("/MT")
         --add_ldflags("/MT")
-        add_cxflags("/Zc:preprocessor", "/std:c23", "/experimental:c11atomics")
+        -- add_cxflags("/Zc:preprocessor", "/std:c23", "/experimental:c11atomics")
         add_syslinks("Advapi32", "User32", "Kernel32", "onecore", "ntdll", "Synchronization", "msvcrt")
         add_defines("MDBX_ENABLE_MINCORE=0")
     else
@@ -259,6 +269,8 @@ local target_of = function(kind, use_openssl)
     -- set_symbols("debug")
     --set_strip("all")
 
+    add_packages("zlib", "zstd")
+
     --     add_ldflags("-fPIC")
     if kind == "shared" then
         --add_rules("utils.symbols.export_all", { export_classes = true })
@@ -268,7 +280,7 @@ local target_of = function(kind, use_openssl)
         end
     end
     if kind == "static" then
-        set_policy("build.merge_archive", true)
+        -- set_policy("build.merge_archive", true)
     end
 
     -- on_build(function(target)
@@ -278,9 +290,16 @@ local target_of = function(kind, use_openssl)
     target_end()
 end
 
-target_of("static", false)
-target_of("static", true)
-target_of("shared", false)
-target_of("shared", true)
+
+
+if not is_plat("windows", "mingw") then
+    target_of("static", false)
+    target_of("static", true)
+    target_of("shared", false)
+    target_of("shared", true)
+else
+    target_of("static", false)
+end
+
 
 includes("snmalloc", "sqlite", "nuraft", "usockets", "uwebsockets", "libuv", "mdbx", "scratch", "test")

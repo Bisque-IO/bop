@@ -112,8 +112,8 @@ struct ZlibContext {
 #endif
 
     ZlibContext() {
-        deflationBuffer = (char *) malloc(LARGE_BUFFER_SIZE);
-        inflationBuffer = (char *) malloc(LARGE_BUFFER_SIZE);
+        deflationBuffer = (char *) new char[LARGE_BUFFER_SIZE];
+        inflationBuffer = (char *) new char[LARGE_BUFFER_SIZE];
 
 #ifdef UWS_USE_LIBDEFLATE
         decompressor = libdeflate_alloc_decompressor();
@@ -122,8 +122,8 @@ struct ZlibContext {
     }
 
     ~ZlibContext() {
-        free(deflationBuffer);
-        free(inflationBuffer);
+        delete[] deflationBuffer;
+        delete[] inflationBuffer;
 
 #ifdef UWS_USE_LIBDEFLATE
         libdeflate_free_decompressor(decompressor);
