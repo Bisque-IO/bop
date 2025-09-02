@@ -63,7 +63,7 @@ function add_nuraft_target(name, src, is_test)
     elseif is_plat("macosx", "macos", "darwin") and is_arch("arm64", "aarch64") then
         add_links(os.projectdir() .. "/odin/libbop/macos/arm64/libwolfssl.a")
     elseif is_plat("windows", "mingw") and is_arch("x64", "x86_64") then
-        add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
+        add_links("odin/libbop/windows/amd64/wolfssl.lib")
     end
 
     --add_defines("USE_BOOST_ASIO=1")

@@ -23,6 +23,7 @@
 #include "Loop.h"
 #include "MoveOnlyFunction.h"
 #include "HttpClientConnection.h"
+#include "HttpClientContextData.h"
 #include "HttpParser.h"
 #include <string>
 #include <string_view>
@@ -49,7 +50,7 @@ struct HttpClientBehavior {
     MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)> onLongTimeout = nullptr;
     
     /* Data flow callbacks - default handlers for all connections */
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)> onWritable = nullptr;
+    MoveOnlyFunction<bool(HttpClientConnection<SSL, USERDATA>*, uintmax_t)> onWritable = nullptr;
     MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, std::string_view)> onDropped = nullptr;
     
     /* Default configuration */
@@ -74,12 +75,12 @@ private:
     }
     
     /* Get socket context data */
-    HttpClientConnectionData<SSL, USERDATA>* getSocketContextData() {
-        return (HttpClientConnectionData<SSL, USERDATA>*)us_socket_context_ext(SSL, getSocketContext());
+    HttpClientContextData<SSL, USERDATA>* getSocketContextData() {
+        return (HttpClientContextData<SSL, USERDATA>*)us_socket_context_ext(SSL, getSocketContext());
     }
     
-    static HttpClientConnectionData<SSL, USERDATA>* getSocketContextDataS(us_socket_t* s) {
-        return (HttpClientConnectionData<SSL, USERDATA>*)us_socket_context_ext(SSL, getSocketContext(s));
+    static HttpClientContextData<SSL, USERDATA>* getSocketContextDataS(us_socket_t* s) {
+        return (HttpClientContextData<SSL, USERDATA>*)us_socket_context_ext(SSL, getSocketContext(s));
     }
     
     /* Initialize the context with behavior */
@@ -87,30 +88,31 @@ private:
         /* Set up connection handlers */
         us_socket_context_on_open(SSL, getSocketContext(), [](us_socket_t* s, int is_client) {
             HttpClientConnectionData<SSL, USERDATA>* connData = HttpClientConnection<SSL, USERDATA>::getConnectionData(s);
+            HttpClientContextData<SSL, USERDATA>* contextData = static_cast<HttpClientContextData<SSL, USERDATA>*>(us_socket_context_ext(SSL, us_socket_context(SSL, s)));
             
             /* Call onConnection handler if available */
-            if (connData->onConnection) {
-                connData->onConnection(static_cast<HttpClientConnection<SSL, USERDATA>*>(s));
+            if (contextData->onConnection) {
+                contextData->onConnection(static_cast<HttpClientConnection<SSL, USERDATA>*>(s));
             }
         });
         
         us_socket_context_on_close(SSL, getSocketContext(), [](us_socket_t* s, int code, void* data) {
             HttpClientConnectionData<SSL, USERDATA>* connData = HttpClientConnection<SSL, USERDATA>::getConnectionData(s);
+            HttpClientContextData<SSL, USERDATA>* contextData = static_cast<HttpClientContextData<SSL, USERDATA>*>(us_socket_context_ext(SSL, us_socket_context(SSL, s)));
             
             /* Call onDisconnected handler if available */
-            if (connData->onDisconnected) {
+            if (contextData->onDisconnected) {
                 std::string_view message = data ? std::string_view((char*)data, strlen((char*)data)) : std::string_view();
-                connData->onDisconnected(static_cast<HttpClientConnection<SSL, USERDATA>*>(s), code, message);
+                contextData->onDisconnected(static_cast<HttpClientConnection<SSL, USERDATA>*>(s), code, message);
             }
             
-            /* Clean up USERDATA if not void */
-            if constexpr (!std::is_same_v<USERDATA, void>) {
-                ((USERDATA*)HttpClientConnection<SSL, USERDATA>::getUserData(s))->~USERDATA();
-            }
+            /* Clean up connection data (destructor will handle USERDATA cleanup) */
+            connData->~HttpClientConnectionData<SSL, USERDATA>();
         });
         
         us_socket_context_on_data(SSL, getSocketContext(), [](us_socket_t* s, char* data, int length) {
             HttpClientConnectionData<SSL, USERDATA>* connData = HttpClientConnection<SSL, USERDATA>::getConnectionData(s);
+            HttpClientContextData<SSL, USERDATA>* contextData = static_cast<HttpClientContextData<SSL, USERDATA>*>(us_socket_context_ext(SSL, us_socket_context(SSL, s)));
             
             /* Parse HTTP response data */
             static_cast<HttpClientConnection<SSL, USERDATA>*>(s)->parseResponseData(data, length);
@@ -118,52 +120,58 @@ private:
         
         us_socket_context_on_timeout(SSL, getSocketContext(), [](us_socket_t* s) {
             HttpClientConnectionData<SSL, USERDATA>* connData = HttpClientConnection<SSL, USERDATA>::getConnectionData(s);
+            HttpClientContextData<SSL, USERDATA>* contextData = static_cast<HttpClientContextData<SSL, USERDATA>*>(us_socket_context_ext(SSL, us_socket_context(SSL, s)));
             
             /* Call onTimeout handler if available */
-            if (connData->onTimeout) {
-                connData->onTimeout(static_cast<HttpClientConnection<SSL, USERDATA>*>(s));
-            } else if (connData->onError) {
-                /* Fallback to onError handler if onTimeout not set */
-                connData->onError(static_cast<HttpClientConnection<SSL, USERDATA>*>(s), -1, "Connection timeout");
+            if (contextData->onTimeout) {
+                contextData->onTimeout(static_cast<HttpClientConnection<SSL, USERDATA>*>(s));
+            } else if (contextData->onResponseEnd) {
+                /* Fallback to onResponseEnd handler if onTimeout not set */
+                contextData->onResponseEnd(static_cast<HttpClientConnection<SSL, USERDATA>*>(s), "Connection timeout");
             }
         });
         
         us_socket_context_on_long_timeout(SSL, getSocketContext(), [](us_socket_t* s) {
             HttpClientConnectionData<SSL, USERDATA>* connData = HttpClientConnection<SSL, USERDATA>::getConnectionData(s);
+            HttpClientContextData<SSL, USERDATA>* contextData = static_cast<HttpClientContextData<SSL, USERDATA>*>(us_socket_context_ext(SSL, us_socket_context(SSL, s)));
             
             /* Call onLongTimeout handler if available */
-            if (connData->onLongTimeout) {
-                connData->onLongTimeout(static_cast<HttpClientConnection<SSL, USERDATA>*>(s));
-            } else if (connData->onError) {
-                /* Fallback to onError handler if onLongTimeout not set */
-                connData->onError(static_cast<HttpClientConnection<SSL, USERDATA>*>(s), -1, "Connection long timeout");
+            if (contextData->onLongTimeout) {
+                contextData->onLongTimeout(static_cast<HttpClientConnection<SSL, USERDATA>*>(s));
+            } else if (contextData->onResponseEnd) {
+                /* Fallback to onResponseEnd handler if onLongTimeout not set */
+                contextData->onResponseEnd(static_cast<HttpClientConnection<SSL, USERDATA>*>(s), "Connection long timeout");
             }
         });
         
         us_socket_context_on_connect_error(SSL, getSocketContext(), [](us_socket_t* s, int code) {
             HttpClientConnectionData<SSL, USERDATA>* connData = HttpClientConnection<SSL, USERDATA>::getConnectionData(s);
+            HttpClientContextData<SSL, USERDATA>* contextData = static_cast<HttpClientContextData<SSL, USERDATA>*>(us_socket_context_ext(SSL, us_socket_context(SSL, s)));
             
             /* Call onConnectError handler if available */
-            if (connData->onConnectError) {
+            if (contextData->onConnectError) {
                 std::string_view message = "Connection failed";
-                connData->onConnectError(static_cast<HttpClientConnection<SSL, USERDATA>*>(s), code, message);
+                contextData->onConnectError(static_cast<HttpClientConnection<SSL, USERDATA>*>(s), code, message);
             }
         });
         
         us_socket_context_on_writable(SSL, getSocketContext(), [](us_socket_t* s) {
             HttpClientConnectionData<SSL, USERDATA>* connData = HttpClientConnection<SSL, USERDATA>::getConnectionData(s);
+            HttpClientContextData<SSL, USERDATA>* contextData = static_cast<HttpClientContextData<SSL, USERDATA>*>(us_socket_context_ext(SSL, us_socket_context(SSL, s)));
             auto* asyncSocket = static_cast<AsyncSocket<SSL>*>(s);
             
             /* Drain any remaining socket buffer */
             asyncSocket->write(nullptr, 0, true, 0);
             
             /* Call onWritable handler if available and backpressure is relieved */
-            if (connData->onWritable) {
+            if (contextData->onWritable) {
                 uintmax_t currentBackpressure = asyncSocket->getBufferedAmount();
+                uintmax_t availableBytes = contextData->maxBackpressure > currentBackpressure ? 
+                    contextData->maxBackpressure - currentBackpressure : 0;
                 /* Call onWritable when backpressure falls below 50% of max backpressure or when completely drained */
                 if (currentBackpressure == 0 || 
-                    (connData->maxBackpressure > 0 && currentBackpressure < connData->maxBackpressure / 2)) {
-                    connData->onWritable(static_cast<HttpClientConnection<SSL, USERDATA>*>(s));
+                    (contextData->maxBackpressure > 0 && currentBackpressure < contextData->maxBackpressure / 2)) {
+                    contextData->onWritable(static_cast<HttpClientConnection<SSL, USERDATA>*>(s), availableBytes);
                 }
             }
         });
@@ -174,10 +182,10 @@ private:
 public:
     /* Construct a new HttpClientContext using specified loop */
     static HttpClientContext* create(Loop* loop, const HttpClientBehavior<SSL, USERDATA>& behavior = {}, us_socket_context_options_t options = {}) {
-        HttpClientContext* httpContext;
+        HttpClientContext<SSL, USERDATA>* httpContext;
         
         httpContext = (HttpClientContext*)us_create_socket_context(
-            SSL, (us_loop_t*)loop, sizeof(HttpClientConnectionData<SSL, USERDATA>) + sizeof(USERDATA), options
+            SSL, (us_loop_t*)loop, sizeof(HttpClientContextData<SSL, USERDATA>), options
         );
         
         if (!httpContext) {
@@ -185,12 +193,12 @@ public:
         }
         
         /* Init socket context data */
-        new ((HttpClientConnectionData<SSL, USERDATA>*)us_socket_context_ext(
+        new ((HttpClientContextData<SSL, USERDATA>*)us_socket_context_ext(
             SSL, (us_socket_context_t*)httpContext
-        )) HttpClientConnectionData<SSL, USERDATA>();
+        )) HttpClientContextData<SSL, USERDATA>();
         
         /* Apply behavior configuration */
-        HttpClientConnectionData<SSL, USERDATA>* contextData = (HttpClientConnectionData<SSL, USERDATA>*)us_socket_context_ext(
+        HttpClientContextData<SSL, USERDATA>* contextData = (HttpClientContextData<SSL, USERDATA>*)us_socket_context_ext(
             SSL, (us_socket_context_t*)httpContext
         );
         contextData->idleTimeoutSeconds = behavior.idleTimeoutSeconds;
@@ -199,22 +207,34 @@ public:
         contextData->resetIdleTimeoutOnSend = behavior.resetIdleTimeoutOnSend;
         contextData->closeOnBackpressureLimit = behavior.closeOnBackpressureLimit;
         
+        /* Apply callbacks */
+        contextData->onConnection = std::move(behavior.onConnected);
+        contextData->onConnectError = std::move(behavior.onConnectError);
+        contextData->onDisconnected = std::move(behavior.onDisconnected);
+        contextData->onResponse = std::move(behavior.onHeaders);
+        contextData->onResponseData = std::move(behavior.onChunk);
+        contextData->onResponseEnd = std::move(behavior.onError);
+        contextData->onWritable = std::move(behavior.onWritable);
+        contextData->onDropped = std::move(behavior.onDropped);
+        contextData->onTimeout = std::move(behavior.onTimeout);
+        contextData->onLongTimeout = std::move(behavior.onLongTimeout);
+        
         return httpContext->init(behavior);
     }
     
     /* Destruct the HttpClientContext */
     void free() {
         /* Destruct socket context data */
-        HttpClientConnectionData<SSL, USERDATA>* connData = getSocketContextData();
-        connData->~HttpClientConnectionData<SSL, USERDATA>();
+        HttpClientContextData<SSL, USERDATA>* contextData = getSocketContextData();
+        contextData->~HttpClientContextData<SSL, USERDATA>();
         
         /* Free the socket context */
         us_socket_context_free(SSL, getSocketContext());
     }
     
     /* Connect to a server (client-side) */
-    us_socket_t* connect(const char* host, int port, const char* source_host = nullptr, int options = 0) {
-        return us_socket_context_connect(
+    HttpClientConnection<SSL, USERDATA>* connect(const char* host, int port, const char* source_host = nullptr, int options = 0) {
+        auto* socket = static_cast<HttpClientConnection<SSL, USERDATA>*>(us_socket_context_connect(
             SSL,
             getSocketContext(),
             host,
@@ -222,23 +242,35 @@ public:
             source_host,
             options,
             sizeof(HttpClientConnectionData<SSL, USERDATA>) + sizeof(USERDATA)
-        );
+        ));
+        
+        if (socket) {
+            /* Initialize connection data immediately for proper RAII */
+            HttpClientConnectionData<SSL, USERDATA>* connData = HttpClientConnection<SSL, USERDATA>::getConnectionData(socket);
+            new (connData) HttpClientConnectionData<SSL, USERDATA>();
+        }
+        
+        return socket;
     }
     
     /* Connect to a Unix domain socket (client-side) */
-    us_socket_t* connectUnix(const char* server_path, int options = 0) {
-        return us_socket_context_connect_unix(
+    HttpClientConnection<SSL, USERDATA>* connectUnix(const char* server_path, int options = 0) {
+        auto* socket = static_cast<HttpClientConnection<SSL, USERDATA>*>(us_socket_context_connect_unix(
             SSL, getSocketContext(), server_path, options, sizeof(HttpClientConnectionData<SSL, USERDATA>) + sizeof(USERDATA)
-        );
+        ));
+        
+        if (socket) {
+            /* Initialize connection data immediately for proper RAII */
+            HttpClientConnectionData<SSL, USERDATA>* connData = HttpClientConnection<SSL, USERDATA>::getConnectionData(socket);
+            new (connData) HttpClientConnectionData<SSL, USERDATA>();
+        }
+        
+        return socket;
     }
     
     /* Set context-level handlers */
     void onConnection(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)>&& handler) {
         getSocketContextData()->onConnection = std::move(handler);
-    }
-    
-    void onConnected(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)>&& handler) {
-        getSocketContextData()->onConnected = std::move(handler);
     }
     
     void onConnectError(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, int, std::string_view)>&& handler) {
@@ -249,16 +281,32 @@ public:
         getSocketContextData()->onDisconnected = std::move(handler);
     }
     
-    void onHeaders(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, int, std::string_view, HttpResponseHeaders&)>&& handler) {
-        getSocketContextData()->onHeaders = std::move(handler);
+    void onResponse(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, int, std::string_view, std::string_view)>&& handler) {
+        getSocketContextData()->onResponse = std::move(handler);
     }
     
-    void onChunk(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, std::string_view, bool)>&& handler) {
-        getSocketContextData()->onChunk = std::move(handler);
+    void onResponseData(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
+        getSocketContextData()->onResponseData = std::move(handler);
     }
     
-    void onError(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, int, std::string_view)>&& handler) {
-        getSocketContextData()->onError = std::move(handler);
+    void onResponseEnd(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
+        getSocketContextData()->onResponseEnd = std::move(handler);
+    }
+    
+    void onData(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
+        getSocketContextData()->onData = std::move(handler);
+    }
+    
+    void onWritable(MoveOnlyFunction<bool(HttpClientConnection<SSL, USERDATA>*, uintmax_t)>&& handler) {
+        getSocketContextData()->onWritable = std::move(handler);
+    }
+    
+    void onDrain(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)>&& handler) {
+        getSocketContextData()->onDrain = std::move(handler);
+    }
+    
+    void onDropped(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
+        getSocketContextData()->onDropped = std::move(handler);
     }
     
     void onTimeout(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)>&& handler) {
@@ -269,24 +317,16 @@ public:
         getSocketContextData()->onLongTimeout = std::move(handler);
     }
     
-    void onWritable(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)>&& handler) {
-        getSocketContextData()->onWritable = std::move(handler);
-    }
-    
-    void onDropped(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
-        getSocketContextData()->onDropped = std::move(handler);
-    }
-    
     /* Set timeout configuration */
     void setTimeout(uint32_t idleTimeoutSeconds, uint32_t longTimeoutMinutes) {
-        HttpClientConnectionData<SSL, USERDATA>* data = getSocketContextData();
+        HttpClientContextData<SSL, USERDATA>* data = getSocketContextData();
         data->idleTimeoutSeconds = idleTimeoutSeconds;
         data->longTimeoutMinutes = longTimeoutMinutes;
     }
     
     /* Get timeout configuration */
     std::pair<uint32_t, uint32_t> getTimeout() const {
-        const HttpClientConnectionData<SSL, USERDATA>* data = getSocketContextData();
+        const HttpClientContextData<SSL, USERDATA>* data = getSocketContextData();
         return {data->idleTimeoutSeconds, data->longTimeoutMinutes};
     }
     

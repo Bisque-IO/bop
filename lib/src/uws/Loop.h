@@ -22,6 +22,7 @@
 
 #include "LoopData.h"
 #include <libusockets.h>
+#include <atomic>
 #include <iostream>
 #include <string_view>
 
@@ -165,6 +166,12 @@ public:
 
         /* Stop and free dateTimer first */
         us_timer_close(loopData->dateTimer);
+        
+        /* Clean up keep-alive timer if it exists */
+        if (loopData->keepAliveTimer) {
+            us_timer_close(loopData->keepAliveTimer);
+            loopData->keepAliveTimer = nullptr;
+        }
 
         loopData->~LoopData();
         /* uSockets will track whether this loop is owned by us or a borrowed alien loop */
@@ -226,6 +233,41 @@ public:
     /* Dynamically change this */
     void setSilent(bool silent) {
         ((LoopData *) us_loop_ext((us_loop_t *) this))->noMark = silent;
+    }
+    
+    /* Reference-counted keep-alive poll management for (clients) */
+    void incrementKeepAliveRef() {
+        LoopData *loopData = (LoopData *) us_loop_ext((us_loop_t *) this);
+        
+        if (loopData->keepAlivePollRefCount.fetch_add(1) == 0) {
+            // First reference, create a timer instead of a poll to keep the loop alive
+            // This avoids the libuv assertion issues with invalid file descriptors
+            loopData->keepAliveTimer = us_create_timer((struct us_loop_t *) this, 0, sizeof(void*));
+            if (loopData->keepAliveTimer) {
+                // Set a timer that never fires (0 timeout, 0 repeat) - just keeps loop alive
+                us_timer_set(loopData->keepAliveTimer, [](struct us_timer_t *) {
+                    // No-op timer callback - this should never be called
+                }, 0, 1000*60*60*24);
+            }
+        }
+    }
+    
+    void decrementKeepAliveRef() {
+        LoopData *loopData = (LoopData *) us_loop_ext((us_loop_t *) this);
+        
+        int oldCount = loopData->keepAlivePollRefCount.fetch_sub(1);
+        if (oldCount == 1) {
+            // Last reference, destroy the timer
+            if (loopData->keepAliveTimer) {
+                us_timer_close(loopData->keepAliveTimer);
+                loopData->keepAliveTimer = nullptr;
+            }
+        }
+    }
+    
+    int keepAliveRefCount() const {
+        LoopData *loopData = (LoopData *) us_loop_ext((us_loop_t *) this);
+        return loopData->keepAlivePollRefCount.load();
     }
 };
 

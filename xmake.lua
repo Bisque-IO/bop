@@ -137,7 +137,7 @@ if is_plat("linux") then
     add_requires("conan::liburing/2.11", { alias = "liburing", configs = { shared = false } })
 end
 
-add_requires("zig ~0.14.0")
+add_requires("zig ~0.15.1")
 
 -- if is_plat("windows") then
 --     add_requires("openssl3 ~3.3.2", {
@@ -158,13 +158,13 @@ add_requires("zig ~0.14.0")
 --     })
 -- end
 
-add_requires("openssl3 ~3.3.2", {
+add_requires("openssl3 ~3.5.1", {
     -- add_requires("conan::openssl/3.5.0", {
     alias = "openssl3",
     configs = {
         fPIC = true,
         fpic = true,
-        shared = true
+        shared = false
     }
 })
 
@@ -271,6 +271,8 @@ add_requires("wolfssl ~5.7.2", {
 --     -- "simde ~0.8.2",
 --     "benchmark ~1.9.1"
 -- )
+
+add_requires("doctest ~2.4.11")
 
 -- add_requires("nanobench ~4.3.11")
 

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 30 xmake r test-uws-tcp --test-case=\"TCP Large Data Transfer\")",
+      "Bash(timeout:*)",
+      "Bash(xmake r:*)",
+      "Bash(set UWS_TESTS_DEBUG=1)",
+      "Bash(xmake:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

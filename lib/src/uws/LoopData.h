@@ -28,8 +28,10 @@
 
 #include "PerMessageDeflate.h"
 #include "MoveOnlyFunction.h"
+#include <atomic>
 
 struct us_timer_t;
+struct us_poll_t;
 
 namespace uWS {
 
@@ -106,6 +108,10 @@ public:
     DeflationStream *deflationStream = nullptr;
 
     us_timer_t *dateTimer;
+    
+    /* Reference-counted handles to keep the loop alive */
+    us_timer_t *keepAliveTimer = nullptr;
+    std::atomic<int> keepAlivePollRefCount{0};
 };
 
 }

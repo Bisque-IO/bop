@@ -5,9 +5,14 @@ local target_of = function(name, use_openssl, src)
 
 
     if is_plat("windows") then
-        add_defines("_CRT_SECURE_NO_WARNINGS=1")
+        -- add_defines("_CRT_SECURE_NO_WARNINGS=1")
         add_defines("NOMINMAX")
+        -- add_ldflags("/NODEFAULTLIB:MSVCRTD", {force = true})
+        add_cxflags("/Zc:preprocessor", "/experimental:c11atomics")
         add_syslinks("Advapi32", "User32", "Kernel32", "onecore", "ntdll", "Synchronization", "msvcrt")
+        set_runtimes("MD")
+        add_ldflags("/NODEFAULTLIB:MSVCRTD", {force = true})
+        add_ldflags("/NODEFAULTLIB:msvcprtd", {force = true})
     else
         add_syslinks("c", "m")
         add_cxflags("-Wno-unused-function", "-Wno-unused-variable")
@@ -18,12 +23,13 @@ local target_of = function(name, use_openssl, src)
     --add_syslinks("c++")
 
     add_defines(
-        "UWS_HTTPRESPONSE_NO_WRITEMARK",
-        "NDEBUG=1"
+        "UWS_HTTPRESPONSE_NO_WRITEMARK"
     )
 
     add_includedirs(".")
     add_files(src)
+
+    add_packages("doctest")
 
     -- usockets
     if is_plat("windows", "mingw") then
@@ -37,7 +43,7 @@ local target_of = function(name, use_openssl, src)
             add_defines("BOOST_ASIO_USE_WOLFSSL=1")
             add_defines("ASIO_USE_WOLFSSL=1")
             add_defines("HAVE_WOLFSSL_ASIO=1")
-            add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
+            add_links("odin/libbop/windows/amd64/wolfssl.lib")
             add_includedirs("../lib/wolfssl", "../lib/wolfssl/wolfssl", { public = true })
         end
 
@@ -68,7 +74,7 @@ local target_of = function(name, use_openssl, src)
             elseif is_plat("macosx", "macos", "darwin") and is_arch("arm64", "aarch64") then
                 add_links(os.projectdir() .. "/odin/libbop/macos/arm64/libwolfssl.a")
             elseif is_plat("windows", "mingw") and is_arch("x64", "x86_64") then
-                add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
+                -- add_links("odin/libbop/windows/amd64/wolfssl.lib")
             end
         else
             add_defines("LIBUS_USE_OPENSSL")
@@ -92,7 +98,7 @@ local target_of = function(name, use_openssl, src)
             elseif is_plat("macosx", "macos", "darwin") and is_arch("arm64", "aarch64") then
                 add_links(os.projectdir() .. "/odin/libbop/macos/arm64/libwolfssl.a")
             elseif is_plat("windows", "mingw") and is_arch("x64", "x86_64") then
-                add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
+                -- add_links("odin/libbop/windows/amd64/wolfssl.lib")
             end
         else
             add_defines("LIBUS_USE_OPENSSL")
@@ -117,9 +123,9 @@ local target_of = function(name, use_openssl, src)
         "SNMALLOC_USE_WAIT_ON_ADDRESS=1",
         "SNMALLOC_STATIC_LIBRARY=1"
     )
-    add_includedirs("snmalloc/src")
+    add_includedirs("../lib/snmalloc/src")
     if not is_plat("windows") then
-        add_files("snmalloc/src/snmalloc/override/malloc.cc")
+        add_files("../lib/snmalloc/src/snmalloc/override/malloc.cc")
     end
     -- add_files("snmalloc/src/snmalloc/override/new.cc")
     -- set_symbols("debug")
@@ -132,3 +138,5 @@ end
 
 
 target_of("test-uws-tcp", true, "TCPTest.cpp")
+
+target_of("test-uws", true, "uws_test.cpp")

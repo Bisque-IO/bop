@@ -25,7 +25,7 @@
 #define LIBUS_SOCKET_WRITABLE UV_WRITABLE
 
 struct us_loop_t {
-    alignas(LIBUS_EXT_ALIGNMENT) struct us_internal_loop_data_t data;
+    LIBUS_ALIGNAS(LIBUS_EXT_ALIGNMENT) struct us_internal_loop_data_t data;
 
     uv_loop_t *uv_loop;
     int is_default;

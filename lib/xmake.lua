@@ -53,7 +53,7 @@ local target_of = function(kind, use_openssl)
 
     if is_plat("windows") then
         if kind == "static" then
-            -- add_cxflags("/MT")
+            add_cxflags("/MT")
         else
             --add_cxflags("/MD")
             --add_syslinks("MSVCRT")
@@ -64,7 +64,9 @@ local target_of = function(kind, use_openssl)
         --add_ldflags("/NODEFAULTLIB:libcmt")
         --add_cxflags("/MT")
         --add_ldflags("/MT")
+        -- add_cxflags("/std:clatest")
         -- add_cxflags("/Zc:preprocessor", "/std:c23", "/experimental:c11atomics")
+        add_cxflags("/Zc:preprocessor", "/experimental:c11atomics")
         add_syslinks("Advapi32", "User32", "Kernel32", "onecore", "ntdll", "Synchronization", "msvcrt")
         add_defines("MDBX_ENABLE_MINCORE=0")
     else
@@ -161,7 +163,7 @@ local target_of = function(kind, use_openssl)
             add_defines("BOOST_ASIO_USE_WOLFSSL=1")
             add_defines("ASIO_USE_WOLFSSL=1")
             add_defines("HAVE_WOLFSSL_ASIO=1")
-            add_links(os.projectdir() .. "/odin/libbop/windows/amd64/wolfssl.lib")
+            add_links("odin/libbop/windows/amd64/wolfssl.lib")
             add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
         end
 

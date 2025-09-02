@@ -12,7 +12,36 @@ main :: proc() {
     app := uws.app_create()
     fmt.println(uws.app_loop(app))
 
-    uws.app_any(app, app, "/*", proc "c" (user_data: rawptr, res: uws.Response, req: uws.Request) {
+    uws.app_ws(app, "/ws", uws.WS_Behavior{
+        open = proc "c" (ws: uws.WS, user_data: rawptr) {
+            context = runtime.default_context()
+            fmt.println("WebSocket connected")
+        },
+        message = proc "c" (
+            ws: uws.WS,
+            user_data: rawptr,
+            message: [^]u8,
+            length: c.size_t,
+            opcode: uws.Opcode,
+        ) {
+            context = runtime.default_context()
+            msg := string(message[0:length])
+            fmt.println("Received message:", msg)
+
+            // uws.ws_send(ws, msg, uws.TEXT, true)
+        },
+        close = proc "c" (
+            ws: uws.WS,
+            user_data: rawptr,
+            message: [^]u8,
+            length: c.size_t,
+        ) {
+            context = runtime.default_context()
+            fmt.println("WebSocket disconnected")
+        },
+    })
+
+    uws.app_any(app, app, "/", proc "c" (user_data: rawptr, res: uws.Response, req: uws.Request) {
         context = runtime.default_context()
         
         num_headers := uws.request_get_header_count(req)
@@ -49,35 +78,6 @@ main :: proc() {
         }
 
         // uws.response_end(res, "Hello World", false)
-    })
-
-    uws.app_ws(app, "/ws", uws.WS_Behavior{
-        open = proc "c" (ws: uws.WS, user_data: rawptr) {
-            context = runtime.default_context()
-            fmt.println("WebSocket connected")
-        },
-        message = proc "c" (
-            ws: uws.WS,
-            user_data: rawptr,
-            message: [^]u8,
-            length: c.size_t,
-            opcode: uws.Opcode,
-        ) {
-            context = runtime.default_context()
-            msg := string(message[0:length])
-            fmt.println("Received message:", msg)
-
-            // uws.ws_send(ws, msg, uws.TEXT, true)
-        },
-        close = proc "c" (
-            ws: uws.WS,
-            user_data: rawptr,
-            message: [^]u8,
-            length: c.size_t,
-        ) {
-            context = runtime.default_context()
-            fmt.println("WebSocket disconnected")
-        },
     })
 
     uws.app_listen(app, nil, port = 3000, handler = proc "c" (user_data: rawptr, listen_socket: rawptr) -> i32 {

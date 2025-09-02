@@ -23,31 +23,36 @@
 #include "Loop.h"
 #include "MoveOnlyFunction.h"
 #include "TCPConnection.h"
+#include "TCPContextData.h"
+#include "libusockets.h"
+#include <mutex>
 #include <string>
 #include <string_view>
 
 namespace uWS {
 
 /* Forward declarations */
-template <bool SSL, typename USERDATA> struct TCPConnectionData;
+template <bool SSL, typename USERDATA> struct TCPContextData;
 
 /* TCP behavior configuration for contexts */
 template <bool SSL, typename USERDATA = void>
 struct TCPBehavior {
-    /* Connection callbacks */
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onConnection = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, int, std::string_view)> onConnectError = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, int, std::string_view)> onDisconnected = nullptr;
+    /* Connection callbacks - default handlers for all connections */
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)> onConnection = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, int, std::string_view)> onConnectError = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, int, void*)> onDisconnected = nullptr;
+    MoveOnlyFunction<void(TCPContext<SSL, USERDATA>*, std::string_view)> onServerName = nullptr;
     
-    /* Data flow callbacks */
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)> onData = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onWritable = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onDrain = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)> onDropped = nullptr;
+    /* Data flow callbacks - default handlers for all connections */
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, std::string_view)> onData = nullptr;
+    MoveOnlyFunction<bool(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, uintmax_t)> onWritable = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)> onDrain = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, std::string_view)> onDropped = nullptr;
+    MoveOnlyFunction<bool(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)> onEnd = nullptr;
     
-    /* Timeout callbacks */
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onTimeout = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onLongTimeout = nullptr;
+    /* Timeout callbacks - default handlers for all connections */
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)> onTimeout = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)> onLongTimeout = nullptr;
     
     /* Default configuration */
     uint32_t idleTimeoutSeconds = 30;
@@ -57,109 +62,214 @@ struct TCPBehavior {
     bool closeOnBackpressureLimit = false;
 };
 
+/* Helper function to calculate connection data size */
+template <bool SSL, typename USERDATA>
+constexpr size_t getTCPConnectionDataSize() {
+    if constexpr (std::is_same_v<USERDATA, void>) {
+        return alignof(TCPConnectionData<SSL, USERDATA>) >= 16
+            ? ((sizeof(TCPConnectionData<SSL, USERDATA>) + 15) & ~size_t(15))
+            : sizeof(TCPConnectionData<SSL, USERDATA>);
+    } else {
+        constexpr size_t base = sizeof(TCPConnectionData<SSL, USERDATA>);
+        constexpr size_t user = sizeof(USERDATA);
+        constexpr size_t total = base + user;
+        return alignof(TCPConnectionData<SSL, USERDATA>) >= 16
+            ? ((total + 15) & ~size_t(15))
+            : total;
+    }
+}
+
 /* TCP context for managing TCP connections */
 template <bool SSL, typename USERDATA = void>
 struct TCPContext {
+    template <bool, typename> friend struct TemplatedTCPServerApp;
+    template <bool, typename> friend struct TemplatedTCPClientApp;
+    
 private:
     /* Get the socket context */
-    us_socket_context_t* getSocketContext() {
-        return (us_socket_context_t*)this;
+    struct us_socket_context_t* getContext() {
+        return reinterpret_cast<us_socket_context_t *>(this);
     }
-    
-    static us_socket_context_t* getSocketContext(us_socket_t* s) {
+
+    static struct us_socket_context_t* getContextS(us_socket_t* s) {
         return us_socket_context(SSL, s);
     }
     
     /* Get socket context data */
-    TCPConnectionData<SSL, USERDATA>* getSocketContextData() {
-        return (TCPConnectionData<SSL, USERDATA>*)us_socket_context_ext(SSL, getSocketContext());
+    TCPContextData<SSL, USERDATA>* getSocketContextData() {
+        return reinterpret_cast<TCPContextData<SSL, USERDATA> *>(us_socket_context_ext(SSL, getContext()));
     }
-    
-    static TCPConnectionData<SSL, USERDATA>* getSocketContextDataS(us_socket_t* s) {
-        return (TCPConnectionData<SSL, USERDATA>*)us_socket_context_ext(SSL, getSocketContext(s));
+
+    static TCPContextData<SSL, USERDATA>* getSocketContextDataS(us_socket_t* s) {
+        return reinterpret_cast<TCPContextData<SSL, USERDATA> *>(us_socket_context_ext(SSL, getContextS(s)));
+    }
+
+    static TCPConnection<SSL, USERDATA>* getConnection(us_socket_t* s) {
+        return reinterpret_cast<TCPConnection<SSL, USERDATA> *>(s);
+    }
+
+    static TCPConnectionData<SSL, USERDATA>* getConnectionData(us_socket_t* s) {
+        return reinterpret_cast<TCPConnectionData<SSL, USERDATA> *>(us_socket_ext(SSL, s));
     }
     
     /* Initialize the context with behavior */
-    TCPContext* init(const TCPBehavior<SSL>& behavior) {
+    TCPContext* init(bool isServer = false) {
         /* Set up connection handlers */
-        us_socket_context_on_open(SSL, getSocketContext(), [](us_socket_t* s, int is_client) {
-            TCPConnectionData<SSL, USERDATA>* connData = TCPConnection<SSL, USERDATA>::getConnectionData(s);
-            connData->isClient = is_client;
+        us_socket_context_on_open(SSL, getContext(), [](us_socket_t* s, int is_client, char *ip, int ip_length) -> struct us_socket_t* {
+            TCPConnection<SSL, USERDATA>* conn = getConnection(s);
+            TCPConnectionData<SSL, USERDATA>* connData = getConnectionData(s);
+            TCPContextData<SSL, USERDATA>* contextData = getSocketContextDataS(s);
+            
+            if (!is_client) {
+                /* Initialize connection data for server connections (client connections already initialized at creation) */
+                new (connData) TCPConnectionData<SSL, USERDATA>();
+            }
+
+            USERDATA* userData = conn->getUserData();
+            
+            connData->isClient = is_client > 0;
+            connData->isConnected = true;
             
             /* Call onConnection handler if available */
-            if (connData->onConnection) {
-                connData->onConnection(static_cast<TCPConnection<SSL, USERDATA>*>(s));
+            if (contextData->onConnection) {
+                contextData->onConnection(conn, connData, userData);
             }
+            
+            return s;
         });
         
-        us_socket_context_on_close(SSL, getSocketContext(), [](us_socket_t* s, int code, void* data) {
-            TCPConnectionData<SSL, USERDATA>* connData = TCPConnection<SSL, USERDATA>::getConnectionData(s);
+        us_socket_context_on_close(SSL, getContext(), [](struct us_socket_t* s, int code, void* data) -> struct us_socket_t* {
+            TCPConnection<SSL, USERDATA>* conn = getConnection(s);
+            TCPConnectionData<SSL, USERDATA>* connData = getConnectionData(s);
+            TCPContextData<SSL, USERDATA>* contextData = getSocketContextDataS(s);
+            USERDATA* userData = conn->getUserData();
             
             /* Call onDisconnected handler if available */
-            if (connData->onDisconnected) {
-                connData->onDisconnected(connData, code, data);
+            if (contextData->onDisconnected) {
+                contextData->onDisconnected(conn, connData, userData, code, data);
             }
+
+            /* Clean up connection data (destructor will handle USERDATA cleanup) */
+            connData->~TCPConnectionData<SSL, USERDATA>();
             
-            /* Clean up USERDATA if not void */
-            if constexpr (!std::is_same_v<USERDATA, void>) {
-                ((USERDATA*)TCPConnection<SSL, USERDATA>::getUserData(s))->~USERDATA();
-            }
+            return s;
         });
         
-        us_socket_context_on_data(SSL, getSocketContext(), [](us_socket_t* s, char* data, int length) {
-            TCPConnectionData<SSL, USERDATA>* connData = TCPConnection<SSL, USERDATA>::getConnectionData(s);
+        us_socket_context_on_data(SSL, getContext(), [](struct us_socket_t* s, char* data, int length) -> struct us_socket_t* {
+            TCPConnection<SSL, USERDATA>* conn = getConnection(s);
+            TCPConnectionData<SSL, USERDATA>* connData = getConnectionData(s);
+            TCPContextData<SSL, USERDATA>* contextData = getSocketContextDataS(s);
+            USERDATA* userData = conn->getUserData();
+
             connData->bytesReceived += length;
-            connData->messagesReceived++;
+            ++connData->messagesReceived;
             
             /* Call onData handler if available */
-            if (connData->onData) {
-                connData->onData(connData, std::string_view(data, length));
+            if (contextData->onData) {
+                contextData->onData(conn, connData, userData, std::string_view(data, length));
             }
-        });
-        
-        us_socket_context_on_timeout(SSL, getSocketContext(), [](us_socket_t* s) {
-            TCPConnectionData<SSL, USERDATA>* connData = TCPConnection<SSL, USERDATA>::getConnectionData(s);
             
-            /* Call onTimeout handler if available */
-            if (connData->onTimeout) {
-                connData->onTimeout(connData);
+            return s;
+        });
+
+        /* Handle FIN, default to not supporting half-closed sockets, so simply close */
+        us_socket_context_on_end(SSL, getContext(), [](struct us_socket_t *s) {
+            TCPConnection<SSL, USERDATA>* conn = getConnection(s);
+            TCPConnectionData<SSL, USERDATA>* connData = getConnectionData(s);
+            TCPContextData<SSL, USERDATA>* contextData = getSocketContextDataS(s);
+            USERDATA* userData = conn->getUserData();
+            
+            /* Call onEnd handler if available - returns true to auto-close */
+            if (contextData->onEnd) {
+                if (contextData->onEnd(conn, connData, userData)) {
+                    return conn->close();
+                }
+                return s; // Don't auto-close if callback returns false
             }
+            
+            /* Default behavior: we do not care for half closed sockets */
+            return conn->close();
         });
         
-        us_socket_context_on_long_timeout(SSL, getSocketContext(), [](us_socket_t* s) {
-            TCPConnectionData<SSL, USERDATA>* connData = TCPConnection<SSL, USERDATA>::getConnectionData(s);
+        us_socket_context_on_timeout(SSL, getContext(), [](struct us_socket_t* s) -> struct us_socket_t* {
+            TCPConnection<SSL, USERDATA>* conn = getConnection(s);
+            TCPConnectionData<SSL, USERDATA>* connData = getConnectionData(s);
+            TCPContextData<SSL, USERDATA>* contextData = getSocketContextDataS(s);
+
+            if (contextData->onTimeout) {
+                contextData->onTimeout(conn, connData, conn->getUserData());
+            }
+
+            return s;
+        });
+        
+        us_socket_context_on_long_timeout(SSL, getContext(), [](struct us_socket_t* s) -> struct us_socket_t* {
+            TCPConnection<SSL, USERDATA>* conn = getConnection(s);
+            TCPConnectionData<SSL, USERDATA>* connData = getConnectionData(s);
+            TCPContextData<SSL, USERDATA>* contextData = getSocketContextDataS(s);
+            USERDATA* userData = conn->getUserData();
             
             /* Call onLongTimeout handler if available */
-            if (connData->onLongTimeout) {
-                connData->onLongTimeout(connData);
+            if (contextData->onLongTimeout) {
+                contextData->onLongTimeout(conn, connData, userData);
             }
-        });
-        
-        us_socket_context_on_connect_error(SSL, getSocketContext(), [](us_socket_t* s, int code) {
-            TCPConnectionData<SSL, USERDATA>* connData = TCPConnection<SSL, USERDATA>::getConnectionData(s);
             
-            /* Call onConnectError handler if available */
-            if (connData->onConnectError) {
-                connData->onConnectError(connData, code);
-            }
+            return s;
         });
         
-        us_socket_context_on_writable(SSL, getSocketContext(), [](us_socket_t* s) {
-            TCPConnectionData<SSL, USERDATA>* connData = TCPConnection<SSL, USERDATA>::getConnectionData(s);
-            auto* asyncSocket = static_cast<AsyncSocket<SSL>*>(s);
+        us_socket_context_on_connect_error(SSL, getContext(), [](struct us_socket_t* s, int code) -> struct us_socket_t* {
+            TCPConnection<SSL, USERDATA>* conn = getConnection(s);
+            TCPConnectionData<SSL, USERDATA>* connData = getConnectionData(s);
+            TCPContextData<SSL, USERDATA>* contextData = getSocketContextDataS(s);
+            USERDATA* userData = conn->getUserData();
+            
+             /* Call onConnectError handler if available */
+             if (contextData->onConnectError) {
+                std::string_view message = "Connection failed";
+                contextData->onConnectError(conn, connData, userData, code, message);
+            }
+            
+            /* Clean up connection data (destructor will handle USERDATA cleanup) */
+            connData->~TCPConnectionData<SSL, USERDATA>();
+            
+            return s;
+        });
+        
+        /* Handle SNI (Server Name Indication) - only for server contexts */
+        if (isServer) {
+            us_socket_context_on_server_name(SSL, getContext(), [](struct us_socket_context_t* context, const char* hostname) {
+                TCPContextData<SSL, USERDATA>* contextData = reinterpret_cast<TCPContextData<SSL, USERDATA>*>(us_socket_context_ext(SSL, context));
+                
+                /* Call onServerName handler if available */
+                if (contextData->onServerName) {
+                    std::string_view hostnameView = hostname ? std::string_view(hostname) : std::string_view("");
+                    contextData->onServerName(reinterpret_cast<TCPContext<SSL, USERDATA>*>(context), hostnameView);
+                }
+            });
+        }
+        
+        us_socket_context_on_writable(SSL, getContext(), [](struct us_socket_t* s) -> struct us_socket_t* {
+            TCPConnection<SSL, USERDATA>* conn = getConnection(s);
+            TCPConnectionData<SSL, USERDATA>* connData = getConnectionData(s);
+            TCPContextData<SSL, USERDATA>* contextData = getSocketContextDataS(s);
+            USERDATA* userData = conn->getUserData();
             
             /* Drain any remaining socket buffer */
-            asyncSocket->write(nullptr, 0, true, 0);
+            conn->write(nullptr, 0, true, 0);
             
             /* Call onWritable handler if available and backpressure is relieved */
-            if (connData->onWritable) {
-                uintmax_t currentBackpressure = asyncSocket->getBufferedAmount();
+            if (contextData->onWritable) {
+                uintmax_t currentBackpressure = conn->getBufferedAmount();
+                uintmax_t availableBytes = contextData->maxBackpressure > currentBackpressure ? 
+                    contextData->maxBackpressure - currentBackpressure : 0;
                 /* Call onWritable when backpressure falls below 50% of max backpressure or when completely drained */
                 if (currentBackpressure == 0 || 
-                    (connData->maxBackpressure > 0 && currentBackpressure < connData->maxBackpressure / 2)) {
-                    connData->onWritable(static_cast<TCPConnection<SSL, USERDATA>*>(s));
+                    (contextData->maxBackpressure > 0 && currentBackpressure < contextData->maxBackpressure / 2)) {
+                    contextData->onWritable(conn, connData, userData, availableBytes);
                 }
             }
+            
+            return s;
         });
         
         return this;
@@ -167,135 +277,127 @@ private:
     
 public:
     /* Construct a new TCPContext using specified loop */
-    static TCPContext* create(Loop* loop, const TCPBehavior<SSL, USERDATA>& behavior = {}, us_socket_context_options_t options = {}) {
-        TCPContext* tcpContext;
-        
-        tcpContext = (TCPContext*)us_create_socket_context(
-            SSL, (us_loop_t*)loop, sizeof(TCPConnectionData<SSL, USERDATA>) + sizeof(USERDATA), options
-        );
+    static TCPContext* create(Loop* loop, struct us_socket_context_options_t options = {}, bool isServer = false) {
+        TCPContext<SSL, USERDATA> *tcpContext = reinterpret_cast<TCPContext<SSL, USERDATA> *>(us_create_socket_context(
+            SSL, reinterpret_cast<struct us_loop_t *>(loop), sizeof(TCPContextData<SSL, USERDATA>), options
+        ));
         
         if (!tcpContext) {
             return nullptr;
         }
         
         /* Init socket context data */
-        new ((TCPConnectionData<SSL, USERDATA>*)us_socket_context_ext(
-            SSL, (us_socket_context_t*)tcpContext
-        )) TCPConnectionData<SSL, USERDATA>();
+        new (reinterpret_cast<TCPContextData<SSL, USERDATA> *>(us_socket_context_ext(
+            SSL, reinterpret_cast<us_socket_context_t *>(tcpContext)
+        ))) TCPContextData<SSL, USERDATA>();
         
-        /* Apply behavior configuration */
-        TCPConnectionData<SSL, USERDATA>* contextData = (TCPConnectionData<SSL, USERDATA>*)us_socket_context_ext(
-            SSL, (us_socket_context_t*)tcpContext
-        );
-        
-        /* Apply configuration */
-        contextData->idleTimeoutSeconds = behavior.idleTimeoutSeconds;
-        contextData->longTimeoutMinutes = behavior.longTimeoutMinutes;
-        contextData->maxBackpressure = behavior.maxBackpressure;
-        contextData->resetIdleTimeoutOnSend = behavior.resetIdleTimeoutOnSend;
-        contextData->closeOnBackpressureLimit = behavior.closeOnBackpressureLimit;
-        
-        /* Apply callbacks */
-        contextData->onConnection = std::move(behavior.onConnection);
-        contextData->onConnectError = std::move(behavior.onConnectError);
-        contextData->onDisconnected = std::move(behavior.onDisconnected);
-        contextData->onData = std::move(behavior.onData);
-        contextData->onWritable = std::move(behavior.onWritable);
-        contextData->onDrain = std::move(behavior.onDrain);
-        contextData->onDropped = std::move(behavior.onDropped);
-        contextData->onTimeout = std::move(behavior.onTimeout);
-        contextData->onLongTimeout = std::move(behavior.onLongTimeout);
-        
-        return tcpContext->init(behavior);
+        return tcpContext->init(isServer);
     }
     
     /* Destruct the TCPContext */
     void free() {
         /* Destruct socket context data */
-        TCPConnectionData<SSL, USERDATA>* connData = getSocketContextData();
-        connData->~TCPConnectionData<SSL, USERDATA>();
+        TCPContextData<SSL, USERDATA>* contextData = getSocketContextData();
+        contextData->~TCPContextData<SSL, USERDATA>();
         
         /* Free the socket context */
-        us_socket_context_free(SSL, getSocketContext());
-    }
-    
-    /* Listen for incoming connections (server-side) */
-    us_listen_socket_t* listen(const char* host, int port, int options = 0) {
-        return us_socket_context_listen(SSL, getSocketContext(), host, port, options);
-    }
-    
-    /* Listen on Unix domain socket (server-side) */
-    us_listen_socket_t* listenUnix(const char* server_path, int options = 0) {
-        return us_socket_context_listen_unix(SSL, getSocketContext(), server_path, options);
+        us_socket_context_close(SSL, getContext());
+        us_socket_context_free(SSL, getContext());
     }
     
     /* Connect to a server (client-side) */
-    us_socket_t* connect(const char* host, int port, const char* source_host = nullptr, int options = 0) {
-        return us_socket_context_connect(
+    TCPConnection<SSL, USERDATA>* connect(const char* host, int port, const char* source_host = nullptr, int options = 0) {
+        auto* socket = reinterpret_cast<TCPConnection<SSL, USERDATA>*>(us_socket_context_connect(
             SSL,
-            getSocketContext(),
+            getContext(),
             host,
             port,
             source_host,
             options,
-            sizeof(TCPConnectionData<SSL, USERDATA>) + sizeof(USERDATA)
-        );
+            getTCPConnectionDataSize<SSL, USERDATA>()
+        ));
+        
+        if (socket) {
+            /* Initialize connection data immediately for proper RAII */
+            TCPConnectionData<SSL, USERDATA>* connData = TCPConnection<SSL, USERDATA>::getConnectionData(reinterpret_cast<us_socket_t*>(socket));
+            new (connData) TCPConnectionData<SSL, USERDATA>();
+            connData->isClient = true;  // Client connections are always true
+        }
+        
+        return socket;
     }
     
     /* Connect to a Unix domain socket (client-side) */
-    us_socket_t* connectUnix(const char* server_path, int options = 0) {
-        return us_socket_context_connect_unix(
-            SSL, getSocketContext(), server_path, options, sizeof(TCPConnectionData<SSL, USERDATA>) + sizeof(USERDATA)
-        );
+    TCPConnection<SSL, USERDATA>* connectUnix(const char* server_path, int options = 0) {
+        auto* socket = static_cast<TCPConnection<SSL, USERDATA>*>(us_socket_context_connect_unix(
+            SSL, getContext(), server_path, options, getTCPConnectionDataSize<SSL, USERDATA>()
+        ));
+        
+        if (socket) {
+            /* Initialize connection data immediately for proper RAII */
+            TCPConnectionData<SSL, USERDATA>* connData = TCPConnection<SSL, USERDATA>::getConnectionData(reinterpret_cast<us_socket_t*>(socket));
+            new (connData) TCPConnectionData<SSL, USERDATA>();
+            connData->isClient = true;  // Client connections are always true
+        }
+        
+        return socket;
     }
     
     /* Set context-level handlers */
-    void onConnection(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)>&& handler) {
+    void onConnection(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)>&& handler) {
         getSocketContextData()->onConnection = std::move(handler);
     }
-    
-    void onConnectError(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, int, std::string_view)>&& handler) {
+
+    void onConnectError(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, int, std::string_view)>&& handler) {
         getSocketContextData()->onConnectError = std::move(handler);
     }
-    
-    void onDisconnected(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, int, std::string_view)>&& handler) {
+
+    void onDisconnected(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, int, void*)>&& handler) {
         getSocketContextData()->onDisconnected = std::move(handler);
     }
-    
-    void onData(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
+
+    void onServerName(MoveOnlyFunction<void(TCPContext<SSL, USERDATA>*, std::string_view)>&& handler) {
+        getSocketContextData()->onServerName = std::move(handler);
+    }
+
+    void onData(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, std::string_view)>&& handler) {
         getSocketContextData()->onData = std::move(handler);
     }
-    
-    void onWritable(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)>&& handler) {
+
+    void onWritable(MoveOnlyFunction<bool(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, uintmax_t)>&& handler) {
         getSocketContextData()->onWritable = std::move(handler);
     }
-    
-    void onDrain(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)>&& handler) {
+
+    void onDrain(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)>&& handler) {
         getSocketContextData()->onDrain = std::move(handler);
     }
-    
-    void onDropped(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
+
+    void onDropped(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, std::string_view)>&& handler) {
         getSocketContextData()->onDropped = std::move(handler);
     }
-    
-    void onTimeout(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)>&& handler) {
+
+    void onEnd(MoveOnlyFunction<bool(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)>&& handler) {
+        getSocketContextData()->onEnd = std::move(handler);
+    }
+
+    void onTimeout(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)>&& handler) {
         getSocketContextData()->onTimeout = std::move(handler);
     }
-    
-    void onLongTimeout(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)>&& handler) {
+
+    void onLongTimeout(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)>&& handler) {
         getSocketContextData()->onLongTimeout = std::move(handler);
     }
     
     /* Set timeout configuration */
     void setTimeout(uint32_t idleTimeoutSeconds, uint32_t longTimeoutMinutes) {
-        TCPConnectionData<SSL, USERDATA>* data = getSocketContextData();
+        TCPContextData<SSL, USERDATA>* data = getSocketContextData();
         data->idleTimeoutSeconds = idleTimeoutSeconds;
         data->longTimeoutMinutes = longTimeoutMinutes;
     }
     
     /* Get timeout configuration */
-    std::pair<uint32_t, uint32_t> getTimeout() const {
-        const TCPConnectionData<SSL, USERDATA>* data = getSocketContextData();
+    std::pair<uint32_t, uint32_t> getTimeout() {
+        const TCPContextData<SSL, USERDATA>* data = getSocketContextData();
         return {data->idleTimeoutSeconds, data->longTimeoutMinutes};
     }
     
@@ -305,8 +407,9 @@ public:
     }
     
     /* Get max backpressure */
-    uintmax_t getMaxBackpressure() const {
-        return getSocketContextData()->maxBackpressure;
+    uintmax_t getMaxBackpressure() {
+        const TCPContextData<SSL, USERDATA>* data = getSocketContextData();
+        return data->maxBackpressure;
     }
     
     /* Set reset idle timeout on send */
@@ -315,8 +418,9 @@ public:
     }
     
     /* Get reset idle timeout on send */
-    bool getResetIdleTimeoutOnSend() const {
-        return getSocketContextData()->resetIdleTimeoutOnSend;
+    bool getResetIdleTimeoutOnSend() {
+        const TCPContextData<SSL, USERDATA>* data = getSocketContextData();
+        return data->resetIdleTimeoutOnSend;
     }
     
     /* Set close on backpressure limit */
@@ -325,8 +429,9 @@ public:
     }
     
     /* Get close on backpressure limit */
-    bool getCloseOnBackpressureLimit() const {
-        return getSocketContextData()->closeOnBackpressureLimit;
+    bool getCloseOnBackpressureLimit() {
+        const TCPContextData<SSL, USERDATA>* data = getSocketContextData();
+        return data->closeOnBackpressureLimit;
     }
 };
 

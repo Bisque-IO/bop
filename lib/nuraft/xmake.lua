@@ -38,16 +38,17 @@ local target_of = function(kind)
         add_syslinks("Advapi32", "User32", "Kernel32", "onecore", "ntdll", "Synchronization", "msvcrt")
     end
 
-    --add_defines("USE_BOOST_ASIO")
-    --add_defines("BOOST_ASIO_USE_WOLFSSL=0")
+    add_packages("boost")
+    add_defines("USE_BOOST_ASIO")
+    -- add_defines("BOOST_ASIO_USE_WOLFSSL=0")
     --add_includedirs("../../src", { public = false })
     -- add_defines("ASIO_USE_WOLFSSL=1")
-    --add_defines("BOOST_ASIO_USE_WOLFSSL=1")
+    add_defines("BOOST_ASIO_USE_WOLFSSL=1")
     --
     -- add_packages("wolfssl")
     add_defines("ASIO_USE_WOLFSSL=1")
     add_defines("HAVE_WOLFSSL_ASIO=1")
-    add_includedirs(os.projectdir() .. "/lib/wolfssl", os.projectdir() .. "/lib/wolfssl/wolfssl", { public = true })
+    add_includedirs("../wolfssl", "../wolfssl/wolfssl", { public = true })
 
     if is_plat("linux") and is_arch("x86_64") then
         add_ldflags("-l:" .. os.projectdir() .. "/odin/libbop/linux/amd64/libwolfssl.a")
@@ -60,10 +61,10 @@ local target_of = function(kind)
     elseif is_plat("macosx", "macos", "darwin") and is_arch("arm64", "aarch64") then
         add_ldflags("-l:" .. os.projectdir() .. "/odin/libbop/macos/arm64/libwolfssl.a")
     elseif is_plat("windows", "mingw") and is_arch("x86_64") then
-        add_ldflags("-l:" .. os.projectdir() .. "/odin/libbop/windows/amd64/libwolfssl.a")
+        add_links("../../odin/libbop/windows/amd64/libwolfssl.a")
     end
 
-    add_includedirs("../asio")
+    -- add_includedirs("../asio")
 
     if is_plat("linux") then
         -- add_defines("ASIO_HAS_IO_URING", "ASIO_DISABLE_EPOLL", "BOOST_ASIO_HAS_IO_URING", "BOOST_ASIO_DISABLE_EPOLL")

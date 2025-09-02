@@ -29,33 +29,13 @@
 namespace uWS {
 
 /* Forward declarations */
-template <bool SSL> struct HttpClientContext;
+template <bool SSL, typename USERDATA> struct HttpClientContext;
 template <bool SSL, typename USERDATA> struct HttpClientConnectionData;
 template <bool SSL, typename USERDATA> struct HttpClientConnection;
 
 /* HTTP client connection data */
 template <bool SSL, typename USERDATA = void>
-struct HttpClientConnectionData {
-    /* Connection type */
-    bool isClient = true;  // Always true for HTTP client connections
-    
-    /* Connection callbacks */
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)> onConnected = nullptr;
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, int, std::string_view)> onConnectError = nullptr;
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, int, std::string_view)> onDisconnected = nullptr;
-    
-    /* HTTP response callbacks */
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, int, std::string_view, HttpResponseHeaders&)> onHeaders = nullptr;
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, std::string_view, bool)> onChunk = nullptr;
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, int, std::string_view)> onError = nullptr;
-    
-    /* Timeout callbacks */
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)> onTimeout = nullptr;
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)> onLongTimeout = nullptr;
-    
-    /* Data flow callbacks */
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)> onWritable = nullptr;
-    MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, std::string_view)> onDropped = nullptr;
+struct HttpClientConnectionData : AsyncSocketData<SSL> {
     
     /* Configuration */
     uint32_t idleTimeoutSeconds = 30;
@@ -104,6 +84,15 @@ struct HttpClientConnectionData {
         responsesReceived = 0;
         messagesReceived = 0;
         messagesSent = 0;
+    }
+    
+    /* Destructor to clean up USERDATA */
+    ~HttpClientConnectionData() {
+        if constexpr (!std::is_same_v<USERDATA, void>) {
+            /* Clean up USERDATA if not void */
+            USERDATA* userData = static_cast<USERDATA*>(this + 1);
+            userData->~USERDATA();
+        }
     }
 };
 
@@ -276,28 +265,28 @@ public:
         getConnectionData()->onChunk = std::move(handler);
     }
     
-         void onError(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, int, std::string_view)>&& handler) {
-         getConnectionData()->onError = std::move(handler);
+        void onError(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, int, std::string_view)>&& handler) {
+        getConnectionData()->onError = std::move(handler);
      }
      
      /* Timeout Event Handlers */
      
      void onTimeout(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)>&& handler) {
-         getConnectionData()->onTimeout = std::move(handler);
+        getConnectionData()->onTimeout = std::move(handler);
      }
      
      void onLongTimeout(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)>&& handler) {
-         getConnectionData()->onLongTimeout = std::move(handler);
+        getConnectionData()->onLongTimeout = std::move(handler);
      }
      
      /* Data Flow Event Handlers */
      
-         void onWritable(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)>&& handler) {
+    void onWritable(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*)>&& handler) {
         getConnectionData()->onWritable = std::move(handler);
     }
      
      void onDropped(MoveOnlyFunction<void(HttpClientConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
-         getConnectionData()->onDropped = std::move(handler);
+        getConnectionData()->onDropped = std::move(handler);
      }
     
     /* Connection Statistics */

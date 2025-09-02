@@ -8,6 +8,7 @@ import c "core:c/libc"
 import "core:mem"
 import "core:slice"
 import "core:strings"
+import "core:time"
 
 App                          :: bop.uws_app_t
 Loop                         :: bop.uws_loop_t
@@ -39,6 +40,10 @@ WS_Subscribe_Handler         :: bop.uws_ws_subscription_handler_t
 WS_Destroy_User_Data_Handler :: bop.uws_ws_destroy_user_data_t
 WS_Behavior                  :: bop.uws_ws_behavior_t
 WS_Send_Status               :: bop.uws_ws_send_status_t
+
+// create_timer :: proc "c" (loop: Loop, timeout: time.Duration, handler: Timer_Handler) -> Timer {
+// 	return bop.us_create_timer(loop, timeout, handler)
+// }
 
 string_from_ptr :: proc "contextless" (ptr: ^byte, len: int) -> (res: string) {
 	return transmute(string)mem.Raw_String{ptr, len}

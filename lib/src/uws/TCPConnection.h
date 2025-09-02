@@ -21,6 +21,8 @@
 #include "AsyncSocket.h"
 #include "AsyncSocketData.h"
 #include "MoveOnlyFunction.h"
+#include "internal/internal.h"
+#include "libusockets.h"
 #include <string>
 #include <string_view>
 
@@ -29,28 +31,15 @@ namespace uWS {
 /* Forward declarations */
 template <bool SSL, typename USERDATA> struct TCPContext;
 template <bool SSL, typename USERDATA> struct TCPConnection;
-template <bool SSL> struct TemplatedTCPApp;
+template <bool SSL, typename USERDATA> struct TemplatedTCPApp;
 
 /* TCP connection data for both server and client sides */
 template <bool SSL, typename USERDATA = void>
-struct TCPConnectionData {
+struct alignas(16) TCPConnectionData : AsyncSocketData<SSL> {
     /* Connection type */
     bool isClient = false;  // Distinguishes server vs client connections
-    
-    /* Connection callbacks */
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onConnection = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, int, std::string_view)> onConnectError = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, int, std::string_view)> onDisconnected = nullptr;
-    
-    /* Data flow callbacks */
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)> onData = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onWritable = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onDrain = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)> onDropped = nullptr;
-    
-    /* Timeout callbacks */
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onTimeout = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onLongTimeout = nullptr;
+
+    bool isConnected = false;
     
     /* Configuration */
     uint32_t idleTimeoutSeconds = 30;
@@ -63,7 +52,7 @@ struct TCPConnectionData {
     bool closeOnBackpressureLimit = false;
     
     /* Connection info */
-    std::string remoteAddress;
+    // std::string remoteAddress{};
     int remotePort = 0;
     
     /* Statistics */
@@ -75,17 +64,27 @@ struct TCPConnectionData {
     /* Reset connection data */
     void reset() {
         writeOffset = 0;
-        remoteAddress.clear();
+        // remoteAddress.clear();
         remotePort = 0;
         bytesReceived = 0;
         bytesSent = 0;
         messagesReceived = 0;
         messagesSent = 0;
     }
+    
+    /* Destructor to clean up USERDATA */
+    ~TCPConnectionData() {
+        if constexpr (std::is_destructible_v<USERDATA> && !std::is_same_v<USERDATA, void>) {
+            /* Clean up USERDATA if it is destructible and not void */
+            // USERDATA* userData = reinterpret_cast<USERDATA*>(this + 1);
+            // new (reinterpret_cast<USERDATA*>(this + 1)) USERDATA();
+            // userData->~USERDATA();
+        }
+    }
 };
 
 /* Send status enum */
-enum class SendStatus {
+enum class SendStatus : int32_t {
     SUCCESS,        // Data sent successfully
     BACKPRESSURE,   // Data partially sent, rest buffered due to backpressure
     DROPPED,        // Data dropped due to backpressure limits
@@ -96,21 +95,27 @@ enum class SendStatus {
 template <bool SSL, typename USERDATA = void>
 struct TCPConnection : public AsyncSocket<SSL> {
     template <bool, typename> friend struct TCPContext;
-    template <bool> friend struct TemplatedTCPApp;
+    template <bool, typename> friend struct TemplatedTCPApp;
+    typedef AsyncSocket<SSL> Super;
     
-private:
+public:
     /* Get the connection data */
     TCPConnectionData<SSL, USERDATA>* getConnectionData() {
-        return (TCPConnectionData<SSL, USERDATA>*)us_socket_ext(SSL, (us_socket_t*)this);
+        return reinterpret_cast<TCPConnectionData<SSL, USERDATA> *>(us_socket_ext(SSL, reinterpret_cast<struct us_socket_t *>(this)));
     }
     
-    static TCPConnectionData<SSL, USERDATA>* getConnectionData(us_socket_t* s) {
-        return (TCPConnectionData<SSL, USERDATA>*)us_socket_ext(SSL, s);
+    /* Get the connection data (const version) */
+    const TCPConnectionData<SSL, USERDATA>* getConnectionData() const {
+        return reinterpret_cast<const TCPConnectionData<SSL, USERDATA> *>(us_socket_ext(SSL, reinterpret_cast<struct us_socket_t *>(this)));
+    }
+    
+    static TCPConnectionData<SSL, USERDATA>* getConnectionData(struct us_socket_t* s) {
+        return reinterpret_cast<TCPConnectionData<SSL, USERDATA> *>(us_socket_ext(SSL, s));
     }
     
     static USERDATA* getUserData(us_socket_t* s) {
         TCPConnectionData<SSL, USERDATA>* connData = getConnectionData(s);
-        return (USERDATA*)(connData + 1);
+        return reinterpret_cast<USERDATA *>(connData + 1);
     }
     
 public:
@@ -118,46 +123,44 @@ public:
     USERDATA* getUserData() {
         TCPConnectionData<SSL, USERDATA>* connData = getConnectionData();
         /* We just have it overallocated by sizeof type */
-        return (USERDATA*)(connData + 1);
+        return reinterpret_cast<USERDATA *>(connData + 1);
     }
     
     /* Connection State and Information */
     
     /* Check if this is a client connection */
-    bool isClient() const {
+    bool isClient() {
         return getConnectionData()->isClient;
     }
     
     /* Check if this is a server connection */
-    bool isServer() const {
+    bool isServer() {
         return !getConnectionData()->isClient;
     }
     
     /* Get remote address */
-    std::string_view getRemoteAddress() const {
+    std::string_view getRemoteAddress() {
         return getConnectionData()->remoteAddress;
     }
     
     /* Get remote port */
-    int getRemotePort() const {
+    int getRemotePort() {
         return getConnectionData()->remotePort;
     }
-    
 
-    
     /* Connection Configuration */
     
     /* Set timeout configuration */
     void setTimeout(uint32_t idleTimeoutSeconds, uint32_t longTimeoutMinutes) {
-        TCPConnectionData<SSL, USERDATA>* data = getConnectionData();
+        auto data = getConnectionData();
         data->idleTimeoutSeconds = idleTimeoutSeconds;
         data->longTimeoutMinutes = longTimeoutMinutes;
         us_socket_timeout(SSL, (us_socket_t*)this, idleTimeoutSeconds);
     }
     
     /* Get timeout configuration */
-    std::pair<uint32_t, uint32_t> getTimeout() const {
-        const TCPConnectionData<SSL, USERDATA>* data = getConnectionData();
+    std::pair<uint32_t, uint32_t> getTimeout() {
+        auto data = getConnectionData();
         return {data->idleTimeoutSeconds, data->longTimeoutMinutes};
     }
     
@@ -167,7 +170,7 @@ public:
     }
     
     /* Get max backpressure */
-    uintmax_t getMaxBackpressure() const {
+    uintmax_t getMaxBackpressure() {
         return getConnectionData()->maxBackpressure;
     }
     
@@ -177,7 +180,7 @@ public:
     }
     
     /* Get reset idle timeout on send */
-    bool getResetIdleTimeoutOnSend() const {
+    bool getResetIdleTimeoutOnSend() {
         return getConnectionData()->resetIdleTimeoutOnSend;
     }
     
@@ -187,74 +190,35 @@ public:
     }
     
     /* Get close on backpressure limit */
-    bool getCloseOnBackpressureLimit() const {
+    bool getCloseOnBackpressureLimit() {
         return getConnectionData()->closeOnBackpressureLimit;
-    }
-    
-    /* Connection Event Handlers */
-    
-    /* Set connection event handlers */
-    void onConnection(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
-        getConnectionData()->onConnection = std::move(handler);
-    }
-    
-    void onDisconnected(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, int, std::string_view)>&& handler) {
-        getConnectionData()->onDisconnected = std::move(handler);
-    }
-    
-    void onTimeout(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)>&& handler) {
-        getConnectionData()->onTimeout = std::move(handler);
-    }
-    
-    void onLongTimeout(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)>&& handler) {
-        getConnectionData()->onLongTimeout = std::move(handler);
-    }
-    
-    void onConnectError(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, int, std::string_view)>&& handler) {
-        getConnectionData()->onConnectError = std::move(handler);
-    }
-    
-    void onData(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
-        getConnectionData()->onData = std::move(handler);
-    }
-    
-    void onWritable(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
-        getConnectionData()->onWritable = std::move(handler);
-    }
-    
-    void onDrain(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)>&& handler) {
-        getConnectionData()->onDrain = std::move(handler);
-    }
-    
-    void onDropped(MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)>&& handler) {
-        getConnectionData()->onDropped = std::move(handler);
     }
     
     /* Connection Statistics */
     
     /* Get bytes received */
-    uintmax_t getBytesReceived() const {
+    uintmax_t getBytesReceived() {
         return getConnectionData()->bytesReceived;
     }
     
     /* Get bytes sent */
-    uintmax_t getBytesSent() const {
+    uintmax_t getBytesSent() {
         return getConnectionData()->bytesSent;
     }
     
     /* Get messages received */
-    uintmax_t getMessagesReceived() const {
+    uintmax_t getMessagesReceived() {
         return getConnectionData()->messagesReceived;
     }
     
     /* Get messages sent */
-    uintmax_t getMessagesSent() const {
+    uintmax_t getMessagesSent() {
         return getConnectionData()->messagesSent;
     }
     
     /* Reset statistics */
     void resetStatistics() {
-        TCPConnectionData<SSL, USERDATA>* data = getConnectionData();
+        auto data = getConnectionData();
         data->bytesReceived = 0;
         data->bytesSent = 0;
         data->messagesReceived = 0;
@@ -273,11 +237,6 @@ public:
         if (connData->maxBackpressure > 0) {
             uintmax_t currentBackpressure = this->getBufferedAmount();
             if (currentBackpressure + data.size() > connData->maxBackpressure) {
-                /* Call dropped handler if available */
-                if (connData->onDropped) {
-                    connData->onDropped(connData, data);
-                }
-                
                 /* Close connection if configured to do so */
                 if (connData->closeOnBackpressureLimit) {
                     this->close();
@@ -307,12 +266,12 @@ public:
     }
     
     /* Get current backpressure amount */
-    uintmax_t getBackpressure() const {
+    uintmax_t getBackpressure() {
         return this->getBufferedAmount();
     }
     
     /* Check if connection has backpressure */
-    bool hasBackpressure() const {
+    bool hasBackpressure() {
         return this->getBufferedAmount() > 0;
     }
     
@@ -337,11 +296,11 @@ public:
             }
 
             /* Timeout on uncork failure, since most writes will succeed while corked */
-            auto [written, failed] = static_cast<AsyncSocket<SSL>*>(newCorkedSocket)->uncork();
+            auto [written, failed] = reinterpret_cast<AsyncSocket<SSL>*>(newCorkedSocket)->uncork();
 
             /* If we are no longer the same socket then early return the new "this" */
             if (this != newCorkedSocket) {
-                return static_cast<TCPConnection*>(newCorkedSocket);
+                return reinterpret_cast<TCPConnection*>(newCorkedSocket);
             }
 
             if (failed) {
@@ -355,29 +314,41 @@ public:
         
         return this;
     }
-    
-    /* Close the connection */
-    void close() {
-        us_socket_close(SSL, (us_socket_t*)this, 0, nullptr);
+
+    /* Immediately terminate this Http response */
+    using Super::close;
+    using Super::shutdown;
+
+    /* See AsyncSocket */
+    using Super::getRemoteAddress;
+    using Super::getRemoteAddressAsText;
+    using Super::getNativeHandle;
+
+    /* Throttle reads and writes */
+    TCPConnection<SSL, USERDATA> *pause() {
+        Super::pause();
+        Super::timeout(0);
+        return this;
     }
-    
-    /* Shutdown the connection */
-    void shutdown() {
-        us_socket_shutdown(SSL, (us_socket_t*)this);
+
+    TCPConnection<SSL, USERDATA> *resume() {
+        Super::resume();
+        Super::timeout(getConnectionData()->idleTimeoutSeconds);
+        return this;
     }
-    
+
     /* Check if connection is closed */
-    bool isClosed() const {
+    bool isClosed() {
         return us_socket_is_closed(SSL, (us_socket_t*)this);
     }
     
     /* Check if connection is shut down */
-    bool isShutDown() const {
+    bool isShutDown() {
         return us_socket_is_shut_down(SSL, (us_socket_t*)this);
     }
     
     /* Check if connection has timed out */
-    bool hasTimedOut() const {
+    bool hasTimedOut() {
         return us_socket_is_shut_down(SSL, (us_socket_t*)this);
     }
 };

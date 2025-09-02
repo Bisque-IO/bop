@@ -313,15 +313,15 @@ public:
         return std::string_view(nullptr, 0);
     }
 
-    bool isChunked() const {
+    bool isChunked() {
         return getHeader("transfer-encoding") == "chunked";
     }
 
-    bool hasContentLength() const {
+    bool hasContentLength() {
         return getHeader("content-length").length() > 0;
     }
 
-    uint64_t getContentLength() const {
+    uint64_t getContentLength() {
         std::string_view contentLengthStr = getHeader("content-length");
         if (contentLengthStr.length() == 0) {
             return 0;

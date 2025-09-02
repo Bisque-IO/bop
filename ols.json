@@ -7,7 +7,7 @@
   "enable_references": true,
   "enable_auto_import": true,
   "thread_pool_count": 1,
-  "enable_inlay_hints": true,
+  "enable_inlay_hints": false,
   "verbose": true,
   "collections": [
     {
