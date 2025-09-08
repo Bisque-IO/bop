@@ -19,6 +19,7 @@
 #define UWS_TCPCONTEXTDATA_H
 
 #include "MoveOnlyFunction.h"
+
 #include <string>
 #include <string_view>
 
@@ -43,21 +44,21 @@ struct alignas(16) TCPContextData {
     
 private:
     /* Connection callbacks - default handlers for all connections */
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)> onConnection = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, int, std::string_view)> onConnectError = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, int, void*)> onDisconnected = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onConnection = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, int, std::string_view)> onConnectError = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, int, void*)> onDisconnected = nullptr;
     MoveOnlyFunction<void(TCPContext<SSL, USERDATA>*, std::string_view)> onServerName = nullptr;
     
     /* Data flow callbacks - default handlers for all connections */
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, std::string_view)> onData = nullptr;
-    MoveOnlyFunction<bool(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, uintmax_t)> onWritable = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)> onDrain = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*, std::string_view)> onDropped = nullptr;
-    MoveOnlyFunction<bool(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)> onEnd = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)> onData = nullptr;
+    MoveOnlyFunction<bool(TCPConnection<SSL, USERDATA>*, uintmax_t)> onWritable = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onDrain = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, std::string_view)> onDropped = nullptr;
+    MoveOnlyFunction<bool(TCPConnection<SSL, USERDATA>*)> onEnd = nullptr;
     
     /* Timeout callbacks - default handlers for all connections */
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)> onTimeout = nullptr;
-    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*, TCPConnectionData<SSL, USERDATA>*, USERDATA*)> onLongTimeout = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onTimeout = nullptr;
+    MoveOnlyFunction<void(TCPConnection<SSL, USERDATA>*)> onLongTimeout = nullptr;
     
     /* Default configuration */
     uint32_t idleTimeoutSeconds = 30;
@@ -69,7 +70,11 @@ private:
     /* Listener configuration */
     std::string listenerHost{};
     int listenerPort = 0;
+    int listenerOptions = 0;
     std::string listenerPath{};  // For Unix domain sockets
+    
+    int connUserDataSize = 16;
+    int connExtSize = 16;
     
     /* SSL configuration */
     struct {

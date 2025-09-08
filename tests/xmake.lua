@@ -1,25 +1,26 @@
 local target_of = function(name, use_openssl, src)
     target(name)
     set_kind("binary")
-    set_languages("c++23")
-
+    set_languages("c++23", "c11")
+    add_toolchains("@clang")
 
     if is_plat("windows") then
         -- add_defines("_CRT_SECURE_NO_WARNINGS=1")
         add_defines("NOMINMAX")
         -- add_ldflags("/NODEFAULTLIB:MSVCRTD", {force = true})
-        add_cxflags("/Zc:preprocessor", "/experimental:c11atomics")
+        -- add_cxflags("/Zc:preprocessor", {force = true})
+        -- add_cxflags("/Zc:preprocessor", "/experimental:c11atomics", {force = true})
         add_syslinks("Advapi32", "User32", "Kernel32", "onecore", "ntdll", "Synchronization", "msvcrt")
-        set_runtimes("MD")
-        add_ldflags("/NODEFAULTLIB:MSVCRTD", {force = true})
-        add_ldflags("/NODEFAULTLIB:msvcprtd", {force = true})
+        -- set_runtimes("MD")
+        -- add_ldflags("/NODEFAULTLIB:MSVCRTD", {force = true})
+        -- add_ldflags("/NODEFAULTLIB:msvcprtd", {force = true})
     else
         add_syslinks("c", "m")
         add_cxflags("-Wno-unused-function", "-Wno-unused-variable")
-        add_cxflags("-fPIC")
+        add_ldflags("-fPIC")
     end
 
-    --add_cxxflags("clang::-stdlib=libc++")
+    -- add_cxxflags("clang::-stdlib=libc++")
     --add_syslinks("c++")
 
     add_defines(
@@ -61,7 +62,7 @@ local target_of = function(name, use_openssl, src)
             add_defines("BOOST_ASIO_USE_WOLFSSL=1")
             add_defines("LIBUS_USE_WOLFSSL")
             -- add_packages("wolfssl")
-            add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
+            add_includedirs("../lib/wolfssl", "../lib/wolfssl/wolfssl", { public = true })
 
             if is_plat("linux") and is_arch("x86_64") then
                 add_links(os.projectdir() .. "/odin/libbop/linux/amd64/libwolfssl.a")
@@ -106,8 +107,18 @@ local target_of = function(name, use_openssl, src)
         end
     end
 
-    add_files("../lib/usockets/src/**.c", { includedirs = "include", cflags = "-O3" })
-    add_files("../lib/usockets/src/**.cpp", { languages = "c++23", includedirs = "include", cflags = "-O3" })
+
+    
+
+    if is_plat("linux") then
+        -- add_defines("LIBUS_USE_IO_URING")
+        -- add_packages("libaio", "liburing")
+    end
+
+    -- add_deps("usockets")
+
+    add_files("../lib/usockets/src/**.c")
+    add_files("../lib/usockets/src/**.cpp")
     add_includedirs("../lib/usockets/src", { public = false })
     add_includedirs("../lib/usockets/include", { public = true })
 
@@ -127,16 +138,13 @@ local target_of = function(name, use_openssl, src)
     if not is_plat("windows") then
         add_files("../lib/snmalloc/src/snmalloc/override/malloc.cc")
     end
-    -- add_files("snmalloc/src/snmalloc/override/new.cc")
+    add_files("../lib/snmalloc/src/snmalloc/override/new.cc")
     -- set_symbols("debug")
-    --set_strip("all")
+    -- set_strip("all")
 
     add_packages("zlib", "zstd")
 
     target_end()
 end
 
-
-target_of("test-uws-tcp", true, "TCPTest.cpp")
-
-target_of("test-uws", true, "uws_test.cpp")
+target_of("test-uws", false, "uws_test.cpp")

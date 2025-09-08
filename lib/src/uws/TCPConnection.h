@@ -21,8 +21,8 @@
 #include "AsyncSocket.h"
 #include "AsyncSocketData.h"
 #include "MoveOnlyFunction.h"
-#include "internal/internal.h"
 #include "libusockets.h"
+
 #include <string>
 #include <string_view>
 
@@ -52,7 +52,7 @@ struct alignas(16) TCPConnectionData : AsyncSocketData<SSL> {
     bool closeOnBackpressureLimit = false;
     
     /* Connection info */
-    // std::string remoteAddress{};
+    std::string remoteAddress{};
     int remotePort = 0;
     
     /* Statistics */
@@ -60,11 +60,19 @@ struct alignas(16) TCPConnectionData : AsyncSocketData<SSL> {
     uintmax_t bytesSent = 0;
     uintmax_t messagesReceived = 0;
     uintmax_t messagesSent = 0;
+
+    /* Reset statistics */
+    void resetStatistics() {
+        bytesReceived = 0;
+        bytesSent = 0;
+        messagesReceived = 0;
+        messagesSent = 0;
+    }
     
     /* Reset connection data */
     void reset() {
         writeOffset = 0;
-        // remoteAddress.clear();
+        remoteAddress.clear();
         remotePort = 0;
         bytesReceived = 0;
         bytesSent = 0;
@@ -125,113 +133,45 @@ public:
         /* We just have it overallocated by sizeof type */
         return reinterpret_cast<USERDATA *>(connData + 1);
     }
-    
-    /* Connection State and Information */
-    
-    /* Check if this is a client connection */
-    bool isClient() {
-        return getConnectionData()->isClient;
+
+    /* Check if connection is closed */
+    bool isClosed() {
+        return us_socket_is_closed(SSL, (us_socket_t*)this);
     }
     
-    /* Check if this is a server connection */
-    bool isServer() {
-        return !getConnectionData()->isClient;
-    }
-    
-    /* Get remote address */
-    std::string_view getRemoteAddress() {
-        return getConnectionData()->remoteAddress;
-    }
-    
-    /* Get remote port */
-    int getRemotePort() {
-        return getConnectionData()->remotePort;
+    /* Check if connection is shut down */
+    bool isShutDown() {
+        return us_socket_is_shut_down(SSL, (us_socket_t*)this);
     }
 
-    /* Connection Configuration */
-    
-    /* Set timeout configuration */
-    void setTimeout(uint32_t idleTimeoutSeconds, uint32_t longTimeoutMinutes) {
-        auto data = getConnectionData();
-        data->idleTimeoutSeconds = idleTimeoutSeconds;
-        data->longTimeoutMinutes = longTimeoutMinutes;
-        us_socket_timeout(SSL, (us_socket_t*)this, idleTimeoutSeconds);
+    /* See AsyncSocket */
+    using Super::getRemoteAddress;
+    using Super::getRemoteAddressAsText;
+    using Super::getNativeHandle;
+    using Super::getBufferedAmount;
+
+    /* Get current backpressure amount */
+    uintmax_t getBackpressure() {
+        return this->getBufferedAmount();
     }
     
-    /* Get timeout configuration */
-    std::pair<uint32_t, uint32_t> getTimeout() {
-        auto data = getConnectionData();
-        return {data->idleTimeoutSeconds, data->longTimeoutMinutes};
+    /* Check if connection has backpressure */
+    bool hasBackpressure() {
+        return this->getBufferedAmount() > 0;
     }
     
-    /* Set max backpressure */
-    void setMaxBackpressure(uintmax_t maxBackpressure) {
-        getConnectionData()->maxBackpressure = maxBackpressure;
+    /* Socket long timeout (for minute precision) */
+    void longTimeout(unsigned int minutes) {
+        us_socket_long_timeout(SSL, (us_socket_t*)this, minutes);
     }
-    
-    /* Get max backpressure */
-    uintmax_t getMaxBackpressure() {
-        return getConnectionData()->maxBackpressure;
-    }
-    
-    /* Set reset idle timeout on send */
-    void setResetIdleTimeoutOnSend(bool reset) {
-        getConnectionData()->resetIdleTimeoutOnSend = reset;
-    }
-    
-    /* Get reset idle timeout on send */
-    bool getResetIdleTimeoutOnSend() {
-        return getConnectionData()->resetIdleTimeoutOnSend;
-    }
-    
-    /* Set close on backpressure limit */
-    void setCloseOnBackpressureLimit(bool close) {
-        getConnectionData()->closeOnBackpressureLimit = close;
-    }
-    
-    /* Get close on backpressure limit */
-    bool getCloseOnBackpressureLimit() {
-        return getConnectionData()->closeOnBackpressureLimit;
-    }
-    
-    /* Connection Statistics */
-    
-    /* Get bytes received */
-    uintmax_t getBytesReceived() {
-        return getConnectionData()->bytesReceived;
-    }
-    
-    /* Get bytes sent */
-    uintmax_t getBytesSent() {
-        return getConnectionData()->bytesSent;
-    }
-    
-    /* Get messages received */
-    uintmax_t getMessagesReceived() {
-        return getConnectionData()->messagesReceived;
-    }
-    
-    /* Get messages sent */
-    uintmax_t getMessagesSent() {
-        return getConnectionData()->messagesSent;
-    }
-    
-    /* Reset statistics */
-    void resetStatistics() {
-        auto data = getConnectionData();
-        data->bytesReceived = 0;
-        data->bytesSent = 0;
-        data->messagesReceived = 0;
-        data->messagesSent = 0;
-    }
-    
+
     /* Send data with backpressure handling */
     SendStatus send(std::string_view data) {
+        TCPConnectionData<SSL, USERDATA>* connData = getConnectionData();
+        
         if (this->isClosed() || this->isShutDown()) {
             return SendStatus::FAILED;
         }
-        
-        TCPConnectionData<SSL, USERDATA>* connData = getConnectionData();
         
         /* Check if this would exceed max backpressure */
         if (connData->maxBackpressure > 0) {
@@ -265,16 +205,6 @@ public:
         }
     }
     
-    /* Get current backpressure amount */
-    uintmax_t getBackpressure() {
-        return this->getBufferedAmount();
-    }
-    
-    /* Check if connection has backpressure */
-    bool hasBackpressure() {
-        return this->getBufferedAmount() > 0;
-    }
-    
     /* Send data using corking for multiple sends */
     TCPConnection* cork(MoveOnlyFunction<void()>&& callback) {
         if (!this->isCorked() && this->canCork()) {
@@ -305,7 +235,7 @@ public:
 
             if (failed) {
                 /* Set timeout on uncork failure */
-                this->timeout(30);  // Use default timeout
+                this->timeout(getConnectionData()->idleTimeoutSeconds);  // Use default timeout
             }
         } else {
             /* Cannot cork, but still execute the callback */
@@ -319,11 +249,6 @@ public:
     using Super::close;
     using Super::shutdown;
 
-    /* See AsyncSocket */
-    using Super::getRemoteAddress;
-    using Super::getRemoteAddressAsText;
-    using Super::getNativeHandle;
-
     /* Throttle reads and writes */
     TCPConnection<SSL, USERDATA> *pause() {
         Super::pause();
@@ -335,21 +260,6 @@ public:
         Super::resume();
         Super::timeout(getConnectionData()->idleTimeoutSeconds);
         return this;
-    }
-
-    /* Check if connection is closed */
-    bool isClosed() {
-        return us_socket_is_closed(SSL, (us_socket_t*)this);
-    }
-    
-    /* Check if connection is shut down */
-    bool isShutDown() {
-        return us_socket_is_shut_down(SSL, (us_socket_t*)this);
-    }
-    
-    /* Check if connection has timed out */
-    bool hasTimedOut() {
-        return us_socket_is_shut_down(SSL, (us_socket_t*)this);
     }
 };
 

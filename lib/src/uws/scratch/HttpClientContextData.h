@@ -21,7 +21,7 @@
 #include "MoveOnlyFunction.h"
 #include "HttpParser.h"
 #include <string>
-#include <string_view>
+#include " ../Utilities.h\
 
 namespace uWS {
 template<bool> struct HttpClientResponse;

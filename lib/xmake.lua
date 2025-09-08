@@ -229,6 +229,7 @@ local target_of = function(kind, use_openssl)
     end
     add_files("usockets/src/**.c", { languages = "c23", includedirs = "include", cflags = "-O3" })
     add_files("usockets/src/**.cpp", { languages = "c++23", includedirs = "include", cflags = "-O3" })
+    remove_files("usockets/src/eventing/asio.cpp")
     add_includedirs("usockets/src", { public = false })
     add_includedirs("usockets/include", { public = true })
 

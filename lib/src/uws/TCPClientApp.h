@@ -23,6 +23,8 @@
 #include "TCPConnection.h"
 #include "App.h"  // For SocketContextOptions
 
+#include <string_view>
+
 namespace uWS {
 
 /* TCP Client application for connecting functionality only */
@@ -42,83 +44,71 @@ public:
     /* Constructor with SSL options and behavior */
     TemplatedTCPClientApp(Loop* loop, TCPBehavior<SSL, USERDATA>&& behavior = {}, SocketContextOptions options = {}) 
         : sslOptions(options), loop(loop) {
-        if (loop) {
-            loop->incrementKeepAliveRef();
-        }
+        assert(loop);
+
+        /*
+        Increment keep-alive ref since we are only client connections and have no
+        listeners to keep the loop alive.
+        */
+        loop->incrementKeepAliveRef();
         
-        // Create the TCP context once on construction
+        /* Create the TCP context once on construction */
         context = TCPContext<SSL, USERDATA>::create(loop, sslOptions, false);
         if (context) {
-            // Set up behavior handlers - now we can move directly from the rvalue reference
-            if (behavior.onConnection) {
-                context->onConnection(std::move(behavior.onConnection));
+            auto contextData = context->getSocketContextData();
+            assert(contextData);
+            contextData->connUserDataSize = (std::max(behavior.connUserDataSize, 16) + 15) / 16 * 16;
+            contextData->connExtSize = sizeof(TCPConnectionData<SSL, USERDATA>) + std::max(contextData->connUserDataSize, (int)((sizeof(USERDATA) + 15) / 16 * 16));
+
+            /* Set up behavior handlers - now we can move directly from the rvalue reference */
+            if (behavior.onOpen) {
+                contextData->onConnection = std::move(behavior.onOpen);
             }
             if (behavior.onData) {
-                context->onData(std::move(behavior.onData));
+                contextData->onData = std::move(behavior.onData);
             }
-            if (behavior.onDisconnected) {
-                context->onDisconnected(std::move(behavior.onDisconnected));
+            if (behavior.onClose) {
+                contextData->onDisconnected = std::move(behavior.onClose);
             }
             if (behavior.onConnectError) {
-                context->onConnectError(std::move(behavior.onConnectError));
+                contextData->onConnectError = std::move(behavior.onConnectError);
+            }
+            if (behavior.onServerName) {
+                contextData->onServerName = std::move(behavior.onServerName);
             }
             if (behavior.onWritable) {
-                context->onWritable(std::move(behavior.onWritable));
+                contextData->onWritable = std::move(behavior.onWritable);
             }
             if (behavior.onDrain) {
-                context->onDrain(std::move(behavior.onDrain));
+                contextData->onDrain = std::move(behavior.onDrain);
             }
             if (behavior.onDropped) {
-                context->onDropped(std::move(behavior.onDropped));
+                contextData->onDropped = std::move(behavior.onDropped);
             }
             if (behavior.onEnd) {
-                context->onEnd(std::move(behavior.onEnd));
+                contextData->onEnd = std::move(behavior.onEnd);
             }
             if (behavior.onTimeout) {
-                context->onTimeout(std::move(behavior.onTimeout));
+                contextData->onTimeout = std::move(behavior.onTimeout);
             }
             if (behavior.onLongTimeout) {
-                context->onLongTimeout(std::move(behavior.onLongTimeout));
+                contextData->onLongTimeout = std::move(behavior.onLongTimeout);
             }
             
-            // Set configuration
-            context->setTimeout(behavior.idleTimeoutSeconds, behavior.longTimeoutMinutes);
-            context->setMaxBackpressure(behavior.maxBackpressure);
-            context->setResetIdleTimeoutOnSend(behavior.resetIdleTimeoutOnSend);
-            context->setCloseOnBackpressureLimit(behavior.closeOnBackpressureLimit);
+            /* Set configuration */
+            contextData->idleTimeoutSeconds = behavior.idleTimeoutSeconds;
+            contextData->longTimeoutMinutes = behavior.longTimeoutMinutes;
+            contextData->maxBackpressure = behavior.maxBackpressure;
+            contextData->resetIdleTimeoutOnSend = behavior.resetIdleTimeoutOnSend;
+            contextData->closeOnBackpressureLimit = behavior.closeOnBackpressureLimit;
         }
     }
     
     /* Move constructor */
-    TemplatedTCPClientApp(TemplatedTCPClientApp&& other) noexcept {
-        sslOptions = other.sslOptions;
-        loop = other.loop;
-        context = other.context;
-        other.loop = nullptr;
-        other.context = nullptr;
-    }
+    TemplatedTCPClientApp(TemplatedTCPClientApp&& other) noexcept = default;
     
     /* Move assignment */
-    TemplatedTCPClientApp& operator=(TemplatedTCPClientApp&& other) noexcept {
-        if (this != &other) {
-            if (loop) {
-                loop->decrementKeepAliveRef();
-            }
-            
-            // Free current context
-            if (context) {
-                context->free();
-                context = nullptr;
-            }
-            
-            sslOptions = other.sslOptions;
-            loop = other.loop;
-            context = other.context;
-            other.loop = nullptr;
-            other.context = nullptr;
-        }
-        return *this;
-    }
+    TemplatedTCPClientApp& operator=(TemplatedTCPClientApp&& other) noexcept = default;
     
     /* Destructor */
     ~TemplatedTCPClientApp() {
@@ -136,14 +126,21 @@ public:
     TCPConnection<SSL, USERDATA>* connect(const char* host, int port, 
                                         const char* source_host = nullptr, int options = 0) {
         if (!context) return nullptr;
-        auto* socket = context->connect(host, port, source_host, options);
+        auto* socket = context->connect(host, port, source_host != nullptr && strlen(source_host) > 0 ? source_host : nullptr, options);
+        return reinterpret_cast<TCPConnection<SSL, USERDATA>*>(socket);
+    }
+
+    /* Client-side: Connect methods using the existing context */
+    TCPConnection<SSL, USERDATA>* connectIP4(uint32_t host_ip, int port, uint32_t source_host_ip = 0, int options = 0) {
+        if (!context) return nullptr;
+        auto* socket = context->connectIP4(host_ip, port, source_host_ip, options);
         return reinterpret_cast<TCPConnection<SSL, USERDATA>*>(socket);
     }
     
     TCPConnection<SSL, USERDATA>* connectUnix(const char* server_path, int options = 0) {
         if (!context) return nullptr;
         
-        auto* socket = context->connectUnix(server_path, options);
+        auto* socket = context->connectUnix(server_path != nullptr && strlen(server_path) > 0 ? server_path : nullptr, options);
         return reinterpret_cast<TCPConnection<SSL, USERDATA>*>(socket);
     }
     
@@ -158,7 +155,7 @@ public:
     }
     
     /* Get the loop reference */
-    Loop* getLoop() const {
+    Loop *getLoop() const {
         return loop;
     }
     
@@ -166,15 +163,18 @@ public:
     TCPContext<SSL, USERDATA>* getContext() const {
         return context;
     }
-    
-    /* Check if keep-alive poll is active */
-    bool isKeepAliveActive() const {
-        return loop && loop->keepAliveRefCount() > 0;
-    }
-    
+
     /* Check if the client app is valid */
     bool isValid() const {
         return context != nullptr;
+    }
+
+    /* adopt an externally accepted socket */
+    TemplatedTCPClientApp<SSL, USERDATA>& adoptSocket(LIBUS_SOCKET_DESCRIPTOR accepted_fd) {
+        if (context) {
+            context->adoptAcceptedSocket(accepted_fd);
+        }
+        return *this;
     }
 };
 

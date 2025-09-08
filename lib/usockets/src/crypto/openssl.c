@@ -17,6 +17,10 @@
 
 #if (defined(LIBUS_USE_OPENSSL) || defined(LIBUS_USE_WOLFSSL))
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 /* These are in sni_tree.cpp */
 void *sni_new();
 void sni_free(void *sni, void(*cb)(void *));
@@ -27,6 +31,10 @@ void *sni_find(void *sni, const char *hostname);
 #include "libusockets.h"
 #include "internal/internal.h"
 #include <string.h>
+
+/* Forward declaration for IPv4 connect function */
+struct us_socket_t *us_socket_context_connect_ip4(int ssl, struct us_socket_context_t *context,
+    uint32_t addr_ip4, int port, uint32_t source_ip4, int options, int socket_ext_size);
 
 /* This module contains the entire OpenSSL implementation
  * of the SSL socket and socket context interfaces. */
@@ -741,6 +749,10 @@ struct us_listen_socket_t *us_internal_ssl_socket_context_listen(struct us_inter
     return us_socket_context_listen(0, &context->sc, host, port, options, sizeof(struct us_internal_ssl_socket_t) - sizeof(struct us_socket_t) + socket_ext_size);
 }
 
+struct us_listen_socket_t *us_internal_ssl_socket_context_listen_ip4(struct us_internal_ssl_socket_context_t *context, uint32_t host, int port, int options, int socket_ext_size) {
+    return us_socket_context_listen_ip4(0, &context->sc, host, port, options, sizeof(struct us_internal_ssl_socket_t) - sizeof(struct us_socket_t) + socket_ext_size);
+}
+
 struct us_listen_socket_t *us_internal_ssl_socket_context_listen_unix(struct us_internal_ssl_socket_context_t *context, const char *path, int options, int socket_ext_size) {
     return us_socket_context_listen_unix(0, &context->sc, path, options, sizeof(struct us_internal_ssl_socket_t) - sizeof(struct us_socket_t) + socket_ext_size);
 }
@@ -752,6 +764,10 @@ struct us_internal_ssl_socket_t *us_internal_ssl_adopt_accepted_socket(struct us
 
 struct us_internal_ssl_socket_t *us_internal_ssl_socket_context_connect(struct us_internal_ssl_socket_context_t *context, const char *host, int port, const char *source_host, int options, int socket_ext_size) {
     return (struct us_internal_ssl_socket_t *) us_socket_context_connect(0, &context->sc, host, port, source_host, options, sizeof(struct us_internal_ssl_socket_t) - sizeof(struct us_socket_t) + socket_ext_size);
+}
+
+struct us_internal_ssl_socket_t *us_internal_ssl_socket_context_connect_ip4(struct us_internal_ssl_socket_context_t *context, uint32_t host_ip4, int port, uint32_t source_ip4, int options, int socket_ext_size) {
+    return (struct us_internal_ssl_socket_t *) us_socket_context_connect_ip4(0, &context->sc, host_ip4, port, source_ip4, options, sizeof(struct us_internal_ssl_socket_t) - sizeof(struct us_socket_t) + socket_ext_size);
 }
 
 struct us_internal_ssl_socket_t *us_internal_ssl_socket_context_connect_unix(struct us_internal_ssl_socket_context_t *context, const char *server_path, int options, int socket_ext_size) {

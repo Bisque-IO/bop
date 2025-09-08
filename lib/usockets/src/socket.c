@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-#ifndef LIBUS_USE_IO_URING
+// #ifndef LIBUS_USE_IO_URING
 
 #include "libusockets.h"
 #include "internal/internal.h"
@@ -228,4 +228,4 @@ void us_socket_shutdown(int ssl, struct us_socket_t *s) {
     }
 }
 
-#endif
+// #endif

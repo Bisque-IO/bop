@@ -106,3 +106,13 @@ External dependencies managed via xmake packages:
 - Prefer `std::string_view` for non-owning string parameters
 - Use move semantics where appropriate
 - Templates heavily used for compile-time polymorphism
+
+## Recent Improvements
+
+- **Fixed TCP Connection Hangs**: Added IP validation to prevent `us_socket_context_connect` from hanging on invalid IP addresses (e.g., "299.99.99.99"). Invalid IPs that look like malformed addresses now return immediately with an error instead of falling back to blocking DNS resolution.
+
+- **Refactored Connection Code**: Eliminated ~100 lines of duplicate code in `bsd_create_connect_socket` by extracting common connection logic into `bsd_connect_addr` helper function. This makes the code more maintainable and easier to extend.
+
+- **Non-blocking Source Interface Binding**: The `source_host` parameter now only accepts IP addresses (IPv4/IPv6) and avoids blocking DNS lookups via `getaddrinfo`. Invalid or hostname source addresses are silently ignored rather than causing connection delays.
+
+- **Added Compact IPv4 Connection API**: Implemented `us_socket_context_connect_ip4()` function that uses `uint32_t` addresses in host byte order (e.g., `0x7F000001` for `127.0.0.1`). This completely eliminates DNS lookups and string parsing for maximum performance. Includes `bsd_create_connect_socket_ip4()` at the BSD layer and supports optional source IP binding. Compatible with existing SSL/TLS functionality.

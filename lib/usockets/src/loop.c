@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-#ifndef LIBUS_USE_IO_URING
+// #ifndef LIBUS_USE_IO_URING
 
 #include "libusockets.h"
 #include "internal/internal.h"
@@ -115,7 +115,16 @@ void us_internal_timer_sweep(struct us_loop_t *loop) {
 
             if (short_ticks == s->timeout) {
                 s->timeout = 255;
-                context->on_socket_timeout(s);
+
+                /* Check if this is a connecting socket that timed out */
+                if (us_internal_poll_type((struct us_poll_t *) s) == POLL_TYPE_SEMI_SOCKET) {
+                    /* This is a connecting socket that timed out - emit connection error */
+                    s->context->on_connect_error(s, 0);
+                    us_socket_close_connecting(0, s);
+                } else {
+                    /* This is an established socket that timed out */
+                    context->on_socket_timeout(s);
+                }
             }
 
             if (context->iterator == s && long_ticks == s->long_timeout) {
@@ -241,9 +250,14 @@ void us_internal_dispatch_ready_poll(struct us_poll_t *p, int error, int events)
              * but they poll for different events */
             if (us_poll_events(p) == LIBUS_SOCKET_WRITABLE) {
                 struct us_socket_t *s = (struct us_socket_t *) p;
-
+#ifdef _WIN32
+                /* Check for connection errors, especially important on Windows */
+                /* It is perfectly possible to come here with an error */
+                if (error || bsd_socket_has_error(us_poll_fd(p))) {
+#else
                 /* It is perfectly possible to come here with an error */
                 if (error) {
+#endif
                     /* Emit error, close without emitting on_close */
                     s->context->on_connect_error(s, 0);
                     us_socket_close_connecting(0, s);
@@ -393,4 +407,4 @@ void *us_loop_ext(struct us_loop_t *loop) {
     return loop + 1;
 }
 
-#endif
+// #endif

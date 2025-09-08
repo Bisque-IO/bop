@@ -18,13 +18,13 @@ BOP_API struct bop_mpmc *bop_mpmc_create();
 
 BOP_API void bop_mpmc_destroy(struct bop_mpmc *queue);
 
-BOP_API bop_mpmc_producer_token *bop_mpmc_create_producer_token(bop_mpmc* queue);
+BOP_API struct bop_mpmc_producer_token *bop_mpmc_create_producer_token(struct bop_mpmc* queue);
 
-BOP_API void bop_mpmc_destroy_producer_token(bop_mpmc_producer_token* token);
+BOP_API void bop_mpmc_destroy_producer_token(struct bop_mpmc_producer_token* token);
 
-BOP_API bop_mpmc_consumer_token *bop_mpmc_create_consumer_token(bop_mpmc* queue);
+BOP_API struct bop_mpmc_consumer_token *bop_mpmc_create_consumer_token(struct bop_mpmc* queue);
 
-BOP_API void bop_mpmc_destroy_consumer_token(bop_mpmc_consumer_token* token);
+BOP_API void bop_mpmc_destroy_consumer_token(struct bop_mpmc_consumer_token* token);
 
 BOP_API size_t bop_mpmc_size_approx(struct bop_mpmc *queue);
 
@@ -54,13 +54,13 @@ BOP_API struct bop_mpmc_blocking *bop_mpmc_blocking_create();
 
 BOP_API void bop_mpmc_blocking_destroy(struct bop_mpmc_blocking *queue);
 
-BOP_API bop_mpmc_blocking_producer_token *bop_mpmc_blocking_create_producer_token(bop_mpmc_blocking* queue);
+BOP_API struct bop_mpmc_blocking_producer_token *bop_mpmc_blocking_create_producer_token(struct bop_mpmc_blocking* queue);
 
-BOP_API void bop_mpmc_blocking_destroy_producer_token(bop_mpmc_blocking_producer_token* token);
+BOP_API void bop_mpmc_blocking_destroy_producer_token(struct bop_mpmc_blocking_producer_token* token);
 
-BOP_API bop_mpmc_blocking_consumer_token *bop_mpmc_blocking_create_consumer_token(bop_mpmc_blocking* queue);
+BOP_API struct bop_mpmc_blocking_consumer_token *bop_mpmc_blocking_create_consumer_token(struct bop_mpmc_blocking* queue);
 
-BOP_API void bop_mpmc_blocking_destroy_consumer_token(bop_mpmc_blocking_consumer_token* token);
+BOP_API void bop_mpmc_blocking_destroy_consumer_token(struct bop_mpmc_blocking_consumer_token* token);
 
 BOP_API size_t bop_mpmc_blocking_size_approx(struct bop_mpmc_blocking *queue);
 

@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "bop-sys",
+    "bop-rs",
+    "vertx-cluster",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"

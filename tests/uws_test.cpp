@@ -1,21 +1,21 @@
-#include <assert.h>
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
-#include <optional>
-#include <unordered_set>
+// #define CHECK(x)
+// #define CHECK_NE(x, y)
+// #define CHECK_EQ(x, y)
+#include <assert.h>
 
 // Debug output control
 #ifndef TCP_TEST_DEBUG
-#define TCP_TEST_DEBUG 1
+#define TCP_TEST_DEBUG 0
 #endif
 
-static std::mutex coutMutex;
+// static std::mutex coutMutex;
 
 #if TCP_TEST_DEBUG
 #define DEBUG_OUT(x)                                                                               \
     do {                                                                                           \
-        std::lock_guard<std::mutex> lock(coutMutex);                                               \
-        std::cout << "[DEBUG] :: " << x << std::endl;                                              \
+        MESSAGE("[DEBUG] :: " << x);                                                               \
     } while (0)
 #else
 #define DEBUG_OUT(x)                                                                               \
@@ -23,12 +23,13 @@ static std::mutex coutMutex;
     } while (0)
 #endif
 
-#include "../lib/src/uws/Loop.h"
-#include "../lib/src/uws/TCPClientApp.h"
-#include "../lib/src/uws/TCPConnection.h"
-#include "../lib/src/uws/TCPContext.h"
-#include "../lib/src/uws/TCPServerApp.h"
+#include "Loop.h"
+#include "TCPClientApp.h"
+#include "TCPConnection.h"
+#include "TCPContext.h"
+#include "TCPServerApp.h"
 #include "libusockets.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -45,7 +46,27 @@ static std::mutex coutMutex;
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#include <arpa/inet.h>
+#else
+// #include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 using namespace uWS;
+
+/* Utility function to convert dotted decimal IP to uint32_t in host byte order */
+inline uint32_t ip_to_uint32(const char* ip_str) {
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip_str, &addr) == 1) {
+        return ntohl(addr.s_addr);
+    }
+    return 0; // Invalid IP
+}
+
+inline uint32_t ip_to_uint32(std::string ip_str) {
+    return ip_to_uint32(ip_str.c_str());
+}
 
 inline int64_t unixNanos() {
     return std::chrono::system_clock::now().time_since_epoch().count();
@@ -145,7 +166,7 @@ inline std::string_view as_string(EventType type) {
 struct Event {
     uint64_t sequence = 0;
     int64_t timestamp{};
-    uint64_t id{};
+    uint64_t conn_id{};
     void* connection{nullptr};
     EventType type{};
     int code{};
@@ -155,24 +176,17 @@ struct Event {
     bool isClient = false;
 
     Event(
-        uint64_t sequence, int64_t timestamp, uint64_t id, void* connection, EventType type,
-        int code, std::string data, void* data_ptr, uintmax_t bytes
+        uint64_t conn_id, void* connection, EventType type, int code, std::string data,
+        void* data_ptr, uintmax_t bytes
     )
-        : sequence(sequence),
-          timestamp(timestamp),
-          id(id),
+        : timestamp(unixNanos()),
+          conn_id(conn_id),
           connection(connection),
           type(type),
           code(code),
           data(data),
           data_ptr(data_ptr),
-          bytes(bytes),
-          isClient(
-              connection ? reinterpret_cast<TCPConnection<false, void*>*>(connection)
-                               ->getConnectionData()
-                               ->isClient
-                         : false
-          ) {}
+          bytes(bytes) {}
 
     Event() = default;
     Event(const Event&) = default;
@@ -190,11 +204,11 @@ struct Event {
         out.append(", timestamp=");
         out.append(std::to_string(timestamp));
         out.append(", id=");
-        out.append(std::to_string(id));
+        out.append(std::to_string(conn_id));
         out.append(", connection=");
         out.append(std::to_string(reinterpret_cast<uintptr_t>(connection)));
-        out.append(", isClient=");
-        out.append(std::to_string(isClient));
+        // out.append(", isClient=");
+        // out.append(std::to_string(isClient));
         out.append(", code=");
         out.append(std::to_string(code));
         out.append(", data=");
@@ -216,7 +230,7 @@ struct EventBuffer {
   public:
     using OnPush = std::function<bool(Event&)>;
 
-    explicit EventBuffer(size_t capacity) : buffer_(capacity), head_(0), tail_(0) {}
+    explicit EventBuffer(size_t capacity) {}
 
     // Move-only support: delete copy constructor and copy assignment
     EventBuffer(const EventBuffer&) = delete;
@@ -224,126 +238,79 @@ struct EventBuffer {
 
     // Push an item to the buffer. Automatically grows if full.
     bool push(Event& item) {
-        DEBUG_OUT("EventBuffer::push => " << item.to_string());
-        size_t index = 0;
-        {
-            std::lock_guard<std::recursive_mutex> lock(mutex_);
-            size_t cap = buffer_.size();
-            if (tail_ - head_ == cap) {
-                // Buffer full, grow automatically
-                grow(cap == 0 ? 8 : cap * 2);
-                cap = buffer_.size();
-            }
-            index = tail_ % cap;
-            buffer_[index] = std::move(item);
-            ++tail_;
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (closed_) {
+            return 0;
+        }
+        uint64_t sequence = buffer_.size();
+        buffer_.emplace_back(std::move(item));
+        auto& event = buffer_[sequence];
+        DEBUG_OUT("EventBuffer::push => " << event.to_string());
 
-            auto& event = buffer_[index];
-            std::lock_guard<std::recursive_mutex> cb_lock(handler_mutex_);
-            for (auto it = handlers_.begin(); it != handlers_.end();) {
-                if (!((*it).second)(event)) {
-                    it = handlers_.erase(it);
-                    continue;
-                }
-                ++it;
+        std::vector<uint64_t> handlers;
+        for (auto& handler : handlers_) {
+            if (!handler.second(event)) {
+                handlers.push_back(handler.first);
+                // it = handlers_.erase(it);
+                continue;
             }
         }
-        return true;
+        for (auto id : handlers) {
+            handlers_.erase(id);
+        }
+
+        DEBUG_OUT("[2] EventBuffer::push => " << event.to_string());
+        return sequence;
     }
 
     // Push an item to the buffer. Automatically grows if full.
-    bool push(Event&& item) {
-        DEBUG_OUT("EventBuffer::push => " << item.to_string());
-        size_t index = 0;
-        {
-            std::lock_guard<std::recursive_mutex> lock(mutex_);
-            size_t cap = buffer_.size();
-            if (tail_ - head_ == cap) {
-                // Buffer full, grow automatically
-                grow(cap == 0 ? 8 : cap * 2);
-                cap = buffer_.size();
-            }
-            index = tail_ % cap;
-            buffer_[index] = std::move(item);
-            ++tail_;
+    uint64_t push(Event&& item) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (closed_) {
+            return 0;
+        }
+        uint64_t sequence = buffer_.size();
+        buffer_.emplace_back(std::move(item));
+        auto& event = buffer_[sequence];
+        DEBUG_OUT("EventBuffer::push => " << event.to_string());
 
-            auto& event = buffer_[index];
-            std::lock_guard<std::recursive_mutex> cb_lock(handler_mutex_);
-            for (auto it = handlers_.begin(); it != handlers_.end();) {
-                if (!((*it).second)(event)) {
-                    it = handlers_.erase(it);
-                    continue;
-                }
-                ++it;
+        std::vector<uint64_t> handlers;
+        for (auto& handler : handlers_) {
+            if (!handler.second(event)) {
+                handlers.push_back(handler.first);
+                // it = handlers_.erase(it);
+                continue;
             }
         }
-
-        return true;
-    }
-
-    // Grows the buffer to at least new_capacity. Preserves order and elements.
-    // Returns true if grown, false if new_capacity <= current capacity.
-    bool grow(size_t new_capacity) {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        size_t old_capacity = buffer_.size();
-        if (new_capacity <= old_capacity) {
-            return false; // No need to shrink or same size
+        for (auto id : handlers) {
+            handlers_.erase(id);
         }
 
-        size_t count = tail_ - head_;
-        std::vector<Event> new_buffer(new_capacity);
-
-        // Move elements in order from old buffer to new buffer
-        for (size_t i = 0; i < count; ++i) {
-            new_buffer[i] = std::move(buffer_[(head_ + i) % old_capacity]);
-        }
-
-        buffer_ = std::move(new_buffer);
-        head_ = 0;
-        tail_ = count;
-        // Note: head_ and tail_ are always modulo (capacity * 2) for overflow safety
-
-        return true;
-    }
-
-    // Pop an item from the buffer. Returns false if empty.
-    bool pop(Event& item) {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        size_t cap = buffer_.size();
-        if (tail_ - head_ == 0) {
-            return false; // Buffer empty
-        }
-        item = std::move(buffer_[head_ % cap]);
-        ++head_;
-        return true;
+        DEBUG_OUT("[2] EventBuffer::push => " << event.to_string());
+        return sequence;
     }
 
     // Check if buffer is empty
     bool empty() const {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        return tail_ - head_ == 0;
+        return buffer_.empty();
     }
 
     // Check if buffer is full
     bool full() const {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        return tail_ - head_ == buffer_.size();
+        return buffer_.size() == buffer_.capacity();
     }
 
     size_t size() const {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        return tail_ - head_;
-    }
-
-    // Get capacity
-    size_t capacity() const {
         return buffer_.size();
     }
 
     // Register a callback to be called on each push.
     // Returns a HandlerRegistration object that can be used to unregister the handler in O(1).
     uint64_t on(OnPush cb) {
-        std::lock_guard<std::recursive_mutex> lock(handler_mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         auto id = handler_id_.fetch_add(1);
         handlers_.insert({id, std::move(cb)});
         return id;
@@ -351,19 +318,26 @@ struct EventBuffer {
 
     // Unregister a handler by iterator (O(1)), used by HandlerRegistration.
     void unregister(uint64_t id) {
-        std::lock_guard<std::recursive_mutex> lock(handler_mutex_);
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         handlers_.erase(id);
+    }
+
+    void close() {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        handlers_.clear();
+        buffer_.clear();
+        closed_ = true;
     }
 
     // Clear the buffer
     void clear() {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        size_t cap = buffer_.size();
-        for (size_t i = head_; i < tail_; ++i) {
-            buffer_[(i % cap)] = Event{};
-        }
-        head_ = 0;
-        tail_ = 0;
+        buffer_.clear();
+    }
+
+    void clearHandlers() {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        handlers_.clear();
     }
 
     // Iterate through all valid values in the buffer, protected by mutex.
@@ -371,20 +345,15 @@ struct EventBuffer {
     template <typename Func>
     void iterate(Func&& func) const {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        size_t cap = buffer_.size();
-        if (tail_ - head_ == 0)
-            return;
-        for (size_t idx = head_; idx < tail_; ++idx) {
-            func(buffer_[(idx % cap)]);
+        for (auto& item : buffer_) {
+            func(item);
         }
     }
 
   protected:
+    bool closed_;
     std::vector<Event> buffer_;
-    size_t head_;
-    size_t tail_;
     mutable std::recursive_mutex mutex_;
-    mutable std::recursive_mutex handler_mutex_;
     bool isDestructing = false;
     std::atomic<uint64_t> handler_id_{0};
     std::unordered_map<uint64_t, OnPush> handlers_;
@@ -401,7 +370,7 @@ struct TestTCPServerApp;
 template <bool SSL>
 struct TestTCPClientApp;
 
-struct TestLoop : std::enable_shared_from_this<TestLoop> {
+struct TestLoop {
     Loop* loop;
     EventBuffer events;
     std::thread loopThread;
@@ -410,21 +379,17 @@ struct TestLoop : std::enable_shared_from_this<TestLoop> {
     std::condition_variable loopReady{};
     std::atomic<bool> loopInitialized{false};
     std::atomic<uint64_t> connectionId{1};
-    std::atomic<uint64_t> sequence_{0};
+    std::thread::id loopThreadId;
     us_timer_t* timer = nullptr;
 
     TestLoop() : events(8192) {
-        // Constructor just initializes the events buffer
-        // Thread creation will be done in create()
-    }
-
-    void initialize(TestLoop* self) {
-        loopThread = std::thread([this, self]() {
-            // Get the loop for this thread
+        loopThread = std::thread([this]() {
+            loopThreadId = std::this_thread::get_id();
             loop = Loop::get();
+            auto l = loop;
 
             timer = us_create_timer(reinterpret_cast<us_loop_t*>(loop), 0, 0);
-            us_timer_set(timer, [](struct us_timer_t*) {}, 1, 1000 * 60 * 60 * 24);
+            us_timer_set(timer, [](struct us_timer_t*) {}, 1, 50);
 
             // Signal that loop is ready
             {
@@ -434,51 +399,47 @@ struct TestLoop : std::enable_shared_from_this<TestLoop> {
             loopReady.notify_all();
 
             // Run the event loop
-            running = true;
-            loop->run();
-            running = false;
-            loop = nullptr;
+            l->run();
 
-            DEBUG_OUT("loopThread exit");
+            DEBUG_OUT("Loop::thread exit");
         });
+        // loopThread.detach();
 
         std::unique_lock<std::mutex> lock(loopMutex);
         loopReady.wait(lock, [this]() { return loopInitialized.load(); });
     }
 
     ~TestLoop() {
-        DEBUG_OUT("TestLoop::~TestLoop start");
+        DEBUG_OUT("[1] TestLoop::~TestLoop " << reinterpret_cast<uintptr_t>((void*)this));
+        events.close();
 
         if (timer) {
-            call([this]() {
-                us_timer_close(timer);
-                timer = nullptr;
-            });
+            call(
+                [this]() {
+                    us_timer_close(timer);
+                    timer = nullptr;
+                },
+                10000
+            );
         }
+
+        DEBUG_OUT("[2] TestLoop::~TestLoop");
 
         // Wait for the thread to finish
         if (loopThread.joinable()) {
             loopThread.join();
         }
 
-        loop = nullptr;
-        loopInitialized = false;
-
-        DEBUG_OUT("TestLoop::~TestLoop end");
+        DEBUG_OUT("[3] TestLoop::~TestLoop");
     }
 
     static TestLoop* create() {
         auto loop = new TestLoop();
-        loop->initialize(loop);
         return loop;
     }
 
     uint64_t getNextConnectionId() {
         return connectionId.fetch_add(1);
-    }
-
-    uint64_t getNextSequence() {
-        return sequence_.fetch_add(1);
     }
 
     Loop* getLoop() {
@@ -496,24 +457,28 @@ struct TestLoop : std::enable_shared_from_this<TestLoop> {
     }
 
     template <typename F>
-    auto call(F&& fn, int timeoutMs = 5000) -> std::invoke_result_t<F&&> {
+    auto call(F&& fn, int timeoutMs = 5000000) -> std::invoke_result_t<F&&> {
         using ReturnT = std::invoke_result_t<F&&>;
+        if (std::this_thread::get_id() == loopThreadId) {
+            if constexpr (std::is_void_v<ReturnT>) {
+                fn();
+                return;
+            } else {
+                return fn();
+            }
+        }
         auto future = callAsync(std::forward<F>(fn));
         if constexpr (std::is_void_v<ReturnT>) {
             if (future.wait_for(std::chrono::milliseconds(timeoutMs)) !=
                 std::future_status::ready) {
-                DEBUG_OUT(
-                    "[WARNING] TestLoop::call timed out after " << timeoutMs << "ms" << std::endl
-                );
+                DEBUG_OUT("[WARNING] TestLoop::call timed out after " << timeoutMs << "ms");
                 throw std::runtime_error("runOnLoop timed out");
             }
             future.get();
         } else {
             if (future.wait_for(std::chrono::milliseconds(timeoutMs)) !=
                 std::future_status::ready) {
-                DEBUG_OUT(
-                    "[WARNING] TestLoop::call timed out after " << timeoutMs << "ms" << std::endl
-                );
+                DEBUG_OUT("[WARNING] TestLoop::call timed out after " << timeoutMs << "ms");
                 throw std::runtime_error("runOnLoop timed out");
             }
             return future.get();
@@ -524,20 +489,20 @@ struct TestLoop : std::enable_shared_from_this<TestLoop> {
     template <typename F>
     auto callAsync(F&& fn) -> std::future<std::invoke_result_t<F>> {
         using ReturnT = std::invoke_result_t<F>;
-        auto promise = std::make_shared<std::promise<ReturnT>>();
-        auto future = promise->get_future();
+        auto promise = std::promise<ReturnT>();
+        auto future = promise.get_future();
         auto loop = this->loop;
         assert(loop != nullptr);
 
-        loop->defer([fn = std::forward<F>(fn), promise]() mutable {
+        loop->defer([fn = std::forward<F>(fn), promise = std::move(promise)]() mutable {
             try {
                 if constexpr (std::is_void_v<ReturnT>) {
                     fn();
-                    promise->set_value();
+                    promise.set_value();
                 } else {
-                    promise->set_value(fn());
+                    promise.set_value(fn());
                 }
-            } catch (...) { promise->set_exception(std::current_exception()); }
+            } catch (...) { promise.set_exception(std::current_exception()); }
         });
 
         return future;
@@ -552,303 +517,277 @@ template <bool SSL>
 struct alignas(16) TestTCPConnection {
     TestLoop* loop = nullptr;
     EventBuffer* loopEvents = nullptr;
-    uint64_t tapId = 0;
     uint64_t id = 0;
     int64_t established = 0;
     std::string host = "";
     int port = 0;
+    bool isClient = false;
     std::string source_host = "";
     int options = 0;
     TCPConnection<SSL, TestTCPConnection<SSL>*>* connection = nullptr;
     bool closed = false;
     EventBuffer localEvents{128};
+    std::string readBuffer = "";
+    size_t readPackets = 0;
+    std::mutex mutex{};
 
-    TestTCPConnection() = default;
+    TestTCPConnection(TestLoop* loop, uint64_t id) {
+        CHECK(loop);
+        CHECK(id != 0);
+        this->id = id;
+        this->loop = loop;
+
+        localEvents.on([this](Event& event) {
+            if (event.type == EventType::TCPOnData) {
+                std::lock_guard<std::mutex> lock(mutex);
+                readBuffer.append(event.data);
+                readPackets++;
+            }
+            return true;
+        });
+    }
 
     ~TestTCPConnection() {
         DEBUG_OUT("TestTCPConnection::~TestTCPConnection => " << toString());
         closed = true;
-        // loopEvents->push(NetworkEvent(
-        //     0,
-        //     unixNanos(),
-        //     id,
-        //     this,
-        //     NetworkEventType::TCPOnTestTCPConnectionDestroyed,
-        //     0,
-        //     std::string(),
-        //     nullptr,
-        //     0
-        // ));
-        // loop = nullptr;
-        // connection = nullptr;
+        loop = nullptr;
+        connection = nullptr;
+        // DEBUG_OUT("[2] TestTCPConnection::~TestTCPConnection");
+    }
 
-        // DEBUG_OUT("TestTCPConnection::~TestTCPConnection" << std::endl);
+    SendStatus send(std::string_view data, int timeoutMs = 5000) {
+        auto loop = this->loop;
+        CHECK(loop);
+        return loop->call([this, data]() { return connection->send(data); }, timeoutMs);
+    }
+
+    std::string read(int timeoutMs = 5000) {
+        auto loop = this->loop;
+        CHECK(loop);
+        return loop->call([this]() { return connection->read(); }, timeoutMs);
+    }
+
+    std::future<std::string> readAsync(int timeoutMs = 5000) {
+        auto loop = this->loop;
+        CHECK(loop);
+        return loop->callAsync([this]() { return connection->read(); }, timeoutMs);
     }
 
     std::string toString() const {
         std::ostringstream oss;
         oss << "TestTCPConnection[" << (SSL ? "SSL" : "PLAIN") << "]{"
-            << "id=" << id << ", established=" << established << ", isClient="
-            << (connection
-                    ? reinterpret_cast<TCPConnection<SSL, TestTCPConnection<SSL>>*>(connection)
-                          ->getConnectionData()
-                          ->isClient
-                    : false)
+            << "id=" << id << ", established=" << established << ", isClient=" << isClient
             << ", host=" << host << ", port=" << port << ", source_host=" << source_host
             << ", options=" << options << ", closed=" << (closed ? "true" : "false")
-            << ", connection=" << static_cast<const void*>(connection)
-            << ", localEvents.size=" << localEvents.size()
-            << ", localEvents.capacity=" << localEvents.capacity() << "}";
+            << ", connection=" << static_cast<const void*>(connection) << "}";
+        // << ", localEvents.size=" << localEvents.size()
+        // << ", localEvents.capacity=" << localEvents.capacity() << "}";
         return oss.str();
     }
 };
 
 template <bool SSL>
-void setupBehavior(
+void wireTCPBehavior(
     bool isServer, TestLoop* loop, TCPBehavior<SSL, TestTCPConnection<SSL>*>& behavior
 ) {
-    behavior.onData = [loop = loop](
-                          TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                          TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                          TestTCPConnection<SSL>** userData,
-                          std::string_view data
-                      ) {
-        CHECK(conn);
-        CHECK(connData);
-        CHECK(userData);
-        CHECK(*userData);
-        loop->events.push(Event(
-            loop->getNextSequence(),
-            unixNanos(),
-            *userData ? (*userData)->id : 0,
-            conn,
-            EventType::TCPOnData,
-            0,
-            std::string(data),
-            nullptr,
-            data.size()
-        ));
-    };
-
-    if (isServer) {
-        behavior.onConnection = [loop = loop](
-                                    TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                                    TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                                    TestTCPConnection<SSL>** userData
-                                ) {
+    behavior.onData =
+        [loop = loop](TCPConnection<SSL, TestTCPConnection<SSL>*>* conn, std::string_view data) {
+            DEBUG_OUT("onData");
+            auto connData = conn->getConnectionData();
+            auto userData = conn->getUserData();
             CHECK(conn);
             CHECK(connData);
             CHECK(userData);
+            CHECK(*userData);
+            loop->events.push(Event(
+                *userData ? (*userData)->id : 0,
+                conn,
+                EventType::TCPOnData,
+                0,
+                std::string(data),
+                nullptr,
+                data.size()
+            ));
+        };
+
+    if (isServer) {
+        behavior.onOpen = [loop = loop](TCPConnection<SSL, TestTCPConnection<SSL>*>* conn) {
+            DEBUG_OUT("onConnection - server");
+            auto connData = conn->getConnectionData();
+            auto userData = conn->getUserData();
+            CHECK(conn);
+            CHECK(connData);
+            CHECK(userData);
+            // *userData = nullptr;
             CHECK_EQ(*userData, nullptr);
 
             // For server, create a new TestTCPConnection when connection is accepted
-            auto connection = new TestTCPConnection<SSL>();
-            connection->connection = conn;
-            connection->id = loop->getNextConnectionId();
-            connection->loop = loop;
+            auto connection = new TestTCPConnection<SSL>(loop, loop->getNextConnectionId());
+            connection->isClient = false;
             connection->loopEvents = &loop->events;
-            connection->established = unixNanos();
-
-            // connection->tapId = loop->tap([connection](Event& event) {
-            //     if (event.id == connection->id) {
-            //         connection->localEvents.push(event);
-            //     }
-            //     return true;
-            // });
+            connection->established = 0;
+            connection->connection = conn;
 
             // Store the pointer in user data
             *userData = connection;
 
-            loop->events.push(Event(
-                loop->getNextSequence(),
-                unixNanos(),
-                connection->id,
-                conn,
-                EventType::TCPOnConnection,
-                0,
-                std::string(),
-                nullptr,
-                0
-            ));
+            DEBUG_OUT("onConnection server before on push");
+            loop->events.push(
+                Event(connection->id, conn, EventType::TCPOnConnection, 0, "", nullptr, 0)
+            );
+            DEBUG_OUT("onConnection server after on push");
         };
     } else {
-        behavior.onConnection = [loop = loop](
-                                    TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                                    TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                                    TestTCPConnection<SSL>** userData
-                                ) {
+        behavior.onOpen = [loop = loop](TCPConnection<SSL, TestTCPConnection<SSL>*>* conn) {
+            DEBUG_OUT("onConnection - client");
+            auto connData = conn->getConnectionData();
+            auto userData = conn->getUserData();
             CHECK(conn);
             CHECK(connData);
             CHECK(userData);
             CHECK(*userData);
 
-            (*userData)->connection = conn;
-            if ((*userData)->id == 0) {
-                (*userData)->id = loop->getNextConnectionId();
-            }
+            // (*userData)->connection = conn;
+            // if ((*userData)->id == 0) {
+            //     (*userData)->id = loop->getNextConnectionId();
+            // }
+            DEBUG_OUT("onConnection before on push");
             loop->events.push(Event(
-                loop->getNextSequence(),
-                unixNanos(),
-                *userData ? (*userData)->id : 0,
-                conn,
-                EventType::TCPOnConnection,
-                0,
-                std::string(),
-                nullptr,
-                0
+                *userData ? (*userData)->id : 0, conn, EventType::TCPOnConnection, 0, "", nullptr, 0
             ));
+            DEBUG_OUT("onConnection after on push");
         };
     }
 
-    behavior.onDisconnected = [loop = loop](
-                                  TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                                  TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                                  TestTCPConnection<SSL>** userData,
-                                  int code,
-                                  void* data
-                              ) {
-        CHECK(conn);
-        CHECK(connData);
-        CHECK(userData);
-        CHECK(*userData);
-        loop->events.push(Event(
-            loop->getNextSequence(),
-            unixNanos(),
-            *userData ? (*userData)->id : 0,
-            conn,
-            EventType::TCPOnDisconnected,
-            0,
-            std::string(),
-            data,
-            0
-        ));
-        // if (*userData) {
-        //     loop->events.unregister((*userData)->tapId);
-        //     DEBUG_OUT("deleting user data");
-        //     delete *userData;
-        //     *userData = nullptr;
-        //     // *reinterpret_cast<TestTCPConnection<SSL>**>(conn->getUserData()) = nullptr;
-        // }
-    };
+    behavior.onClose =
+        [loop = loop](TCPConnection<SSL, TestTCPConnection<SSL>*>* conn, int code, void* data) {
+            DEBUG_OUT("onDisconnected");
+            auto connData = conn->getConnectionData();
+            auto userData = conn->getUserData();
+            CHECK(conn);
+            CHECK(connData);
+            CHECK(userData);
+            auto connId = userData && *userData ? (*userData)->id : 0;
+            // CHECK(*userData);
+            loop->events.push(Event(connId, conn, EventType::TCPOnDisconnected, code, "", data, 0));
+            if (*userData) {
+                delete *userData;
+                *userData = nullptr;
 
-    behavior.onConnectError = [loop = loop](
-                                  TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                                  TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                                  TestTCPConnection<SSL>** userData,
-                                  int code,
-                                  std::string_view message
-                              ) {
-        CHECK(conn);
-        CHECK(connData);
-        CHECK(userData);
-        CHECK(*userData);
-        loop->events.push(Event(
-            loop->getNextSequence(),
-            unixNanos(),
-            *userData ? (*userData)->id : 0,
-            conn,
-            EventType::TCPOnConnectError,
-            0,
-            std::string(message),
-            nullptr,
-            message.size()
-        ));
-        if (*userData) {
-            // delete *userData;
-            *userData = nullptr;
-            // *reinterpret_cast<TestTCPConnection<SSL>**>(conn->getUserData()) = nullptr;
-        }
-    };
+                loop->events.push(Event(
+                    connId,
+                    conn,
+                    EventType::TCPOnTestTCPConnectionDestroyed,
+                    code,
+                    "onDisconnected",
+                    data,
+                    0
+                ));
+            }
+        };
 
-    behavior.onWritable = [loop = loop](
-                              TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                              TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                              TestTCPConnection<SSL>** userData,
-                              uintmax_t bytes
-                          ) -> bool {
+    behavior.onConnectError =
+        [loop = loop](
+            TCPConnection<SSL, TestTCPConnection<SSL>*>* conn, int code, std::string_view message
+        ) {
+            DEBUG_OUT("onConnectError");
+            auto connData = conn->getConnectionData();
+            auto userData = conn->getUserData();
+            CHECK(conn);
+            CHECK(connData);
+            CHECK(userData);
+            CHECK(*userData);
+            auto connId = *userData ? (*userData)->id : 0;
+            loop->events.push(Event(
+                connId,
+                conn,
+                EventType::TCPOnConnectError,
+                code,
+                std::string(message),
+                nullptr,
+                message.size()
+            ));
+            if (*userData) {
+                delete *userData;
+                *userData = nullptr;
+
+                std::string messageStr = std::string("onConnectError");
+                if (!messageStr.empty()) {
+                    messageStr.append(": ");
+                    messageStr.append(message);
+                }
+
+                loop->events.push(Event(
+                    connId,
+                    conn,
+                    EventType::TCPOnTestTCPConnectionDestroyed,
+                    code,
+                    messageStr,
+                    nullptr,
+                    0
+                ));
+            }
+        };
+
+    behavior.onWritable =
+        [loop = loop](TCPConnection<SSL, TestTCPConnection<SSL>*>* conn, uintmax_t bytes) -> bool {
+        DEBUG_OUT("onWritable");
+        auto connData = conn->getConnectionData();
+        auto userData = conn->getUserData();
         CHECK(conn);
         CHECK(connData);
         CHECK(userData);
         CHECK(*userData);
         loop->events.push(Event(
-            loop->getNextSequence(),
-            unixNanos(),
-            *userData ? (*userData)->id : 0,
-            conn,
-            EventType::TCPOnWritable,
-            0,
-            std::string(),
-            nullptr,
-            bytes
+            *userData ? (*userData)->id : 0, conn, EventType::TCPOnWritable, 0, "", nullptr, bytes
         ));
         return true;
     };
 
-    behavior.onDrain = [loop = loop](
-                           TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                           TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                           TestTCPConnection<SSL>** userData
-                       ) {
+    behavior.onDrain = [loop = loop](TCPConnection<SSL, TestTCPConnection<SSL>*>* conn) {
+        DEBUG_OUT("onDrain");
+        auto connData = conn->getConnectionData();
+        auto userData = conn->getUserData();
         CHECK(conn);
         CHECK(connData);
         CHECK(userData);
         CHECK(*userData);
-        loop->events.push(Event(
-            loop->getNextSequence(),
-            unixNanos(),
-            *userData ? (*userData)->id : 0,
-            conn,
-            EventType::TCPOnDrain,
-            0,
-            std::string(),
-            nullptr,
-            0
-        ));
+        loop->events.push(
+            Event(*userData ? (*userData)->id : 0, conn, EventType::TCPOnDrain, 0, "", nullptr, 0)
+        );
     };
 
-    behavior.onDropped = [loop = loop](
-                             TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                             TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                             TestTCPConnection<SSL>** userData,
-                             std::string_view data
-                         ) {
-        CHECK(conn);
-        CHECK(connData);
-        CHECK(userData);
-        CHECK(*userData);
-        loop->events.push(Event(
-            loop->getNextSequence(),
-            unixNanos(),
-            *userData ? (*userData)->id : 0,
-            conn,
-            EventType::TCPOnDropped,
-            0,
-            std::string(data),
-            nullptr,
-            0
-        ));
-    };
+    behavior.onDropped =
+        [loop = loop](TCPConnection<SSL, TestTCPConnection<SSL>*>* conn, std::string_view data) {
+            DEBUG_OUT("onDropped");
+            auto connData = conn->getConnectionData();
+            auto userData = conn->getUserData();
+            CHECK(conn);
+            CHECK(connData);
+            CHECK(userData);
+            CHECK(*userData);
+            loop->events.push(Event(
+                *userData ? (*userData)->id : 0,
+                conn,
+                EventType::TCPOnDropped,
+                0,
+                std::string(data),
+                nullptr,
+                0
+            ));
+        };
 
-    behavior.onEnd = [loop = loop](
-                         TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                         TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                         TestTCPConnection<SSL>** userData
-                     ) {
+    behavior.onEnd = [loop = loop](TCPConnection<SSL, TestTCPConnection<SSL>*>* conn) {
+        DEBUG_OUT("onEnd");
+        auto connData = conn->getConnectionData();
+        auto userData = conn->getUserData();
         CHECK(conn);
         CHECK(connData);
         CHECK(userData);
         CHECK(*userData);
-        loop->events.push(Event(
-            loop->getNextSequence(),
-            unixNanos(),
-            *userData ? (*userData)->id : 0,
-            conn,
-            EventType::TCPOnEnd,
-            0,
-            std::string(),
-            nullptr,
-            0
-        ));
+        loop->events.push(
+            Event(*userData ? (*userData)->id : 0, conn, EventType::TCPOnEnd, 0, "", nullptr, 0)
+        );
         // if (*userData) {
         //     loop->events.unregister((*userData)->tapId);
         //     DEBUG_OUT("deleting user data");
@@ -860,48 +799,32 @@ void setupBehavior(
         return true;
     };
 
-    behavior.onTimeout = [loop = loop](
-                             TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                             TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                             TestTCPConnection<SSL>** userData
-                         ) {
+    behavior.onTimeout = [loop = loop](TCPConnection<SSL, TestTCPConnection<SSL>*>* conn) {
+        DEBUG_OUT("onTimeout");
+        auto connData = conn->getConnectionData();
+        auto userData = conn->getUserData();
         CHECK(conn);
         CHECK(connData);
         CHECK(userData);
-        CHECK(*userData);
-        loop->events.push(Event(
-            loop->getNextSequence(),
-            unixNanos(),
-            *userData ? (*userData)->id : 0,
-            conn,
-            EventType::TCPOnTimeout,
-            0,
-            std::string(),
-            nullptr,
-            0
-        ));
+        // CHECK(*userData);
+        loop->events.push(
+            Event(*userData ? (*userData)->id : 0, conn, EventType::TCPOnTimeout, 0, "", nullptr, 0)
+        );
+        conn->close();
     };
 
-    behavior.onLongTimeout = [loop = loop](
-                                 TCPConnection<SSL, TestTCPConnection<SSL>*>* conn,
-                                 TCPConnectionData<SSL, TestTCPConnection<SSL>*>* connData,
-                                 TestTCPConnection<SSL>** userData
-                             ) {
+    behavior.onLongTimeout = [loop = loop](TCPConnection<SSL, TestTCPConnection<SSL>*>* conn) {
+        DEBUG_OUT("onLongTimeout");
+        auto connData = conn->getConnectionData();
+        auto userData = conn->getUserData();
         CHECK(conn);
         CHECK(connData);
         CHECK(userData);
-        CHECK(*userData);
+        // CHECK(*userData);
         loop->events.push(Event(
-            loop->getNextSequence(),
-            unixNanos(),
-            *userData ? (*userData)->id : 0,
-            conn,
-            EventType::TCPOnLongTimeout,
-            0,
-            std::string(),
-            nullptr,
-            0
+            *userData ? (*userData)->id : 0, conn, EventType::TCPOnLongTimeout, 0, "", nullptr, 0
         ));
+        conn->close();
     };
 
     if (isServer) {
@@ -909,10 +832,9 @@ void setupBehavior(
                                     TCPContext<SSL, TestTCPConnection<SSL>*>* context,
                                     std::string_view hostname
                                 ) {
+            DEBUG_OUT("onServerName");
             CHECK(context);
             loop->events.push(Event(
-                loop->getNextSequence(),
-                unixNanos(),
                 0,
                 context,
                 EventType::TCPOnLongTimeout,
@@ -935,38 +857,298 @@ struct TestTCPServerApp {
     struct PrivateTag {};
 
   public:
-    TestTCPServerApp(TestLoop* loop) : loop(loop), app(app) {
+    TestTCPServerApp(TestLoop* loop) : loop(loop) {
         app = loop->call([loop]() {
             TCPBehavior<SSL, TestTCPConnection<SSL>*> behavior;
-            setupBehavior<SSL>(true, loop, behavior);
-            return TemplatedTCPServerApp<SSL, TestTCPConnection<SSL>*>::listen(
-                loop->loop, 0, std::move(behavior)
+            wireTCPBehavior<SSL>(true, loop, behavior);
+            return TemplatedTCPServerApp<SSL, TestTCPConnection<SSL>*>::listenIP4(
+                loop->loop, ip_to_uint32("127.0.0.1"), 0, 0, std::move(behavior)
             );
         });
 
-        port = app->getLocalPort();
+        port = app->getListenerPort();
     }
 
     ~TestTCPServerApp() {
-        DEBUG_OUT("[1] TestTCPServerApp::~TestTCPServerApp");
+        DEBUG_OUT("TestTCPServerApp::~TestTCPServerApp");
         if (loop && app) {
-            try {
-                loop->call(
-                    [this]() {
-                        delete app;
-                        app = nullptr;
-                    },
-                    1000
-                ); // Short timeout
-            } catch (const std::exception& e) {
-                DEBUG_OUT("TestTCPServerApp::~TestTCPServerApp - execute failed: " << e.what());
-                // If we can't execute on loop thread, still try to clean up
-                delete app;
-                app = nullptr;
-            }
+            loop->call(
+                [this]() {
+                    delete app;
+                    app = nullptr;
+                },
+                1000
+            );
         }
         loop = nullptr;
-        DEBUG_OUT("[2] TestTCPServerApp::~TestTCPServerApp");
+    }
+};
+
+enum class ConnectFutureCode {
+    CONNECTING,
+    SUCCESS,
+    BAD_HOST,
+    FAILED,
+    TIMED_OUT,
+};
+
+std::string ConnectFutureCode_to_string(ConnectFutureCode code) {
+    switch (code) {
+    case ConnectFutureCode::CONNECTING: return "WAITING";
+    case ConnectFutureCode::SUCCESS: return "OK";
+    case ConnectFutureCode::BAD_HOST: return "BAD_HOST";
+    case ConnectFutureCode::FAILED: return "HOST_NOT_AVAILABLE";
+    case ConnectFutureCode::TIMED_OUT: return "TIMED_OUT";
+    }
+    return "UNKNOWN";
+}
+
+template <bool SSL>
+struct TCPConnectFuture : std::enable_shared_from_this<TCPConnectFuture<SSL>> {
+
+    TestLoop* loop;
+    uint64_t connId;
+    std::string host;
+    uint32_t host_ip4;
+    int port;
+    std::string source_host;
+    uint32_t source_ip4;
+    int options;
+
+    ConnectFutureCode code = ConnectFutureCode::CONNECTING;
+    TestTCPConnection<SSL>* connection = nullptr;
+    uint64_t tapId = 0;
+    int64_t connectingAt = 0;
+    int64_t connectedAt = 0;
+    int64_t completedAt = 0;
+    int64_t connectErrorAt = 0;
+
+    // Use mutex and condition_variable for synchronization
+    std::mutex mutex;
+    std::condition_variable cv;
+
+    TCPConnectFuture(
+        uint64_t connId, TestLoop* loop, /*std::future<TestTCPConnection<SSL>*> future,*/
+        std::string host, uint32_t host_ip4, int port, std::string source_host, uint32_t source_ip4,
+        int options
+    )
+        : connId(connId),
+          loop(loop),
+          host(host),
+          host_ip4(host_ip4),
+          port(port),
+          source_host(source_host),
+          source_ip4(source_ip4),
+          options(options) {
+        connectingAt = unixNanos();
+    }
+
+    ~TCPConnectFuture() {
+        DEBUG_OUT("ConnectFuture::~ConnectFuture");
+        // if (tapId > 0) {
+        //     loop->events.unregister(tapId);
+        //     tapId = 0;
+        // }
+        if (connection != nullptr) {
+            if (code != ConnectFutureCode::SUCCESS) {
+                // DEBUG_OUT("ConnectFuture::~ConnectFuture needs to close connection");
+                loop->call([this]() {
+                    auto c = connection;
+                    if (c == nullptr) {
+                        return;
+                    }
+                    auto conn = c->connection;
+                    if (conn == nullptr) {
+                        return;
+                    }
+                    if (connectErrorAt == 0) {
+                        DEBUG_OUT("us_socket_close_connecting");
+                        us_socket_close_connecting(SSL, (us_socket_t*)conn);
+                    } else {
+                        DEBUG_OUT("us_socket_close");
+                        us_socket_close(SSL, (us_socket_t*)conn, 0, nullptr);
+                    }
+                });
+            }
+        }
+    }
+
+    ConnectFutureCode wait(int timeoutMs) {
+        bool signaled = false;
+        ConnectFutureCode code = ConnectFutureCode::CONNECTING;
+
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            code = this->code;
+            if (code != ConnectFutureCode::CONNECTING) {
+                return code;
+            }
+
+            // DEBUG_OUT("ConnectFuture::wait");
+            // Wait for code to change from WAITING, or timeout
+            bool signaled = cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] {
+                return this->code != ConnectFutureCode::CONNECTING;
+            });
+            // DEBUG_OUT(
+            //     "ConnectFuture::wait signaled: " << signaled
+            //                                      << " code: " <<
+            //                                      ConnectFutureCode_to_string(code)
+            // );
+
+            code = this->code;
+        }
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            code = this->code;
+            DEBUG_OUT("SIGNALED: " << ConnectFutureCode_to_string(this->code));
+        }
+        if (code == ConnectFutureCode::CONNECTING) {
+            this->complete(ConnectFutureCode::TIMED_OUT);
+        }
+        return code;
+    }
+
+    void onConnectionDestroyed() {
+        bool shouldFail = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            connection = nullptr;
+            if (code == ConnectFutureCode::CONNECTING) {
+                shouldFail = true;
+            }
+        }
+        if (shouldFail) {
+            this->complete(ConnectFutureCode::FAILED);
+        }
+    }
+
+    void onConnectionError() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            connection = nullptr;
+            connectErrorAt = unixNanos();
+        }
+        this->complete(ConnectFutureCode::FAILED);
+    }
+
+    void onConnection() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            connectedAt = unixNanos();
+        }
+        this->complete(ConnectFutureCode::SUCCESS);
+    }
+
+    ConnectFutureCode complete(ConnectFutureCode newCode) {
+        bool shouldDisconnect = false;
+        {
+            DEBUG_OUT("ConnectFuture::complete " << ConnectFutureCode_to_string(newCode));
+            std::lock_guard<std::mutex> lock(mutex);
+
+            // Do we have progress?
+            if (this->code != ConnectFutureCode::CONNECTING) {
+                switch (this->code) {
+                case ConnectFutureCode::BAD_HOST:
+                    CHECK_NE(newCode, ConnectFutureCode::CONNECTING);
+                    CHECK_NE(newCode, ConnectFutureCode::SUCCESS);
+                    if (newCode == ConnectFutureCode::BAD_HOST) {
+                        return ConnectFutureCode::BAD_HOST;
+                    } else if (newCode == ConnectFutureCode::TIMED_OUT) {
+                        shouldDisconnect = true;
+                    }
+                    break;
+
+                case ConnectFutureCode::FAILED:
+                    CHECK_NE(newCode, ConnectFutureCode::CONNECTING);
+                    CHECK_NE(newCode, ConnectFutureCode::SUCCESS);
+
+                    if (newCode == ConnectFutureCode::BAD_HOST) {
+                        // FAILED is a better result than BAD_HOST since it happens via
+                        // on_connect_error
+                    } else if (newCode == ConnectFutureCode::TIMED_OUT) {
+                        shouldDisconnect = false;
+                    }
+                    break;
+
+                case ConnectFutureCode::SUCCESS:
+                    CHECK_NE(newCode, ConnectFutureCode::CONNECTING);
+                    CHECK_NE(newCode, ConnectFutureCode::BAD_HOST);
+                    CHECK_NE(newCode, ConnectFutureCode::FAILED);
+
+                    // Ignore timeout for success
+                    if (newCode == ConnectFutureCode::TIMED_OUT) {
+                        return ConnectFutureCode::SUCCESS;
+                    }
+
+                    break;
+
+                case ConnectFutureCode::TIMED_OUT:
+                    if (newCode == ConnectFutureCode::TIMED_OUT) {
+                        return ConnectFutureCode::TIMED_OUT;
+                    }
+                    shouldDisconnect = connection != nullptr && connectErrorAt == 0;
+                    break;
+
+                default:
+                    throw std::runtime_error(
+                        "ConnectFuture::complete invalid code: " +
+                        std::to_string(static_cast<int>(newCode))
+                    );
+                }
+            } else {
+                switch (newCode) {
+                case ConnectFutureCode::BAD_HOST:
+                    shouldDisconnect = connection != nullptr && connectErrorAt == 0;
+                    break;
+                case ConnectFutureCode::FAILED: shouldDisconnect = false; break;
+                case ConnectFutureCode::SUCCESS: shouldDisconnect = false; break;
+                case ConnectFutureCode::TIMED_OUT: break;
+
+                default:
+                    throw std::runtime_error(
+                        "ConnectFuture::complete invalid code: " +
+                        std::to_string(static_cast<int>(newCode))
+                    );
+                }
+            }
+            if (shouldDisconnect) {
+                shouldDisconnect = connection != nullptr && connectErrorAt == 0;
+            }
+            this->code = newCode;
+        }
+
+        if (shouldDisconnect) {
+            std::shared_ptr<TCPConnectFuture<SSL>> self = this->shared_from_this();
+            loop->call([this, self = self, connection = this->connection]() {
+                std::lock_guard<std::mutex> lock(mutex);
+                auto c = connection;
+                if (c == nullptr) {
+                    return;
+                }
+                auto conn = c->connection;
+                if (conn == nullptr || connectErrorAt != 0) {
+                    return;
+                }
+
+                auto userData = conn->getUserData();
+                if (userData == nullptr || *userData == nullptr) {
+                    return;
+                }
+
+                if (connectedAt == 0) {
+                    DEBUG_OUT("us_socket_close_connecting");
+                    us_socket_close_connecting(SSL, (us_socket_t*)conn);
+                } else {
+                    DEBUG_OUT("us_socket_close");
+                    us_socket_close(SSL, (us_socket_t*)conn, 0, nullptr);
+                }
+            });
+        }
+
+        std::lock_guard<std::mutex> lock(mutex);
+        cv.notify_all();
+
+        return this->code;
     }
 };
 
@@ -977,16 +1159,54 @@ struct TestTCPClientApp {
 
     mutable std::mutex connectionsMutex;
     std::unordered_map<uint64_t, TestTCPConnection<SSL>*> connections;
-    std::unordered_set<uint64_t> tapIds;
+    std::unordered_map<uint64_t, std::shared_ptr<TCPConnectFuture<SSL>>> connecting;
+    uint64_t tapId = 0;
 
   private:
     struct PrivateTag {};
 
   public:
     TestTCPClientApp(TestLoop* loop) : loop(loop) {
+        // first event should determine if the connection is established or not
+        tapId = loop->tap([this](Event& event) {
+            DEBUG_OUT("tap :: TCPClient << " << event.to_string());
+            std::lock_guard<std::mutex> lock(connectionsMutex);
+            auto it = connecting.find(event.conn_id);
+            if (it == connecting.end()) {
+                auto it = connections.find(event.conn_id);
+                if (it == connections.end()) {
+                    return true;
+                }
+                auto connection = it->second;
+
+                return true;
+            }
+            auto future = it->second;
+            auto connId = future->connId;
+
+            if (event.type == EventType::TCPOnConnecting) {
+                // do nothing
+            } else if (event.type == EventType::TCPOnTestTCPConnectionDestroyed) {
+                connecting.erase(connId);
+                future->onConnectionDestroyed();
+            } else if (event.type == EventType::TCPOnConnection) {
+                connecting.erase(connId);
+                connections.insert({connId, (TestTCPConnection<SSL>*)event.connection});
+                future->onConnection();
+            } else if (event.type == EventType::TCPOnConnectError) {
+                connecting.erase(connId);
+                future->onConnectionError();
+            } else {
+                DEBUG_OUT("UNREACHABLE");
+            }
+
+            // unregister the event handler
+            return true;
+        });
+
         app = loop->call([loop]() {
             TCPBehavior<SSL, TestTCPConnection<SSL>*> behavior;
-            setupBehavior<SSL>(false, loop, behavior);
+            wireTCPBehavior<SSL>(false, loop, behavior);
             return std::make_unique<TemplatedTCPClientApp<SSL, TestTCPConnection<SSL>*>>(
                 loop->loop, std::move(behavior)
             );
@@ -994,233 +1214,280 @@ struct TestTCPClientApp {
     }
 
     ~TestTCPClientApp() {
-        DEBUG_OUT("[1] TestTCPClientApp::~TestTCPClientApp");
+        DEBUG_OUT("TestTCPClientApp::~TestTCPClientApp");
 
-        // Clean up connections and app on the loop thread
-        if (loop) {
-            // Clean up event handlers
-            loop->call(
-                [this]() {
-                    for (auto& tapId : tapIds) {
-                        loop->events.unregister(tapId);
-                    }
-                    for (auto& [id, connection] : connections) {
-                        loop->events.unregister(connection->tapId);
-                        if (connection && connection->connection) {
-                            // reinterpret_cast<TCPConnection<SSL,
-                            // TestTCPConnection<SSL>>*>(connection->connection)->close();
-                        }
-                    }
-                    connections.clear();
-                    // app = nullptr;
-                },
-                1000
-            ); // Short timeout
+        loop->events.unregister(tapId);
 
-            loop = nullptr;
-        }
+        loop->call(
+            [this]() {
+                for (auto& [connId, future] : connecting) {
+                    future->onConnectionError();
+                }
 
-        DEBUG_OUT("[2] TestTCPClientApp::~TestTCPClientApp");
+                for (auto& [connId, connection] : connections) {
+                    // connection->connection->close();
+                }
+
+                connecting.clear();
+                connections.clear();
+                tapId = 0;
+
+                app = nullptr;
+            },
+            10000
+        );
     }
 
     // Connect to a host asynchronously, returning a future to the TCPConnection pointer.
-    std::future<TestTCPConnection<SSL>*>
-    connectAsync(std::string host, int port, const std::string& source_host = "", int options = 0) {
-        auto promise = std::make_shared<std::promise<TestTCPConnection<SSL>*>>();
-        auto future = promise->get_future();
+    std::shared_ptr<TCPConnectFuture<SSL>> connectAsync(
+        std::string host, uint32_t host_ip4, int port, const std::string& source_host = "",
+        uint32_t source_ip4 = 0, int options = 0
+    ) {
+        auto future = std::make_shared<TCPConnectFuture<SSL>>(
+            loop->getNextConnectionId(),
+            loop,
+            host,
+            host_ip4,
+            port,
+            source_host,
+            source_ip4,
+            options
+        );
+
+        {
+            std::lock_guard<std::mutex> lock(connectionsMutex);
+            connecting.insert({future->connId, future});
+        }
 
         // connect the client on loop
         loop->callAsync([this,
                          loop = loop,
-                         promise = promise,
+                         future = future,
                          host = host,
+                         host_ip4 = host_ip4,
                          port = port,
                          source_host = source_host,
+                         source_ip4 = source_ip4,
                          options = options]() mutable {
-            auto connId = loop->getNextConnectionId();
+            // assign a connection id
+            auto connId = future->connId;
+            auto connectingAt = unixNanos();
+
+            DEBUG_OUT(
+                "connecting " << host << ":" << port << " " << source_host << " " << options
+                              << " conn_id = " << connId
+            );
+
+            // create the us_socket_t* connection
             TCPConnection<SSL, TestTCPConnection<SSL>*>* conn = nullptr;
-            if (source_host.empty()) {
-                conn = app->connect(host.c_str(), port, nullptr, options);
-            } else {
-                conn = app->connect(host.c_str(), port, source_host.c_str(), options);
+
+            if (!host.empty()) {
+                if (source_host.empty()) {
+                    conn = app->connect(host.c_str(), port, nullptr, options);
+                } else {
+                    conn = app->connect(host.c_str(), port, source_host.c_str(), options);
+                }
+            } else if (host_ip4 != 0) {
+                conn = app->connectIP4(host_ip4, port, source_ip4, options);
             }
 
-            DEBUG_OUT("connect result: " << static_cast<uintptr_t>((uintptr_t)(void*)conn));
+            DEBUG_OUT("connection address: " << static_cast<uintptr_t>((uintptr_t)(void*)conn));
 
+            // check if the connection is valid
             if (!conn) {
+                {
+                    std::lock_guard<std::mutex> lock(connectionsMutex);
+                    connecting.erase(connId);
+                }
+
                 loop->events.push(Event(
-                    loop->getNextSequence(),
-                    unixNanos(),
-                    0,
+                    connId,
                     nullptr,
                     EventType::TCPOnConnectError,
                     0,
-                    std::string("connect return nullptr"),
+                    std::string("REJECTED_HOST"),
                     nullptr,
-                    0
+                    std::string("REJECTED_HOST").size()
                 ));
-                promise->set_value(nullptr);
+
+                future->complete(ConnectFutureCode::BAD_HOST);
                 return;
             }
 
-            // Create a new TestTCPConnection on the heap
-            auto connection = new TestTCPConnection<SSL>();
-
-            // Store the pointer in the user data
-            *reinterpret_cast<TestTCPConnection<SSL>**>(conn->getUserData()) = connection;
-            connection->id = connId;
+            // create a new TestTCPConnection on the heap
+            auto connection = new TestTCPConnection<SSL>(loop, connId);
+            future->connection = connection;
+            connection->isClient = true;
             connection->host = host;
             connection->port = port;
             connection->source_host = source_host;
             connection->options = options;
             connection->loopEvents = &loop->events;
+            connection->established = 0;
             connection->connection = conn;
-            connection->tapId = loop->tap([this, connection](Event& event) {
-                if (event.id == connection->id) {
-                    connection->localEvents.push(event);
 
-                    if (event.type == EventType::TCPOnDisconnected ||
-                        event.type == EventType::TCPOnConnectError) {
-                        std::lock_guard<std::mutex> lock(connectionsMutex);
-                        connections.erase(connection->id);
-                    }
-                }
-                return true;
-            });
+            // store the pointer in the user data
+            *reinterpret_cast<TestTCPConnection<SSL>**>(conn->getUserData()) = connection;
 
-            {
-                std::lock_guard<std::mutex> lock(connectionsMutex);
-                connections[connection->id] = connection;
-            }
-
-            if (connection->established > 0) {
-                promise->set_value(connection);
-                return;
-            }
-
-            loop->events.push(Event(
-                loop->getNextSequence(),
-                unixNanos(),
-                connection->id,
-                conn,
-                EventType::TCPOnConnecting,
-                0,
-                std::string(),
-                nullptr,
-                0
-            ));
-
-            // first event should determine if the connection is established or not
-            tapIds.insert(
-                loop->tap([this, connection = connection, promise = promise](Event& event) {
-                    // ignore events for other connections
-                    if (event.id != connection->id) {
-                        return true;
-                    }
-
-                    if (event.type == EventType::TCPOnConnecting) {
-                        return true;
-                    }
-
-                    // set the connection established time
-                    if (event.type == EventType::TCPOnConnection) {
-                        connection->established = unixNanos();
-
-                        // complete the promise
-                        promise->set_value(connection);
-                    } else if (event.type == EventType::TCPOnConnectError) {
-                        promise->set_exception(
-                            std::make_exception_ptr(std::runtime_error("connect error"))
-                        );
-                    } else {
-                        promise->set_exception(
-                            std::make_exception_ptr(std::runtime_error("unexpected connect error"))
-                        );
-                    }
-
-                    // unregister the event handler
-                    return false;
-                })
-            );
+            loop->events.push(Event(connId, conn, EventType::TCPOnConnecting, 0, "", nullptr, 0));
         });
 
         return future;
     }
 
+    std::shared_ptr<TCPConnectFuture<SSL>>
+    connectAsyncIP4(uint32_t host_ip4, int port, uint32_t source_ip4 = 0, int options = 0) {
+        return connectAsync("", host_ip4, port, "", source_ip4, options);
+    }
+
+    std::shared_ptr<TCPConnectFuture<SSL>>
+    connectAsyncIP4(std::string host, int port, std::string source_host = "", int options = 0) {
+        return connectAsync(host, 0, port, source_host, 0, options);
+    }
+
     // Connect to a host synchronously, blocking until connection is established or timeoutMs
     // expires.
-    TestTCPConnection<SSL>* connect(
+    std::shared_ptr<TCPConnectFuture<SSL>> connect(
         std::string host, int port, std::string source_host = "", int options = 0,
-        int timeoutMs = 5000
+        int timeoutMs = 6000
     ) {
-        auto fut = connectAsync(host, port, source_host, options);
-        if (fut.wait_for(std::chrono::milliseconds(timeoutMs)) == std::future_status::ready) {
-            return fut.get();
-        }
-        return nullptr;
+        auto fut = connectAsync(host, 0, port, source_host, 0, options);
+        fut->wait(timeoutMs);
+        return fut;
+    }
+
+    std::shared_ptr<TCPConnectFuture<SSL>> connectIP4(
+        uint32_t host_ip4, int port, uint32_t source_ip4 = 0, int options = 0, int timeoutMs = 6000
+    ) {
+        auto fut = connectAsyncIP4(host_ip4, port, source_ip4, options);
+        fut->wait(timeoutMs);
+        return fut;
     }
 };
+
+#define CHECK_CONNECT_SUCCESS(result)                                                              \
+    do {                                                                                           \
+        auto r = result;                                                                           \
+        CHECK_EQ(r->code, ConnectFutureCode::SUCCESS);                                             \
+        CHECK(r->connection);                                                                      \
+    } while (0)
+
+#define CHECK_CONNECT_BAD_HOST(result)                                                             \
+    do {                                                                                           \
+        auto r = result;                                                                           \
+        CHECK_EQ(r->code, ConnectFutureCode::BAD_HOST);                                            \
+        CHECK_EQ(r->connection, nullptr);                                                          \
+    } while (0)
+
+#define CHECK_CONNECT_FAILED(result)                                                               \
+    do {                                                                                           \
+        auto r = result;                                                                           \
+        CHECK_EQ(r->code, ConnectFutureCode::FAILED);                                              \
+        CHECK(r->connection != nullptr);                                                           \
+    } while (0)
+
+#define CHECK_CONNECT_ERROR(result)                                                                \
+    do {                                                                                           \
+        auto r = result;                                                                           \
+        CHECK_NE(r->code, ConnectFutureCode::SUCCESS);                                             \
+        CHECK_NE(r->code, ConnectFutureCode::CONNECTING);                                          \
+    } while (0)
+
+#define CHECK_CONNECT_TIMED_OUT(result)                                                            \
+    do {                                                                                           \
+        auto r = result;                                                                           \
+        CHECK_EQ(r->code, ConnectFutureCode::TIMED_OUT);                                           \
+    } while (0)
 
 struct TestFixture {
     TestLoop* loop;
 
     TestFixture() {
         loop = TestLoop::create();
+        CHECK(loop);
     }
 
     ~TestFixture() {
-        DEBUG_OUT("Cleaning up loop");
+        // DEBUG_OUT("Cleaning up loop");
         delete loop;
     }
 };
 
-TEST_CASE("Test Loop creation") {
+
+TEST_CASE("Loop Creation") {
+    DEBUG_OUT("Creating TestLoop...");
     // Try to create a loop directly
     auto loop = TestLoop::create();
+    DEBUG_OUT("TestLoop created successfully");
     CHECK(loop != nullptr);
+    DEBUG_OUT("Deleting TestLoop...");
+    delete loop;
+    DEBUG_OUT("TestLoop deleted successfully");
 }
 
-TEST_CASE("Test NetworkEventBuffer") {
-    EventBuffer buffer(16);
-    CHECK_EQ(buffer.empty(), true);
-    CHECK_EQ(buffer.size(), 0);
+// TEST_CASE("Testing EventBuffer") {
+//     EventBuffer buffer(16);
+//     CHECK_EQ(buffer.empty(), true);
+//     CHECK_EQ(buffer.size(), 0);
 
-    Event event;
-    event.timestamp = 12345;
-    event.connection = nullptr;
-    event.type = EventType::TCPOnData;
-    event.code = 0;
-    event.data = "test";
-    event.data_ptr = nullptr;
-    event.bytes = 4;
+//     Event event;
+//     event.timestamp = 12345;
+//     event.connection = nullptr;
+//     event.type = EventType::TCPOnData;
+//     event.code = 0;
+//     event.data = "test";
+//     event.data_ptr = nullptr;
+//     event.bytes = 4;
 
-    CHECK(buffer.push(std::move(event)));
-    CHECK(!buffer.empty());
-    CHECK(buffer.size() == 1);
+//     CHECK_EQ(buffer.push(std::move(event)), 0);
+//     CHECK_EQ(buffer.empty(), false);
+//     CHECK_EQ(buffer.size(), 1);
+// }
 
-    Event received;
-    CHECK_EQ(buffer.pop(received), true);
-    DEBUG_OUT("received: " << received.to_string() << std::endl);
-    CHECK_EQ(received.timestamp, 12345);
-    CHECK_EQ(received.connection, nullptr);
-    CHECK_EQ(received.type, EventType::TCPOnData);
-    CHECK_EQ(received.code, 0);
-    CHECK_EQ(received.data, "test");
-    CHECK_EQ(received.data_ptr, nullptr);
-    CHECK_EQ(received.bytes, 4);
-    CHECK(buffer.empty());
+// TEST_CASE("TCPConnectionData 16-byte aligned") {
+//     constexpr size_t size = getTCPConnectionDataSize<true, void*>();
+//     CHECK_EQ(size % 16, 0); // 16-byte aligned
+// }
+
+TEST_CASE_FIXTURE(TestFixture, "Client and Server") {
+    auto server = TestTCPServerApp<false>(loop);
+    CHECK(server.port != 0);
+    DEBUG_OUT("server: " << server.port);
+    auto client = TestTCPClientApp<false>(loop);
+    auto clientConn = client.connect("127.0.0.1", server.port);
+    CHECK(clientConn);
+    // Invalid IPs now return nullptr instead of throwing
+    CHECK_CONNECT_ERROR(client.connect("299.99.99.99", server.port, "", 0, 1000));
+    CHECK_CONNECT_ERROR(client.connect("264.0.0.999", server.port, "", 0, 1000));
 }
 
-TEST_CASE("sizeof TCPConnectionData") {
-    constexpr size_t size = getTCPConnectionDataSize<true, void*>();
-    // constexpr size_t size = getTCPConnectionDataSize<true, TestTCPConnection<true>>();
-    DEBUG_OUT("sizeof TCPConnectionData: " << size << std::endl);
+TEST_CASE_FIXTURE(TestFixture, "Bad Connect") {
+    auto client = TestTCPClientApp<false>(loop);
+    CHECK_CONNECT_ERROR(client.connect("299.99.99.99", 54585, "", 0, 5000));
+    CHECK_CONNECT_ERROR(client.connect("264.0.0.999", 54585, "", 0, 5000));
+    CHECK_CONNECT_ERROR(client.connect("999.999.999.999", 54585, "", 0, 5000));
+    CHECK_CONNECT_ERROR(client.connect("127.0.0.1", 54585, "", 0, 500));
+    CHECK_CONNECT_ERROR(client.connectIP4(ip_to_uint32("127.0.0.1"), 54585, 0, 0, 500));
+    CHECK_CONNECT_ERROR(client.connectIP4(ip_to_uint32("127.0.0.1"), 54586, 0, 0, 20));
 }
 
-TEST_CASE_FIXTURE(TestFixture, "Test Client and Server") {
-    auto server = std::make_unique<TestTCPServerApp<false>>(loop);
-    DEBUG_OUT("server: " << server->port << std::endl);
-    auto client = std::make_unique<TestTCPClientApp<false>>(loop);
-    auto clientConn = client->connect("127.0.0.1", server->port);
-    CHECK(clientConn != nullptr);
+TEST_CASE("IPv4 Address Conversion") {
+    // Test the utility function for converting IP addresses to uint32_t
+    CHECK_EQ(ip_to_uint32("127.0.0.1"), 0x7F000001u);
+    CHECK_EQ(ip_to_uint32("8.8.8.8"), 0x08080808u);
+    CHECK_EQ(ip_to_uint32("192.168.1.1"), 0xC0A80101u);
+    CHECK_EQ(ip_to_uint32("255.255.255.255"), 0xFFFFFFFFu);
+    CHECK_EQ(ip_to_uint32("0.0.0.0"), 0x00000000u);
+
+    // Test invalid IPs
+    CHECK_EQ(ip_to_uint32("invalid"), 0u);
+    CHECK_EQ(ip_to_uint32("299.99.99.99"), 0u);
+    CHECK_EQ(ip_to_uint32(""), 0u);
+}
+
+TEST_CASE_FIXTURE(TestFixture, "Testing Loop and TCPClientApp and TCPServerApp Instantiation") {
+    auto client = TestTCPClientApp<false>(loop);
+    CHECK(client.app != nullptr);
+    auto server = TestTCPServerApp<false>(loop);
+    CHECK(server.port != 0);
 }

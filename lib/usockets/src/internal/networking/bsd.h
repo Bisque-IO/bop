@@ -25,6 +25,8 @@
 
 #include "libusockets.h"
 
+#include <stdint.h>
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -92,10 +94,15 @@ int bsd_recv(LIBUS_SOCKET_DESCRIPTOR fd, void *buf, int length, int flags);
 int bsd_send(LIBUS_SOCKET_DESCRIPTOR fd, const char *buf, int length, int msg_more);
 int bsd_write2(LIBUS_SOCKET_DESCRIPTOR fd, const char *header, int header_length, const char *payload, int payload_length);
 int bsd_would_block();
+int bsd_socket_has_error(LIBUS_SOCKET_DESCRIPTOR fd);
 
 // return LIBUS_SOCKET_ERROR or the fd that represents listen socket
 // listen both on ipv6 and ipv4
 LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket(const char *host, int port, int options);
+
+/* IPv4-only listen socket where host is a uint32_t IPv4 address (host order).
+ * If host is 0 (0.0.0.0), listens on all interfaces. */
+LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket_ip4(uint32_t host, int port, int options);
 
 LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket_unix(const char *path, int options);
 
@@ -103,6 +110,8 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket_unix(const char *path, int opti
 LIBUS_SOCKET_DESCRIPTOR bsd_create_udp_socket(const char *host, int port);
 
 LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket(const char *host, int port, const char *source_host, int options);
+
+LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket_ip4(uint32_t addr_ip4, int port, uint32_t source_ip4, int options);
 
 LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket_unix(const char *server_path, int options);
 

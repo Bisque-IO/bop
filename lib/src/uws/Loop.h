@@ -21,6 +21,7 @@
 /* The loop is lazily created per-thread and run with run() */
 
 #include "LoopData.h"
+
 #include <libusockets.h>
 #include <atomic>
 #include <iostream>
@@ -263,6 +264,11 @@ public:
                 loopData->keepAliveTimer = nullptr;
             }
         }
+    }
+    
+    /* Check if keep-alive poll is active */
+    bool isKeepAliveActive() {
+        return this->keepAliveRefCount() > 0;
     }
     
     int keepAliveRefCount() const {

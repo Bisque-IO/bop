@@ -18,6 +18,8 @@
 #ifndef LIBUSOCKETS_H
 #define LIBUSOCKETS_H
 
+#include <stdint.h>
+
 /* 512kb shared receive buffer */
 #define LIBUS_RECV_BUFFER_LENGTH 524288
 /* A timeout granularity of 4 seconds means give or take 4 seconds from set timeout */
@@ -186,6 +188,10 @@ void us_socket_context_close(int ssl, struct us_socket_context_t *context);
 struct us_listen_socket_t *us_socket_context_listen(int ssl, struct us_socket_context_t *context,
     const char *host, int port, int options, int socket_ext_size);
 
+/* Listen for connections. Acts as the main driving cog in a server. Will call set async callbacks. */
+struct us_listen_socket_t *us_socket_context_listen_ip4(int ssl, struct us_socket_context_t *context,
+    uint32_t host, int port, int options, int socket_ext_size);
+
 struct us_listen_socket_t *us_socket_context_listen_unix(int ssl, struct us_socket_context_t *context,
     const char *path, int options, int socket_ext_size);
 
@@ -199,6 +205,10 @@ struct us_socket_t *us_adopt_accepted_socket(int ssl, struct us_socket_context_t
 /* Land in on_open or on_connection_error or return null or return socket */
 struct us_socket_t *us_socket_context_connect(int ssl, struct us_socket_context_t *context,
     const char *host, int port, const char *source_host, int options, int socket_ext_size);
+
+/* IPv4-specific variant using uint32_t addresses in host byte order (no DNS lookup required) */
+struct us_socket_t *us_socket_context_connect_ip4(int ssl, struct us_socket_context_t *context,
+    uint32_t addr_ip4, int port, uint32_t source_ip4, int options, int socket_ext_size);
 
 struct us_socket_t *us_socket_context_connect_unix(int ssl, struct us_socket_context_t *context,
     const char *server_path, int options, int socket_ext_size);

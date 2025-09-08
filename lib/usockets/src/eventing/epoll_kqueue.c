@@ -15,9 +15,15 @@
  * limitations under the License.
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "libusockets.h"
 #include "internal/internal.h"
 #include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
 
 #if defined(LIBUS_USE_EPOLL) || defined(LIBUS_USE_KQUEUE)
 

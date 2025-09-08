@@ -33,6 +33,8 @@
 /* Guaranteed alignment of extension memory */
 #define LIBUS_EXT_ALIGNMENT 16
 
+#include <stdint.h>
+
 /* Define what a socket descriptor is based on platform */
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -192,6 +194,9 @@ LIBUS_API void us_socket_context_close(int ssl, struct us_socket_context_t *cont
 LIBUS_API struct us_listen_socket_t *us_socket_context_listen(int ssl, struct us_socket_context_t *context,
     const char *host, int port, int options, int socket_ext_size);
 
+LIBUS_API struct us_listen_socket_t *us_socket_context_listen_ip4(int ssl, struct us_socket_context_t *context,
+    uint32_t host, int port, int options, int socket_ext_size);
+
 LIBUS_API struct us_listen_socket_t *us_socket_context_listen_unix(int ssl, struct us_socket_context_t *context,
     const char *path, int options, int socket_ext_size);
 
@@ -205,6 +210,10 @@ LIBUS_API struct us_socket_t *us_adopt_accepted_socket(int ssl, struct us_socket
 /* Land in on_open or on_connection_error or return null or return socket */
 LIBUS_API struct us_socket_t *us_socket_context_connect(int ssl, struct us_socket_context_t *context,
     const char *host, int port, const char *source_host, int options, int socket_ext_size);
+
+/* Land in on_open or on_connection_error or return null or return socket */
+LIBUS_API struct us_socket_t *us_socket_context_connect_ip4(int ssl, struct us_socket_context_t *context,
+    uint32_t host, int port, uint32_t source_host, int options, int socket_ext_size);
 
 LIBUS_API struct us_socket_t *us_socket_context_connect_unix(int ssl, struct us_socket_context_t *context,
     const char *server_path, int options, int socket_ext_size);

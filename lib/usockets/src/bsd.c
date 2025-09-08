@@ -17,6 +17,14 @@
 
 /* Todo: this file should lie in networking/bsd.c */
 
+/* Ensure GNU extensions (sendmmsg/recvmmsg, struct mmsghdr) are exposed
+   before any system headers are pulled in. */
+#ifndef _WIN32
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#endif
+
 #define __APPLE_USE_RFC_3542
 
 #include "libusockets.h"
@@ -36,6 +44,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <arpa/inet.h>  /* For inet_pton */
+#include <sys/uio.h>    /* For struct iovec */
 #endif
 
 /* Internal structure of packet buffer */
@@ -279,6 +289,14 @@ LIBUS_SOCKET_DESCRIPTOR apple_no_sigpipe(LIBUS_SOCKET_DESCRIPTOR fd) {
 LIBUS_SOCKET_DESCRIPTOR bsd_set_nonblocking(LIBUS_SOCKET_DESCRIPTOR fd) {
 #ifdef _WIN32
     /* Libuv will set windows sockets as non-blocking */
+    if (fd == LIBUS_SOCKET_ERROR) {
+        return fd;
+    }
+    /* Set Windows sockets as non-blocking using ioctlsocket */
+    u_long mode = 1;
+    if (ioctlsocket(fd, FIONBIO, &mode) != 0) {
+        return LIBUS_SOCKET_ERROR;
+    }
 #else
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
 #endif
@@ -463,6 +481,23 @@ int bsd_would_block() {
 #endif
 }
 
+/* Check if a socket has a connection error (Windows-specific) */
+int bsd_socket_has_error(LIBUS_SOCKET_DESCRIPTOR fd) {
+#ifdef _WIN32
+    int error = 0;
+    int len = sizeof(error);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char*)&error, &len) == 0) {
+        return error != 0;
+    }
+    
+    /* If getsockopt fails, check the last WSA error */
+    int wsa_error = WSAGetLastError();
+    return (wsa_error != WSAEWOULDBLOCK && wsa_error != 0);
+#else
+    return 0; /* Unix systems handle this through the event loop */
+#endif
+}
+
 // return LIBUS_SOCKET_ERROR or the fd that represents listen socket
 // listen both on ipv6 and ipv4
 LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket(const char *host, int port, int options) {
@@ -539,6 +574,50 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket(const char *host, int port, int
     return listenFd;
 }
 
+/* IPv4-only: create a listen socket bound to a numeric IPv4 address.
+ * host: IPv4 address in host byte order (e.g., 0x7F000001 == 127.0.0.1).
+ * If host == 0 (0.0.0.0), bind to all interfaces (INADDR_ANY). */
+LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket_ip4(uint32_t host, int port, int options) {
+    LIBUS_SOCKET_DESCRIPTOR listenFd = bsd_create_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listenFd == LIBUS_SOCKET_ERROR) {
+        return LIBUS_SOCKET_ERROR;
+    }
+
+    if (port != 0) {
+#ifdef _WIN32
+        if (options & LIBUS_LISTEN_EXCLUSIVE_PORT) {
+            int optval2 = 1;
+            setsockopt(listenFd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (void *) &optval2, sizeof(optval2));
+        } else {
+            int optval3 = 1;
+            setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (void *) &optval3, sizeof(optval3));
+        }
+#else
+    #if defined(SO_REUSEPORT)
+        if (!(options & LIBUS_LISTEN_EXCLUSIVE_PORT)) {
+            int optval = 1;
+            setsockopt(listenFd, SOL_SOCKET, SO_REUSEPORT, (void *) &optval, sizeof(optval));
+        }
+    #endif
+        int enabled = 1;
+        setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, (void *) &enabled, sizeof(enabled));
+#endif
+    }
+
+    struct sockaddr_in addr4;
+    memset(&addr4, 0, sizeof(addr4));
+    addr4.sin_family = AF_INET;
+    addr4.sin_port = htons(port);
+    addr4.sin_addr.s_addr = htonl(host); /* 0 -> INADDR_ANY */
+
+    if (bind(listenFd, (struct sockaddr *) &addr4, (socklen_t) sizeof(addr4)) || listen(listenFd, 512)) {
+        bsd_close_socket(listenFd);
+        return LIBUS_SOCKET_ERROR;
+    }
+
+    return listenFd;
+}
+
 #ifndef _WIN32
 #include <sys/un.h>
 #else
@@ -567,7 +646,11 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_listen_socket_unix(const char *path, int opti
     struct sockaddr_un server_address;
     memset(&server_address, 0, sizeof(server_address));
     server_address.sun_family = AF_UNIX;
-    strcpy(server_address.sun_path, path);
+    if (snprintf(server_address.sun_path, sizeof(server_address.sun_path), "%s", path) >= (int)sizeof(server_address.sun_path)) {
+        bsd_close_socket(listenFd);
+        return LIBUS_SOCKET_ERROR;
+    }
+    // strcpy(server_address.sun_path, path);
     int size = offsetof(struct sockaddr_un, sun_path) + strlen(server_address.sun_path);
 #ifdef _WIN32
     _unlink(path);
@@ -709,50 +792,272 @@ int bsd_udp_packet_buffer_ecn(void *msgvec, int index) {
     return 0; // no ecn defaults to 0
 }
 
-LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket(const char *host, int port, const char *source_host, int options) {
-    struct addrinfo hints, *result;
-    memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
+/* Parses a potential IPv4 address string.
+   Returns 1 if the string is a valid IPv6 address, 0 otherwise.
+   If valid, writes the address in network byte order to *out (must be at least 4 bytes). */
+int parse_ipv4(const char *host, unsigned char *out) {
+    if (!host || !out) {
+        return 0;
+    }
+    // Use inet_pton to parse IPv6 address
+    // Returns 1 on success, 0 on invalid address, -1 on error (e.g. af not supported)
+    int ret = inet_pton(AF_INET, host, out);
+    return ret == 1 ? 1 : 0;
+}
 
-    char port_string[16];
-    snprintf(port_string, 16, "%d", port);
+/* Parses a potential IPv6 address string.
+   Returns 1 if the string is a valid IPv6 address, 0 otherwise.
+   If valid, writes the address in network byte order to *out (must be at least 16 bytes). */
+int parse_ipv6(const char *host, unsigned char *out) {
+    if (!host || !out) {
+        return 0;
+    }
+    // Use inet_pton to parse IPv6 address
+    // Returns 1 on success, 0 on invalid address, -1 on error (e.g. af not supported)
+    int ret = inet_pton(AF_INET6, host, out);
+    return ret == 1 ? 1 : 0;
+}
 
-    if (getaddrinfo(host, port_string, &hints, &result) != 0) {
-        return LIBUS_SOCKET_ERROR;
+/* Helper to check if string looks like an invalid IP address */
+static int is_invalid_ip(const char *host) {
+    if (!host || !*host) {
+        /* Null or empty string is not a valid IP, let DNS handle it */
+        return 0;
     }
 
-    LIBUS_SOCKET_DESCRIPTOR fd = bsd_create_socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (fd == LIBUS_SOCKET_ERROR) {
-        freeaddrinfo(result);
-        return LIBUS_SOCKET_ERROR;
-    }
+    int dots = 0;
+    int colons = 0;
+    int digits = 0;
+    int current_num = 0;
+    int num_count = 0;
 
-    if (source_host) {
-        struct addrinfo *interface_result;
-        if (!getaddrinfo(source_host, NULL, NULL, &interface_result)) {
-            int ret = bind(fd, interface_result->ai_addr, (socklen_t) interface_result->ai_addrlen);
-            freeaddrinfo(interface_result);
-            if (ret == LIBUS_SOCKET_ERROR) {
-                bsd_close_socket(fd);
-                freeaddrinfo(result);
-                return LIBUS_SOCKET_ERROR;
+    for (const char *p = host; *p; p++) {
+        if (*p == '.') {
+            dots++;
+            if (current_num > 255 || num_count == 0 || num_count > 3) {
+                return 1; /* Invalid IPv4 octet */
             }
+            current_num = 0;
+            num_count = 0;
+        } else if (*p == ':') {
+            colons++;
+            current_num = 0;
+            num_count = 0;
+        } else if (*p >= '0' && *p <= '9') {
+            digits++;
+            current_num = current_num * 10 + (*p - '0');
+            num_count++;
+        } else if (!(colons && ((*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')))) {
+            /* Not a hex digit in IPv6 context */
+            return 0; /* Probably a hostname, let DNS handle it */
         }
     }
 
-    connect(fd, result->ai_addr, (socklen_t) result->ai_addrlen);
-    freeaddrinfo(result);
+    /* Final octet check for IPv4 */
+    if (dots == 3 && (current_num > 255 || num_count == 0 || num_count > 3)) {
+        return 1; /* Invalid IPv4 */
+    }
+
+    /* If it looks like an IP but has wrong format */
+    if (dots > 0 && dots != 3) {
+        return 1; /* Wrong number of dots for IPv4 */
+    }
+
+    /* If all digits and dots, likely an invalid IP like 999.999.999.999 */
+    if (dots == 3 && digits > 0) {
+        /* Already validated by octet checks above */
+        return 0;
+    }
+
+    return 0; /* Let DNS handle it */
+}
+
+LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket(const char *host, int port, const char *source_host, int options) {
+    struct sockaddr_in addr4;
+    memset(&addr4, 0, sizeof(addr4));
+    struct sockaddr_in6 addr6;
+    memset(&addr6, 0, sizeof(addr6));
+    struct sockaddr *addr = NULL;
+    socklen_t addrlen = 0;
+
+    struct addrinfo* result = NULL;
+
+    LIBUS_SOCKET_DESCRIPTOR fd = LIBUS_SOCKET_ERROR;
+
+    /* Try to parse as IPv4 address first to avoid blocking DNS lookup */
+    if (inet_pton(AF_INET, host, &addr4.sin_addr) == 1) {
+        addr4.sin_family = AF_INET;
+        addr4.sin_port = htons(port);
+        addr = (struct sockaddr *)&addr4;
+        addrlen = sizeof(addr4);
+        fd = bsd_create_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (fd == LIBUS_SOCKET_ERROR) {
+            return LIBUS_SOCKET_ERROR;
+        }
+    } else if (inet_pton(AF_INET6, host, &addr6.sin6_addr) == 1) {
+        addr6.sin6_family = AF_INET6;
+        addr6.sin6_port = htons(port);
+        addr = (struct sockaddr *)&addr6;
+        addrlen = sizeof(addr6);
+        fd = bsd_create_socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+        if (fd == LIBUS_SOCKET_ERROR) {
+            return LIBUS_SOCKET_ERROR;
+        }
+    } else {
+        /* Check if it looks like an invalid IP address to avoid blocking DNS */
+        if (is_invalid_ip(host)) {
+            return LIBUS_SOCKET_ERROR;
+        }
+
+        char port_string[16];
+        snprintf(port_string, 16, "%d", port);
+
+        /* Not an IP address, fall back to DNS lookup (will block) */
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(struct addrinfo));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        
+        if (getaddrinfo(host, port_string, &hints, &result) != 0) {
+            return LIBUS_SOCKET_ERROR;
+        }
+
+        fd = bsd_create_socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+        if (fd == LIBUS_SOCKET_ERROR) {
+            freeaddrinfo(result);
+            return LIBUS_SOCKET_ERROR;
+        }
+
+        addr = result->ai_addr;
+        addrlen = (socklen_t) result->ai_addrlen;
+    }
+    
+    if (source_host && *source_host != '\0') {
+        struct sockaddr_in source_addr4;
+        memset(&source_addr4, 0, sizeof(source_addr4));
+        struct sockaddr_in6 source_addr6;
+        memset(&source_addr6, 0, sizeof(source_addr6));
+        int bind_result = 0;
+
+        if (inet_pton(AF_INET, source_host, &source_addr4.sin_addr) == 1) {
+            source_addr4.sin_family = AF_INET;
+            bind_result = bind(fd, (struct sockaddr*)&source_addr4, (socklen_t) sizeof(struct sockaddr_in));
+        } else if (inet_pton(AF_INET6, source_host, &source_addr6.sin6_addr) == 1) {
+            source_addr6.sin6_family = AF_INET6;
+            bind_result = bind(fd, (struct sockaddr*)&source_addr6, (socklen_t) sizeof(struct sockaddr_in6));
+        } else {
+            /* Check if it looks like an invalid IP address to avoid blocking DNS */
+            if (is_invalid_ip(source_host)) {
+                bsd_close_socket(fd);
+                if (result) {
+                    freeaddrinfo(result);
+                    result = NULL;
+                }
+                return LIBUS_SOCKET_ERROR;
+            }
+            struct addrinfo *interface_result = NULL;
+            int getaddr_result = getaddrinfo(source_host, NULL, NULL, &interface_result);
+            if (getaddr_result != 0) {
+                bsd_close_socket(fd);
+                if (result) {
+                    freeaddrinfo(result);
+                    result = NULL;
+                }
+                return LIBUS_SOCKET_ERROR;
+            }
+            bind_result = bind(fd, interface_result->ai_addr, (socklen_t) interface_result->ai_addrlen);
+            freeaddrinfo(interface_result);
+        }
+
+        if (bind_result != 0) {
+            bsd_close_socket(fd);
+            if (result) {
+                freeaddrinfo(result);
+                result = NULL;
+            }
+            return LIBUS_SOCKET_ERROR;
+        }
+    }
+
+    /* Attempt the connection */
+    int connect_result = connect(fd, addr, addrlen);
+    if (result) {
+        freeaddrinfo(result);
+        result = NULL;
+    }
+    if (connect_result != 0) {
+#ifdef _WIN32
+        int wsa_error = WSAGetLastError();
+        if (wsa_error != WSAEWOULDBLOCK) {
+            bsd_close_socket(fd);
+            return LIBUS_SOCKET_ERROR;
+        }
+#else
+        if (errno != EINPROGRESS) {
+            bsd_close_socket(fd);
+            return LIBUS_SOCKET_ERROR;
+        }
+#endif
+    }
 
     return fd;
 }
 
-LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket_unix(const char *server_path, int options) {
+LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket_ip4(uint32_t addr_ip4, int port, uint32_t source_ip4, int options) {
+    struct sockaddr_in addr4;
+    memset(&addr4, 0, sizeof(addr4));
+    addr4.sin_family = AF_INET;
+    addr4.sin_addr.s_addr = htonl(addr_ip4);
+    addr4.sin_port = htons(port);
 
+    LIBUS_SOCKET_DESCRIPTOR fd = bsd_create_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd == LIBUS_SOCKET_ERROR) {
+        return LIBUS_SOCKET_ERROR;
+    }
+
+    if (source_ip4 != 0) {
+        struct sockaddr_in source_addr4;
+        memset(&source_addr4, 0, sizeof(source_addr4));
+        source_addr4.sin_family = AF_INET;
+        source_addr4.sin_addr.s_addr = htonl(source_ip4);
+        if (bind(fd, (struct sockaddr*)&source_addr4, (socklen_t) sizeof(struct sockaddr_in)) != 0) {
+            bsd_close_socket(fd);
+            return LIBUS_SOCKET_ERROR;
+        }
+    }
+
+    /* Attempt the connection */
+    int connect_result = connect(fd, (struct sockaddr*)&addr4, (socklen_t)sizeof(addr4));
+
+    if (connect_result != 0) {
+#ifdef _WIN32
+        int wsa_error = WSAGetLastError();
+        if (wsa_error != WSAEWOULDBLOCK) {
+            bsd_close_socket(fd);
+            return LIBUS_SOCKET_ERROR;
+        }
+#else
+        if (errno != EINPROGRESS) {
+            bsd_close_socket(fd);
+            return LIBUS_SOCKET_ERROR;
+        }
+#endif
+    }
+    
+    return fd;
+}
+
+LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket_unix(const char *server_path, int options) {
+    if (server_path == NULL || *server_path == '\0') {
+        return LIBUS_SOCKET_ERROR;
+    }
     struct sockaddr_un server_address;
     memset(&server_address, 0, sizeof(server_address));
     server_address.sun_family = AF_UNIX;
-    strcpy(server_address.sun_path, server_path);
+    if (snprintf(server_address.sun_path, sizeof(server_address.sun_path), "%s", server_path) >= (int)sizeof(server_address.sun_path)) {
+        return LIBUS_SOCKET_ERROR;
+    }
+    // strcpy(server_address.sun_path, server_path);
     int size = offsetof(struct sockaddr_un, sun_path) + strlen(server_address.sun_path);
 
     LIBUS_SOCKET_DESCRIPTOR fd = bsd_create_socket(AF_UNIX, SOCK_STREAM, 0);
@@ -761,7 +1066,22 @@ LIBUS_SOCKET_DESCRIPTOR bsd_create_connect_socket_unix(const char *server_path, 
         return LIBUS_SOCKET_ERROR;
     }
 
-    connect(fd, (struct sockaddr *)&server_address, size);
+    int connect_result = connect(fd, (struct sockaddr *)&server_address, size);
+
+    if (connect_result != 0) {
+#ifdef _WIN32
+        int wsa_error = WSAGetLastError();
+        if (wsa_error != WSAEWOULDBLOCK) {
+            bsd_close_socket(fd);
+            return LIBUS_SOCKET_ERROR;
+        }
+#else
+        if (errno != EINPROGRESS) {
+            bsd_close_socket(fd);
+            return LIBUS_SOCKET_ERROR;
+        }
+#endif
+    }
 
     return fd;
 }

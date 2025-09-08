@@ -1,5 +1,6 @@
 CompileFlags:
-  Add: 
-    - -I"C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/include"
+  Add:
+    - -I"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35213\\include"
     - -I"lib/usockets/include"
     - -std=c++23
+    - -stdlib=libc++

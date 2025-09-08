@@ -47,10 +47,10 @@
 // fail surprisingly.
 #include <stdint.h>
 
-#ifndef LIBUS_USE_IO_URING
-
 /* We have many different eventing implementations */
-#if defined(LIBUS_USE_EPOLL) || defined(LIBUS_USE_KQUEUE)
+#ifdef LIBUS_USE_IO_URING
+#include "internal/eventing/io_uring.h"
+#elif defined(LIBUS_USE_EPOLL) || defined(LIBUS_USE_KQUEUE)
 #include "internal/eventing/epoll_kqueue.h"
 #endif
 #ifdef LIBUS_USE_LIBUV
@@ -107,6 +107,7 @@ void us_internal_free_loop_ssl_data(struct us_loop_t *loop);
 void us_internal_socket_context_link_socket(struct us_socket_context_t *context, struct us_socket_t *s);
 void us_internal_socket_context_unlink_socket(struct us_socket_context_t *context, struct us_socket_t *s);
 
+#ifndef LIBUS_USE_IO_URING
 /* Sockets are polls */
 struct us_socket_t {
     LIBUS_ALIGNAS(LIBUS_EXT_ALIGNMENT) struct us_poll_t p; // 4 bytes
@@ -125,6 +126,18 @@ struct us_internal_callback_t {
     int leave_poll_ready;
     void (*cb)(struct us_internal_callback_t *cb);
 };
+#else
+/* When using io_uring, these structs are defined in io_uring.h */
+/* But we need to define us_socket_t here since it's used everywhere */
+struct us_socket_t {
+    LIBUS_ALIGNAS(LIBUS_EXT_ALIGNMENT) struct us_poll_t p; // 4 bytes
+    unsigned char timeout; // 1 byte
+    unsigned char long_timeout; // 1 byte
+    unsigned short low_prio_state; /* 0 = not in low-prio queue, 1 = is in low-prio queue, 2 = was in low-prio queue in this iteration */
+    struct us_socket_context_t *context;
+    struct us_socket_t *prev, *next;
+};
+#endif
 
 /* Listen sockets are sockets */
 struct us_listen_socket_t {
@@ -158,8 +171,6 @@ struct us_socket_context_t {
     struct us_socket_t *(*on_connect_error)(struct us_socket_t *, int code);
     int (*is_low_prio)(struct us_socket_t *);
 };
-
-#endif
 
 /* Internal SSL interface */
 #ifndef LIBUS_NO_SSL
@@ -208,6 +219,9 @@ void us_internal_ssl_socket_context_on_connect_error(struct us_internal_ssl_sock
 struct us_listen_socket_t *us_internal_ssl_socket_context_listen(struct us_internal_ssl_socket_context_t *context,
     const char *host, int port, int options, int socket_ext_size);
 
+struct us_listen_socket_t *us_internal_ssl_socket_context_listen_ip4(struct us_internal_ssl_socket_context_t *context,
+    uint32_t host, int port, int options, int socket_ext_size);
+
 struct us_listen_socket_t *us_internal_ssl_socket_context_listen_unix(struct us_internal_ssl_socket_context_t *context,
     const char *path, int options, int socket_ext_size);
 
@@ -216,6 +230,9 @@ struct us_internal_ssl_socket_t *us_internal_ssl_adopt_accepted_socket(struct us
 
 struct us_internal_ssl_socket_t *us_internal_ssl_socket_context_connect(struct us_internal_ssl_socket_context_t *context,
     const char *host, int port, const char *source_host, int options, int socket_ext_size);
+
+struct us_internal_ssl_socket_t *us_internal_ssl_socket_context_connect_ip4(struct us_internal_ssl_socket_context_t *context,
+    uint32_t host_ip4, int port, uint32_t source_ip4, int options, int socket_ext_size);
 
     
 struct us_internal_ssl_socket_t *us_internal_ssl_socket_context_connect_unix(struct us_internal_ssl_socket_context_t *context,
@@ -235,6 +252,6 @@ struct us_internal_ssl_socket_t *us_internal_ssl_socket_context_adopt_socket(str
 struct us_internal_ssl_socket_context_t *us_internal_create_child_ssl_socket_context(struct us_internal_ssl_socket_context_t *context, int context_ext_size);
 struct us_loop_t *us_internal_ssl_socket_context_loop(struct us_internal_ssl_socket_context_t *context);
 
-#endif
+#endif // LIBUS_NO_SSL
 
 #endif // INTERNAL_H

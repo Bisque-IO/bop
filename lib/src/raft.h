@@ -10,6 +10,7 @@ extern "C" {
 
 #include <inttypes.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 ////////////////////////////////////////////////////////////////
 //
@@ -20,20 +21,20 @@ extern "C" {
 struct bop_raft_buffer_ptr;
 struct bop_raft_buffer;
 
-BOP_API bop_raft_buffer *bop_raft_buffer_new(const size_t size);
+BOP_API struct bop_raft_buffer *bop_raft_buffer_new(const size_t size);
 
 // Do not call this when passing to a function that takes ownership.
-BOP_API void bop_raft_buffer_free(bop_raft_buffer *buf);
+BOP_API void bop_raft_buffer_free(struct bop_raft_buffer *buf);
 
-BOP_API unsigned char *bop_raft_buffer_data(bop_raft_buffer *buf);
+BOP_API unsigned char *bop_raft_buffer_data(struct bop_raft_buffer *buf);
 
-BOP_API size_t bop_raft_buffer_container_size(bop_raft_buffer *buf);
+BOP_API size_t bop_raft_buffer_container_size(struct bop_raft_buffer *buf);
 
-BOP_API size_t bop_raft_buffer_size(bop_raft_buffer *buf);
+BOP_API size_t bop_raft_buffer_size(struct bop_raft_buffer *buf);
 
-BOP_API size_t bop_raft_buffer_pos(bop_raft_buffer *buf);
+BOP_API size_t bop_raft_buffer_pos(struct bop_raft_buffer *buf);
 
-BOP_API void bop_raft_buffer_set_pos(bop_raft_buffer *buf, size_t pos);
+BOP_API void bop_raft_buffer_set_pos(struct bop_raft_buffer *buf, size_t pos);
 
 ////////////////////////////////////////////////////////////////
 //
@@ -47,21 +48,21 @@ typedef void (*bop_raft_async_bool_when_ready)(
 
 struct bop_raft_async_bool_ptr;
 
-BOP_API bop_raft_async_bool_ptr *bop_raft_async_bool_make(
+BOP_API struct bop_raft_async_bool_ptr *bop_raft_async_bool_make(
     void *user_data, bop_raft_async_bool_when_ready when_ready
 );
 
-BOP_API void bop_raft_async_bool_delete(const bop_raft_async_bool_ptr *self);
+BOP_API void bop_raft_async_bool_delete(const struct bop_raft_async_bool_ptr *self);
 
-BOP_API void *bop_raft_async_bool_get_user_data(const bop_raft_async_bool_ptr *self);
+BOP_API void *bop_raft_async_bool_get_user_data(const struct bop_raft_async_bool_ptr *self);
 
-BOP_API void bop_raft_async_bool_set_user_data(bop_raft_async_bool_ptr *self, void *user_data);
+BOP_API void bop_raft_async_bool_set_user_data(struct bop_raft_async_bool_ptr *self, void *user_data);
 
 BOP_API bop_raft_async_bool_when_ready
-bop_raft_async_bool_get_when_ready(const bop_raft_async_bool_ptr *self);
+bop_raft_async_bool_get_when_ready(const struct bop_raft_async_bool_ptr *self);
 
 BOP_API void bop_raft_async_bool_set_when_ready(
-    bop_raft_async_bool_ptr *self, void *user_data,
+    struct bop_raft_async_bool_ptr *self, void *user_data,
     bop_raft_async_bool_when_ready when_ready
 );
 
@@ -77,21 +78,21 @@ typedef void (*bop_raft_async_u64_when_ready)(
 
 struct bop_raft_async_u64_ptr;
 
-BOP_API bop_raft_async_u64_ptr *bop_raft_async_u64_make(
+BOP_API struct bop_raft_async_u64_ptr *bop_raft_async_u64_make(
     void *user_data, bop_raft_async_u64_when_ready when_ready
 );
 
-BOP_API void bop_raft_async_u64_delete(const bop_raft_async_u64_ptr *self);
+BOP_API void bop_raft_async_u64_delete(const struct bop_raft_async_u64_ptr *self);
 
-BOP_API void *bop_raft_async_u64_get_user_data(const bop_raft_async_u64_ptr *self);
+BOP_API void *bop_raft_async_u64_get_user_data(const struct bop_raft_async_u64_ptr *self);
 
-BOP_API void bop_raft_async_u64_set_user_data(bop_raft_async_u64_ptr *self, void *user_data);
+BOP_API void bop_raft_async_u64_set_user_data(struct bop_raft_async_u64_ptr *self, void *user_data);
 
 BOP_API bop_raft_async_u64_when_ready
-bop_raft_async_u64_get_when_ready(const bop_raft_async_u64_ptr *self);
+bop_raft_async_u64_get_when_ready(const struct bop_raft_async_u64_ptr *self);
 
 BOP_API void bop_raft_async_u64_set_when_ready(
-    bop_raft_async_u64_ptr *self, void *user_data,
+    struct bop_raft_async_u64_ptr *self, void *user_data,
     bop_raft_async_u64_when_ready when_ready
 );
 
@@ -100,26 +101,26 @@ BOP_API void bop_raft_async_u64_set_when_ready(
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 typedef void (*bop_raft_async_buffer_when_ready)(
-    void *user_data, bop_raft_buffer *result, const char *error
+    void *user_data, struct bop_raft_buffer *result, const char *error
 );
 
 struct bop_raft_async_buffer_ptr;
 
-BOP_API bop_raft_async_buffer_ptr *bop_raft_async_buffer_make(
+BOP_API struct bop_raft_async_buffer_ptr *bop_raft_async_buffer_make(
     void *user_data, bop_raft_async_buffer_when_ready when_ready
 );
 
-BOP_API void bop_raft_async_buffer_delete(const bop_raft_async_buffer_ptr *self);
+BOP_API void bop_raft_async_buffer_delete(const struct bop_raft_async_buffer_ptr *self);
 
-BOP_API void *bop_raft_async_buffer_get_user_data(bop_raft_async_buffer_ptr *self);
+BOP_API void *bop_raft_async_buffer_get_user_data(const struct bop_raft_async_buffer_ptr *self);
 
-BOP_API void bop_raft_async_buffer_set_user_data(bop_raft_async_buffer_ptr *self, void *user_data);
+BOP_API void bop_raft_async_buffer_set_user_data(struct bop_raft_async_buffer_ptr *self, void *user_data);
 
 BOP_API bop_raft_async_buffer_when_ready
-bop_raft_async_buffer_get_when_ready(bop_raft_async_buffer_ptr *self);
+bop_raft_async_buffer_get_when_ready(const struct bop_raft_async_buffer_ptr *self);
 
 BOP_API void bop_raft_async_buffer_set_when_ready(
-    bop_raft_async_buffer_ptr *self, void *user_data,
+    struct bop_raft_async_buffer_ptr *self, void *user_data,
     bop_raft_async_buffer_when_ready when_ready
 );
 
@@ -129,9 +130,9 @@ BOP_API void bop_raft_async_buffer_set_when_ready(
 
 struct bop_raft_snapshot;
 
-BOP_API bop_raft_buffer *bop_raft_snapshot_serialize(bop_raft_snapshot *snapshot);
+BOP_API struct bop_raft_buffer *bop_raft_snapshot_serialize(struct bop_raft_snapshot *snapshot);
 
-BOP_API bop_raft_snapshot *bop_raft_snapshot_deserialize(bop_raft_buffer *buf);
+BOP_API struct bop_raft_snapshot *bop_raft_snapshot_deserialize(struct bop_raft_buffer *buf);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::cluster_config
@@ -143,40 +144,40 @@ struct bop_raft_cluster_config_ptr;
 
 struct bop_raft_srv_config;
 
-BOP_API bop_raft_cluster_config *bop_raft_cluster_config_new();
+BOP_API struct bop_raft_cluster_config *bop_raft_cluster_config_new();
 
-BOP_API bop_raft_cluster_config_ptr *
-bop_raft_cluster_config_ptr_make(bop_raft_cluster_config *config);
+BOP_API struct bop_raft_cluster_config_ptr *
+bop_raft_cluster_config_ptr_make(struct bop_raft_cluster_config *config);
 
-BOP_API void bop_raft_cluster_config_free(const bop_raft_cluster_config *config);
+BOP_API void bop_raft_cluster_config_free(const struct bop_raft_cluster_config *config);
 
-BOP_API void bop_raft_cluster_config_ptr_delete(const bop_raft_cluster_config_ptr *config);
+BOP_API void bop_raft_cluster_config_ptr_delete(const struct bop_raft_cluster_config_ptr *config);
 
-BOP_API bop_raft_cluster_config *bop_raft_cluster_config_ptr_get(bop_raft_cluster_config_ptr *conf);
+BOP_API struct bop_raft_cluster_config *bop_raft_cluster_config_ptr_get(struct bop_raft_cluster_config_ptr *conf);
 
-BOP_API bop_raft_buffer *bop_raft_cluster_config_serialize(bop_raft_cluster_config *conf);
+BOP_API struct bop_raft_buffer *bop_raft_cluster_config_serialize(struct bop_raft_cluster_config *conf);
 
-BOP_API bop_raft_cluster_config *bop_raft_cluster_config_deserialize(bop_raft_buffer *buf);
+BOP_API struct bop_raft_cluster_config *bop_raft_cluster_config_deserialize(struct bop_raft_buffer *buf);
 
 // Log index number of current config.
-BOP_API uint64_t bop_raft_cluster_config_log_idx(bop_raft_cluster_config *cfg);
+BOP_API uint64_t bop_raft_cluster_config_log_idx(struct bop_raft_cluster_config *cfg);
 
 // Log index number of previous config.
-BOP_API uint64_t bop_raft_cluster_config_prev_log_idx(bop_raft_cluster_config *cfg);
+BOP_API uint64_t bop_raft_cluster_config_prev_log_idx(struct bop_raft_cluster_config *cfg);
 
 // `true` if asynchronous replication mode is on.
-BOP_API bool bop_raft_cluster_config_is_async_replication(bop_raft_cluster_config *cfg);
+BOP_API bool bop_raft_cluster_config_is_async_replication(struct bop_raft_cluster_config *cfg);
 
 // Custom config data given by user.
-BOP_API void bop_raft_cluster_config_user_ctx(bop_raft_cluster_config *cfg, char *out_data, size_t out_data_size);
+BOP_API void bop_raft_cluster_config_user_ctx(struct bop_raft_cluster_config *cfg, char *out_data, size_t out_data_size);
 
-BOP_API size_t bop_raft_cluster_config_user_ctx_size(bop_raft_cluster_config *cfg);
+BOP_API size_t bop_raft_cluster_config_user_ctx_size(struct bop_raft_cluster_config *cfg);
 
 // Number of servers.
-BOP_API size_t bop_raft_cluster_config_servers_size(bop_raft_cluster_config *cfg);
+BOP_API size_t bop_raft_cluster_config_servers_size(struct bop_raft_cluster_config *cfg);
 
 // Server config at index
-BOP_API bop_raft_srv_config *bop_raft_cluster_config_server(bop_raft_cluster_config *cfg, int32_t idx);
+BOP_API struct bop_raft_srv_config *bop_raft_cluster_config_server(struct bop_raft_cluster_config *cfg, int32_t idx);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// bop_raft_srv_config
@@ -192,19 +193,19 @@ struct bop_raft_srv_config_ptr;
 
 struct bop_raft_srv_config_vec;
 
-BOP_API bop_raft_srv_config_vec *bop_raft_srv_config_vec_make();
+BOP_API struct bop_raft_srv_config_vec *bop_raft_srv_config_vec_make();
 
-BOP_API void bop_raft_srv_config_vec_delete(const bop_raft_srv_config_vec *vec);
+BOP_API void bop_raft_srv_config_vec_delete(const struct bop_raft_srv_config_vec *vec);
 
-BOP_API size_t bop_raft_srv_config_vec_size(bop_raft_srv_config_vec *vec);
+BOP_API size_t bop_raft_srv_config_vec_size(struct bop_raft_srv_config_vec *vec);
 
-BOP_API bop_raft_srv_config *bop_raft_srv_config_vec_get(bop_raft_srv_config_vec *vec, size_t idx);
+BOP_API struct bop_raft_srv_config *bop_raft_srv_config_vec_get(struct bop_raft_srv_config_vec *vec, size_t idx);
 
-BOP_API bop_raft_srv_config_ptr *bop_raft_srv_config_ptr_make(bop_raft_srv_config *config);
+BOP_API struct bop_raft_srv_config_ptr *bop_raft_srv_config_ptr_make(struct bop_raft_srv_config *config);
 
-BOP_API void bop_raft_srv_config_ptr_delete(const bop_raft_srv_config_ptr *config);
+BOP_API void bop_raft_srv_config_ptr_delete(const struct bop_raft_srv_config_ptr *config);
 
-BOP_API bop_raft_srv_config* bop_raft_srv_config_make(
+BOP_API struct bop_raft_srv_config *bop_raft_srv_config_make(
     int32_t id,
     int32_t dc_id,
     const char *endpoint,
@@ -215,19 +216,19 @@ BOP_API bop_raft_srv_config* bop_raft_srv_config_make(
     int32_t priority
 );
 
-BOP_API void bop_raft_srv_config_delete(const bop_raft_srv_config *config);
+BOP_API void bop_raft_srv_config_delete(const struct bop_raft_srv_config *config);
 
 // ID of this server, should be positive number.
-BOP_API int32_t bop_raft_srv_config_id(bop_raft_srv_config *cfg);
+BOP_API int32_t bop_raft_srv_config_id(struct bop_raft_srv_config *cfg);
 
 // ID of datacenter where this server is located. 0 if not used.
-BOP_API int32_t bop_raft_srv_config_dc_id(bop_raft_srv_config *cfg);
+BOP_API int32_t bop_raft_srv_config_dc_id(struct bop_raft_srv_config *cfg);
 
 // Endpoint (address + port).
-BOP_API const char *bop_raft_srv_config_endpoint(bop_raft_srv_config *cfg);
+BOP_API const char *bop_raft_srv_config_endpoint(struct bop_raft_srv_config *cfg);
 
 // Size of Endpoint (address + port).
-BOP_API size_t bop_raft_srv_config_endpoint_size(bop_raft_srv_config *cfg);
+BOP_API size_t bop_raft_srv_config_endpoint_size(struct bop_raft_srv_config *cfg);
 
 /**
  * Custom string given by user.
@@ -235,33 +236,33 @@ BOP_API size_t bop_raft_srv_config_endpoint_size(bop_raft_srv_config *cfg);
  *          as
  * it will be stored as a C-style string.
  */
-BOP_API const char *bop_raft_srv_config_aux(bop_raft_srv_config *cfg);
+BOP_API const char *bop_raft_srv_config_aux(struct bop_raft_srv_config *cfg);
 
-BOP_API size_t bop_raft_srv_config_aux_size(bop_raft_srv_config *cfg);
+BOP_API size_t bop_raft_srv_config_aux_size(struct bop_raft_srv_config *cfg);
 
 /**
  * `true` if this node is learner.
  * Learner will not initiate or participate in leader
  * election.
  */
-BOP_API bool bop_raft_srv_config_is_learner(bop_raft_srv_config *cfg);
+BOP_API bool bop_raft_srv_config_is_learner(struct bop_raft_srv_config *cfg);
 
-BOP_API void bop_raft_srv_config_set_is_learner(bop_raft_srv_config *cfg, bool learner);
+BOP_API void bop_raft_srv_config_set_is_learner(struct bop_raft_srv_config *cfg, bool learner);
 
 /**
  * `true` if this node is a new joiner, but not yet fully synced.
  * New joiner will not
  * initiate or participate in leader election.
  */
-BOP_API bool bop_raft_srv_config_is_new_joiner(bop_raft_srv_config *cfg);
-BOP_API void bop_raft_srv_config_set_new_joiner(bop_raft_srv_config *cfg, bool new_joiner);
+BOP_API bool bop_raft_srv_config_is_new_joiner(struct bop_raft_srv_config *cfg);
+BOP_API void bop_raft_srv_config_set_new_joiner(struct bop_raft_srv_config *cfg, bool new_joiner);
 
 /**
  * Priority of this node.
  * 0 will never be a leader.
  */
-BOP_API int32_t bop_raft_srv_config_priority(bop_raft_srv_config *cfg);
-BOP_API void bop_raft_srv_config_set_priority(bop_raft_srv_config *cfg, int32_t priority);
+BOP_API int32_t bop_raft_srv_config_priority(struct bop_raft_srv_config *cfg);
+BOP_API void bop_raft_srv_config_set_priority(struct bop_raft_srv_config *cfg, int32_t priority);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::svr_state
@@ -269,27 +270,27 @@ BOP_API void bop_raft_srv_config_set_priority(bop_raft_srv_config *cfg, int32_t 
 
 struct bop_raft_srv_state;
 
-BOP_API bop_raft_buffer *bop_raft_srv_state_serialize(bop_raft_srv_state *state);
+BOP_API struct bop_raft_buffer *bop_raft_srv_state_serialize(struct bop_raft_srv_state *state);
 
-BOP_API bop_raft_srv_state *bop_raft_srv_state_deserialize(bop_raft_buffer *buf);
+BOP_API struct bop_raft_srv_state *bop_raft_srv_state_deserialize(struct bop_raft_buffer *buf);
 
-BOP_API void bop_raft_srv_state_delete(const bop_raft_srv_state *state);
+BOP_API void bop_raft_srv_state_delete(const struct bop_raft_srv_state *state);
 
 /**
  * Term
  */
-BOP_API uint64_t bop_raft_srv_state_term(const bop_raft_srv_state *state);
+BOP_API uint64_t bop_raft_srv_state_term(const struct bop_raft_srv_state *state);
 
 /**
  * Server ID that this server voted for.
  * `-1` if not voted.
  */
-BOP_API int32_t bop_raft_srv_state_voted_for(const bop_raft_srv_state *state);
+BOP_API int32_t bop_raft_srv_state_voted_for(const struct bop_raft_srv_state *state);
 
 /**
  * `true` if election timer is allowed.
  */
-BOP_API bool bop_raft_srv_state_is_election_timer_allowed(const bop_raft_srv_state *state);
+BOP_API bool bop_raft_srv_state_is_election_timer_allowed(const struct bop_raft_srv_state *state);
 
 /**
  * true if this server has joined the cluster but has not yet
@@ -298,7 +299,7 @@ BOP_API bool bop_raft_srv_state_is_election_timer_allowed(const bop_raft_srv_sta
  * this server will not receive normal append_entries
  * requests.
  */
-BOP_API bool bop_raft_srv_state_is_catching_up(const bop_raft_srv_state *state);
+BOP_API bool bop_raft_srv_state_is_catching_up(const struct bop_raft_srv_state *state);
 
 /**
  * `true` if this server is receiving a snapshot.
@@ -308,7 +309,7 @@ BOP_API bool bop_raft_srv_state_is_catching_up(const bop_raft_srv_state *state);
  * neither
  * receive normal append_entries requests nor initiate election.
  */
-BOP_API bool bop_raft_srv_state_is_receiving_snapshot(const bop_raft_srv_state *state);
+BOP_API bool bop_raft_srv_state_is_receiving_snapshot(const struct bop_raft_srv_state *state);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::logger
@@ -343,10 +344,10 @@ typedef void (*bop_raft_logger_put_details_func)(
     const char *log_line, size_t log_line_size
 );
 
-BOP_API bop_raft_logger_ptr *
+BOP_API struct bop_raft_logger_ptr *
 bop_raft_logger_make(void *user_data, bop_raft_logger_put_details_func callback);
 
-BOP_API void bop_raft_logger_delete(const bop_raft_logger_ptr *logger);
+BOP_API void bop_raft_logger_delete(const struct bop_raft_logger_ptr *logger);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::asio_service
@@ -367,7 +368,7 @@ typedef void (*bop_raft_asio_service_worker_stop_fn)(void *user_data, uint32_t v
 
 typedef bool (*bop_raft_asio_service_verify_sn_fn)(void *user_data, const char *data, size_t size);
 
-typedef SSL_CTX * (*bop_raft_asio_service_ssl_ctx_provider_fn)(void *user_data);
+typedef struct SSL_CTX * (*bop_raft_asio_service_ssl_ctx_provider_fn)(void *user_data);
 
 typedef void (*bop_raft_asio_service_custom_resolver_response_fn)(
     void *response_impl, const char *v1, size_t v1_size, const char *v2, size_t v2_size,
@@ -543,63 +544,63 @@ struct bop_raft_asio_options {
     bool streaming_mode;
 };
 
-BOP_API bop_raft_asio_service_ptr *bop_raft_asio_service_make(
-    bop_raft_asio_options *options,
-    bop_raft_logger_ptr *logger
+BOP_API struct bop_raft_asio_service_ptr *bop_raft_asio_service_make(
+    struct bop_raft_asio_options *options,
+    struct bop_raft_logger_ptr *logger
 );
 
-BOP_API void bop_raft_asio_service_delete(const bop_raft_asio_service_ptr *asio_service);
+BOP_API void bop_raft_asio_service_delete(const struct bop_raft_asio_service_ptr *asio_service);
 
-BOP_API void bop_raft_asio_service_stop(bop_raft_asio_service_ptr *asio_service);
+BOP_API void bop_raft_asio_service_stop(struct bop_raft_asio_service_ptr *asio_service);
 
-BOP_API uint32_t bop_raft_asio_service_get_active_workers(bop_raft_asio_service_ptr *asio_service);
+BOP_API uint32_t bop_raft_asio_service_get_active_workers(struct bop_raft_asio_service_ptr *asio_service);
 
 struct bop_raft_delayed_task_ptr;
 
 typedef void (*bop_raft_delayed_task_func)(void *user_data);
 
-BOP_API bop_raft_delayed_task_ptr *bop_raft_delayed_task_make(
+BOP_API struct bop_raft_delayed_task_ptr *bop_raft_delayed_task_make(
     void *user_data,
     int32_t type,
     bop_raft_delayed_task_func exec_func,
     bop_raft_delayed_task_func deleter_func
 );
 
-BOP_API void bop_raft_delayed_task_delete(const bop_raft_delayed_task_ptr *task);
+BOP_API void bop_raft_delayed_task_delete(const struct bop_raft_delayed_task_ptr *task);
 
-BOP_API void bop_raft_delayed_task_cancel(bop_raft_delayed_task_ptr *task);
+BOP_API void bop_raft_delayed_task_cancel(struct bop_raft_delayed_task_ptr *task);
 
-BOP_API void bop_raft_delayed_task_reset(bop_raft_delayed_task_ptr *task);
+BOP_API void bop_raft_delayed_task_reset(struct bop_raft_delayed_task_ptr *task);
 
-BOP_API int32_t bop_raft_delayed_task_type(bop_raft_delayed_task_ptr *task);
+BOP_API int32_t bop_raft_delayed_task_type(struct bop_raft_delayed_task_ptr *task);
 
-BOP_API void *bop_raft_delayed_task_user_data(bop_raft_delayed_task_ptr *task);
+BOP_API void *bop_raft_delayed_task_user_data(struct bop_raft_delayed_task_ptr *task);
 
 BOP_API void bop_raft_asio_service_schedule(
-    bop_raft_asio_service_ptr *asio_service,
-    bop_raft_delayed_task_ptr *delayed_task,
+    struct bop_raft_asio_service_ptr *asio_service,
+    struct bop_raft_delayed_task_ptr *delayed_task,
     int32_t milliseconds
 );
 
 struct bop_raft_rpc_listener_ptr;
 
-BOP_API bop_raft_rpc_listener_ptr *bop_raft_asio_rpc_listener_make(
-    bop_raft_asio_service_ptr *asio_service,
+BOP_API struct bop_raft_rpc_listener_ptr *bop_raft_asio_rpc_listener_make(
+    struct bop_raft_asio_service_ptr *asio_service,
     uint16_t listening_port,
-    bop_raft_logger_ptr *logger
+    struct bop_raft_logger_ptr *logger
 );
 
-BOP_API void bop_raft_asio_rpc_listener_delete(const bop_raft_rpc_listener_ptr *rpc_listener);
+BOP_API void bop_raft_asio_rpc_listener_delete(const struct bop_raft_rpc_listener_ptr *rpc_listener);
 
 struct bop_raft_rpc_client_ptr;
 
-BOP_API bop_raft_rpc_client_ptr *bop_raft_asio_rpc_client_make(
-    bop_raft_asio_service_ptr *asio_service,
+BOP_API struct bop_raft_rpc_client_ptr *bop_raft_asio_rpc_client_make(
+    struct bop_raft_asio_service_ptr *asio_service,
     const char *endpoint,
     size_t endpoint_size
 );
 
-BOP_API void bop_raft_asio_rpc_client_delete(const bop_raft_rpc_client_ptr *rpc_client);
+BOP_API void bop_raft_asio_rpc_client_delete(const struct bop_raft_rpc_client_ptr *rpc_client);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::raft_params
@@ -830,12 +831,12 @@ struct bop_raft_params {
     /**
      * Choose the type of lock that will be used by user threads.
      */
-    bop_raft_params_locking_method_type locking_method_type;
+    enum bop_raft_params_locking_method_type locking_method_type;
 
     /**
      * To choose blocking call or asynchronous call.
      */
-    bop_raft_params_return_method_type return_method;
+    enum bop_raft_params_return_method_type return_method;
 
     /**
      * Wait ms for response after forwarding request to leader.
@@ -985,9 +986,9 @@ struct bop_raft_params {
 
 struct bop_raft_params_ptr;
 
-BOP_API bop_raft_params *bop_raft_params_make();
+BOP_API struct bop_raft_params *bop_raft_params_make();
 
-BOP_API void bop_raft_params_delete(const bop_raft_params *params);
+BOP_API void bop_raft_params_delete(const struct bop_raft_params *params);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::state_machine
@@ -997,7 +998,7 @@ struct bop_raft_fsm_ptr;
 
 typedef void (*bop_raft_fsm_commit)(
     void *user_data, uint64_t log_idx, const unsigned char *data, size_t size,
-    nuraft::buffer **result
+    struct bop_raft_buffer **result
 );
 
 typedef void (*bop_raft_fsm_cluster_config)(void *user_data, uint64_t log_idx, void *new_conf);
@@ -1010,28 +1011,28 @@ typedef int64_t (*bop_raft_fsm_get_next_batch_size_hint_in_bytes)(void *user_dat
 
 typedef void (*bop_raft_fsm_snapshot_save)(
     void *user_data, uint64_t last_log_idx, uint64_t last_log_term,
-    bop_raft_cluster_config *last_config, uint64_t size, uint8_t type, bool is_first_obj,
+    struct bop_raft_cluster_config *last_config, uint64_t size, uint8_t type, bool is_first_obj,
     bool is_last_obj, const unsigned char *data, size_t data_size
 );
 
 typedef bool (*bop_raft_fsm_snapshot_apply)(
     void *user_data, uint64_t last_log_idx, uint64_t last_log_term,
-    bop_raft_cluster_config *last_config, uint64_t size, uint8_t type
+    struct bop_raft_cluster_config *last_config, uint64_t size, uint8_t type
 );
 
 typedef int32_t (*bop_raft_fsm_snapshot_read)(
-    void *user_data, void **user_snapshot_ctx, uint64_t obj_id, bop_raft_buffer **data_out,
+    void *user_data, void **user_snapshot_ctx, uint64_t obj_id, struct bop_raft_buffer **data_out,
     bool *is_last_obj
 );
 
 typedef void (*bop_raft_fsm_free_user_snapshot_ctx)(void *user_data, void **user_snapshot_ctx);
 
-typedef bop_raft_snapshot * (*bop_raft_fsm_last_snapshot)(void *user_data);
+typedef struct bop_raft_snapshot * (*bop_raft_fsm_last_snapshot)(void *user_data);
 
 typedef uint64_t (*bop_raft_fsm_last_commit_index)(void *user_data);
 
 typedef void (*bop_raft_fsm_create_snapshot)(
-    void *user_data, bop_raft_snapshot *snapshot, bop_raft_buffer *snapshot_data, void *snp_data,
+    void *user_data, struct bop_raft_snapshot *snapshot, struct bop_raft_buffer *snapshot_data, void *snp_data,
     size_t snp_data_size
 );
 
@@ -1043,21 +1044,21 @@ struct bop_raft_fsm_adjust_commit_index_params;
 
 typedef uint64_t (*bop_raft_fsm_adjust_commit_index)(
     void *user_data, uint64_t current_commit_index, uint64_t expected_commit_index,
-    const bop_raft_fsm_adjust_commit_index_params *params
+    const struct bop_raft_fsm_adjust_commit_index_params *params
 );
 
 BOP_API uint64_t bop_raft_fsm_adjust_commit_index_peer_index(
-    bop_raft_fsm_adjust_commit_index_params *params, const int32_t peerID
+    struct bop_raft_fsm_adjust_commit_index_params *params, const int32_t peerID
 );
 
 BOP_API void bop_raft_fsm_adjust_commit_index_peer_indexes(
-    bop_raft_fsm_adjust_commit_index_params *params, uint64_t *peers[16]
+    struct bop_raft_fsm_adjust_commit_index_params *params, uint64_t *peers[16]
 );
 
-BOP_API bop_raft_fsm_ptr *bop_raft_fsm_make(
+BOP_API struct bop_raft_fsm_ptr *bop_raft_fsm_make(
     void *user_data,
-    bop_raft_cluster_config *current_conf,
-    bop_raft_cluster_config *rollback_conf,
+    struct bop_raft_cluster_config *current_conf,
+    struct bop_raft_cluster_config *rollback_conf,
     bop_raft_fsm_commit commit,
     bop_raft_fsm_cluster_config commit_config,
     bop_raft_fsm_commit pre_commit,
@@ -1076,7 +1077,7 @@ BOP_API bop_raft_fsm_ptr *bop_raft_fsm_make(
     bop_raft_fsm_adjust_commit_index adjust_commit_index
 );
 
-BOP_API void bop_raft_fsm_delete(const bop_raft_fsm_ptr *fsm);
+BOP_API void bop_raft_fsm_delete(const struct bop_raft_fsm_ptr *fsm);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::state_mgr
@@ -1085,23 +1086,23 @@ BOP_API void bop_raft_fsm_delete(const bop_raft_fsm_ptr *fsm);
 struct bop_raft_log_store_ptr;
 struct bop_raft_state_mgr_ptr;
 
-typedef bop_raft_cluster_config * (*bop_raft_state_mgr_load_config)(void *user_data);
+typedef struct bop_raft_cluster_config * (*bop_raft_state_mgr_load_config)(void *user_data);
 
 typedef void (*bop_raft_state_mgr_save_config)(
-    void *user_data, const bop_raft_cluster_config *config
+    void *user_data, const struct bop_raft_cluster_config *config
 );
 
-typedef void (*bop_raft_state_mgr_save_state)(void *user_data, const bop_raft_srv_state *state);
+typedef void (*bop_raft_state_mgr_save_state)(void *user_data, const struct bop_raft_srv_state *state);
 
-typedef bop_raft_srv_state * (*bop_raft_state_mgr_read_state)(void *user_data);
+typedef struct bop_raft_srv_state * (*bop_raft_state_mgr_read_state)(void *user_data);
 
-typedef bop_raft_log_store_ptr * (*bop_raft_state_mgr_load_log_store)(void *user_data);
+typedef struct bop_raft_log_store_ptr * (*bop_raft_state_mgr_load_log_store)(void *user_data);
 
 typedef int32_t (*bop_raft_state_mgr_server_id)(void *user_data);
 
 typedef void (*bop_raft_state_mgr_system_exit)(void *user_data, const int32_t exit_code);
 
-BOP_API bop_raft_state_mgr_ptr *bop_raft_state_mgr_make(
+BOP_API struct bop_raft_state_mgr_ptr *bop_raft_state_mgr_make(
     void *user_data,
     bop_raft_state_mgr_load_config load_config,
     bop_raft_state_mgr_save_config save_config,
@@ -1112,7 +1113,7 @@ BOP_API bop_raft_state_mgr_ptr *bop_raft_state_mgr_make(
     bop_raft_state_mgr_system_exit system_exit
 );
 
-BOP_API void bop_raft_state_mgr_delete(const bop_raft_state_mgr_ptr *sm);
+BOP_API void bop_raft_state_mgr_delete(const struct bop_raft_state_mgr_ptr *sm);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::log_store
@@ -1126,16 +1127,16 @@ struct bop_raft_log_entry_ptr {
 
 struct bop_raft_log_entry;
 
-BOP_API bop_raft_log_entry *bop_raft_log_entry_make(
-    uint64_t term, nuraft::buffer *data, uint64_t timestamp, bool has_crc32, uint32_t crc32
+BOP_API struct bop_raft_log_entry *bop_raft_log_entry_make(
+    uint64_t term, struct bop_raft_buffer *data, uint64_t timestamp, bool has_crc32, uint32_t crc32
 );
 
-BOP_API void bop_raft_log_entry_delete(const bop_raft_log_entry *entry);
+BOP_API void bop_raft_log_entry_delete(const struct bop_raft_log_entry *entry);
 
 struct bop_raft_log_entry_vector;
 
 BOP_API void bop_raft_log_entry_vec_push(
-    const bop_raft_log_entry_vector *vec, uint64_t term, nuraft::buffer *data, uint64_t timestamp,
+    const struct bop_raft_log_entry_vector *vec, uint64_t term, struct bop_raft_buffer *data, uint64_t timestamp,
     bool has_crc32, uint32_t crc32
 );
 
@@ -1143,11 +1144,11 @@ typedef uint64_t (*bop_raft_log_store_next_slot)(void *user_data);
 
 typedef uint64_t (*bop_raft_log_store_start_index)(void *user_data);
 
-typedef bop_raft_log_entry * (*bop_raft_log_store_last_entry)(void *user_data);
+typedef struct bop_raft_log_entry * (*bop_raft_log_store_last_entry)(void *user_data);
 
 typedef uint64_t (*bop_raft_log_store_append)(
     void *user_data,
-    bop_raft_log_entry_ptr log_entry,
+    struct bop_raft_log_entry_ptr log_entry,
     uint64_t term,
     uint8_t *data,
     size_t data_size,
@@ -1166,17 +1167,17 @@ typedef void (*bop_raft_log_store_end_of_append_batch)(
 );
 
 typedef bool (*bop_raft_log_store_log_entries)(
-    void *user_data, bop_raft_log_entry_vector *vec, uint64_t start, uint64_t end
+    void *user_data, struct bop_raft_log_entry_vector *vec, uint64_t start, uint64_t end
 );
 
-typedef bop_raft_log_entry * (*bop_raft_log_store_entry_at)(void *user_data, uint64_t index);
+typedef struct bop_raft_log_entry * (*bop_raft_log_store_entry_at)(void *user_data, uint64_t index);
 
 typedef uint64_t (*bop_raft_log_store_term_at)(void *user_data, uint64_t index);
 
-typedef bop_raft_buffer * (*bop_raft_log_store_pack)(void *user_data, uint64_t index, int32_t cnt);
+typedef struct bop_raft_buffer * (*bop_raft_log_store_pack)(void *user_data, uint64_t index, int32_t cnt);
 
 typedef void (*bop_raft_log_store_apply_pack)(
-    void *user_data, uint64_t index, bop_raft_buffer *pack
+    void *user_data, uint64_t index, struct bop_raft_buffer *pack
 );
 
 typedef bool (*bop_raft_log_store_compact)(void *user_data, uint64_t last_log_index);
@@ -1187,7 +1188,7 @@ typedef bool (*bop_raft_log_store_flush)(void *user_data);
 
 typedef uint64_t (*bop_raft_log_store_last_durable_index)(void *user_data);
 
-BOP_API bop_raft_log_store_ptr *bop_raft_log_store_make(
+BOP_API struct bop_raft_log_store_ptr *bop_raft_log_store_make(
     void *user_data,
     bop_raft_log_store_next_slot next_slot,
     bop_raft_log_store_start_index start_index,
@@ -1206,7 +1207,7 @@ BOP_API bop_raft_log_store_ptr *bop_raft_log_store_make(
     bop_raft_log_store_last_durable_index last_durable_index
 );
 
-BOP_API void bop_raft_log_store_delete(const bop_raft_log_store_ptr *log_store);
+BOP_API void bop_raft_log_store_delete(const struct bop_raft_log_store_ptr *log_store);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::counter
@@ -1214,13 +1215,13 @@ BOP_API void bop_raft_log_store_delete(const bop_raft_log_store_ptr *log_store);
 
 struct bop_raft_counter;
 
-BOP_API bop_raft_counter *bop_raft_counter_make(const char *name, size_t name_size);
+BOP_API struct bop_raft_counter *bop_raft_counter_make(const char *name, size_t name_size);
 
-BOP_API void bop_raft_counter_delete(const bop_raft_counter *counter);
+BOP_API void bop_raft_counter_delete(const struct bop_raft_counter *counter);
 
-BOP_API const char *bop_raft_counter_name(const bop_raft_counter *counter);
+BOP_API const char *bop_raft_counter_name(const struct bop_raft_counter *counter);
 
-BOP_API uint64_t bop_raft_counter_value(const bop_raft_counter *counter);
+BOP_API uint64_t bop_raft_counter_value(const struct bop_raft_counter *counter);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::gauge
@@ -1228,13 +1229,13 @@ BOP_API uint64_t bop_raft_counter_value(const bop_raft_counter *counter);
 
 struct bop_raft_gauge;
 
-BOP_API bop_raft_gauge *bop_raft_gauge_make(const char *name, size_t name_size);
+BOP_API struct bop_raft_gauge *bop_raft_gauge_make(const char *name, size_t name_size);
 
-BOP_API void bop_raft_gauge_delete(const bop_raft_gauge *gauge);
+BOP_API void bop_raft_gauge_delete(const struct bop_raft_gauge *gauge);
 
-BOP_API const char *bop_raft_gauge_name(const bop_raft_gauge *gauge);
+BOP_API const char *bop_raft_gauge_name(const struct bop_raft_gauge *gauge);
 
-BOP_API int64_t bop_raft_gauge_value(const bop_raft_gauge *gauge);
+BOP_API int64_t bop_raft_gauge_value(const struct bop_raft_gauge *gauge);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// nuraft::histogram
@@ -1242,15 +1243,15 @@ BOP_API int64_t bop_raft_gauge_value(const bop_raft_gauge *gauge);
 
 struct bop_raft_histogram;
 
-BOP_API bop_raft_histogram *bop_raft_histogram_make(const char *name, size_t name_size);
+BOP_API struct bop_raft_histogram *bop_raft_histogram_make(const char *name, size_t name_size);
 
-BOP_API void bop_raft_histogram_delete(const bop_raft_histogram *histogram);
+BOP_API void bop_raft_histogram_delete(const struct bop_raft_histogram *histogram);
 
-BOP_API const char *bop_raft_histogram_name(const bop_raft_histogram *histogram);
+BOP_API const char *bop_raft_histogram_name(const struct bop_raft_histogram *histogram);
 
-BOP_API size_t bop_raft_histogram_size(const bop_raft_histogram *histogram);
+BOP_API size_t bop_raft_histogram_size(const struct bop_raft_histogram *histogram);
 
-BOP_API uint64_t bop_raft_histogram_get(const bop_raft_histogram *histogram, double key);
+BOP_API uint64_t bop_raft_histogram_get(const struct bop_raft_histogram *histogram, double key);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// bop_raft_append_entries_ptr
@@ -1258,14 +1259,14 @@ BOP_API uint64_t bop_raft_histogram_get(const bop_raft_histogram *histogram, dou
 
 struct bop_raft_append_entries_ptr;
 
-BOP_API bop_raft_append_entries_ptr *bop_raft_append_entries_create();
+BOP_API struct bop_raft_append_entries_ptr *bop_raft_append_entries_create();
 
-BOP_API void bop_raft_append_entries_delete(const bop_raft_append_entries_ptr *self);
+BOP_API void bop_raft_append_entries_delete(const struct bop_raft_append_entries_ptr *self);
 
-BOP_API size_t bop_raft_append_entries_size(bop_raft_append_entries_ptr *self);
+BOP_API size_t bop_raft_append_entries_size(const struct bop_raft_append_entries_ptr *self);
 
 BOP_API size_t
-bop_raft_append_entries_push(bop_raft_append_entries_ptr *self, bop_raft_buffer *buf);
+bop_raft_append_entries_push(struct bop_raft_append_entries_ptr *self, struct bop_raft_buffer *buf);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// bop_raft_server_peer_info
@@ -1290,14 +1291,14 @@ struct bop_raft_server_peer_info {
 
 struct bop_raft_server_peer_info_vec;
 
-BOP_API bop_raft_server_peer_info_vec *bop_raft_server_peer_info_vec_make();
+BOP_API struct bop_raft_server_peer_info_vec *bop_raft_server_peer_info_vec_make();
 
-BOP_API void bop_raft_server_peer_info_vec_delete(const bop_raft_server_peer_info_vec *vec);
+BOP_API void bop_raft_server_peer_info_vec_delete(const struct bop_raft_server_peer_info_vec *vec);
 
-BOP_API size_t bop_raft_server_peer_info_vec_size(bop_raft_server_peer_info_vec *vec);
+BOP_API size_t bop_raft_server_peer_info_vec_size(const struct bop_raft_server_peer_info_vec *vec);
 
-BOP_API bop_raft_server_peer_info *
-bop_raft_server_peer_info_vec_get(bop_raft_server_peer_info_vec *vec, size_t idx);
+BOP_API struct bop_raft_server_peer_info *
+bop_raft_server_peer_info_vec_get(const struct bop_raft_server_peer_info_vec *vec, size_t idx);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 /// bop_raft_server
@@ -1641,7 +1642,7 @@ struct bop_raft_cb_req_resp;
 
 struct bop_raft_cb_req_msg {
     uint64_t term;
-    bop_raft_msg_type type;
+    enum bop_raft_msg_type type;
     int32_t src;
     int32_t dst;
     // Term of last log below.
@@ -1660,57 +1661,57 @@ struct bop_raft_cb_resp_peer;
 
 struct bop_raft_cb_resp_msg {
     uint64_t term;
-    bop_raft_msg_type type;
+    enum bop_raft_msg_type type;
     int32_t src;
     int32_t dst;
     uint64_t next_idx;
     int64_t next_batch_size_hint_in_bytes;
     bool accepted;
-    bop_raft_buffer *ctx;
-    bop_raft_cb_resp_peer *peer;
-    bop_raft_cmd_result_code result_code;
+    struct bop_raft_buffer *ctx;
+    struct bop_raft_cb_resp_peer *peer;
+    enum bop_raft_cmd_result_code result_code;
 };
 
-BOP_API void bop_raft_cb_get_req_msg(bop_raft_cb_req_resp *req_resp, bop_raft_cb_req_msg *req_msg);
+BOP_API void bop_raft_cb_get_req_msg(struct bop_raft_cb_req_resp *req_resp, struct bop_raft_cb_req_msg *req_msg);
 
-BOP_API size_t bop_raft_cb_get_req_msg_entries_size(bop_raft_cb_req_resp *req_resp);
+BOP_API size_t bop_raft_cb_get_req_msg_entries_size(const struct bop_raft_cb_req_resp *req_resp);
 
-BOP_API bop_raft_log_entry *
-bop_raft_cb_get_req_msg_get_entry(bop_raft_cb_req_resp *req_resp, size_t idx);
+BOP_API struct bop_raft_log_entry *
+bop_raft_cb_get_req_msg_get_entry(const struct bop_raft_cb_req_resp *req_resp, size_t idx);
 
 BOP_API void
-bop_raft_cb_get_resp_msg(bop_raft_cb_req_resp *req_resp, bop_raft_cb_resp_msg *resp_msg);
+bop_raft_cb_get_resp_msg(struct bop_raft_cb_req_resp *req_resp, struct bop_raft_cb_resp_msg *resp_msg);
 
-typedef bop_raft_cb_return_code (*bop_raft_cb_func)(
-    void *user_data, bop_raft_cb_type type, bop_raft_cb_param *param
+typedef enum bop_raft_cb_return_code (*bop_raft_cb_func)(
+    void *user_data, enum bop_raft_cb_type type, struct bop_raft_cb_param *param
 );
 
 typedef uint64_t (*bop_raft_inc_term_func)(void *user_data, uint64_t current_term);
 
-BOP_API bop_raft_server_ptr *bop_raft_server_launch(
+BOP_API struct bop_raft_server_ptr *bop_raft_server_launch(
     void *user_data,
-    bop_raft_fsm_ptr *fsm,
-    bop_raft_state_mgr_ptr *state_mgr,
-    bop_raft_logger_ptr *logger,
+    struct bop_raft_fsm_ptr *fsm,
+    struct bop_raft_state_mgr_ptr *state_mgr,
+    struct bop_raft_logger_ptr *logger,
     int32_t port_number,
-    const bop_raft_asio_service_ptr *asio_service,
-    bop_raft_params *params_given,
+    const struct bop_raft_asio_service_ptr *asio_service,
+    struct bop_raft_params *params_given,
     bool skip_initial_election_timeout,
     bool start_server_in_constructor,
     bool test_mode_flag,
     bop_raft_cb_func cb_func
 );
 
-BOP_API bool bop_raft_server_stop(bop_raft_server_ptr *server, size_t time_limit_sec);
+BOP_API bool bop_raft_server_stop(struct bop_raft_server_ptr *server, size_t time_limit_sec);
 
-BOP_API bop_raft_server *bop_raft_server_get(bop_raft_server_ptr *s);
+BOP_API struct bop_raft_server *bop_raft_server_get(struct bop_raft_server_ptr *s);
 
 /**
  * Check if this server is ready to serve operation.
  *
  * @return `true` if it is ready.
  */
-BOP_API bool bop_raft_server_is_initialized(const bop_raft_server *rs);
+BOP_API bool bop_raft_server_is_initialized(const struct bop_raft_server *rs);
 
 /**
  * Check if this server is catching up the current leader
@@ -1719,7 +1720,7 @@ BOP_API bool bop_raft_server_is_initialized(const bop_raft_server *rs);
  * @return
  * `true` if it is in catch-up mode.
  */
-BOP_API bool bop_raft_server_is_catching_up(const bop_raft_server *rs);
+BOP_API bool bop_raft_server_is_catching_up(const struct bop_raft_server *rs);
 
 /**
  * Check if this server is receiving snapshot from leader.
@@ -1727,7 +1728,7 @@ BOP_API bool bop_raft_server_is_catching_up(const bop_raft_server *rs);
  * @return `true` if it is
  * receiving snapshot.
  */
-BOP_API bool bop_raft_server_is_receiving_snapshot(const bop_raft_server *rs);
+BOP_API bool bop_raft_server_is_receiving_snapshot(const struct bop_raft_server *rs);
 
 /**
  * Add a new server to the current cluster. Only leader will accept this operation.
@@ -1738,7 +1739,7 @@ BOP_API bool bop_raft_server_is_receiving_snapshot(const bop_raft_server *rs);
  * @return `get_accepted()` will be true on success.
  */
 BOP_API bool bop_raft_server_add_srv(
-    bop_raft_server *rs, const bop_raft_srv_config_ptr *srv, bop_raft_async_buffer_ptr *handler
+    struct bop_raft_server *rs, const struct bop_raft_srv_config_ptr *srv, struct bop_raft_async_buffer_ptr *handler
 );
 
 /**
@@ -1749,9 +1750,9 @@ BOP_API bool bop_raft_server_add_srv(
  * @return `get_accepted()` will be true on success.
  */
 BOP_API bool bop_raft_server_remove_srv(
-    bop_raft_server *rs,
+    struct bop_raft_server *rs,
     int32_t srv_id,
-    bop_raft_async_buffer_ptr *handler
+    struct bop_raft_async_buffer_ptr *handler
 );
 
 /**
@@ -1763,10 +1764,10 @@ BOP_API bool bop_raft_server_remove_srv(
  * @return `ret->get_result_code()` will be OK on success.
  */
 BOP_API bool bop_raft_server_flip_learner_flag(
-    bop_raft_server *rs,
+    struct bop_raft_server *rs,
     const int32_t srv_id,
     const bool to,
-    bop_raft_async_buffer_ptr *handler
+    struct bop_raft_async_buffer_ptr *handler
 );
 
 /**
@@ -1782,9 +1783,9 @@ BOP_API bool bop_raft_server_flip_learner_flag(
  *     results will be set to returned `cmd_result` instance later.
  */
 BOP_API bool bop_raft_server_append_entries(
-    bop_raft_server *rs,
-    bop_raft_append_entries_ptr *entries,
-    bop_raft_async_buffer_ptr *handler
+    struct bop_raft_server *rs,
+    struct bop_raft_append_entries_ptr *entries,
+    struct bop_raft_async_buffer_ptr *handler
 );
 
 /**
@@ -1810,11 +1811,11 @@ BOP_API bool bop_raft_server_append_entries(
  * @return IGNORED If we're not a leader and broadcast_when_leader_exists = false.
  *
  */
-BOP_API bop_raft_server_priority_set_result bop_raft_server_set_priority(
-    bop_raft_server *rs,
+BOP_API enum bop_raft_server_priority_set_result bop_raft_server_set_priority(
+    struct bop_raft_server *rs,
     const int32_t srv_id,
     const int32_t new_priority,
-    bool broadcast_when_leader_exists = false
+    bool broadcast_when_leader_exists
 );
 
 /**
@@ -1829,7 +1830,7 @@ BOP_API bop_raft_server_priority_set_result bop_raft_server_set_priority(
  * @param new_priority New priority.
  */
 BOP_API void bop_raft_server_broadcast_priority_change(
-    bop_raft_server *rs,
+    struct bop_raft_server *rs,
     const int32_t srv_id,
     const int32_t new_priority
 );
@@ -1855,7 +1856,7 @@ BOP_API void bop_raft_server_broadcast_priority_change(
  */
 BOP_API void
 bop_raft_server_yield_leadership(
-    bop_raft_server *rs,
+    struct bop_raft_server *rs,
     bool immediate_yield,
     int32_t successor_id
 );
@@ -1868,13 +1869,13 @@ bop_raft_server_yield_leadership(
  * @return `true` on success. But it does not guarantee to become
  *         the next leader due to various failures.
  */
-BOP_API bool bop_raft_server_request_leadership(bop_raft_server *rs);
+BOP_API bool bop_raft_server_request_leadership(struct bop_raft_server *rs);
 
 /**
  * Start the election timer on this server, if this server is a follower. It will
  * allow the election timer permanently, if it was disabled by state manager.
  */
-BOP_API void bop_raft_server_restart_election_timer(bop_raft_server *rs);
+BOP_API void bop_raft_server_restart_election_timer(struct bop_raft_server *rs);
 
 /**
  * Set custom context to Raft cluster config. It will create a new configuration log and
@@ -1882,35 +1883,35 @@ BOP_API void bop_raft_server_restart_election_timer(bop_raft_server *rs);
  *
  * @param ctx Custom context.
  */
-BOP_API void bop_raft_server_set_user_ctx(bop_raft_server *rs, const char *data, size_t size);
+BOP_API void bop_raft_server_set_user_ctx(struct bop_raft_server *rs, const char *data, size_t size);
 
 /**
  * Get custom context from the current cluster config.
  *
  * @return Custom context.
  */
-BOP_API bop_raft_buffer *bop_raft_server_get_user_ctx(bop_raft_server *rs);
+BOP_API struct bop_raft_buffer *bop_raft_server_get_user_ctx(struct bop_raft_server *rs);
 
 /**
 * Get timeout for snapshot_sync_ctx
 *
 * @return snapshot_sync_ctx_timeout.
 */
-BOP_API int32_t bop_raft_server_get_snapshot_sync_ctx_timeout(const bop_raft_server *rs);
+BOP_API int32_t bop_raft_server_get_snapshot_sync_ctx_timeout(const struct bop_raft_server *rs);
 
 /**
  * Get ID of this server.
  *
  * @return Server ID.
  */
-BOP_API int32_t bop_raft_server_get_id(const bop_raft_server *rs);
+BOP_API int32_t bop_raft_server_get_id(const struct bop_raft_server *rs);
 
 /**
  * Get the current term of this server.
  *
  * @return Term.
  */
-BOP_API uint64_t bop_raft_server_get_term(const bop_raft_server *rs);
+BOP_API uint64_t bop_raft_server_get_term(const struct bop_raft_server *rs);
 
 /**
  * Get the term of given log index number.
@@ -1918,42 +1919,42 @@ BOP_API uint64_t bop_raft_server_get_term(const bop_raft_server *rs);
  * @param log_idx Log index number
  * @return Term of given log.
  */
-BOP_API uint64_t bop_raft_server_get_log_term(const bop_raft_server *rs, uint64_t log_idx);
+BOP_API uint64_t bop_raft_server_get_log_term(const struct bop_raft_server *rs, uint64_t log_idx);
 
 /**
  * Get the term of the last log.
  *
  * @return Term of the last log.
  */
-BOP_API uint64_t bop_raft_server_get_last_log_term(const bop_raft_server *rs);
+BOP_API uint64_t bop_raft_server_get_last_log_term(const struct bop_raft_server *rs);
 
 /**
  * Get the last log index number.
  *
  * @return Last log index number.
  */
-BOP_API uint64_t bop_raft_server_get_last_log_idx(const bop_raft_server *rs);
+BOP_API uint64_t bop_raft_server_get_last_log_idx(const struct bop_raft_server *rs);
 
 /**
  * Get the last committed log index number of state machine.
  *
  * @return Last committed log index number of state machine.
  */
-BOP_API uint64_t bop_raft_server_get_committed_log_idx(const bop_raft_server *rs);
+BOP_API uint64_t bop_raft_server_get_committed_log_idx(const struct bop_raft_server *rs);
 
 /**
  * Get the target log index number we are required to commit.
  *
  * @return Target committed log index number.
  */
-BOP_API uint64_t bop_raft_server_get_target_committed_log_idx(const bop_raft_server *rs);
+BOP_API uint64_t bop_raft_server_get_target_committed_log_idx(const struct bop_raft_server *rs);
 
 /**
  * Get the leader's last committed log index number.
  *
  * @return The leader's last committed log index number.
  */
-BOP_API uint64_t bop_raft_server_get_leader_committed_log_idx(const bop_raft_server *rs);
+BOP_API uint64_t bop_raft_server_get_leader_committed_log_idx(const struct bop_raft_server *rs);
 
 /**
  * Get the log index of the first config when this server became a leader.
@@ -1965,14 +1966,14 @@ BOP_API uint64_t bop_raft_server_get_leader_committed_log_idx(const bop_raft_ser
  *
  * @return The log index of the first config when this server became a leader.
  */
-BOP_API uint64_t bop_raft_server_get_log_idx_at_becoming_leader(const bop_raft_server *rs);
+BOP_API uint64_t bop_raft_server_get_log_idx_at_becoming_leader(const struct bop_raft_server *rs);
 
 /**
  * Calculate the log index to be committed from current peers' matched indexes.
  *
  * @return Expected committed log index.
  */
-BOP_API uint64_t bop_raft_server_get_expected_committed_log_idx(bop_raft_server *rs);
+BOP_API uint64_t bop_raft_server_get_expected_committed_log_idx(const struct bop_raft_server *rs);
 
 /**
  * Get the current Raft cluster config.
@@ -1981,7 +1982,7 @@ BOP_API uint64_t bop_raft_server_get_expected_committed_log_idx(bop_raft_server 
  * @param cluster_config Wrapper for holding nuraft::ptr<nuraft::cluster_config>
  */
 BOP_API void
-bop_raft_server_get_config(const bop_raft_server *rs, bop_raft_cluster_config_ptr *cluster_config);
+bop_raft_server_get_config(const struct bop_raft_server *rs, struct bop_raft_cluster_config_ptr *cluster_config);
 
 /**
  * Get data center ID of the given server.
@@ -1990,7 +1991,7 @@ bop_raft_server_get_config(const bop_raft_server *rs, bop_raft_cluster_config_pt
  * @return -1 if given server ID does not exist.
  *          0 if data center ID was not assigned.
  */
-BOP_API int32_t bop_raft_server_get_dc_id(const bop_raft_server *rs, int32_t srv_id);
+BOP_API int32_t bop_raft_server_get_dc_id(const struct bop_raft_server *rs, int32_t srv_id);
 
 /**
  * Get auxiliary context stored in the server config.
@@ -1999,7 +2000,7 @@ BOP_API int32_t bop_raft_server_get_dc_id(const bop_raft_server *rs, int32_t srv
  * @return
  * Auxiliary context.
  */
-BOP_API bop_raft_buffer *bop_raft_server_get_aux(const bop_raft_server *rs, int32_t srv_id);
+BOP_API struct bop_raft_buffer *bop_raft_server_get_aux(const struct bop_raft_server *rs, int32_t srv_id);
 
 /**
  * Get the ID of current leader.
@@ -2007,21 +2008,21 @@ BOP_API bop_raft_buffer *bop_raft_server_get_aux(const bop_raft_server *rs, int3
  * @return Leader ID
  *         -1 if there is no live leader.
  */
-BOP_API int32_t bop_raft_server_get_leader(const bop_raft_server *rs);
+BOP_API int32_t bop_raft_server_get_leader(const struct bop_raft_server *rs);
 
 /**
  * Check if this server is leader.
  *
  * @return `true` if it is leader.
  */
-BOP_API bool bop_raft_server_is_leader(const bop_raft_server *rs);
+BOP_API bool bop_raft_server_is_leader(const struct bop_raft_server *rs);
 
 /**
  * Check if there is live leader in the current cluster.
  *
  * @return `true` if live leader exists.
  */
-BOP_API bool bop_raft_server_is_leader_alive(const bop_raft_server *rs);
+BOP_API bool bop_raft_server_is_leader_alive(const struct bop_raft_server *rs);
 
 /**
  * Get the configuration of given server.
@@ -2030,7 +2031,7 @@ BOP_API bool bop_raft_server_is_leader_alive(const bop_raft_server *rs);
  * @return Server configuration.
  */
 BOP_API void bop_raft_server_get_srv_config(
-    const bop_raft_server *rs, bop_raft_srv_config_ptr *svr_config, int32_t srv_id
+    const struct bop_raft_server *rs, struct bop_raft_srv_config_ptr *svr_config, int32_t srv_id
 );
 
 /**
@@ -2039,7 +2040,7 @@ BOP_API void bop_raft_server_get_srv_config(
  * @param[out] configs_out Set of server configurations.
  */
 BOP_API void
-bop_raft_server_get_srv_config_all(const bop_raft_server *rs, bop_raft_srv_config_vec *configs_out);
+bop_raft_server_get_srv_config_all(const struct bop_raft_server *rs, struct bop_raft_srv_config_vec *configs_out);
 
 /**
  * Update the server configuration, only leader will accept this operation.
@@ -2055,7 +2056,7 @@ bop_raft_server_get_srv_config_all(const bop_raft_server *rs, bop_raft_srv_confi
  * @return `true` on success, `false` if rejected.
  */
 BOP_API void
-bop_raft_server_update_srv_config(bop_raft_server *rs, bop_raft_srv_config_ptr *new_config);
+bop_raft_server_update_srv_config(struct bop_raft_server *rs, struct bop_raft_srv_config_ptr *new_config);
 
 /**
  * Get the peer info of the given ID. Only leader will return peer info.
@@ -2064,7 +2065,7 @@ bop_raft_server_update_srv_config(bop_raft_server *rs, bop_raft_srv_config_ptr *
  * @return Peer info
  */
 BOP_API bool
-bop_raft_server_get_peer_info(bop_raft_server *rs, int32_t srv_id, bop_raft_server_peer_info *peer);
+bop_raft_server_get_peer_info(struct bop_raft_server *rs, int32_t srv_id, struct bop_raft_server_peer_info *peer);
 
 /**
  * Get the info of all peers. Only leader will return peer info.
@@ -2073,36 +2074,36 @@ bop_raft_server_get_peer_info(bop_raft_server *rs, int32_t srv_id, bop_raft_serv
  * info.
  */
 BOP_API void bop_raft_server_get_peer_info_all(
-    const bop_raft_server *rs, bop_raft_server_peer_info_vec *peers_out
+    const struct bop_raft_server *rs, struct bop_raft_server_peer_info_vec *peers_out
 );
 
 /**
  * Shut down server instance.
  */
-BOP_API void bop_raft_server_shutdown(bop_raft_server *rs);
+BOP_API void bop_raft_server_shutdown(struct bop_raft_server *rs);
 
 /**
  *  Start internal background threads, initialize election
  */
-BOP_API void bop_raft_server_start_server(bop_raft_server *rs, bool skip_initial_election_timeout);
+BOP_API void bop_raft_server_start_server(struct bop_raft_server *rs, bool skip_initial_election_timeout);
 
 /**
  * Stop background commit thread.
  */
-BOP_API void bop_raft_server_stop_server(bop_raft_server *rs);
+BOP_API void bop_raft_server_stop_server(struct bop_raft_server *rs);
 
 /**
  * Send reconnect request to leader. Leader will re-establish the connection to this server
  * in a few seconds. Only follower will accept this operation.
  */
-BOP_API void bop_raft_server_send_reconnect_request(bop_raft_server *rs);
+BOP_API void bop_raft_server_send_reconnect_request(struct bop_raft_server *rs);
 
 /**
  * Update Raft parameters.
  *
  * @param new_params Parameters to set.
  */
-BOP_API void bop_raft_server_update_params(bop_raft_server *rs, bop_raft_params *params);
+BOP_API void bop_raft_server_update_params(struct bop_raft_server *rs, struct bop_raft_params *params);
 
 /**
  * Get the current Raft parameters. Returned instance is the clone of the original one,
@@ -2110,7 +2111,7 @@ BOP_API void bop_raft_server_update_params(bop_raft_server *rs, bop_raft_params 
  *
  * @return Clone of Raft parameters.
  */
-BOP_API void bop_raft_server_get_current_params(const bop_raft_server *rs, bop_raft_params *params);
+BOP_API void bop_raft_server_get_current_params(const struct bop_raft_server *rs, struct bop_raft_params *params);
 
 /**
  * Get the counter number of given stat name.
@@ -2119,7 +2120,7 @@ BOP_API void bop_raft_server_get_current_params(const bop_raft_server *rs, bop_r
  *
  * @return Counter value.
  */
-BOP_API uint64_t bop_raft_server_get_stat_counter(bop_raft_server *rs, bop_raft_counter *counter);
+BOP_API uint64_t bop_raft_server_get_stat_counter(struct bop_raft_server *rs, struct bop_raft_counter *counter);
 
 /**
  * Get the gauge number of given stat name.
@@ -2127,7 +2128,7 @@ BOP_API uint64_t bop_raft_server_get_stat_counter(bop_raft_server *rs, bop_raft_
  * @param name Stat name to retrieve.
  * @return Gauge value.
  */
-BOP_API int64_t bop_raft_server_get_stat_gauge(bop_raft_server *rs, bop_raft_gauge *gauge);
+BOP_API int64_t bop_raft_server_get_stat_gauge(struct bop_raft_server *rs, struct bop_raft_gauge *gauge);
 
 /**
  * Get the histogram of given stat name.
@@ -2138,39 +2139,39 @@ BOP_API int64_t bop_raft_server_get_stat_gauge(bop_raft_server *rs, bop_raft_gau
  * @return `true` on success.
  *         `false` if stat does not exist, or is not histogram type.
  */
-BOP_API bool bop_raft_server_get_stat_histogram(bop_raft_server *rs, bop_raft_histogram *histogram);
+BOP_API bool bop_raft_server_get_stat_histogram(struct bop_raft_server *rs, struct bop_raft_histogram *histogram);
 
 /**
  * Reset given stat to zero.
  *
  * @param name Stat name to reset.
  */
-BOP_API void bop_raft_server_reset_counter(bop_raft_server *rs, bop_raft_counter *counter);
+BOP_API void bop_raft_server_reset_counter(struct bop_raft_server *rs, struct bop_raft_counter *counter);
 
 /**
  * Reset given stat to zero.
  *
  * @param name Stat name to reset.
  */
-BOP_API void bop_raft_server_reset_gauge(bop_raft_server *rs, bop_raft_gauge *gauge);
+BOP_API void bop_raft_server_reset_gauge(struct bop_raft_server *rs, struct bop_raft_gauge *gauge);
 
 /**
  * Reset given stat to zero.
  *
  * @param name Stat name to reset.
  */
-BOP_API void bop_raft_server_reset_histogram(bop_raft_server *rs, bop_raft_histogram *histogram);
+BOP_API void bop_raft_server_reset_histogram(struct bop_raft_server *rs, struct bop_raft_histogram *histogram);
 
 /**
  * Reset all existing stats to zero.
  */
-BOP_API void bop_raft_server_reset_all_stats(bop_raft_server *rs);
+BOP_API void bop_raft_server_reset_all_stats(struct bop_raft_server *rs);
 
 /**
  * Set a custom callback function for increasing term.
  */
 BOP_API void bop_raft_server_set_inc_term_func(
-    bop_raft_server *rs, void *user_data, bop_raft_inc_term_func func
+    struct bop_raft_server *rs, void *user_data, bop_raft_inc_term_func func
 );
 
 /**
@@ -2184,19 +2185,19 @@ BOP_API void bop_raft_server_set_inc_term_func(
  *                   is a possibility that the state machine execution
  *                   is still happening.
  */
-BOP_API void bop_raft_server_pause_state_machine_execution(bop_raft_server *rs, size_t timeout_ms);
+BOP_API void bop_raft_server_pause_state_machine_execution(struct bop_raft_server *rs, size_t timeout_ms);
 
 /**
  * Resume the background execution of state machine.
  */
-BOP_API void bop_raft_server_resume_state_machine_execution(bop_raft_server *rs);
+BOP_API void bop_raft_server_resume_state_machine_execution(struct bop_raft_server *rs);
 
 /**
  * Check if the state machine execution is paused.
  *
  * @return `true` if paused.
  */
-BOP_API bool bop_raft_server_is_state_machine_execution_paused(const bop_raft_server *rs);
+BOP_API bool bop_raft_server_is_state_machine_execution_paused(const struct bop_raft_server *rs);
 
 /**
  * Block the current thread and wake it up when the state machine execution is paused.
@@ -2205,7 +2206,7 @@ BOP_API bool bop_raft_server_is_state_machine_execution_paused(const bop_raft_se
  *                   even though the state machine is not paused yet.
  * @return `true` if the state machine is paused.
  */
-BOP_API bool bop_raft_server_wait_for_state_machine_pause(bop_raft_server *rs, size_t timeout_ms);
+BOP_API bool bop_raft_server_wait_for_state_machine_pause(struct bop_raft_server *rs, size_t timeout_ms);
 
 /**
  * (Experimental)
@@ -2217,7 +2218,7 @@ BOP_API bool bop_raft_server_wait_for_state_machine_pause(bop_raft_server *rs, s
  *
  * @param ok `true` if appending succeeded.
  */
-BOP_API void bop_raft_server_notify_log_append_completion(bop_raft_server *rs, bool ok);
+BOP_API void bop_raft_server_notify_log_append_completion(struct bop_raft_server *rs, bool ok);
 
 /**
  * Manually create a snapshot based on the latest committed log index of the state machine.
@@ -2235,7 +2236,7 @@ BOP_API void bop_raft_server_notify_log_append_completion(bop_raft_server *rs, b
  * @return Log index number of the created snapshot or`0` if failed.
  */
 BOP_API uint64_t bop_raft_server_create_snapshot(
-    bop_raft_server *rs,
+    struct bop_raft_server *rs,
     bool serialize_commit
 );
 
@@ -2251,7 +2252,7 @@ BOP_API uint64_t bop_raft_server_create_snapshot(
  *        `nullptr` if there is already a scheduled snapshot creation.
  */
 BOP_API void bop_raft_server_schedule_snapshot_creation(
-    bop_raft_server *rs, bop_raft_async_u64_ptr *result_handler
+    struct bop_raft_server *rs, struct bop_raft_async_u64_ptr *result_handler
 );
 
 /**
@@ -2259,14 +2260,14 @@ BOP_API void bop_raft_server_schedule_snapshot_creation(
  *
  * @return Log index number of the last snapshot. `0` if snapshot does not exist.
  */
-BOP_API uint64_t bop_raft_server_get_last_snapshot_idx(const bop_raft_server *rs);
+BOP_API uint64_t bop_raft_server_get_last_snapshot_idx(const struct bop_raft_server *rs);
 
 /**
  * Set the self mark down flag of this server.
  *
  * @return The self mark down flag before the update.
  */
-BOP_API bool bop_raft_server_set_self_mark_down(bop_raft_server *rs, bool to);
+BOP_API bool bop_raft_server_set_self_mark_down(struct bop_raft_server *rs, bool to);
 
 /**
  * Check if this server is the part of the quorum of full consensus.
@@ -2275,7 +2276,7 @@ BOP_API bool bop_raft_server_set_self_mark_down(bop_raft_server *rs, bool to);
  *
  * @return `true` if this server is the part of the full consensus.
  */
-BOP_API bool bop_raft_server_is_part_of_full_consensus(bop_raft_server *rs);
+BOP_API bool bop_raft_server_is_part_of_full_consensus(struct bop_raft_server *rs);
 
 /**
  * Check if this server is excluded from the quorum by the leader,
@@ -2284,7 +2285,7 @@ BOP_API bool bop_raft_server_is_part_of_full_consensus(bop_raft_server *rs);
  * @return `true` if this server is excluded by the current leader and
  *         not the part of the full consensus.
  */
-BOP_API bool bop_raft_server_is_excluded_by_leader(bop_raft_server *rs);
+BOP_API bool bop_raft_server_is_excluded_by_leader(struct bop_raft_server *rs);
 
 /**
  * Wait for the state machine to commit the log at the given index.
@@ -2295,16 +2296,16 @@ BOP_API bool bop_raft_server_is_excluded_by_leader(bop_raft_server *rs);
  *         has been invoked, and `false` if not.
  */
 bool bop_raft_server_wait_for_state_machine_commit(
-    bop_raft_server *rs,
-    bop_raft_async_bool_ptr* result,
+    struct bop_raft_server *rs,
+    struct bop_raft_async_bool_ptr* result,
     uint64_t target_idx
 ); // ptr<cmd_result<bool>>
 
-BOP_API bop_raft_state_mgr_ptr* bop_raft_mdbx_state_mgr_open(
-    bop_raft_srv_config_ptr* my_srv_config,
+BOP_API struct bop_raft_state_mgr_ptr* bop_raft_mdbx_state_mgr_open(
+    struct bop_raft_srv_config_ptr* my_srv_config,
     const char* dir,
     size_t dir_size,
-    bop_raft_logger_ptr* logger,
+    struct bop_raft_logger_ptr* logger,
     size_t size_lower,
     size_t size_now,
     size_t size_upper,
@@ -2313,13 +2314,13 @@ BOP_API bop_raft_state_mgr_ptr* bop_raft_mdbx_state_mgr_open(
     size_t pagesize,
     uint32_t flags, // MDBX_env_flags_t
     uint16_t mode, // mdbx_mode_t
-    bop_raft_log_store_ptr* log_store
+    struct bop_raft_log_store_ptr* log_store
 );
 
-BOP_API bop_raft_log_store_ptr* bop_raft_mdbx_log_store_open(
+BOP_API struct bop_raft_log_store_ptr* bop_raft_mdbx_log_store_open(
     const char* path,
     size_t path_size,
-    bop_raft_logger_ptr* logger,
+    struct bop_raft_logger_ptr* logger,
     size_t size_lower,
     size_t size_now,
     size_t size_upper,
