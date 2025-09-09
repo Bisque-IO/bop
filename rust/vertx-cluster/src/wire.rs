@@ -83,6 +83,24 @@ pub enum WireError {
     InvalidData(String),
 }
 
+impl std::fmt::Display for WireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WireError::Io(err) => write!(f, "IO error: {}", err),
+            WireError::InvalidData(msg) => write!(f, "Invalid data: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for WireError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WireError::Io(err) => Some(err),
+            WireError::InvalidData(_) => None,
+        }
+    }
+}
+
 impl From<std::io::Error> for WireError {
     fn from(err: std::io::Error) -> Self {
         WireError::Io(err)

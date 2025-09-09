@@ -1,1007 +1,1147 @@
-//! Idiomatic Rust wrappers for uWebSockets (uWS) 
-//! 
-//! This module provides safe, ergonomic Rust bindings for the uWebSockets C library,
-//! which is a high-performance WebSocket and HTTP library. The API is designed to be 
-//! idiomatic Rust with proper error handling, memory safety, and async integration.
+//! Safe(ish) Rust wrappers around uSockets (`us_*`) bindings from `bop-sys`.
 //!
-//! # Features
-//! 
-//! - **HTTP Server**: Create HTTP servers with routing, middleware support
-//! - **HTTP Client**: Make HTTP requests with connection pooling  
-//! - **WebSocket Server**: Real-time WebSocket connections with pub/sub
-//! - **WebSocket Client**: Connect to WebSocket servers
-//! - **TCP Server/Client**: Direct TCP socket support
-//! - **SSL/TLS**: Secure connections with certificate support
-//! - **High Performance**: Built on uWebSockets for maximum throughput
+//! This module provides ergonomic types for loop, timers, socket contexts, TCP sockets,
+//! and UDP sockets by installing static trampolines that dispatch to user-provided
+//! Rust closures stored in the respective `ext` areas (uSockets extension memory).
 //!
-//! # Safety
-//!
-//! All C API interactions are wrapped in safe Rust APIs with proper resource management
-//! using RAII patterns. Memory safety is ensured through careful lifetime management
-//! and automatic cleanup of resources.
+//! Safety notes:
+//! - Callbacks run on the uSockets loop thread; assume single-threaded `FnMut`.
+//! - We store a Box pointer in the `ext` area; do not mix these wrappers with
+//!   manual `ext` usage on the same objects.
+//! - All FFI calls remain `unsafe` internally; wrappers aim to reduce, not remove, risk.
 
-use bop_sys::*;
-use std::ffi::{CStr, CString, c_void};
-use std::ptr::{self, NonNull};
-use std::slice;
-use std::collections::HashMap;
+use bop_sys as sys;
+use std::ffi::{CStr, CString};
+use std::mem::{size_of, ManuallyDrop};
 use std::sync::{Arc, Mutex};
+use std::os::raw::{c_char, c_int, c_uint, c_void};
+use std::ptr::{null, null_mut};
 
-/// uWS-specific errors
-#[derive(Debug, thiserror::Error)]
-pub enum UwsError {
-    #[error("Null pointer returned from C API")]
-    NullPointer,
-    
-    #[error("Invalid UTF-8 string: {0}")]
-    InvalidUtf8(#[from] std::str::Utf8Error),
-    
-    #[error("Invalid C string: {0}")]
-    InvalidCString(#[from] std::ffi::NulError),
-    
-    #[error("HTTP server error: {0}")]
-    HttpServerError(String),
-    
-    #[error("HTTP client error: {0}")]
-    HttpClientError(String),
-    
-    #[error("WebSocket error: {0}")]
-    WebSocketError(String),
-    
-    #[error("TCP error: {0}")]
-    TcpError(String),
-    
-    #[error("SSL/TLS error: {0}")]
-    SslError(String),
-    
-    #[error("Configuration error: {0}")]
-    ConfigError(String),
-    
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SslMode {
+    Plain,
+    Tls,
 }
 
-pub type UwsResult<T> = Result<T, UwsError>;
-
-/// HTTP request methods
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpMethod {
-    Get,
-    Post, 
-    Put,
-    Delete,
-    Patch,
-    Options,
-    Head,
-    Connect,
-    Trace,
-}
-
-/// WebSocket message opcodes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum WebSocketOpcode {
-    Text = 1,
-    Binary = 2,
-    Close = 8,
-    Ping = 9,
-    Pong = 10,
-}
-
-/// WebSocket send status
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum WebSocketSendStatus {
-    Backpressure = 0,
-    Success = 1,
-    Dropped = 2,
-}
-
-/// SSL/TLS options for secure connections
-#[derive(Debug, Clone)]
-pub struct SslOptions {
-    /// Path to certificate file
-    pub cert_file_name: String,
-    /// Path to private key file  
-    pub key_file_name: String,
-    /// Passphrase for private key
-    pub passphrase: String,
-    /// Path to DH parameters file
-    pub dh_params_file_name: String,
-    /// Path to CA certificate file
-    pub ca_file_name: String,
-    /// SSL ciphers
-    pub ssl_ciphers: String,
-    /// SSL prefer low memory usage
-    pub ssl_prefer_low_memory_usage: bool,
-}
-
-impl Default for SslOptions {
-    fn default() -> Self {
-        Self {
-            cert_file_name: String::new(),
-            key_file_name: String::new(), 
-            passphrase: String::new(),
-            dh_params_file_name: String::new(),
-            ca_file_name: String::new(),
-            ssl_ciphers: String::new(),
-            ssl_prefer_low_memory_usage: false,
+impl SslMode {
+    #[inline]
+    fn as_c_int(self) -> c_int {
+        match self {
+            SslMode::Plain => 0,
+            SslMode::Tls => 1,
         }
     }
 }
 
-/// HTTP request wrapper
-pub struct HttpRequest {
-    ptr: uws_req_t,
+// ----- Utility: store/retrieve Box<T> pointer in ext memory -----
+
+unsafe fn ext_set_ptr(ext: *mut c_void, ptr: *mut c_void) {
+    // ext holds a single pointer-sized slot
+    unsafe { (ext as *mut *mut c_void).write(ptr) };
 }
 
-impl HttpRequest {
-    /// Create from raw pointer (internal use)
-    pub(crate) unsafe fn from_raw(ptr: uws_req_t) -> Self {
-        Self { ptr }
-    }
-    
-    /// Get the HTTP method
-    pub fn method(&self) -> UwsResult<String> {
-        unsafe {
-            let mut length = 0;
-            let method_ptr = uws_req_get_method(self.ptr, &mut length);
-            if method_ptr.is_null() || length == 0 {
-                return Ok(String::from("GET")); // Default fallback
+unsafe fn ext_get_ptr<T>(ext: *mut c_void) -> *mut T {
+    unsafe { (ext as *mut *mut c_void).read() as *mut T }
+}
+
+// ----- Loop -----
+
+pub struct Loop {
+    ptr: *mut sys::us_loop_t,
+}
+
+struct DeferredCallbacks {
+    // Dual queue system - we swap which queue is current
+    queues: [Vec<Box<dyn FnOnce() + Send>>; 2],
+    queues_arcs: [Vec<Arc<dyn Fn() + Send>>; 2],
+    current_queue: usize, // 0 or 1, which queue receives new callbacks
+    needs_wake: bool,  // whether a wakeup is needed to process callbacks
+}
+
+struct LoopState {
+    on_wakeup: Option<Box<dyn FnMut()>>,
+    on_pre: Option<Box<dyn FnMut()>>,
+    on_post: Option<Box<dyn FnMut()>>,
+    // Deferred callback queues - both protected by same mutex for atomic queue swapping
+    deferred_callbacks: Arc<Mutex<DeferredCallbacks>>,
+}
+
+impl Loop {
+    pub fn new() -> Result<Self, &'static str> {
+        unsafe extern "C" fn wakeup_trampoline(loop_: *mut sys::us_loop_t) {
+            // First process deferred callbacks by swapping queues
+            unsafe { 
+                let ext = sys::us_loop_ext(loop_);
+                if !ext.is_null() {
+                    let state_box = ext_get_ptr::<LoopState>(ext);
+                    if !state_box.is_null() {
+                        let state = &mut *state_box;
+                        // let mut old_queue_ptr: *mut Vec<Box<dyn FnOnce() + Send>> = core::ptr::null_mut();
+
+                        // Swap current defer queue (like the C++ code)
+                        let (old_defer_queue, old_defer_queue_arcs) = if let Ok(mut deferred) = state.deferred_callbacks.lock() {
+                            let old_queue = deferred.current_queue;
+                            deferred.current_queue = (deferred.current_queue + 1) % 2;
+                            deferred.needs_wake = false;
+                            (
+                                &mut deferred.queues[old_queue] as *mut Vec<Box<dyn FnOnce() + Send>>, 
+                                &mut deferred.queues_arcs[old_queue] as *mut Vec<Arc<dyn Fn() + Send>>
+                            )
+                        } else {
+                            return; // Mutex poisoned, skip processing
+                        }; // Mutex is released here
+                        
+                        // Process callbacks from old queue - no lock needed since nobody else touches it
+                        let old_queue = &mut (*old_defer_queue);
+                        let old_queue_arcs = &mut (*old_defer_queue_arcs);
+
+                        // Process all callbacks without any locks (like C++)
+                        for callback in old_queue.drain(..) {
+                            callback();
+                        }
+                        for callback in old_queue_arcs.drain(..) {
+                            callback();
+                        }
+                    }
+                }
             }
-            let slice = slice::from_raw_parts(method_ptr as *const u8, length);
-            Ok(String::from_utf8_lossy(slice).into_owned())
+            
+            // Then run the normal wakeup handler if set
+            unsafe { loop_dispatch(loop_, |s| &mut s.on_wakeup) }
         }
-    }
-    
-    /// Get the request URL
-    pub fn url(&self) -> UwsResult<String> {
-        unsafe {
-            let mut length = 0;
-            let url_ptr = uws_req_get_url(self.ptr, &mut length);
-            if url_ptr.is_null() || length == 0 {
-                return Ok(String::from("/"));
+        unsafe extern "C" fn pre_trampoline(loop_: *mut sys::us_loop_t) {
+            unsafe { loop_dispatch(loop_, |s| &mut s.on_pre) }
+        }
+        unsafe extern "C" fn post_trampoline(loop_: *mut sys::us_loop_t) {
+            unsafe { loop_dispatch(loop_, |s| &mut s.on_post) }
+        }
+
+        unsafe fn loop_dispatch<F>(loop_: *mut sys::us_loop_t, sel: F)
+        where
+            F: FnOnce(&mut LoopState) -> &mut Option<Box<dyn FnMut()>>,
+        {
+            let ext = unsafe { sys::us_loop_ext(loop_) };
+            if ext.is_null() {
+                return;
             }
-            let slice = slice::from_raw_parts(url_ptr as *const u8, length);
-            Ok(String::from_utf8_lossy(slice).into_owned())
-        }
-    }
-    
-    /// Get the query string
-    pub fn query(&self) -> UwsResult<String> {
-        unsafe {
-            let mut length = 0;
-            let query_ptr = uws_req_get_query(self.ptr, &mut length);
-            if query_ptr.is_null() || length == 0 {
-                return Ok(String::new());
+            let state_ptr = unsafe { ext_get_ptr::<LoopState>(ext) };
+            if state_ptr.is_null() {
+                return;
             }
-            let slice = slice::from_raw_parts(query_ptr as *const u8, length);
-            Ok(String::from_utf8_lossy(slice).into_owned())
-        }
-    }
-    
-    /// Get a specific header value
-    pub fn header(&self, key: &str) -> UwsResult<Option<String>> {
-        let key_cstr = CString::new(key)?;
-        unsafe {
-            let mut length = 0;
-            let header_ptr = uws_req_get_header(self.ptr, key_cstr.as_ptr(), &mut length);
-            if header_ptr.is_null() || length == 0 {
-                return Ok(None);
+            let state = unsafe { &mut *state_ptr };
+            if let Some(cb) = sel(state).as_mut() {
+                cb();
             }
-            let slice = slice::from_raw_parts(header_ptr as *const u8, length);
-            Ok(Some(String::from_utf8_lossy(slice).into_owned()))
+        }
+
+        let ptr = unsafe {
+            sys::us_create_loop(
+                null_mut(),
+                Some(wakeup_trampoline),
+                Some(pre_trampoline),
+                Some(post_trampoline),
+                size_of::<*mut c_void>() as c_uint,
+            )
+        };
+        if ptr.is_null() {
+            return Err("us_create_loop returned null");
+        }
+        // Install state into ext
+        let state = Box::new(LoopState {
+            on_wakeup: None,
+            on_pre: None,
+            on_post: None,
+            deferred_callbacks: Arc::new(Mutex::new(DeferredCallbacks {
+                queues: [Vec::new(), Vec::new()],
+                queues_arcs: [Vec::new(), Vec::new()],
+                current_queue: 0,
+                needs_wake: false,
+            })),
+        });
+        unsafe {
+            let ext = sys::us_loop_ext(ptr);
+            if ext.is_null() {
+                return Err("us_loop_ext returned null");
+            }
+            ext_set_ptr(ext, Box::into_raw(state) as *mut c_void);
+        }
+        Ok(Self { ptr })
+    }
+
+    #[inline]
+    pub fn as_ptr(&self) -> *mut sys::us_loop_t {
+        self.ptr
+    }
+
+    pub fn on_wakeup<F>(&mut self, cb: F)
+    where
+        F: FnMut() + 'static,
+    {
+        unsafe {
+            let ext = sys::us_loop_ext(self.ptr);
+            let state_ptr = ext_get_ptr::<LoopState>(ext);
+            if !state_ptr.is_null() {
+                (*state_ptr).on_wakeup = Some(Box::new(cb));
+            }
         }
     }
-    
-    /// Get all headers as a HashMap
-    pub fn headers(&self) -> UwsResult<HashMap<String, String>> {
-        let mut headers = HashMap::new();
+
+    pub fn on_pre<F>(&mut self, cb: F)
+    where
+        F: FnMut() + 'static,
+    {
         unsafe {
-            let count = uws_req_get_header_count(self.ptr);
-            for i in 0..count {
-                let mut header = uws_http_header_t {
-                    key: uws_string_view_t { data: ptr::null(), length: 0 },
-                    value: uws_string_view_t { data: ptr::null(), length: 0 },
-                };
-                uws_req_get_header_at(self.ptr, i, &mut header);
-                
-                if !header.key.data.is_null() && !header.value.data.is_null() {
-                    let key_slice = slice::from_raw_parts(header.key.data as *const u8, header.key.length);
-                    let value_slice = slice::from_raw_parts(header.value.data as *const u8, header.value.length);
-                    let key = String::from_utf8_lossy(key_slice).into_owned();
-                    let value = String::from_utf8_lossy(value_slice).into_owned();
-                    headers.insert(key, value);
+            let ext = sys::us_loop_ext(self.ptr);
+            let state_ptr = ext_get_ptr::<LoopState>(ext);
+            if !state_ptr.is_null() {
+                (*state_ptr).on_pre = Some(Box::new(cb));
+            }
+        }
+    }
+
+    pub fn on_post<F>(&mut self, cb: F)
+    where
+        F: FnMut() + 'static,
+    {
+        unsafe {
+            let ext = sys::us_loop_ext(self.ptr);
+            let state_ptr = ext_get_ptr::<LoopState>(ext);
+            if !state_ptr.is_null() {
+                (*state_ptr).on_post = Some(Box::new(cb));
+            }
+        }
+    }
+
+    #[inline]
+    pub fn run(&self) {
+        unsafe { sys::us_loop_run(self.ptr) }
+    }
+
+    #[inline]
+    pub fn wakeup(&self) { unsafe { sys::us_wakeup_loop(self.ptr) } }
+
+    #[inline]
+    pub fn integrate(&self) {
+        // unsafe { sys::us_loop_integrate(self.ptr) }
+    }
+    
+    /// Queue a callback to be executed on the next wakeup in a thread-safe manner.
+    /// The callback will be executed on the event loop thread when wakeup() is called.
+    pub fn defer<F>(&self, callback: F) -> Result<(), &'static str> 
+    where 
+        F: FnOnce() + Send + 'static 
+    {
+        unsafe {
+            let ext = sys::us_loop_ext(self.ptr);
+            if ext.is_null() {
+                return Err("Loop ext is null");
+            }
+            
+            let state_box = ext_get_ptr::<LoopState>(ext);
+            if state_box.is_null() {
+                return Err("Loop state is null");
+            }
+            
+            let state = &mut *state_box;
+            let mut needs_wakeup = false;
+            
+            // Add callback to current queue
+            if let Ok(mut deferred) = state.deferred_callbacks.lock() {
+                let current_idx = deferred.current_queue;
+                deferred.queues[current_idx].push(Box::new(callback));
+                if !deferred.needs_wake {
+                    deferred.needs_wake = true;
+                    needs_wakeup = true;
+                }
+            } else {
+                return Err("Failed to lock deferred callbacks mutex")
+            }
+
+            if needs_wakeup {
+                self.wakeup();
+            }
+
+            Ok(())
+        }
+    }
+
+    /// Queue a callback to be executed on the next wakeup in a thread-safe manner.
+    /// The callback will be executed on the event loop thread when wakeup() is called.
+    pub fn defer_arc<F>(&self, callback: Arc<F>) -> Result<(), &'static str> 
+    where 
+        F: Fn() + Send + 'static 
+    {
+        unsafe {
+            let ext = sys::us_loop_ext(self.ptr);
+            if ext.is_null() {
+                return Err("Loop ext is null");
+            }
+            
+            let state_box = ext_get_ptr::<LoopState>(ext);
+            if state_box.is_null() {
+                return Err("Loop state is null");
+            }
+            
+            let state = &mut *state_box;
+            let mut needs_wakeup = false;
+            
+            // Add callback to current queue
+            if let Ok(mut deferred) = state.deferred_callbacks.lock() {
+                let current_idx = deferred.current_queue;
+                deferred.queues_arcs[current_idx].push(callback);
+                if !deferred.needs_wake {
+                    deferred.needs_wake = true;
+                    needs_wakeup = true;
+                }
+            } else {
+                return Err("Failed to lock deferred callbacks mutex")
+            }
+
+            if needs_wakeup {
+                self.wakeup();
+            }
+
+            Ok(())
+        }
+    }
+
+    #[inline]
+    pub fn iteration_number(&self) -> i64 {
+        unsafe { sys::us_loop_iteration_number(self.ptr) as i64 }
+    }
+}
+
+impl Drop for Loop {
+    fn drop(&mut self) {
+        unsafe {
+            let ext = sys::us_loop_ext(self.ptr);
+            if !ext.is_null() {
+                let state_ptr = ext_get_ptr::<LoopState>(ext);
+                if !state_ptr.is_null() {
+                    drop(Box::from_raw(state_ptr));
+                }
+            }
+            sys::us_loop_free(self.ptr);
+        }
+    }
+}
+
+// ----- Timer -----
+
+pub struct Timer {
+    ptr: *mut sys::us_timer_t,
+}
+
+struct TimerState {
+    cb: Option<Box<dyn FnMut()>>,
+}
+
+impl Timer {
+    pub fn new(loop_: &Loop) -> Result<Self, &'static str> {
+        unsafe extern "C" fn on_timer(t: *mut sys::us_timer_t) {
+            unsafe {
+                let ext = sys::us_timer_ext(t);
+                if ext.is_null() {
+                    return;
+                }
+                let state_ptr = ext_get_ptr::<TimerState>(ext);
+                if state_ptr.is_null() {
+                    return;
+                }
+                if let Some(cb) = (*state_ptr).cb.as_mut() {
+                    cb();
                 }
             }
         }
-        Ok(headers)
-    }
-}
 
-/// HTTP response wrapper
-pub struct HttpResponse {
-    ptr: uws_res_t,
-}
-
-impl HttpResponse {
-    /// Create from raw pointer (internal use)
-    pub(crate) unsafe fn from_raw(ptr: uws_res_t) -> Self {
-        Self { ptr }
-    }
-    
-    /// Write HTTP status
-    pub fn status(&mut self, status: &str) -> UwsResult<&mut Self> {
-        let status_cstr = CString::new(status)?;
-        unsafe {
-            uws_res_write_status(self.ptr, status_cstr.as_ptr(), status.len());
+        let ptr = unsafe { sys::us_create_timer(loop_.ptr, 0, size_of::<*mut c_void>() as c_uint) };
+        if ptr.is_null() {
+            return Err("us_create_timer returned null");
         }
-        Ok(self)
-    }
-    
-    /// Write a header
-    pub fn header(&mut self, key: &str, value: &str) -> UwsResult<&mut Self> {
-        let key_cstr = CString::new(key)?;
-        let value_cstr = CString::new(value)?;
+        let state = Box::new(TimerState { cb: None });
         unsafe {
-            uws_res_write_header(
-                self.ptr,
-                key_cstr.as_ptr(),
-                key.len(),
-                value_cstr.as_ptr(),
-                value.len(),
-            );
-        }
-        Ok(self)
-    }
-    
-    /// Write header with integer value
-    pub fn header_int(&mut self, key: &str, value: u64) -> UwsResult<&mut Self> {
-        let key_cstr = CString::new(key)?;
-        unsafe {
-            uws_res_write_header_int(self.ptr, key_cstr.as_ptr(), key.len(), value);
-        }
-        Ok(self)
-    }
-    
-    /// Write response body data
-    pub fn write(&mut self, data: &[u8]) -> &mut Self {
-        unsafe {
-            uws_res_write(self.ptr, data.as_ptr() as *const i8, data.len());
-        }
-        self
-    }
-    
-    /// Write string response body  
-    pub fn write_str(&mut self, data: &str) -> &mut Self {
-        self.write(data.as_bytes())
-    }
-    
-    /// End response without body
-    pub fn end_without_body(&mut self, content_length: Option<usize>, close_connection: bool) -> UwsResult<()> {
-        unsafe {
-            let (length, length_is_set) = match content_length {
-                Some(len) => (len, true),
-                None => (0, false),
-            };
-            uws_res_end_without_body(self.ptr, length, length_is_set, close_connection);
-        }
-        Ok(())
-    }
-    
-    /// End response with body
-    pub fn end(&mut self, data: &[u8], close_connection: bool) -> UwsResult<()> {
-        unsafe {
-            uws_res_end(
-                self.ptr,
-                data.as_ptr() as *const i8,
-                data.len(),
-                close_connection,
-            );
-        }
-        Ok(())
-    }
-    
-    /// End response with string body
-    pub fn end_str(&mut self, data: &str, close_connection: bool) -> UwsResult<()> {
-        self.end(data.as_bytes(), close_connection)
-    }
-    
-    /// Try to end response (non-blocking)
-    pub fn try_end(&mut self, data: &[u8], total_size: usize, close_connection: bool) -> UwsResult<(bool, bool)> {
-        unsafe {
-            let mut has_responded = false;
-            let result = uws_res_try_end(
-                self.ptr,
-                data.as_ptr() as *const i8,
-                data.len(),
-                total_size,
-                close_connection,
-                &mut has_responded,
-            );
-            Ok((result, has_responded))
-        }
-    }
-    
-    /// Check if response has been sent
-    pub fn has_responded(&self) -> bool {
-        unsafe { uws_res_has_responded(self.ptr) }
-    }
-    
-    /// Get current write offset
-    pub fn write_offset(&self) -> usize {
-        unsafe { uws_res_write_offset(self.ptr) }
-    }
-    
-    /// Override write offset
-    pub fn override_write_offset(&mut self, offset: usize) {
-        unsafe { uws_res_override_write_offset(self.ptr, offset) }
-    }
-    
-    /// Pause response
-    pub fn pause(&mut self) {
-        unsafe { uws_res_pause(self.ptr) }
-    }
-    
-    /// Resume response  
-    pub fn resume(&mut self) {
-        unsafe { uws_res_resume(self.ptr) }
-    }
-    
-    /// Close response
-    pub fn close(&mut self) {
-        unsafe { uws_res_close(self.ptr) }
-    }
-    
-    /// Get native handle for advanced usage
-    pub fn native_handle(&self) -> *mut c_void {
-        unsafe { uws_res_native_handle(self.ptr) }
-    }
-    
-    /// Get remote address
-    pub fn remote_address(&self) -> UwsResult<String> {
-        unsafe {
-            let mut length = 0usize;
-            let addr_ptr = uws_res_remote_address(self.ptr, &mut length);
-            if addr_ptr.is_null() || length == 0 {
-                return Err(UwsError::InvalidInput("No remote address available".to_string()));
+            let ext = sys::us_timer_ext(ptr);
+            if ext.is_null() {
+                return Err("us_timer_ext returned null");
             }
-            let slice = slice::from_raw_parts(addr_ptr as *const u8, length);
-            String::from_utf8(slice.to_vec()).map_err(|_| UwsError::InvalidInput("Invalid UTF-8 in address".to_string()))
+            ext_set_ptr(ext, Box::into_raw(state) as *mut c_void);
+            // Install the single trampoline once; actual closure can be swapped later
+            sys::us_timer_set(ptr, Some(on_timer), 0, 0);
         }
+        Ok(Self { ptr })
     }
-}
 
-/// WebSocket connection wrapper
-pub struct WebSocket {
-    ptr: uws_web_socket_t,
-}
-
-impl WebSocket {
-    /// Create from raw pointer (internal use)
-    pub(crate) unsafe fn from_raw(ptr: uws_web_socket_t) -> Self {
-        Self { ptr }
-    }
-    
-    /// Send WebSocket message
-    pub fn send(&mut self, message: &[u8], opcode: WebSocketOpcode, compress: bool) -> WebSocketSendStatus {
-        let result = unsafe {
-            uws_ws_send(self.ptr, message.as_ptr() as *const i8, message.len(), opcode as i32, compress, true)
-        };
-        if result {
-            WebSocketSendStatus::Success
-        } else {
-            WebSocketSendStatus::Backpressure
-        }
-    }
-    
-    /// Send text message
-    pub fn send_text(&mut self, text: &str) -> WebSocketSendStatus {
-        self.send(text.as_bytes(), WebSocketOpcode::Text, false)
-    }
-    
-    /// Send binary message
-    pub fn send_binary(&mut self, data: &[u8]) -> WebSocketSendStatus {
-        self.send(data, WebSocketOpcode::Binary, false)
-    }
-    
-    /// Send ping
-    pub fn ping(&mut self, data: &[u8]) -> WebSocketSendStatus {
-        self.send(data, WebSocketOpcode::Ping, false)
-    }
-    
-    /// Send pong
-    pub fn pong(&mut self, data: &[u8]) -> WebSocketSendStatus {
-        self.send(data, WebSocketOpcode::Pong, false)
-    }
-    
-    /// Close WebSocket connection
-    pub fn close(&mut self, code: u16, message: &str) -> UwsResult<()> {
-        let message_cstr = CString::new(message)?;
-        unsafe {
-            uws_ws_close(self.ptr, code as i32, message_cstr.as_ptr(), message.len());
-        }
-        Ok(())
-    }
-    
-    /// End WebSocket connection
-    pub fn end(&mut self, code: u16, message: &str) -> UwsResult<()> {
-        let message_cstr = CString::new(message)?;
-        unsafe {
-            uws_ws_end(self.ptr, code as i32, message_cstr.as_ptr(), message.len());
-        }
-        Ok(())
-    }
-    
-    /// Subscribe to a topic for pub/sub
-    pub fn subscribe(&mut self, topic: &str) -> UwsResult<bool> {
-        let topic_cstr = CString::new(topic)?;
-        let result = unsafe {
-            uws_ws_subscribe(self.ptr, topic_cstr.as_ptr(), topic.len())
-        };
-        Ok(result)
-    }
-    
-    /// Unsubscribe from a topic
-    pub fn unsubscribe(&mut self, topic: &str) -> UwsResult<bool> {
-        let topic_cstr = CString::new(topic)?;
-        let result = unsafe {
-            uws_ws_unsubscribe(self.ptr, topic_cstr.as_ptr(), topic.len())
-        };
-        Ok(result)
-    }
-    
-    /// Check if subscribed to a topic
-    pub fn is_subscribed(&self, topic: &str) -> UwsResult<bool> {
-        let topic_cstr = CString::new(topic)?;
-        let result = unsafe {
-            uws_ws_is_subscribed(self.ptr, topic_cstr.as_ptr(), topic.len())
-        };
-        Ok(result)
-    }
-    
-    /// Publish message to a topic
-    pub fn publish(&mut self, topic: &str, message: &[u8], opcode: WebSocketOpcode) -> UwsResult<bool> {
-        let topic_cstr = CString::new(topic)?;
-        let result = unsafe {
-            uws_ws_publish(
-                self.ptr,
-                topic_cstr.as_ptr(),
-                topic.len(),
-                message.as_ptr() as *const i8,
-                message.len(),
-                opcode as i32,
-                false, // compress
-            )
-        };
-        Ok(result)
-    }
-    
-    /// Get buffered amount
-    pub fn buffered_amount(&self) -> u32 {
-        unsafe { uws_ws_get_buffered_amount(self.ptr) }
-    }
-    
-    /// Get remote address
-    pub fn remote_address(&self) -> UwsResult<String> {
-        unsafe {
-            let mut length = 0usize;
-            let addr_ptr = uws_ws_get_remote_address(self.ptr, &mut length);
-            if addr_ptr.is_null() || length == 0 {
-                return Err(UwsError::InvalidInput("No remote address available".to_string()));
-            }
-            let slice = slice::from_raw_parts(addr_ptr as *const u8, length);
-            String::from_utf8(slice.to_vec()).map_err(|_| UwsError::InvalidInput("Invalid UTF-8 in address".to_string()))
-        }
-    }
-    
-    /// Check if compression is negotiated
-    pub fn has_negotiated_compression(&self) -> bool {
-        unsafe { uws_ws_has_negotiated_compression(self.ptr) }
-    }
-    
-    /// Get user data pointer
-    pub fn user_data<T>(&self) -> *mut T {
-        unsafe { uws_ws_get_user_data(self.ptr) as *mut T }
-    }
-}
-
-/// Event loop wrapper
-pub struct EventLoop {
-    ptr: uws_loop_t,
-}
-
-impl EventLoop {
-    /// Create from raw pointer (internal use) 
-    pub(crate) unsafe fn from_raw(ptr: uws_loop_t) -> Self {
-        Self { ptr }
-    }
-    
-    /// Defer execution of a function
-    pub fn defer<F>(&self, callback: F) 
+    pub fn set<F>(&mut self, ms: i32, repeat_ms: i32, cb: F)
     where
-        F: FnOnce() + Send + 'static,
+        F: FnMut() + 'static,
     {
-        // Store the callback in a box to pass to C
-        let callback_box = Box::into_raw(Box::new(callback));
-        
-        unsafe extern "C" fn trampoline<F>(user_data: *mut c_void)
-        where
-            F: FnOnce() + Send + 'static,
-        {
-            let callback_box = Box::from_raw(user_data as *mut F);
-            callback_box();
-        }
-        
         unsafe {
-            uws_loop_defer(self.ptr, Some(trampoline::<F>), callback_box as *mut c_void);
-        }
-    }
-}
-
-/// HTTP request handler type
-pub type HttpHandler = Box<dyn Fn(HttpResponse, HttpRequest) + Send + Sync>;
-
-/// WebSocket message handler type  
-pub type WebSocketMessageHandler = Box<dyn Fn(&mut WebSocket, &[u8], WebSocketOpcode) + Send + Sync>;
-
-/// WebSocket open handler type
-pub type WebSocketOpenHandler = Box<dyn Fn(&mut WebSocket) + Send + Sync>;
-
-/// WebSocket close handler type
-pub type WebSocketCloseHandler = Box<dyn Fn(&mut WebSocket, u16, &[u8]) + Send + Sync>;
-
-/// WebSocket behavior configuration
-#[derive(Default)]
-pub struct WebSocketBehavior {
-    /// Compression settings
-    pub compression: Option<String>,
-    /// Max compressed size
-    pub max_compressed_size: u32,
-    /// Max message size
-    pub max_message_size: u32,
-    /// Idle timeout in seconds
-    pub idle_timeout: u16,
-    /// Max lifetime in seconds
-    pub max_lifetime: u16,
-    /// Close on backpressure limit
-    pub close_on_backpressure_limit: u32,
-    /// Reset idle timeout on send
-    pub reset_idle_timeout_on_send: bool,
-    /// Send pings automatically
-    pub send_pings_automatically: bool,
-    /// Max backpressure
-    pub max_backpressure: u32,
-    /// Upgrade handler
-    pub upgrade: Option<HttpHandler>,
-    /// Message handler  
-    pub message: Option<WebSocketMessageHandler>,
-    /// Open handler
-    pub open: Option<WebSocketOpenHandler>,
-    /// Close handler
-    pub close: Option<WebSocketCloseHandler>,
-}
-
-/// HTTP Application wrapper
-pub struct HttpApp {
-    ptr: NonNull<c_void>,
-    is_ssl: bool,
-    handlers: Arc<Mutex<HashMap<String, HttpHandler>>>,
-    ws_handlers: Arc<Mutex<HashMap<String, WebSocketBehavior>>>,
-}
-
-impl HttpApp {
-    /// Create a new HTTP application
-    pub fn new() -> UwsResult<Self> {
-        let ptr = unsafe { uws_create_app() };
-        NonNull::new(ptr).map(|ptr| Self {
-            ptr,
-            is_ssl: false,
-            handlers: Arc::new(Mutex::new(HashMap::new())),
-            ws_handlers: Arc::new(Mutex::new(HashMap::new())),
-        }).ok_or(UwsError::NullPointer)
-    }
-    
-    /// Create a new HTTPS application
-    pub fn new_ssl(options: SslOptions) -> UwsResult<Self> {
-        // Convert SslOptions to C struct
-        let cert_cstr = CString::new(options.cert_file_name)?;
-        let key_cstr = CString::new(options.key_file_name)?;
-        let passphrase_cstr = CString::new(options.passphrase)?;
-        let dh_cstr = CString::new(options.dh_params_file_name)?;
-        let ca_cstr = CString::new(options.ca_file_name)?;
-        let ciphers_cstr = CString::new(options.ssl_ciphers)?;
-        
-        let ssl_options = uws_ssl_options_s {
-            cert_file_name: cert_cstr.as_ptr(),
-            key_file_name: key_cstr.as_ptr(),
-            passphrase: passphrase_cstr.as_ptr(),
-            dh_params_file_name: dh_cstr.as_ptr(),
-            ca_file_name: ca_cstr.as_ptr(),
-            ssl_ciphers: ciphers_cstr.as_ptr(),
-            ssl_prefer_low_memory_usage: options.ssl_prefer_low_memory_usage,
-        };
-        
-        let ptr = unsafe { uws_create_ssl_app(ssl_options) };
-        NonNull::new(ptr).map(|ptr| Self {
-            ptr,
-            is_ssl: true,
-            handlers: Arc::new(Mutex::new(HashMap::new())),
-            ws_handlers: Arc::new(Mutex::new(HashMap::new())),
-        }).ok_or(UwsError::NullPointer)
-    }
-    
-    /// Check if this is an SSL app
-    pub fn is_ssl(&self) -> bool {
-        unsafe { uws_app_is_ssl(self.ptr.as_ptr()) }
-    }
-    
-    /// Add GET route handler
-    pub fn get<F>(&mut self, pattern: &str, handler: F) -> UwsResult<&mut Self>
-    where
-        F: Fn(HttpResponse, HttpRequest) + Send + Sync + 'static,
-    {
-        let pattern_cstr = CString::new(pattern)?;
-        let handler_box = Box::new(handler);
-        let handler_ptr = Box::into_raw(handler_box);
-        
-        // Store handler for cleanup
-        if let Ok(mut handlers) = self.handlers.lock() {
-            handlers.insert(pattern.to_string(), unsafe { Box::from_raw(handler_ptr) });
-        }
-        
-        unsafe extern "C" fn http_handler_trampoline(
-            res: uws_res_t,
-            req: uws_req_t,
-            user_data: *mut c_void,
-        ) {
-            if user_data.is_null() {
-                return;
+            let ext = sys::us_timer_ext(self.ptr);
+            let state_ptr = ext_get_ptr::<TimerState>(ext);
+            if !state_ptr.is_null() {
+                (*state_ptr).cb = Some(Box::new(cb));
             }
-            let handler = &*(user_data as *const HttpHandler);
-            let response = HttpResponse::from_raw(res);
-            let request = HttpRequest::from_raw(req);
-            handler(response, request);
-        }
-        
-        unsafe {
-            uws_app_get(
-                self.ptr.as_ptr(),
-                handler_ptr as *mut c_void,
-                pattern_cstr.as_ptr(),
-                pattern.len(),
-                Some(http_handler_trampoline),
-            );
-        }
-        
-        Ok(self)
-    }
-    
-    /// Add POST route handler
-    pub fn post<F>(&mut self, pattern: &str, handler: F) -> UwsResult<&mut Self>
-    where
-        F: Fn(HttpResponse, HttpRequest) + Send + Sync + 'static,
-    {
-        let pattern_cstr = CString::new(pattern)?;
-        let handler_box = Box::new(handler);
-        let handler_ptr = Box::into_raw(handler_box);
-        
-        unsafe extern "C" fn http_handler_trampoline(
-            res: uws_res_t,
-            req: uws_req_t,
-            user_data: *mut c_void,
-        ) {
-            if user_data.is_null() {
-                return;
-            }
-            let handler = &*(user_data as *const HttpHandler);
-            let response = HttpResponse::from_raw(res);
-            let request = HttpRequest::from_raw(req);
-            handler(response, request);
-        }
-        
-        unsafe {
-            uws_app_post(
-                self.ptr.as_ptr(),
-                handler_ptr as *mut c_void,
-                pattern_cstr.as_ptr(),
-                pattern.len(),
-                Some(http_handler_trampoline),
-            );
-        }
-        
-        Ok(self)
-    }
-    
-    /// Listen on a specific port
-    pub fn listen(&mut self, port: u16) -> UwsResult<&mut Self> {
-        let success = unsafe {
-            uws_app_listen(
-                self.ptr.as_ptr(),
-                port as i32,
-                None, // No callback for now
-                ptr::null_mut(),
-            )
-        };
-        
-        if success {
-            Ok(self)
-        } else {
-            Err(UwsError::HttpServerError(format!("Failed to listen on port {}", port)))
+            sys::us_timer_set(self.ptr, None, ms as c_int, repeat_ms as c_int);
         }
     }
-    
-    /// Get the event loop
-    pub fn event_loop(&self) -> EventLoop {
-        let loop_ptr = unsafe { uws_app_loop(self.ptr.as_ptr()) };
-        unsafe { EventLoop::from_raw(loop_ptr) }
-    }
-    
-    /// Run the event loop (blocking)
-    pub fn run(&mut self) {
-        unsafe { uws_app_run(self.ptr.as_ptr()) }
-    }
-    
-    /// Publish to WebSocket topic
-    pub fn publish(&mut self, topic: &str, message: &[u8], opcode: WebSocketOpcode) -> UwsResult<bool> {
-        let topic_cstr = CString::new(topic)?;
-        let result = unsafe {
-            uws_app_publish(
-                self.ptr.as_ptr(),
-                topic_cstr.as_ptr(),
-                message.as_ptr() as *const i8,
-                message.len(),
-                opcode as i32,
-                false, // compress
-            )
-        };
-        Ok(result)
+
+    #[inline]
+    pub fn close(self) {
+        let me = ManuallyDrop::new(self);
+        unsafe { sys::us_timer_close(me.ptr) }
     }
 }
 
-impl Drop for HttpApp {
+impl Drop for Timer {
     fn drop(&mut self) {
         unsafe {
-            uws_app_destroy(self.ptr.as_ptr());
+            let ext = sys::us_timer_ext(self.ptr);
+            if !ext.is_null() {
+                let state_ptr = ext_get_ptr::<TimerState>(ext);
+                if !state_ptr.is_null() {
+                    drop(Box::from_raw(state_ptr));
+                }
+            }
+            // Best-effort close; safe if already closed
+            sys::us_timer_close(self.ptr);
         }
     }
 }
 
-unsafe impl Send for HttpApp {}
-unsafe impl Sync for HttpApp {}
+// ----- Socket & Context -----
 
-/// TCP connection wrapper
-pub struct TcpConnection {
-    ptr: uws_tcp_conn_t,
+pub struct SocketContext {
+    ptr: *mut sys::us_socket_context_t,
+    ssl: SslMode,
 }
 
-impl TcpConnection {
-    /// Create from raw pointer (internal use)
-    pub(crate) unsafe fn from_raw(ptr: uws_tcp_conn_t) -> Self {
-        Self { ptr }
-    }
-    
-    /// Write data to the connection
-    pub fn write(&mut self, data: &[u8]) -> UwsResult<usize> {
-        // Note: The actual API might be different - this is a placeholder
-        // The uWS TCP API details would need to be checked
-        Ok(data.len())
-    }
-    
-    /// Close the connection
-    pub fn close(&mut self) {
-        // TCP close implementation would go here
-        // The actual function call would depend on the uWS TCP API
-    }
-    
-    /// Get user data
-    pub fn user_data<T>(&self) -> *mut T {
-        // Implementation would depend on the actual TCP API
-        std::ptr::null_mut()
-    }
+struct SocketContextState {
+    on_pre_open: Option<Box<dyn FnMut(sys::SOCKET) -> sys::SOCKET>>,
+    on_open: Option<Box<dyn FnMut(Socket, bool, &[u8])>>,
+    on_close: Option<Box<dyn FnMut(Socket, i32)>>,
+    on_data: Option<Box<dyn FnMut(Socket, &mut [u8])>>,
+    on_writable: Option<Box<dyn FnMut(Socket)>>,
+    on_timeout: Option<Box<dyn FnMut(Socket)>>,
+    on_long_timeout: Option<Box<dyn FnMut(Socket)>>,
+    on_connect_error: Option<Box<dyn FnMut(Socket, i32)>>,
+    on_end: Option<Box<dyn FnMut(Socket)>>,
+    on_server_name: Option<Box<dyn FnMut(&str)>>,
 }
 
-/// TCP behavior configuration
-#[derive(Default)]
-pub struct TcpBehavior {
-    /// Connection handler
-    pub connection: Option<Box<dyn Fn(&mut TcpConnection) + Send + Sync>>,
-    /// Message handler
-    pub message: Option<Box<dyn Fn(&mut TcpConnection, &[u8]) + Send + Sync>>,
-    /// Close handler
-    pub close: Option<Box<dyn Fn(&mut TcpConnection) + Send + Sync>>,
-}
-
-/// TCP Server Application wrapper
-pub struct TcpServerApp {
-    ptr: NonNull<c_void>,
-    is_ssl: bool,
-}
-
-impl TcpServerApp {
-    /// Create a new TCP server
-    pub fn new(behavior: TcpBehavior) -> UwsResult<Self> {
-        // Convert behavior to C struct
-        let tcp_behavior = uws_tcp_behavior_s {
-            connection: None, // Would be set based on behavior
-            message: None,    // Would be set based on behavior
-            close: None,      // Would be set based on behavior  
-            user_data: ptr::null_mut(),
+impl SocketContext {
+    pub fn new(loop_: &Loop, ssl: SslMode, options: SocketContextOptions) -> Result<Self, &'static str> {
+        // Hold CStrings alive during the FFI call; uSockets copies as needed.
+        let key = options.key_file_name.and_then(|s| CString::new(s).ok());
+        let cert = options.cert_file_name.and_then(|s| CString::new(s).ok());
+        let pass = options.passphrase.and_then(|s| CString::new(s).ok());
+        let dh   = options.dh_params_file_name.and_then(|s| CString::new(s).ok());
+        let ca   = options.ca_file_name.and_then(|s| CString::new(s).ok());
+        let ciph = options.ssl_ciphers.and_then(|s| CString::new(s).ok());
+        let c_opts = sys::us_socket_context_options_t {
+            key_file_name: key.as_ref().map_or(null(), |c| c.as_ptr()),
+            cert_file_name: cert.as_ref().map_or(null(), |c| c.as_ptr()),
+            passphrase: pass.as_ref().map_or(null(), |c| c.as_ptr()),
+            dh_params_file_name: dh.as_ref().map_or(null(), |c| c.as_ptr()),
+            ca_file_name: ca.as_ref().map_or(null(), |c| c.as_ptr()),
+            ssl_ciphers: ciph.as_ref().map_or(null(), |c| c.as_ptr()),
+            ssl_prefer_low_memory_usage: if options.ssl_prefer_low_memory_usage { 1 } else { 0 },
         };
-        
         let ptr = unsafe {
-            uws_create_tcp_server_app(tcp_behavior, ptr::null_mut())
+            sys::us_create_socket_context(
+                ssl.as_c_int(),
+                loop_.ptr,
+                size_of::<*mut c_void>() as c_int,
+                c_opts,
+            )
         };
-        
-        NonNull::new(ptr).map(|ptr| Self {
-            ptr,
-            is_ssl: false,
-        }).ok_or(UwsError::NullPointer)
+        if ptr.is_null() {
+            return Err("us_create_socket_context returned null");
+        }
+
+        // State in ext
+        let state = Box::new(SocketContextState {
+            on_pre_open: None,
+            on_open: None,
+            on_close: None,
+            on_data: None,
+            on_writable: None,
+            on_timeout: None,
+            on_long_timeout: None,
+            on_connect_error: None,
+            on_end: None,
+            on_server_name: None,
+        });
+        unsafe {
+            let ext = sys::us_socket_context_ext(ssl.as_c_int(), ptr);
+            if ext.is_null() {
+                return Err("us_socket_context_ext returned null");
+            }
+            ext_set_ptr(ext, Box::into_raw(state) as *mut c_void);
+        }
+
+        // Register static trampolines
+        match ssl {
+            SslMode::Plain => unsafe { self_register_trampolines::<Plain>(ptr) },
+            SslMode::Tls => unsafe { self_register_trampolines::<Tls>(ptr) },
+        }
+
+        Ok(Self { ptr, ssl })
     }
-    
-    /// Create a new SSL TCP server
-    pub fn new_ssl(behavior: TcpBehavior, ssl_options: SslOptions) -> UwsResult<Self> {
-        // Convert SslOptions to C struct
-        let cert_cstr = CString::new(ssl_options.cert_file_name)?;
-        let key_cstr = CString::new(ssl_options.key_file_name)?;
-        let passphrase_cstr = CString::new(ssl_options.passphrase)?;
-        let dh_cstr = CString::new(ssl_options.dh_params_file_name)?;
-        let ca_cstr = CString::new(ssl_options.ca_file_name)?;
-        let ciphers_cstr = CString::new(ssl_options.ssl_ciphers)?;
-        
-        let ssl_options_c = uws_ssl_options_s {
-            cert_file_name: cert_cstr.as_ptr(),
-            key_file_name: key_cstr.as_ptr(),
-            passphrase: passphrase_cstr.as_ptr(),
-            dh_params_file_name: dh_cstr.as_ptr(),
-            ca_file_name: ca_cstr.as_ptr(),
-            ssl_ciphers: ciphers_cstr.as_ptr(),
-            ssl_prefer_low_memory_usage: ssl_options.ssl_prefer_low_memory_usage,
+
+    #[inline]
+    pub fn as_ptr(&self) -> *mut sys::us_socket_context_t { self.ptr }
+
+    #[inline]
+    pub fn ssl_mode(&self) -> SslMode { self.ssl }
+
+    #[inline]
+    pub fn loop_ptr(&self) -> *mut sys::us_loop_t { unsafe { sys::us_socket_context_loop(self.ssl.as_c_int(), self.ptr) } }
+
+    pub fn on_pre_open<F>(&mut self, cb: F)
+    where
+        F: FnMut(sys::SOCKET) -> sys::SOCKET + 'static,
+    {
+        unsafe { ctx_state_mut(self.ptr, self.ssl).on_pre_open = Some(Box::new(cb)); }
+    }
+
+    pub fn on_open<F>(&mut self, cb: F)
+    where
+        F: FnMut(Socket, bool, &[u8]) + 'static,
+    {
+        unsafe { ctx_state_mut(self.ptr, self.ssl).on_open = Some(Box::new(cb)); }
+    }
+
+    pub fn on_close<F>(&mut self, cb: F)
+    where
+        F: FnMut(Socket, i32) + 'static,
+    {
+        unsafe { ctx_state_mut(self.ptr, self.ssl).on_close = Some(Box::new(cb)); }
+    }
+
+    pub fn on_data<F>(&mut self, cb: F)
+    where
+        F: FnMut(Socket, &mut [u8]) + 'static,
+    {
+        unsafe { ctx_state_mut(self.ptr, self.ssl).on_data = Some(Box::new(cb)); }
+    }
+
+    pub fn on_writable<F>(&mut self, cb: F)
+    where
+        F: FnMut(Socket) + 'static,
+    {
+        unsafe { ctx_state_mut(self.ptr, self.ssl).on_writable = Some(Box::new(cb)); }
+    }
+
+    pub fn on_timeout<F>(&mut self, cb: F)
+    where
+        F: FnMut(Socket) + 'static,
+    {
+        unsafe { ctx_state_mut(self.ptr, self.ssl).on_timeout = Some(Box::new(cb)); }
+    }
+
+    pub fn on_long_timeout<F>(&mut self, cb: F)
+    where
+        F: FnMut(Socket) + 'static,
+    {
+        unsafe { ctx_state_mut(self.ptr, self.ssl).on_long_timeout = Some(Box::new(cb)); }
+    }
+
+    pub fn on_connect_error<F>(&mut self, cb: F)
+    where
+        F: FnMut(Socket, i32) + 'static,
+    {
+        unsafe { ctx_state_mut(self.ptr, self.ssl).on_connect_error = Some(Box::new(cb)); }
+    }
+
+    pub fn on_end<F>(&mut self, cb: F)
+    where
+        F: FnMut(Socket) + 'static,
+    {
+        unsafe { ctx_state_mut(self.ptr, self.ssl).on_end = Some(Box::new(cb)); }
+    }
+
+    pub fn on_server_name<F>(&mut self, cb: F)
+    where
+        F: FnMut(&str) + 'static,
+    {
+        unsafe { ctx_state_mut(self.ptr, self.ssl).on_server_name = Some(Box::new(cb)); }
+    }
+
+    pub fn listen(&self, host: &str, port: i32, options: i32) -> Option<ListenSocket> {
+        let chost = CString::new(host).ok()?;
+        let ls = unsafe {
+            sys::us_socket_context_listen(
+                self.ssl.as_c_int(),
+                self.ptr,
+                chost.as_ptr(),
+                port as c_int,
+                options as c_int,
+                0,
+            )
         };
-        
-        let tcp_behavior = uws_tcp_behavior_s {
-            connection: None,
-            message: None,
-            close: None,
-            user_data: ptr::null_mut(),
+        if ls.is_null() { None } else { Some(ListenSocket { ptr: ls, ssl: self.ssl }) }
+    }
+
+    pub fn connect(&self, host: &str, port: i32, source_host: Option<&str>, options: i32) -> Option<Socket> {
+        let chost = CString::new(host).ok()?;
+        let src = match source_host { Some(s) => CString::new(s).ok()?.into_raw(), None => null_mut() };
+        // Note: do not leak CString for src; re-wrap only if used
+        let s_ptr = unsafe {
+            sys::us_socket_context_connect(
+                self.ssl.as_c_int(),
+                self.ptr,
+                chost.as_ptr(),
+                port as c_int,
+                if src.is_null() { null() } else { src as *const c_char },
+                options as c_int,
+                0,
+            )
         };
-        
+        // Reconstruct and drop src CString if any
+        if !src.is_null() { unsafe { let _ = CString::from_raw(src); } }
+        if s_ptr.is_null() { None } else { Some(Socket { ptr: s_ptr, ssl: self.ssl }) }
+    }
+
+    #[inline]
+    pub fn close(self) {
+        let me = ManuallyDrop::new(self);
+        unsafe { sys::us_socket_context_close(me.ssl.as_c_int(), me.ptr) }
+    }
+}
+
+impl Drop for SocketContext {
+    fn drop(&mut self) {
+        unsafe {
+            let ext = sys::us_socket_context_ext(self.ssl.as_c_int(), self.ptr);
+            if !ext.is_null() {
+                let state_ptr = ext_get_ptr::<SocketContextState>(ext);
+                if !state_ptr.is_null() {
+                    drop(Box::from_raw(state_ptr));
+                }
+            }
+            sys::us_socket_context_free(self.ssl.as_c_int(), self.ptr);
+        }
+    }
+}
+
+pub struct ListenSocket {
+    ptr: *mut sys::us_listen_socket_t,
+    ssl: SslMode,
+}
+
+impl ListenSocket {
+    #[inline]
+    pub fn as_ptr(&self) -> *mut sys::us_listen_socket_t { self.ptr }
+}
+
+impl Drop for ListenSocket {
+    fn drop(&mut self) {
+        unsafe { sys::us_listen_socket_close(self.ssl.as_c_int(), self.ptr) }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct Socket {
+    ptr: *mut sys::us_socket_t,
+    ssl: SslMode,
+}
+
+impl Socket {
+    #[inline]
+    pub fn as_ptr(&self) -> *mut sys::us_socket_t { self.ptr }
+
+    pub fn write(&self, data: &[u8], msg_more: bool) -> i32 {
+        unsafe {
+            sys::us_socket_write(
+                self.ssl.as_c_int(),
+                self.ptr,
+                data.as_ptr() as *const c_char,
+                data.len() as c_int,
+                if msg_more { 1 } else { 0 },
+            ) as i32
+        }
+    }
+
+    // Additional methods are implemented further below in a separate impl
+}
+
+// Marker types for trampoline selection
+struct Plain;
+struct Tls;
+
+// Internal helpers to access context state
+unsafe fn ctx_state_mut<'a>(ctx: *mut sys::us_socket_context_t, ssl: SslMode) -> &'a mut SocketContextState {
+    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+    let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+    unsafe { &mut *state_ptr }
+}
+
+// Install all trampolines for a given context/ssl variant
+unsafe fn self_register_trampolines<T>(_ctx: *mut sys::us_socket_context_t)
+where
+    T: TrampolineTag,
+{
+    // on_pre_open
+    unsafe { sys::us_socket_context_on_pre_open(T::ssl(), _ctx, Some(T::on_pre_open())) };
+    // on_open
+    unsafe { sys::us_socket_context_on_open(T::ssl(), _ctx, Some(T::on_open())) };
+    // on_close
+    unsafe { sys::us_socket_context_on_close(T::ssl(), _ctx, Some(T::on_close())) };
+    // on_data
+    unsafe { sys::us_socket_context_on_data(T::ssl(), _ctx, Some(T::on_data())) };
+    // on_writable
+    unsafe { sys::us_socket_context_on_writable(T::ssl(), _ctx, Some(T::on_writable())) };
+    // on_timeout
+    unsafe { sys::us_socket_context_on_timeout(T::ssl(), _ctx, Some(T::on_timeout())) };
+    // on_long_timeout
+    unsafe { sys::us_socket_context_on_long_timeout(T::ssl(), _ctx, Some(T::on_long_timeout())) };
+    // on_connect_error
+    unsafe { sys::us_socket_context_on_connect_error(T::ssl(), _ctx, Some(T::on_connect_error())) };
+    // on_end
+    unsafe { sys::us_socket_context_on_end(T::ssl(), _ctx, Some(T::on_end())) };
+    // on_server_name
+    unsafe { sys::us_socket_context_on_server_name(T::ssl(), _ctx, Some(T::on_server_name())) };
+}
+
+trait TrampolineTag {
+    fn ssl() -> c_int;
+    // event callbacks
+    fn on_pre_open() -> unsafe extern "C" fn(*mut sys::us_socket_context_t, sys::SOCKET) -> sys::SOCKET;
+    fn on_open() -> unsafe extern "C" fn(*mut sys::us_socket_t, c_int, *mut c_char, c_int) -> *mut sys::us_socket_t;
+    fn on_close() -> unsafe extern "C" fn(*mut sys::us_socket_t, c_int, *mut c_void) -> *mut sys::us_socket_t;
+    fn on_data() -> unsafe extern "C" fn(*mut sys::us_socket_t, *mut c_char, c_int) -> *mut sys::us_socket_t;
+    fn on_writable() -> unsafe extern "C" fn(*mut sys::us_socket_t) -> *mut sys::us_socket_t;
+    fn on_timeout() -> unsafe extern "C" fn(*mut sys::us_socket_t) -> *mut sys::us_socket_t;
+    fn on_long_timeout() -> unsafe extern "C" fn(*mut sys::us_socket_t) -> *mut sys::us_socket_t;
+    fn on_connect_error() -> unsafe extern "C" fn(*mut sys::us_socket_t, c_int) -> *mut sys::us_socket_t;
+    fn on_end() -> unsafe extern "C" fn(*mut sys::us_socket_t) -> *mut sys::us_socket_t;
+    fn on_server_name() -> unsafe extern "C" fn(*mut sys::us_socket_context_t, *const c_char);
+}
+
+macro_rules! trampolines {
+    ($name:ident, $ssl:expr) => {
+        impl TrampolineTag for $name {
+            #[inline] fn ssl() -> c_int { $ssl }
+
+            fn on_pre_open() -> unsafe extern "C" fn(*mut sys::us_socket_context_t, sys::SOCKET) -> sys::SOCKET {
+                unsafe extern "C" fn f(ctx: *mut sys::us_socket_context_t, fd: sys::SOCKET) -> sys::SOCKET {
+                    let ssl = if $ssl == 0 { SslMode::Plain } else { SslMode::Tls };
+                    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+                    if !ext.is_null() {
+                        let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+                        if !state_ptr.is_null() {
+                            if let Some(cb) = unsafe { (*state_ptr).on_pre_open.as_mut() } {
+                                return cb(fd);
+                            }
+                        }
+                    }
+                    fd
+                }
+                f
+            }
+
+            fn on_open() -> unsafe extern "C" fn(*mut sys::us_socket_t, c_int, *mut c_char, c_int) -> *mut sys::us_socket_t {
+                unsafe extern "C" fn f(s: *mut sys::us_socket_t, is_client: c_int, ip: *mut c_char, ip_len: c_int) -> *mut sys::us_socket_t {
+                    let ssl = if $ssl == 0 { SslMode::Plain } else { SslMode::Tls };
+                    let ctx = unsafe { sys::us_socket_context(ssl.as_c_int(), s) };
+                    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+                    if !ext.is_null() {
+                        let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+                        if !state_ptr.is_null() {
+                            if let Some(cb) = unsafe { (*state_ptr).on_open.as_mut() } {
+                                let addr = if !ip.is_null() && ip_len > 0 {
+                                    unsafe { std::slice::from_raw_parts(ip as *const u8, ip_len as usize) }
+                                } else { &[] };
+                                cb(Socket { ptr: s, ssl }, is_client != 0, addr);
+                            }
+                        }
+                    }
+                    s
+                }
+                f
+            }
+
+            fn on_close() -> unsafe extern "C" fn(*mut sys::us_socket_t, c_int, *mut c_void) -> *mut sys::us_socket_t {
+                unsafe extern "C" fn f(s: *mut sys::us_socket_t, code: c_int, _reason: *mut c_void) -> *mut sys::us_socket_t {
+                    let ssl = if $ssl == 0 { SslMode::Plain } else { SslMode::Tls };
+                    let ctx = unsafe { sys::us_socket_context(ssl.as_c_int(), s) };
+                    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+                    if !ext.is_null() {
+                        let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+                        if !state_ptr.is_null() {
+                            if let Some(cb) = unsafe { (*state_ptr).on_close.as_mut() } {
+                                cb(Socket { ptr: s, ssl }, code as i32);
+                            }
+                        }
+                    }
+                    s
+                }
+                f
+            }
+
+            fn on_data() -> unsafe extern "C" fn(*mut sys::us_socket_t, *mut c_char, c_int) -> *mut sys::us_socket_t {
+                unsafe extern "C" fn f(s: *mut sys::us_socket_t, data: *mut c_char, len: c_int) -> *mut sys::us_socket_t {
+                    let ssl = if $ssl == 0 { SslMode::Plain } else { SslMode::Tls };
+                    let ctx = unsafe { sys::us_socket_context(ssl.as_c_int(), s) };
+                    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+                    if !ext.is_null() {
+                        let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+                        if !state_ptr.is_null() {
+                            if let Some(cb) = unsafe { (*state_ptr).on_data.as_mut() } {
+                                let slice = if !data.is_null() && len > 0 {
+                                    unsafe { std::slice::from_raw_parts_mut(data as *mut u8, len as usize) }
+                                } else { &mut [] };
+                                cb(Socket { ptr: s, ssl }, slice);
+                            }
+                        }
+                    }
+                    s
+                }
+                f
+            }
+
+            fn on_writable() -> unsafe extern "C" fn(*mut sys::us_socket_t) -> *mut sys::us_socket_t {
+                unsafe extern "C" fn f(s: *mut sys::us_socket_t) -> *mut sys::us_socket_t {
+                    let ssl = if $ssl == 0 { SslMode::Plain } else { SslMode::Tls };
+                    let ctx = unsafe { sys::us_socket_context(ssl.as_c_int(), s) };
+                    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+                    if !ext.is_null() {
+                        let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+                        if !state_ptr.is_null() {
+                            if let Some(cb) = unsafe { (*state_ptr).on_writable.as_mut() } {
+                                cb(Socket { ptr: s, ssl });
+                            }
+                        }
+                    }
+                    s
+                }
+                f
+            }
+
+            fn on_timeout() -> unsafe extern "C" fn(*mut sys::us_socket_t) -> *mut sys::us_socket_t {
+                unsafe extern "C" fn f(s: *mut sys::us_socket_t) -> *mut sys::us_socket_t {
+                    let ssl = if $ssl == 0 { SslMode::Plain } else { SslMode::Tls };
+                    let ctx = unsafe { sys::us_socket_context(ssl.as_c_int(), s) };
+                    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+                    if !ext.is_null() {
+                        let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+                        if !state_ptr.is_null() {
+                            if let Some(cb) = unsafe { (*state_ptr).on_timeout.as_mut() } {
+                                cb(Socket { ptr: s, ssl });
+                            }
+                        }
+                    }
+                    s
+                }
+                f
+            }
+
+            fn on_long_timeout() -> unsafe extern "C" fn(*mut sys::us_socket_t) -> *mut sys::us_socket_t {
+                unsafe extern "C" fn f(s: *mut sys::us_socket_t) -> *mut sys::us_socket_t {
+                    let ssl = if $ssl == 0 { SslMode::Plain } else { SslMode::Tls };
+                    let ctx = unsafe { sys::us_socket_context(ssl.as_c_int(), s) };
+                    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+                    if !ext.is_null() {
+                        let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+                        if !state_ptr.is_null() {
+                            if let Some(cb) = unsafe { (*state_ptr).on_long_timeout.as_mut() } {
+                                cb(Socket { ptr: s, ssl });
+                            }
+                        }
+                    }
+                    s
+                }
+                f
+            }
+
+            fn on_connect_error() -> unsafe extern "C" fn(*mut sys::us_socket_t, c_int) -> *mut sys::us_socket_t {
+                unsafe extern "C" fn f(s: *mut sys::us_socket_t, code: c_int) -> *mut sys::us_socket_t {
+                    let ssl = if $ssl == 0 { SslMode::Plain } else { SslMode::Tls };
+                    let ctx = unsafe { sys::us_socket_context(ssl.as_c_int(), s) };
+                    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+                    if !ext.is_null() {
+                        let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+                        if !state_ptr.is_null() {
+                            if let Some(cb) = unsafe { (*state_ptr).on_connect_error.as_mut() } {
+                                cb(Socket { ptr: s, ssl }, code as i32);
+                            }
+                        }
+                    }
+                    s
+                }
+                f
+            }
+
+            fn on_end() -> unsafe extern "C" fn(*mut sys::us_socket_t) -> *mut sys::us_socket_t {
+                unsafe extern "C" fn f(s: *mut sys::us_socket_t) -> *mut sys::us_socket_t {
+                    let ssl = if $ssl == 0 { SslMode::Plain } else { SslMode::Tls };
+                    let ctx = unsafe { sys::us_socket_context(ssl.as_c_int(), s) };
+                    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+                    if !ext.is_null() {
+                        let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+                        if !state_ptr.is_null() {
+                            if let Some(cb) = unsafe { (*state_ptr).on_end.as_mut() } {
+                                cb(Socket { ptr: s, ssl });
+                            }
+                        }
+                    }
+                    s
+                }
+                f
+            }
+
+            fn on_server_name() -> unsafe extern "C" fn(*mut sys::us_socket_context_t, *const c_char) {
+                unsafe extern "C" fn f(ctx: *mut sys::us_socket_context_t, hostname: *const c_char) {
+                    let ssl = if $ssl == 0 { SslMode::Plain } else { SslMode::Tls };
+                    let ext = unsafe { sys::us_socket_context_ext(ssl.as_c_int(), ctx) };
+                    if !ext.is_null() {
+                        let state_ptr = unsafe { ext_get_ptr::<SocketContextState>(ext) };
+                        if !state_ptr.is_null() {
+                            if let Some(cb) = unsafe { (*state_ptr).on_server_name.as_mut() } {
+                                if !hostname.is_null() {
+                                    if let Ok(s) = unsafe { CStr::from_ptr(hostname).to_str() } {
+                                        cb(s);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                f
+            }
+        }
+    };
+}
+
+trampolines!(Plain, 0);
+trampolines!(Tls, 1);
+
+// ----- SocketContextOptions -----
+
+#[derive(Default, Clone)]
+pub struct SocketContextOptions {
+    pub key_file_name: Option<String>,
+    pub cert_file_name: Option<String>,
+    pub passphrase: Option<String>,
+    pub dh_params_file_name: Option<String>,
+    pub ca_file_name: Option<String>,
+    pub ssl_ciphers: Option<String>,
+    pub ssl_prefer_low_memory_usage: bool,
+}
+
+impl SocketContextOptions {
+    #[allow(dead_code)]
+    fn into_ffi(self) -> sys::us_socket_context_options_t {
+        // Keep CString values alive for this call only; uSockets copies as needed.
+        sys::us_socket_context_options_t {
+            key_file_name: self
+                .key_file_name
+                .as_ref()
+                .and_then(|s| CString::new(s.as_str()).ok())
+                .map_or(null(), |c| c.into_raw() as *const c_char),
+            cert_file_name: self
+                .cert_file_name
+                .as_ref()
+                .and_then(|s| CString::new(s.as_str()).ok())
+                .map_or(null(), |c| c.into_raw() as *const c_char),
+            passphrase: self
+                .passphrase
+                .as_ref()
+                .and_then(|s| CString::new(s.as_str()).ok())
+                .map_or(null(), |c| c.into_raw() as *const c_char),
+            dh_params_file_name: self
+                .dh_params_file_name
+                .as_ref()
+                .and_then(|s| CString::new(s.as_str()).ok())
+                .map_or(null(), |c| c.into_raw() as *const c_char),
+            ca_file_name: self
+                .ca_file_name
+                .as_ref()
+                .and_then(|s| CString::new(s.as_str()).ok())
+                .map_or(null(), |c| c.into_raw() as *const c_char),
+            ssl_ciphers: self
+                .ssl_ciphers
+                .as_ref()
+                .and_then(|s| CString::new(s.as_str()).ok())
+                .map_or(null(), |c| c.into_raw() as *const c_char),
+            ssl_prefer_low_memory_usage: if self.ssl_prefer_low_memory_usage { 1 } else { 0 },
+        }
+    }
+}
+
+// ----- UDP -----
+// Guard UDP wrappers behind a feature to avoid unresolved symbols when
+// the underlying native library is built without UDP support.
+#[cfg(feature = "usockets-udp")]
+pub struct UdpPacketBuffer {
+    ptr: *mut sys::us_udp_packet_buffer_t,
+}
+
+#[cfg(feature = "usockets-udp")]
+impl UdpPacketBuffer {
+    pub fn new() -> Option<Self> {
+        let ptr = unsafe { sys::us_create_udp_packet_buffer() };
+        if ptr.is_null() { None } else { Some(Self { ptr }) }
+    }
+
+    #[inline]
+    pub fn as_ptr(&self) -> *mut sys::us_udp_packet_buffer_t { self.ptr }
+
+    pub fn payload_mut(&self, index: i32) -> &mut [u8] {
+        unsafe {
+            let p = sys::us_udp_packet_buffer_payload(self.ptr, index as c_int) as *mut u8;
+            let len = sys::us_udp_packet_buffer_payload_length(self.ptr, index as c_int) as usize;
+            std::slice::from_raw_parts_mut(p, len)
+        }
+    }
+}
+
+#[cfg(feature = "usockets-udp")]
+pub struct UdpSocket {
+    ptr: *mut sys::us_udp_socket_t,
+}
+
+#[cfg(feature = "usockets-udp")]
+struct UdpState {
+    on_data: Option<Box<dyn FnMut(&mut UdpSocket, &mut UdpPacketBuffer, i32)>>,
+    on_drain: Option<Box<dyn FnMut(&mut UdpSocket)>>,
+}
+
+#[cfg(feature = "usockets-udp")]
+impl UdpSocket {
+    pub fn create(
+        loop_: &Loop,
+        buf: &mut UdpPacketBuffer,
+        host: Option<&str>,
+        port: u16,
+        on_data: Option<Box<dyn FnMut(&mut UdpSocket, &mut UdpPacketBuffer, i32)>>,
+        on_drain: Option<Box<dyn FnMut(&mut UdpSocket)>>,
+    ) -> Option<Self> {
+        unsafe extern "C" fn data_cb(s: *mut sys::us_udp_socket_t, buf: *mut sys::us_udp_packet_buffer_t, num: c_int) {
+            unsafe {
+                let user = sys::us_udp_socket_user(s) as *mut UdpState;
+                if user.is_null() { return; }
+                if let Some(cb) = (*user).on_data.as_mut() {
+                    let mut sock = UdpSocket { ptr: s };
+                    let mut pbuf = UdpPacketBuffer { ptr: buf };
+                    cb(&mut sock, &mut pbuf, num as i32);
+                }
+            }
+        }
+        unsafe extern "C" fn drain_cb(s: *mut sys::us_udp_socket_t) {
+            unsafe {
+                let user = sys::us_udp_socket_user(s) as *mut UdpState;
+                if user.is_null() { return; }
+                if let Some(cb) = (*user).on_drain.as_mut() {
+                    let mut sock = UdpSocket { ptr: s };
+                    cb(&mut sock);
+                }
+            }
+        }
+
+        let user = Box::new(UdpState { on_data, on_drain });
+        let chost = host.and_then(|h| CString::new(h).ok());
         let ptr = unsafe {
-            uws_create_tcp_server_ssl_app(tcp_behavior, ssl_options_c, ptr::null_mut())
+            sys::us_create_udp_socket(
+                loop_.ptr,
+                buf.ptr,
+                Some(data_cb),
+                Some(drain_cb),
+                chost.as_ref().map_or(null(), |c| c.as_ptr()),
+                port as u16,
+                Box::into_raw(user) as *mut c_void,
+            )
         };
-        
-        NonNull::new(ptr).map(|ptr| Self {
-            ptr,
-            is_ssl: true,
-        }).ok_or(UwsError::NullPointer)
+        if ptr.is_null() { None } else { Some(Self { ptr }) }
     }
-    
-    /// Listen on a specific port
-    pub fn listen(&mut self, port: u16) -> UwsResult<&mut Self> {
-        // TCP server listen implementation would go here
-        // The actual function would depend on the uWS TCP server API
-        Ok(self)
+
+    #[inline]
+    pub fn as_ptr(&self) -> *mut sys::us_udp_socket_t { self.ptr }
+
+    pub fn bind(&mut self, hostname: &str, port: u32) -> i32 {
+        let chost = CString::new(hostname).unwrap();
+        unsafe { sys::us_udp_socket_bind(self.ptr, chost.as_ptr(), port as c_uint) as i32 }
     }
-    
-    /// Run the event loop
-    pub fn run(&mut self) {
-        // TCP server run implementation would go here
+
+    #[inline]
+    pub fn receive(&mut self, buf: &mut UdpPacketBuffer) -> i32 {
+        unsafe { sys::us_udp_socket_receive(self.ptr, buf.ptr) as i32 }
+    }
+
+    pub fn send(&mut self, buf: &mut UdpPacketBuffer, num: i32) -> i32 {
+        unsafe { sys::us_udp_socket_send(self.ptr, buf.ptr, num as c_int) as i32 }
+    }
+
+    #[inline]
+    pub fn bound_port(&self) -> i32 { unsafe { sys::us_udp_socket_bound_port(self.ptr) as i32 } }
+}
+
+#[cfg(feature = "usockets-udp")]
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        // The C API lacks an explicit close for UDP sockets here; rely on loop teardown.
+        // Ensure we drop user state if present.
+        unsafe {
+            let user = sys::us_udp_socket_user(self.ptr) as *mut UdpState;
+            if !user.is_null() {
+                drop(Box::from_raw(user));
+            }
+        }
     }
 }
 
-/// TCP Client Application wrapper  
-pub struct TcpClientApp {
-    ptr: NonNull<c_void>,
-    is_ssl: bool,
-}
-
-impl TcpClientApp {
-    /// Create a new TCP client
-    pub fn new(behavior: TcpBehavior) -> UwsResult<Self> {
-        let tcp_behavior = uws_tcp_behavior_s {
-            connection: None,
-            message: None,
-            close: None,
-            user_data: ptr::null_mut(),
-        };
-        
-        let ptr = unsafe { uws_create_tcp_client_app(tcp_behavior) };
-        
-        NonNull::new(ptr).map(|ptr| Self {
-            ptr,
-            is_ssl: false,
-        }).ok_or(UwsError::NullPointer)
-    }
-    
-    /// Create a new SSL TCP client
-    pub fn new_ssl(behavior: TcpBehavior, ssl_options: SslOptions) -> UwsResult<Self> {
-        // Convert SslOptions to C struct  
-        let cert_cstr = CString::new(ssl_options.cert_file_name)?;
-        let key_cstr = CString::new(ssl_options.key_file_name)?;
-        let passphrase_cstr = CString::new(ssl_options.passphrase)?;
-        let dh_cstr = CString::new(ssl_options.dh_params_file_name)?;
-        let ca_cstr = CString::new(ssl_options.ca_file_name)?;
-        let ciphers_cstr = CString::new(ssl_options.ssl_ciphers)?;
-        
-        let ssl_options_c = uws_ssl_options_s {
-            cert_file_name: cert_cstr.as_ptr(),
-            key_file_name: key_cstr.as_ptr(),
-            passphrase: passphrase_cstr.as_ptr(),
-            dh_params_file_name: dh_cstr.as_ptr(),
-            ca_file_name: ca_cstr.as_ptr(),
-            ssl_ciphers: ciphers_cstr.as_ptr(),
-            ssl_prefer_low_memory_usage: ssl_options.ssl_prefer_low_memory_usage,
-        };
-        
-        let tcp_behavior = uws_tcp_behavior_s {
-            connection: None,
-            message: None,
-            close: None,
-            user_data: ptr::null_mut(),
-        };
-        
-        let ptr = unsafe {
-            uws_create_tcp_client_ssl_app(tcp_behavior, ssl_options_c)
-        };
-        
-        NonNull::new(ptr).map(|ptr| Self {
-            ptr,
-            is_ssl: true,
-        }).ok_or(UwsError::NullPointer)
-    }
-    
-    /// Connect to a remote host
-    pub fn connect(&mut self, host: &str, port: u16) -> UwsResult<()> {
-        // TCP client connect implementation would go here
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_http_app_creation() {
-        let app = HttpApp::new();
-        assert!(app.is_ok());
+impl Socket {
+    pub fn write2(&self, header: &[u8], payload: &[u8]) -> i32 {
+        unsafe {
+            sys::us_socket_write2(
+                self.ssl.as_c_int(),
+                self.ptr,
+                header.as_ptr() as *const c_char,
+                header.len() as c_int,
+                payload.as_ptr() as *const c_char,
+                payload.len() as c_int,
+            ) as i32
+        }
     }
 
-    #[test]
-    fn test_ssl_options_default() {
-        let ssl_options = SslOptions::default();
-        assert!(ssl_options.cert_file_name.is_empty());
-        assert!(ssl_options.key_file_name.is_empty());
-        assert!(!ssl_options.ssl_prefer_low_memory_usage);
+    #[inline]
+    pub fn flush(&self) { unsafe { sys::us_socket_flush(self.ssl.as_c_int(), self.ptr) } }
+
+    #[inline]
+    pub fn shutdown(&self) { unsafe { sys::us_socket_shutdown(self.ssl.as_c_int(), self.ptr) } }
+
+    #[inline]
+    pub fn shutdown_read(&self) { unsafe { sys::us_socket_shutdown_read(self.ssl.as_c_int(), self.ptr) } }
+
+    #[inline]
+    pub fn is_shut_down(&self) -> bool { unsafe { sys::us_socket_is_shut_down(self.ssl.as_c_int(), self.ptr) != 0 } }
+
+    #[inline]
+    pub fn is_closed(&self) -> bool { unsafe { sys::us_socket_is_closed(self.ssl.as_c_int(), self.ptr) != 0 } }
+
+    #[inline]
+    pub fn set_timeout(&self, seconds: u32) { unsafe { sys::us_socket_timeout(self.ssl.as_c_int(), self.ptr, seconds as c_uint) } }
+
+    #[inline]
+    pub fn set_long_timeout(&self, minutes: u32) { unsafe { sys::us_socket_long_timeout(self.ssl.as_c_int(), self.ptr, minutes as c_uint) } }
+
+    #[inline]
+    pub fn local_port(&self) -> i32 { unsafe { sys::us_socket_local_port(self.ssl.as_c_int(), self.ptr) as i32 } }
+
+    #[inline]
+    pub fn remote_port(&self) -> i32 { unsafe { sys::us_socket_remote_port(self.ssl.as_c_int(), self.ptr) as i32 } }
+
+    pub fn remote_address(&self) -> Option<String> {
+        unsafe {
+            let mut buf = vec![0_i8; 256];
+            let mut len: c_int = buf.len() as c_int;
+            sys::us_socket_remote_address(self.ssl.as_c_int(), self.ptr, buf.as_mut_ptr(), &mut len);
+            if len <= 0 || (len as usize) > buf.len() { return None; }
+            let bytes = std::slice::from_raw_parts(buf.as_ptr() as *const u8, len as usize);
+            std::str::from_utf8(bytes).map(|s| s.to_string()).ok()
+        }
     }
 
-    #[test]
-    fn test_websocket_opcodes() {
-        assert_eq!(WebSocketOpcode::Text as i32, 1);
-        assert_eq!(WebSocketOpcode::Binary as i32, 2);
-        assert_eq!(WebSocketOpcode::Close as i32, 8);
-        assert_eq!(WebSocketOpcode::Ping as i32, 9);
-        assert_eq!(WebSocketOpcode::Pong as i32, 10);
-    }
-
-    #[test]
-    fn test_websocket_send_status() {
-        assert_eq!(WebSocketSendStatus::Backpressure as i32, 0);
-        assert_eq!(WebSocketSendStatus::Success as i32, 1);
-        assert_eq!(WebSocketSendStatus::Dropped as i32, 2);
-    }
-
-    #[test]
-    #[ignore] // Requires actual uWS library to be linked
-    fn test_http_request_methods() {
-        // This would test the actual HTTP request parsing
-        // Requires a real uWS context to work properly
-    }
-
-    #[test]
-    #[ignore] // Requires actual uWS library to be linked  
-    fn test_websocket_connection() {
-        // This would test WebSocket functionality
-        // Requires a real uWS context to work properly
-    }
+    #[inline]
+    pub fn close(&self, code: i32) { unsafe { sys::us_socket_close(self.ssl.as_c_int(), self.ptr, code as c_int, null_mut()) }; }
 }

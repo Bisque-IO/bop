@@ -17,6 +17,8 @@ extern "C" {
 #include "hash.h"
 #include "mpmc.h"
 #include "uws.h"
+#include "libusockets.h"
+#include "mdbx.h"
 
 #ifdef __cplusplus
 }

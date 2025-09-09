@@ -8,7 +8,12 @@
       "Bash(sed:*)",
       "WebSearch",
       "WebFetch(domain:docs.rs)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(rustc:*)",
+      "Bash(./test_mpmc_generic)",
+      "Bash(cargo clean:*)",
+      "Bash(cat:*)",
+      "Bash(cargo fix:*)"
     ],
     "deny": [],
     "ask": []

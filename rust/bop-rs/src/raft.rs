@@ -6,7 +6,7 @@
 
 use bop_sys::*;
 use std::ffi::{CStr, CString};
-use std::ptr::{self, NonNull};
+use std::ptr::{self, null_mut, NonNull};
 
 /// Strong type for server IDs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -155,7 +155,7 @@ unsafe impl Sync for Buffer {}
 
 /// Server configuration for a Raft node
 pub struct ServerConfig {
-    ptr: NonNull<bop_raft_srv_config>,
+    ptr: NonNull<bop_raft_srv_config_ptr>,
 }
 
 impl ServerConfig {
@@ -491,29 +491,34 @@ pub struct RaftServer {
 
 impl RaftServer {
     /// Launch a new Raft server
-    pub fn launch(
-        asio_service: AsioService,
-        params: RaftParams,
-        state_mgr: StateManager,
-        log_store: LogStore,
-        raft_params: RaftParams,
-        listener: RpcListener,
-    ) -> RaftResult<Self> {
-        let ptr = unsafe {
-            bop_raft_server_launch(
-                asio_service.as_ptr(),
-                params.as_ptr(),
-                state_mgr.as_ptr(),
-                log_store.as_ptr(),
-                raft_params.as_ptr(),
-                listener.as_ptr(),
-            )
-        };
+    // pub fn launch(
+    //     asio_service: AsioService,
+    //     params: RaftParams,
+    //     state_mgr: StateManager,
+    //     log_store: LogStore,
+    //     raft_params: RaftParams,
+    //     listener: RpcListener,
+    // ) -> RaftResult<Self> {
+    //     let ptr = unsafe {
+    //         bop_raft_server_launch(
+    //             asio_service.as_ptr(),
+    //             params.as_ptr(),
+    //             state_mgr.as_ptr(),
+    //             log_store.as_ptr(),
+    //             raft_params.as_ptr(),
+    //             listener.as_ptr(),
+    //             raft_params.as_ptr(),
+    //             true,
+    //             false,
+    //             false,
+    //             None,
+    //         )
+    //     };
         
-        NonNull::new(ptr)
-            .map(|ptr| RaftServer { ptr })
-            .ok_or(RaftError::NullPointer)
-    }
+    //     NonNull::new(ptr)
+    //         .map(|ptr| RaftServer { ptr })
+    //         .ok_or(RaftError::NullPointer)
+    // }
     
     /// Stop the server with a timeout
     pub fn stop(&mut self, time_limit_sec: usize) -> bool {
@@ -548,7 +553,7 @@ impl RaftServer {
     pub fn add_srv(&mut self, srv_config: ServerConfig) -> RaftResult<()> {
         let result = unsafe {
             let server_ptr = bop_raft_server_get(self.ptr.as_ptr());
-            bop_raft_server_add_srv(server_ptr, srv_config.as_ptr())
+            bop_raft_server_add_srv(server_ptr, srv_config.as_ptr(), null_mut())
         };
         if result {
             Ok(())

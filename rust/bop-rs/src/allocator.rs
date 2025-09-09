@@ -66,18 +66,18 @@ unsafe impl GlobalAlloc for BopAllocator {
     #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if new_size == 0 {
-            self.dealloc(ptr, layout);
+            unsafe { self.dealloc(ptr, layout) };
             return ptr::NonNull::dangling().as_ptr();
         }
 
         if layout.size() == 0 {
-            return self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
+            return unsafe { self.alloc(Layout::from_size_align_unchecked(new_size, layout.align())) };
         }
 
-        let new_ptr = bop_realloc(
+        let new_ptr = unsafe { bop_realloc(
             ptr as *mut std::ffi::c_void,
             new_size,
-        );
+        ) };
         new_ptr as *mut u8
     }
 
@@ -91,7 +91,7 @@ unsafe impl GlobalAlloc for BopAllocator {
             return ptr::NonNull::dangling().as_ptr();
         }
 
-        let ptr = bop_zalloc_aligned(layout.align(), layout.size());
+        let ptr = unsafe { bop_zalloc_aligned(layout.align(), layout.size()) };
         ptr as *mut u8
     }
 }

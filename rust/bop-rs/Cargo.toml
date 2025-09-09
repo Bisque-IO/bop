@@ -9,9 +9,12 @@ default = []
 # sys = ["dep:bop-sys"]
 # Enable allocation statistics tracking
 alloc-stats = []
+# Optionally enable UDP uSockets bindings/wrappers
+usockets-udp = []
 
 [dependencies]
 bop-sys = { path = "../bop-sys", optional = false }
+bitflags = "2"
 multimap = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -24,6 +27,13 @@ crc32fast = "1.4"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
 
+[profile.dev]
+opt-level = 0
+debug = true
 
 [profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
 strip = true
