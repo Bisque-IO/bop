@@ -56,7 +56,9 @@ unsafe impl GlobalAlloc for BopAllocator {
             return;
         }
 
-        unsafe { bop_dealloc_sized(ptr as *mut std::ffi::c_void, layout.size()); }
+        unsafe {
+            bop_dealloc_sized(ptr as *mut std::ffi::c_void, layout.size());
+        }
     }
 
     /// Reallocate memory using BOP's realloc function
@@ -71,13 +73,12 @@ unsafe impl GlobalAlloc for BopAllocator {
         }
 
         if layout.size() == 0 {
-            return unsafe { self.alloc(Layout::from_size_align_unchecked(new_size, layout.align())) };
+            return unsafe {
+                self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()))
+            };
         }
 
-        let new_ptr = unsafe { bop_realloc(
-            ptr as *mut std::ffi::c_void,
-            new_size,
-        ) };
+        let new_ptr = unsafe { bop_realloc(ptr as *mut std::ffi::c_void, new_size) };
         new_ptr as *mut u8
     }
 
@@ -127,7 +128,7 @@ impl BopStatsAllocator {
     /// Get the current allocation statistics
     pub fn stats(&self) -> AllocationStats {
         use std::sync::atomic::Ordering;
-        
+
         AllocationStats {
             allocations: self.allocations.load(Ordering::Relaxed),
             deallocations: self.deallocations.load(Ordering::Relaxed),
@@ -141,7 +142,7 @@ impl BopStatsAllocator {
     /// Reset all statistics to zero
     pub fn reset_stats(&self) {
         use std::sync::atomic::Ordering;
-        
+
         self.allocations.store(0, Ordering::Relaxed);
         self.deallocations.store(0, Ordering::Relaxed);
         self.bytes_allocated.store(0, Ordering::Relaxed);
@@ -162,17 +163,26 @@ unsafe impl GlobalAlloc for BopStatsAllocator {
         }
 
         let ptr = bop_alloc_aligned(layout.align(), layout.size());
-        
+
         if !ptr.is_null() {
             self.allocations.fetch_add(1, Ordering::Relaxed);
-            self.bytes_allocated.fetch_add(layout.size(), Ordering::Relaxed);
-            
-            let current = self.current_memory.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
-            
+            self.bytes_allocated
+                .fetch_add(layout.size(), Ordering::Relaxed);
+
+            let current = self
+                .current_memory
+                .fetch_add(layout.size(), Ordering::Relaxed)
+                + layout.size();
+
             // Update peak memory usage
             let mut peak = self.peak_memory.load(Ordering::Relaxed);
             while current > peak {
-                match self.peak_memory.compare_exchange_weak(peak, current, Ordering::Relaxed, Ordering::Relaxed) {
+                match self.peak_memory.compare_exchange_weak(
+                    peak,
+                    current,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     Ok(_) => break,
                     Err(new_peak) => peak = new_peak,
                 }
@@ -191,10 +201,12 @@ unsafe impl GlobalAlloc for BopStatsAllocator {
         }
 
         bop_dealloc_sized(ptr as *mut std::ffi::c_void, layout.size());
-        
+
         self.deallocations.fetch_add(1, Ordering::Relaxed);
-        self.bytes_deallocated.fetch_add(layout.size(), Ordering::Relaxed);
-        self.current_memory.fetch_sub(layout.size(), Ordering::Relaxed);
+        self.bytes_deallocated
+            .fetch_add(layout.size(), Ordering::Relaxed);
+        self.current_memory
+            .fetch_sub(layout.size(), Ordering::Relaxed);
     }
 
     #[inline]
@@ -210,29 +222,37 @@ unsafe impl GlobalAlloc for BopStatsAllocator {
             return self.alloc(Layout::from_size_align_unchecked(new_size, layout.align()));
         }
 
-        let new_ptr = bop_realloc(
-            ptr as *mut std::ffi::c_void,
-            new_size,
-        );
+        let new_ptr = bop_realloc(ptr as *mut std::ffi::c_void, new_size);
 
         if !new_ptr.is_null() {
             // Update statistics for the size change
             let size_diff = new_size as isize - layout.size() as isize;
             if size_diff > 0 {
-                self.bytes_allocated.fetch_add(size_diff as usize, Ordering::Relaxed);
-                let current = self.current_memory.fetch_add(size_diff as usize, Ordering::Relaxed) + size_diff as usize;
-                
+                self.bytes_allocated
+                    .fetch_add(size_diff as usize, Ordering::Relaxed);
+                let current = self
+                    .current_memory
+                    .fetch_add(size_diff as usize, Ordering::Relaxed)
+                    + size_diff as usize;
+
                 // Update peak memory usage
                 let mut peak = self.peak_memory.load(Ordering::Relaxed);
                 while current > peak {
-                    match self.peak_memory.compare_exchange_weak(peak, current, Ordering::Relaxed, Ordering::Relaxed) {
+                    match self.peak_memory.compare_exchange_weak(
+                        peak,
+                        current,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
                         Ok(_) => break,
                         Err(new_peak) => peak = new_peak,
                     }
                 }
             } else if size_diff < 0 {
-                self.bytes_deallocated.fetch_add((-size_diff) as usize, Ordering::Relaxed);
-                self.current_memory.fetch_sub((-size_diff) as usize, Ordering::Relaxed);
+                self.bytes_deallocated
+                    .fetch_add((-size_diff) as usize, Ordering::Relaxed);
+                self.current_memory
+                    .fetch_sub((-size_diff) as usize, Ordering::Relaxed);
             }
         }
 
@@ -248,17 +268,26 @@ unsafe impl GlobalAlloc for BopStatsAllocator {
         }
 
         let ptr = bop_zalloc_aligned(layout.align(), layout.size());
-        
+
         if !ptr.is_null() {
             self.allocations.fetch_add(1, Ordering::Relaxed);
-            self.bytes_allocated.fetch_add(layout.size(), Ordering::Relaxed);
-            
-            let current = self.current_memory.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
-            
+            self.bytes_allocated
+                .fetch_add(layout.size(), Ordering::Relaxed);
+
+            let current = self
+                .current_memory
+                .fetch_add(layout.size(), Ordering::Relaxed)
+                + layout.size();
+
             // Update peak memory usage
             let mut peak = self.peak_memory.load(Ordering::Relaxed);
             while current > peak {
-                match self.peak_memory.compare_exchange_weak(peak, current, Ordering::Relaxed, Ordering::Relaxed) {
+                match self.peak_memory.compare_exchange_weak(
+                    peak,
+                    current,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     Ok(_) => break,
                     Err(new_peak) => peak = new_peak,
                 }
@@ -308,10 +337,11 @@ impl AllocationStats {
 #[cfg(feature = "alloc-stats")]
 impl std::fmt::Display for AllocationStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, 
+        write!(
+            f,
             "Allocations: {} | Deallocations: {} | Outstanding: {} | Current Memory: {} bytes | Peak Memory: {} bytes",
             self.allocations,
-            self.deallocations, 
+            self.deallocations,
             self.outstanding_allocations(),
             self.current_memory,
             self.peak_memory
@@ -375,7 +405,7 @@ pub mod utils {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::alloc::{Layout, GlobalAlloc};
+    use std::alloc::{GlobalAlloc, Layout};
 
     #[test]
     fn test_bop_allocator_basic() {
@@ -385,11 +415,11 @@ mod tests {
         unsafe {
             let ptr = allocator.alloc(layout);
             assert!(!ptr.is_null());
-            
+
             // Write and read to ensure the memory is valid
             *(ptr as *mut u64) = 0x1234567890ABCDEF;
             assert_eq!(*(ptr as *const u64), 0x1234567890ABCDEF);
-            
+
             allocator.dealloc(ptr, layout);
         }
     }
@@ -403,7 +433,7 @@ mod tests {
             let ptr = allocator.alloc(layout);
             // Should return a non-null dangling pointer for zero-size allocations
             assert!(!ptr.is_null());
-            
+
             // Deallocation should be safe
             allocator.dealloc(ptr, layout);
         }
@@ -417,12 +447,12 @@ mod tests {
         unsafe {
             let ptr = allocator.alloc_zeroed(layout);
             assert!(!ptr.is_null());
-            
+
             // Check that memory is zeroed
             for i in 0..64 {
                 assert_eq!(*ptr.offset(i), 0);
             }
-            
+
             allocator.dealloc(ptr, layout);
         }
     }
@@ -435,17 +465,17 @@ mod tests {
         unsafe {
             let ptr = allocator.alloc(layout);
             assert!(!ptr.is_null());
-            
+
             // Write some data
             *(ptr as *mut u64) = 0xDEADBEEF;
-            
+
             // Reallocate to larger size
             let new_ptr = allocator.realloc(ptr, layout, 64);
             assert!(!new_ptr.is_null());
-            
+
             // Data should be preserved
             assert_eq!(*(new_ptr as *const u64), 0xDEADBEEF);
-            
+
             // Clean up
             let new_layout = Layout::from_size_align(64, 8).unwrap();
             allocator.dealloc(new_ptr, new_layout);
@@ -461,15 +491,15 @@ mod tests {
         unsafe {
             let ptr = allocator.alloc(layout);
             assert!(!ptr.is_null());
-            
+
             let stats = allocator.stats();
             assert_eq!(stats.allocations, 1);
             assert_eq!(stats.deallocations, 0);
             assert_eq!(stats.outstanding_allocations(), 1);
             assert!(stats.current_memory >= layout.size());
-            
+
             allocator.dealloc(ptr, layout);
-            
+
             let stats = allocator.stats();
             assert_eq!(stats.allocations, 1);
             assert_eq!(stats.deallocations, 1);
@@ -482,10 +512,10 @@ mod tests {
         unsafe {
             let ptr = utils::alloc(64);
             assert!(!ptr.is_null());
-            
+
             let usable_size = utils::malloc_usable_size(ptr);
             assert!(usable_size >= 64);
-            
+
             utils::dealloc_sized(ptr, 64);
         }
     }

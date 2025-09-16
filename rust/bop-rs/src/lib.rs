@@ -1,8 +1,12 @@
+#![feature(thread_id_value)]
+
 pub mod allocator;
-pub mod mpmc;
-pub mod usockets;
+pub mod aof;
 pub mod mdbx;
-pub mod production_socket;
+pub mod mpmc;
+pub mod numa;
+pub mod socket;
+pub mod usockets;
 // pub mod raft_integration;
 
 // pub use raft_integration::{BopNodeId, BopNode, BopRequest, BopResponse, BopRaftLogStorage, BopRaftStateMachine, BopRaftNetwork, BopTypeConfig};
@@ -19,20 +23,20 @@ impl RaftApp {
     /// Create a new RaftApp instance with Raft consensus
     pub async fn new(node_id: BopNodeId, address: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let state = Arc::new(State::new_with_raft_node(node_id as i32, address.clone()));
-        
+
         // Create Raft log storage and state machine
         let log_storage = BopRaftLogStorage::new(state.clone());
         let state_machine = BopRaftStateMachine::new(state.clone());
-        
+
         // Create Raft network
         let network = BopRaftNetwork::new(node_id);
-        
+
         // Create Raft configuration
         let config = RaftConfig::default();
-        
+
         // Create the Raft instance
         let raft = Raft::new(node_id, config, network, log_storage, state_machine).await?;
-        
+
         Ok(Self {
             state,
             raft,

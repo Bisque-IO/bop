@@ -19,8 +19,12 @@ pub struct Error {
 }
 
 impl Error {
-    pub fn code(&self) -> i32 { self.code }
-    pub fn message(&self) -> &str { &self.message }
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -46,7 +50,11 @@ fn mk_error(code: i32) -> Error {
 }
 
 fn check(code: i32) -> Result<()> {
-    if code == 0 { Ok(()) } else { Err(mk_error(code)) }
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(mk_error(code))
+    }
 }
 
 // ----- Flags & Options -----
@@ -173,11 +181,13 @@ pub enum CursorOp {
     /// Doubtless cursor positioning at a specified key-value pair (lesser than)
     ToExactKeyValueLesserThan = sys::MDBX_cursor_op_MDBX_TO_EXACT_KEY_VALUE_LESSER_THAN as i32,
     /// Doubtless cursor positioning at a specified key-value pair (lesser or equal)
-    ToExactKeyValueLesserOrEqual = sys::MDBX_cursor_op_MDBX_TO_EXACT_KEY_VALUE_LESSER_OR_EQUAL as i32,
+    ToExactKeyValueLesserOrEqual =
+        sys::MDBX_cursor_op_MDBX_TO_EXACT_KEY_VALUE_LESSER_OR_EQUAL as i32,
     /// Doubtless cursor positioning at a specified key-value pair (equal)
     ToExactKeyValueEqual = sys::MDBX_cursor_op_MDBX_TO_EXACT_KEY_VALUE_EQUAL as i32,
     /// Doubtless cursor positioning at a specified key-value pair (greater or equal)
-    ToExactKeyValueGreaterOrEqual = sys::MDBX_cursor_op_MDBX_TO_EXACT_KEY_VALUE_GREATER_OR_EQUAL as i32,
+    ToExactKeyValueGreaterOrEqual =
+        sys::MDBX_cursor_op_MDBX_TO_EXACT_KEY_VALUE_GREATER_OR_EQUAL as i32,
     /// Doubtless cursor positioning at a specified key-value pair (greater than)
     ToExactKeyValueGreaterThan = sys::MDBX_cursor_op_MDBX_TO_EXACT_KEY_VALUE_GREATER_THAN as i32,
     /// Doubtless cursor positioning at a specified key-value pair (lesser than)
@@ -313,7 +323,7 @@ impl ErrorCode {
     }
 
     /// Convert a raw MDBX_error value to an ErrorCode enum variant
-    /// 
+    ///
     /// # Safety
     /// This function uses transmute and assumes the input value corresponds to a valid ErrorCode variant.
     /// Invalid values may result in undefined behavior.
@@ -345,7 +355,10 @@ impl OptionKey {
 
 #[inline]
 fn to_val(bytes: &[u8]) -> sys::MDBX_val {
-    sys::MDBX_val { iov_base: bytes.as_ptr() as *mut c_void, iov_len: bytes.len() }
+    sys::MDBX_val {
+        iov_base: bytes.as_ptr() as *mut c_void,
+        iov_len: bytes.len(),
+    }
 }
 
 #[inline]
@@ -367,7 +380,9 @@ impl Env {
     pub fn new() -> Result<Self> {
         let mut env_ptr: *mut sys::MDBX_env = std::ptr::null_mut();
         let rc = unsafe { sys::mdbx_env_create(&mut env_ptr as *mut _) } as i32;
-        if rc != 0 || env_ptr.is_null() { return Err(mk_error(rc)); }
+        if rc != 0 || env_ptr.is_null() {
+            return Err(mk_error(rc));
+        }
         Ok(Self { ptr: env_ptr })
     }
 
@@ -378,12 +393,14 @@ impl Env {
 
     pub fn get_option(&self, key: OptionKey) -> Result<u64> {
         let mut out: u64 = 0;
-        let rc = unsafe { sys::mdbx_env_get_option(self.ptr, key.to_raw(), &mut out as *mut _) } as i32;
+        let rc =
+            unsafe { sys::mdbx_env_get_option(self.ptr, key.to_raw(), &mut out as *mut _) } as i32;
         check(rc).map(|_| out)
     }
 
     pub fn open<P: AsRef<Path>>(&self, path: P, flags: EnvFlags, mode: u16) -> Result<()> {
-        let cpath = CString::new(path.as_ref().as_os_str().to_string_lossy().into_owned()).map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;
+        let cpath = CString::new(path.as_ref().as_os_str().to_string_lossy().into_owned())
+            .map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;
         let rc = unsafe {
             sys::mdbx_env_open(
                 self.ptr,
@@ -404,14 +421,20 @@ impl Env {
     }
 
     #[inline]
-    pub fn as_ptr(&self) -> *mut sys::MDBX_env { self.ptr }
+    pub fn as_ptr(&self) -> *mut sys::MDBX_env {
+        self.ptr
+    }
 
     /// Flushes environment buffers. Returns true if no data pending for flush.
     pub fn sync(&self, force: bool, nonblock: bool) -> Result<bool> {
         let rc = unsafe { sys::mdbx_env_sync_ex(self.ptr, force, nonblock) } as i32;
-        if rc == 0 { Ok(false) }
-        else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(true) }
-        else { Err(mk_error(rc)) }
+        if rc == 0 {
+            Ok(false)
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(true)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Returns environment statistics (snapshot or txn-relative if provided).
@@ -445,7 +468,8 @@ impl Env {
     /// Get current environment flags.
     pub fn get_flags(&self) -> Result<EnvFlags> {
         let mut out: c_uint = 0;
-        let rc = unsafe { sys::mdbx_env_get_flags(self.ptr as *const _, &mut out as *mut _) } as i32;
+        let rc =
+            unsafe { sys::mdbx_env_get_flags(self.ptr as *const _, &mut out as *mut _) } as i32;
         check(rc).map(|_| EnvFlags::from_bits_truncate(out as i32))
     }
 
@@ -459,25 +483,38 @@ impl Env {
     pub fn get_path(&self) -> Result<String> {
         let mut ptr: *const c_char = std::ptr::null();
         let rc = unsafe { sys::mdbx_env_get_path(self.ptr as *const _, &mut ptr as *mut _) } as i32;
-        if rc != 0 { return Err(mk_error(rc)); }
+        if rc != 0 {
+            return Err(mk_error(rc));
+        }
         if ptr.is_null() {
             return Ok(String::new());
         }
-        let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+        let s = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
         Ok(s)
     }
 
     /// Returns various max sizes for keys/values given flags.
     pub fn max_key_size(&self, flags: DbFlags) -> i32 {
-        unsafe { sys::mdbx_env_get_maxkeysize_ex(self.ptr as *const _, flags.bits() as c_int) as i32 }
+        unsafe {
+            sys::mdbx_env_get_maxkeysize_ex(self.ptr as *const _, flags.bits() as c_int) as i32
+        }
     }
 
     pub fn max_val_size(&self, flags: DbFlags) -> i32 {
-        unsafe { sys::mdbx_env_get_maxvalsize_ex(self.ptr as *const _, flags.bits() as c_int) as i32 }
+        unsafe {
+            sys::mdbx_env_get_maxvalsize_ex(self.ptr as *const _, flags.bits() as c_int) as i32
+        }
     }
 
     /// Warm up database pages according to flags; returns true if timeout reached.
-    pub fn warmup(&self, txn: Option<&Txn<'_>>, flags: WarmupFlags, timeout_16dot16: u32) -> Result<bool> {
+    pub fn warmup(
+        &self,
+        txn: Option<&Txn<'_>>,
+        flags: WarmupFlags,
+        timeout_16dot16: u32,
+    ) -> Result<bool> {
         let rc = unsafe {
             sys::mdbx_env_warmup(
                 self.ptr as *const _,
@@ -486,9 +523,13 @@ impl Env {
                 timeout_16dot16 as c_uint,
             )
         } as i32;
-        if rc == 0 { Ok(false) }
-        else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(true) }
-        else { Err(mk_error(rc)) }
+        if rc == 0 {
+            Ok(false)
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(true)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Get OS file handle of the environment.
@@ -499,20 +540,41 @@ impl Env {
     }
 
     /// Returns system default page size from MDBX.
-    pub fn default_pagesize() -> usize { unsafe { sys::mdbx_default_pagesize() } }
+    pub fn default_pagesize() -> usize {
+        unsafe { sys::mdbx_default_pagesize() }
+    }
 
     /// Limits helpers forwarded to MDBX.
-    pub fn limits_dbsize_max(pagesize: isize) -> isize { unsafe { sys::mdbx_limits_dbsize_max(pagesize) } }
-    pub fn limits_keysize_max(pagesize: isize, flags: DbFlags) -> isize { unsafe { sys::mdbx_limits_keysize_max(pagesize, flags.bits() as c_int) } }
-    pub fn limits_keysize_min(flags: DbFlags) -> isize { unsafe { sys::mdbx_limits_keysize_min(flags.bits() as c_int) } }
-    pub fn limits_valsize_max(pagesize: isize, flags: DbFlags) -> isize { unsafe { sys::mdbx_limits_valsize_max(pagesize, flags.bits() as c_int) } }
-    pub fn limits_valsize_min(flags: DbFlags) -> isize { unsafe { sys::mdbx_limits_valsize_min(flags.bits() as c_int) } }
-    pub fn limits_pairsize4page_max(pagesize: isize, flags: DbFlags) -> isize { unsafe { sys::mdbx_limits_pairsize4page_max(pagesize, flags.bits() as c_int) } }
-    pub fn limits_valsize4page_max(pagesize: isize, flags: DbFlags) -> isize { unsafe { sys::mdbx_limits_valsize4page_max(pagesize, flags.bits() as c_int) } }
+    pub fn limits_dbsize_max(pagesize: isize) -> isize {
+        unsafe { sys::mdbx_limits_dbsize_max(pagesize) }
+    }
+    pub fn limits_keysize_max(pagesize: isize, flags: DbFlags) -> isize {
+        unsafe { sys::mdbx_limits_keysize_max(pagesize, flags.bits() as c_int) }
+    }
+    pub fn limits_keysize_min(flags: DbFlags) -> isize {
+        unsafe { sys::mdbx_limits_keysize_min(flags.bits() as c_int) }
+    }
+    pub fn limits_valsize_max(pagesize: isize, flags: DbFlags) -> isize {
+        unsafe { sys::mdbx_limits_valsize_max(pagesize, flags.bits() as c_int) }
+    }
+    pub fn limits_valsize_min(flags: DbFlags) -> isize {
+        unsafe { sys::mdbx_limits_valsize_min(flags.bits() as c_int) }
+    }
+    pub fn limits_pairsize4page_max(pagesize: isize, flags: DbFlags) -> isize {
+        unsafe { sys::mdbx_limits_pairsize4page_max(pagesize, flags.bits() as c_int) }
+    }
+    pub fn limits_valsize4page_max(pagesize: isize, flags: DbFlags) -> isize {
+        unsafe { sys::mdbx_limits_valsize4page_max(pagesize, flags.bits() as c_int) }
+    }
 
     /// Set/Get a raw user context pointer for this environment (advanced).
-    pub fn set_userctx(&self, ctx: *mut c_void) -> Result<()> { let rc = unsafe { sys::mdbx_env_set_userctx(self.ptr, ctx) } as i32; check(rc) }
-    pub fn get_userctx(&self) -> *mut c_void { unsafe { sys::mdbx_env_get_userctx(self.ptr as *const _) } }
+    pub fn set_userctx(&self, ctx: *mut c_void) -> Result<()> {
+        let rc = unsafe { sys::mdbx_env_set_userctx(self.ptr, ctx) } as i32;
+        check(rc)
+    }
+    pub fn get_userctx(&self) -> *mut c_void {
+        unsafe { sys::mdbx_env_get_userctx(self.ptr as *const _) }
+    }
 
     /// Enumerate reader table; returns Ok(true) if table empty (MDBX_RESULT_TRUE), Ok(false) if entries visited.
     pub fn reader_list<F>(&self, mut f: F) -> Result<bool>
@@ -551,26 +613,48 @@ impl Env {
                 (&mut cb as *mut _) as *mut c_void,
             )
         } as i32;
-        if rc == 0 { Ok(false) } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(true) } else { Err(mk_error(rc)) }
+        if rc == 0 {
+            Ok(false)
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(true)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Check and cleanup stale reader table entries. Returns (had_issue, dead_count).
     pub fn reader_check(&self) -> Result<(bool, i32)> {
         let mut dead: c_int = 0;
         let rc = unsafe { sys::mdbx_reader_check(self.ptr, &mut dead as *mut _) } as i32;
-        if rc == 0 { Ok((false, dead)) }
-        else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok((true, dead)) }
-        else { Err(mk_error(rc)) }
+        if rc == 0 {
+            Ok((false, dead))
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok((true, dead))
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Pre-register/unregister current thread as reader.
     pub fn thread_register(&self) -> Result<bool> {
         let rc = unsafe { sys::mdbx_thread_register(self.ptr as *const _) } as i32;
-        if rc == 0 { Ok(false) } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(true) } else { Err(mk_error(rc)) }
+        if rc == 0 {
+            Ok(false)
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(true)
+        } else {
+            Err(mk_error(rc))
+        }
     }
     pub fn thread_unregister(&self) -> Result<bool> {
         let rc = unsafe { sys::mdbx_thread_unregister(self.ptr as *const _) } as i32;
-        if rc == 0 { Ok(false) } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(true) } else { Err(mk_error(rc)) }
+        if rc == 0 {
+            Ok(false)
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(true)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     // /// Set or clear the Handle-Slow-Readers callback. Returns Ok when installed.
@@ -593,7 +677,6 @@ impl Env {
     //         }
     //     }
     // }
-
 }
 
 #[derive(Debug, Clone)]
@@ -615,8 +698,10 @@ pub struct ReaderEntry {
 impl Env {
     /// Copy the environment to a new file path.
     pub fn copy_to_path<P: AsRef<Path>>(&self, dest: P, flags: CopyFlags) -> Result<()> {
-        let cpath = CString::new(dest.as_ref().as_os_str().to_string_lossy().into_owned()).map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;
-        let rc = unsafe { sys::mdbx_env_copy(self.ptr, cpath.as_ptr(), flags.bits() as c_int) } as i32;
+        let cpath = CString::new(dest.as_ref().as_os_str().to_string_lossy().into_owned())
+            .map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;
+        let rc =
+            unsafe { sys::mdbx_env_copy(self.ptr, cpath.as_ptr(), flags.bits() as c_int) } as i32;
         check(rc)
     }
 
@@ -628,16 +713,23 @@ impl Env {
 
     /// Delete the environment files at a given path with a mode.
     pub fn delete_path<P: AsRef<Path>>(path: P, mode: DeleteMode) -> Result<()> {
-        let cpath = CString::new(path.as_ref().as_os_str().to_string_lossy().into_owned()).map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;
+        let cpath = CString::new(path.as_ref().as_os_str().to_string_lossy().into_owned())
+            .map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;
         let rc = unsafe { sys::mdbx_env_delete(cpath.as_ptr(), mode.to_raw()) } as i32;
         // mdbx_env_delete returns 0 or MDBX_RESULT_TRUE if nothing to delete; treat both as Ok.
-        if rc == 0 || rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(()) } else { Err(mk_error(rc)) }
+        if rc == 0 || rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(())
+        } else {
+            Err(mk_error(rc))
+        }
     }
 }
 
 impl Drop for Env {
     fn drop(&mut self) {
-        unsafe { let _ = sys::mdbx_env_close_ex(self.ptr, false); }
+        unsafe {
+            let _ = sys::mdbx_env_close_ex(self.ptr, false);
+        }
     }
 }
 
@@ -659,13 +751,28 @@ pub struct Txn<'e> {
 }
 
 impl<'e> Txn<'e> {
-    pub fn begin(env: &'e Env, parent: Option<*mut sys::MDBX_txn>, flags: TxnFlags) -> Result<Self> {
+    pub fn begin(
+        env: &'e Env,
+        parent: Option<*mut sys::MDBX_txn>,
+        flags: TxnFlags,
+    ) -> Result<Self> {
         let mut txn_ptr: *mut sys::MDBX_txn = std::ptr::null_mut();
         let rc = unsafe {
-            sys::mdbx_txn_begin_ex(env.ptr, parent.unwrap_or(std::ptr::null_mut()), flags.bits() as c_int, &mut txn_ptr as *mut _, std::ptr::null_mut())
+            sys::mdbx_txn_begin_ex(
+                env.ptr,
+                parent.unwrap_or(std::ptr::null_mut()),
+                flags.bits() as c_int,
+                &mut txn_ptr as *mut _,
+                std::ptr::null_mut(),
+            )
         } as i32;
-        if rc != 0 || txn_ptr.is_null() { return Err(mk_error(rc)); }
-        Ok(Self { ptr: txn_ptr, _marker: PhantomData })
+        if rc != 0 || txn_ptr.is_null() {
+            return Err(mk_error(rc));
+        }
+        Ok(Self {
+            ptr: txn_ptr,
+            _marker: PhantomData,
+        })
     }
 
     pub fn commit(self) -> Result<()> {
@@ -683,7 +790,9 @@ impl<'e> Txn<'e> {
     }
 
     #[inline]
-    pub fn as_ptr(&self) -> *mut sys::MDBX_txn { self.ptr }
+    pub fn as_ptr(&self) -> *mut sys::MDBX_txn {
+        self.ptr
+    }
 
     /// Transaction flags including internal; map to TxnFlags where possible.
     pub fn flags(&self) -> TxnFlags {
@@ -692,35 +801,51 @@ impl<'e> Txn<'e> {
     }
 
     #[inline]
-    pub fn id(&self) -> u64 { unsafe { sys::mdbx_txn_id(self.ptr as *const _) } }
+    pub fn id(&self) -> u64 {
+        unsafe { sys::mdbx_txn_id(self.ptr as *const _) }
+    }
 
     pub fn info(&self, scan_rlt: bool) -> Result<sys::MDBX_txn_info> {
         let mut info: sys::MDBX_txn_info = Default::default();
-        let rc = unsafe { sys::mdbx_txn_info(self.ptr as *const _, &mut info as *mut _, scan_rlt) } as i32;
+        let rc = unsafe { sys::mdbx_txn_info(self.ptr as *const _, &mut info as *mut _, scan_rlt) }
+            as i32;
         check(rc).map(|_| info)
     }
 
     /// Reset a read-only transaction for reuse (see MDBX docs).
-    pub fn reset(&mut self) -> Result<()> { let rc = unsafe { sys::mdbx_txn_reset(self.ptr) } as i32; check(rc) }
+    pub fn reset(&mut self) -> Result<()> {
+        let rc = unsafe { sys::mdbx_txn_reset(self.ptr) } as i32;
+        check(rc)
+    }
 
     /// Renew a reset read-only transaction for use again.
-    pub fn renew(&mut self) -> Result<()> { let rc = unsafe { sys::mdbx_txn_renew(self.ptr) } as i32; check(rc) }
+    pub fn renew(&mut self) -> Result<()> {
+        let rc = unsafe { sys::mdbx_txn_renew(self.ptr) } as i32;
+        check(rc)
+    }
 
     /// Unbind or close all cursors of this txn and its parents.
     pub fn release_all_cursors(&self, unbind: bool) -> Result<usize> {
         let mut count: usize = 0;
-        let rc = unsafe { sys::mdbx_txn_release_all_cursors_ex(self.ptr as *const _, unbind, &mut count as *mut _) } as i32;
+        let rc = unsafe {
+            sys::mdbx_txn_release_all_cursors_ex(self.ptr as *const _, unbind, &mut count as *mut _)
+        } as i32;
         check(rc).map(|_| count)
     }
 
     /// Mark transaction as broken to prevent further operations (must abort later).
-    pub fn break_txn(&mut self) -> Result<()> { let rc = unsafe { sys::mdbx_txn_break(self.ptr) } as i32; check(rc) }
+    pub fn break_txn(&mut self) -> Result<()> {
+        let rc = unsafe { sys::mdbx_txn_break(self.ptr) } as i32;
+        check(rc)
+    }
 
     /// Park a read-only transaction; autounpark allows implicit unpark by read ops.
     #[allow(dead_code)]
     pub fn park(&mut self, autounpark: bool) -> Result<()> {
         #[allow(non_snake_case)]
-        unsafe extern "C" { fn mdbx_txn_park(txn: *mut sys::MDBX_txn, autounpark: bool) -> c_int; }
+        unsafe extern "C" {
+            fn mdbx_txn_park(txn: *mut sys::MDBX_txn, autounpark: bool) -> c_int;
+        }
         let rc = unsafe { sys::mdbx_txn_park(self.ptr, autounpark) } as i32;
         check(rc)
     }
@@ -729,15 +854,26 @@ impl<'e> Txn<'e> {
     #[allow(dead_code)]
     pub fn unpark(&mut self, restart_if_ousted: bool) -> Result<bool> {
         #[allow(non_snake_case)]
-        unsafe extern "C" { fn mdbx_txn_unpark(txn: *mut sys::MDBX_txn, restart_if_ousted: bool) -> c_int; }
+        unsafe extern "C" {
+            fn mdbx_txn_unpark(txn: *mut sys::MDBX_txn, restart_if_ousted: bool) -> c_int;
+        }
         let rc = unsafe { sys::mdbx_txn_unpark(self.ptr, restart_if_ousted) } as i32;
-        if rc == 0 { Ok(false) } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(true) } else { Err(mk_error(rc)) }
+        if rc == 0 {
+            Ok(false)
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(true)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Copy a consistent snapshot of the environment to a path via this read txn.
     pub fn copy_to_path<P: AsRef<Path>>(&self, dest: P, flags: CopyFlags) -> Result<()> {
-        let cpath = CString::new(dest.as_ref().as_os_str().to_string_lossy().into_owned()).map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;
-        let rc = unsafe { sys::mdbx_txn_copy2pathname(self.ptr, cpath.as_ptr(), flags.bits() as c_int) } as i32;
+        let cpath = CString::new(dest.as_ref().as_os_str().to_string_lossy().into_owned())
+            .map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;
+        let rc =
+            unsafe { sys::mdbx_txn_copy2pathname(self.ptr, cpath.as_ptr(), flags.bits() as c_int) }
+                as i32;
         check(rc)
     }
 
@@ -748,12 +884,19 @@ impl<'e> Txn<'e> {
     }
 
     /// Set/Get a raw user context pointer for this transaction (advanced).
-    pub fn set_userctx(&mut self, ctx: *mut c_void) -> Result<()> { let rc = unsafe { sys::mdbx_txn_set_userctx(self.ptr, ctx) } as i32; check(rc) }
-    pub fn get_userctx(&self) -> *mut c_void { unsafe { sys::mdbx_txn_get_userctx(self.ptr as *const _) } }
+    pub fn set_userctx(&mut self, ctx: *mut c_void) -> Result<()> {
+        let rc = unsafe { sys::mdbx_txn_set_userctx(self.ptr, ctx) } as i32;
+        check(rc)
+    }
+    pub fn get_userctx(&self) -> *mut c_void {
+        unsafe { sys::mdbx_txn_get_userctx(self.ptr as *const _) }
+    }
 
     /// Set the environment canary (x,y,z from canary; v is set to txn id). If canary is None, only v is updated.
     pub fn set_canary(&self, canary: Option<&sys::MDBX_canary>) -> Result<()> {
-        let rc = unsafe { sys::mdbx_canary_put(self.ptr, canary.map_or(std::ptr::null(), |c| c as *const _)) } as i32;
+        let rc = unsafe {
+            sys::mdbx_canary_put(self.ptr, canary.map_or(std::ptr::null(), |c| c as *const _))
+        } as i32;
         check(rc)
     }
 
@@ -768,7 +911,14 @@ impl<'e> Txn<'e> {
     pub fn cmp_keys(&self, dbi: Dbi, a: &[u8], b: &[u8]) -> std::cmp::Ordering {
         let av = to_val(a);
         let bv = to_val(b);
-        let r = unsafe { sys::mdbx_cmp(self.ptr as *const _, dbi.0, &av as *const _, &bv as *const _) } as i32;
+        let r = unsafe {
+            sys::mdbx_cmp(
+                self.ptr as *const _,
+                dbi.0,
+                &av as *const _,
+                &bv as *const _,
+            )
+        } as i32;
         r.cmp(&0)
     }
 
@@ -776,21 +926,35 @@ impl<'e> Txn<'e> {
     pub fn cmp_data(&self, dbi: Dbi, a: &[u8], b: &[u8]) -> std::cmp::Ordering {
         let av = to_val(a);
         let bv = to_val(b);
-        let r = unsafe { sys::mdbx_dcmp(self.ptr as *const _, dbi.0, &av as *const _, &bv as *const _) } as i32;
+        let r = unsafe {
+            sys::mdbx_dcmp(
+                self.ptr as *const _,
+                dbi.0,
+                &av as *const _,
+                &bv as *const _,
+            )
+        } as i32;
         r.cmp(&0)
     }
 
     /// Return lag and percentage of page allocation of this read txn relative to head.
     pub fn straggler(&self) -> Result<(i32, i32)> {
         let mut percent: c_int = 0;
-        let lag = unsafe { sys::mdbx_txn_straggler(self.ptr as *const _, &mut percent as *mut _) } as i32;
-        if lag < 0 { Err(mk_error(lag)) } else { Ok((lag, percent)) }
+        let lag =
+            unsafe { sys::mdbx_txn_straggler(self.ptr as *const _, &mut percent as *mut _) } as i32;
+        if lag < 0 {
+            Err(mk_error(lag))
+        } else {
+            Ok((lag, percent))
+        }
     }
 }
 
 impl<'e> Drop for Txn<'e> {
     fn drop(&mut self) {
-        unsafe { let _ = sys::mdbx_txn_abort(self.ptr); }
+        unsafe {
+            let _ = sys::mdbx_txn_abort(self.ptr);
+        }
     }
 }
 
@@ -801,7 +965,10 @@ pub struct Dbi(sys::MDBX_dbi);
 
 impl Dbi {
     pub fn open(txn: &Txn<'_>, name: Option<&str>, flags: DbFlags) -> Result<Dbi> {
-        let cname = match name { Some(s) => Some(CString::new(s).map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?), None => None };
+        let cname = match name {
+            Some(s) => Some(CString::new(s).map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?),
+            None => None,
+        };
         let mut dbi: sys::MDBX_dbi = 0;
         let rc = unsafe {
             sys::mdbx_dbi_open(
@@ -820,28 +987,52 @@ impl Dbi {
     }
 
     #[inline]
-    pub fn raw(&self) -> sys::MDBX_dbi { self.0 }
+    pub fn raw(&self) -> sys::MDBX_dbi {
+        self.0
+    }
 
     /// Retrieve DB flags/state for this handle in the given transaction.
     pub fn flags_ex(&self, txn: &Txn<'_>) -> Result<(DbFlags, u32)> {
         let mut flags: c_uint = 0;
         let mut state: c_uint = 0;
-        let rc = unsafe { sys::mdbx_dbi_flags_ex(txn.ptr as *const _, self.0, &mut flags as *mut _, &mut state as *mut _) } as i32;
+        let rc = unsafe {
+            sys::mdbx_dbi_flags_ex(
+                txn.ptr as *const _,
+                self.0,
+                &mut flags as *mut _,
+                &mut state as *mut _,
+            )
+        } as i32;
         check(rc).map(|_| (DbFlags::from_bits_truncate(flags as i32), state as u32))
     }
 
     /// Retrieve statistics for this table in the given transaction.
     pub fn stat(&self, txn: &Txn<'_>) -> Result<sys::MDBX_stat> {
         let mut st: sys::MDBX_stat = Default::default();
-        let rc = unsafe { sys::mdbx_dbi_stat(txn.ptr as *const _, self.0, &mut st as *mut _, std::mem::size_of::<sys::MDBX_stat>()) } as i32;
+        let rc = unsafe {
+            sys::mdbx_dbi_stat(
+                txn.ptr as *const _,
+                self.0,
+                &mut st as *mut _,
+                std::mem::size_of::<sys::MDBX_stat>(),
+            )
+        } as i32;
         check(rc).map(|_| st)
     }
 
     /// Retrieve dupsort nested btree depthmask. Returns None if not dupsort.
     pub fn dupsort_depthmask(&self, txn: &Txn<'_>) -> Result<Option<u32>> {
         let mut mask: u32 = 0;
-        let rc = unsafe { sys::mdbx_dbi_dupsort_depthmask(txn.ptr as *const _, self.0, &mut mask as *mut _) } as i32;
-        if rc == 0 { Ok(Some(mask)) } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(None) } else { Err(mk_error(rc)) }
+        let rc = unsafe {
+            sys::mdbx_dbi_dupsort_depthmask(txn.ptr as *const _, self.0, &mut mask as *mut _)
+        } as i32;
+        if rc == 0 {
+            Ok(Some(mask))
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(None)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Empty or delete and close a table.
@@ -855,12 +1046,23 @@ impl Dbi {
 
 pub fn get<'txn>(txn: &'txn Txn<'_>, dbi: Dbi, key: &[u8]) -> Result<Option<&'txn [u8]>> {
     let key_val = to_val(key);
-    let mut data = sys::MDBX_val { iov_base: std::ptr::null_mut(), iov_len: 0 };
-    let rc = unsafe { sys::mdbx_get(txn.ptr as *const _, dbi.0, &key_val as *const _, &mut data as *mut _) } as i32;
+    let mut data = sys::MDBX_val {
+        iov_base: std::ptr::null_mut(),
+        iov_len: 0,
+    };
+    let rc = unsafe {
+        sys::mdbx_get(
+            txn.ptr as *const _,
+            dbi.0,
+            &key_val as *const _,
+            &mut data as *mut _,
+        )
+    } as i32;
     if rc == 0 {
         // Safety: MDBX returns a pointer to memory owned by the DB, valid for the
         // lifetime of the read transaction and until the next write affecting it.
-        let slice: &'txn [u8] = unsafe { std::slice::from_raw_parts(data.iov_base as *const u8, data.iov_len) };
+        let slice: &'txn [u8] =
+            unsafe { std::slice::from_raw_parts(data.iov_base as *const u8, data.iov_len) };
         Ok(Some(slice))
     } else if rc == sys::MDBX_error_MDBX_NOTFOUND {
         Ok(None)
@@ -872,7 +1074,15 @@ pub fn get<'txn>(txn: &'txn Txn<'_>, dbi: Dbi, key: &[u8]) -> Result<Option<&'tx
 pub fn put(txn: &Txn<'_>, dbi: Dbi, key: &[u8], value: &[u8], flags: PutFlags) -> Result<()> {
     let mut key_val = to_val(key);
     let mut data_val = to_val(value);
-    let rc = unsafe { sys::mdbx_put(txn.ptr, dbi.0, &mut key_val as *mut _, &mut data_val as *mut _, flags.bits() as c_int) } as i32;
+    let rc = unsafe {
+        sys::mdbx_put(
+            txn.ptr,
+            dbi.0,
+            &mut key_val as *mut _,
+            &mut data_val as *mut _,
+            flags.bits() as c_int,
+        )
+    } as i32;
     check(rc)
 }
 
@@ -880,7 +1090,14 @@ pub fn put(txn: &Txn<'_>, dbi: Dbi, key: &[u8], value: &[u8], flags: PutFlags) -
 /// - `elem_size` is the size of each element in bytes.
 /// - `payload` is a contiguous region containing `count = payload.len() / elem_size` elements.
 /// Returns the number of elements actually written.
-pub fn put_multiple(txn: &Txn<'_>, dbi: Dbi, key: &[u8], elem_size: usize, payload: &[u8], flags: PutFlags) -> Result<usize> {
+pub fn put_multiple(
+    txn: &Txn<'_>,
+    dbi: Dbi,
+    key: &[u8],
+    elem_size: usize,
+    payload: &[u8],
+    flags: PutFlags,
+) -> Result<usize> {
     assert!(elem_size > 0, "elem_size must be > 0");
     if payload.len() % elem_size != 0 {
         return Err(mk_error(sys::MDBX_error_MDBX_EINVAL));
@@ -888,8 +1105,14 @@ pub fn put_multiple(txn: &Txn<'_>, dbi: Dbi, key: &[u8], elem_size: usize, paylo
     let mut key_val = to_val(key);
     // Prepare the 2-element array per MDBX MULTIPLE semantics
     let mut vals = [
-        sys::MDBX_val { iov_base: payload.as_ptr() as *mut c_void, iov_len: elem_size },
-        sys::MDBX_val { iov_base: std::ptr::null_mut(), iov_len: payload.len() / elem_size },
+        sys::MDBX_val {
+            iov_base: payload.as_ptr() as *mut c_void,
+            iov_len: elem_size,
+        },
+        sys::MDBX_val {
+            iov_base: std::ptr::null_mut(),
+            iov_len: payload.len() / elem_size,
+        },
     ];
     let rc = unsafe {
         sys::mdbx_put(
@@ -900,18 +1123,29 @@ pub fn put_multiple(txn: &Txn<'_>, dbi: Dbi, key: &[u8], elem_size: usize, paylo
             (flags | PutFlags::MULTIPLE).bits() as c_int,
         )
     } as i32;
-    if rc == 0 { Ok(vals[1].iov_len) } else { Err(mk_error(rc)) }
+    if rc == 0 {
+        Ok(vals[1].iov_len)
+    } else {
+        Err(mk_error(rc))
+    }
 }
 
 pub fn del(txn: &Txn<'_>, dbi: Dbi, key: &[u8], value: Option<&[u8]>) -> Result<()> {
     let key_val = to_val(key);
-    let data_ptr = if let Some(v) = value { &to_val(v) as *const _ } else { std::ptr::null() };
+    let data_ptr = if let Some(v) = value {
+        &to_val(v) as *const _
+    } else {
+        std::ptr::null()
+    };
     let rc = unsafe { sys::mdbx_del(txn.ptr, dbi.0, &key_val as *const _, data_ptr) } as i32;
     check(rc)
 }
 
 /// Retrieve equal or next greater key/value pair. Returns whether it was an exact match.
-pub enum Match { Exact, Greater }
+pub enum Match {
+    Exact,
+    Greater,
+}
 
 pub fn get_equal_or_great<'txn>(
     txn: &'txn Txn<'_>,
@@ -921,12 +1155,23 @@ pub fn get_equal_or_great<'txn>(
 ) -> Result<Match> {
     let mut k = to_val(*key_in_out);
     let mut d = to_val(*data_in_out);
-    let rc = unsafe { sys::mdbx_get_equal_or_great(txn.ptr as *const _, dbi.0, &mut k as *mut _, &mut d as *mut _) } as i32;
+    let rc = unsafe {
+        sys::mdbx_get_equal_or_great(
+            txn.ptr as *const _,
+            dbi.0,
+            &mut k as *mut _,
+            &mut d as *mut _,
+        )
+    } as i32;
     if rc == 0 || rc == sys::MDBX_error_MDBX_RESULT_TRUE {
         // Update to DB-backed slices
         *key_in_out = unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
         *data_in_out = unsafe { std::slice::from_raw_parts(d.iov_base as *const u8, d.iov_len) };
-        Ok(if rc == 0 { Match::Exact } else { Match::Greater })
+        Ok(if rc == 0 {
+            Match::Exact
+        } else {
+            Match::Greater
+        })
     } else {
         Err(mk_error(rc))
     }
@@ -934,7 +1179,11 @@ pub fn get_equal_or_great<'txn>(
 
 /// Replace item at key with new value (or delete if new=None). Optionally retrieve previous value into provided buffer.
 /// If the buffer is too small, returns NeedOldSize(required_len) without changing data.
-pub enum ReplaceOutcome { Replaced, Deleted, NeedOldSize(usize) }
+pub enum ReplaceOutcome {
+    Replaced,
+    Deleted,
+    NeedOldSize(usize),
+}
 
 pub fn replace(
     txn: &Txn<'_>,
@@ -947,16 +1196,24 @@ pub fn replace(
     let k = to_val(key);
     let mut new_val = new.map(|n| to_val(n));
     let mut old_val = if let Some(buf) = old_out.as_deref_mut() {
-        sys::MDBX_val { iov_base: buf.as_mut_ptr() as *mut c_void, iov_len: buf.len() }
+        sys::MDBX_val {
+            iov_base: buf.as_mut_ptr() as *mut c_void,
+            iov_len: buf.len(),
+        }
     } else {
-        sys::MDBX_val { iov_base: std::ptr::null_mut(), iov_len: 0 }
+        sys::MDBX_val {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        }
     };
     let rc = unsafe {
         sys::mdbx_replace_ex(
             txn.ptr,
             dbi.0,
             &k as *const _,
-            new_val.as_mut().map_or(std::ptr::null_mut(), |v| v as *mut _),
+            new_val
+                .as_mut()
+                .map_or(std::ptr::null_mut(), |v| v as *mut _),
             &mut old_val as *mut _,
             flags.bits() as c_int,
             None,
@@ -964,7 +1221,11 @@ pub fn replace(
         )
     } as i32;
     if rc == 0 {
-        Ok(if new.is_some() { ReplaceOutcome::Replaced } else { ReplaceOutcome::Deleted })
+        Ok(if new.is_some() {
+            ReplaceOutcome::Replaced
+        } else {
+            ReplaceOutcome::Deleted
+        })
     } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
         // old_out too small; report required length via iov_len
         Ok(ReplaceOutcome::NeedOldSize(old_val.iov_len))
@@ -984,8 +1245,13 @@ impl<'t> Cursor<'t> {
     pub fn open(txn: &'t Txn<'t>, dbi: Dbi) -> Result<Self> {
         let mut cur: *mut sys::MDBX_cursor = std::ptr::null_mut();
         let rc = unsafe { sys::mdbx_cursor_open(txn.ptr, dbi.0, &mut cur as *mut _) } as i32;
-        if rc != 0 || cur.is_null() { return Err(mk_error(rc)); }
-        Ok(Self { ptr: cur, _marker: PhantomData })
+        if rc != 0 || cur.is_null() {
+            return Err(mk_error(rc));
+        }
+        Ok(Self {
+            ptr: cur,
+            _marker: PhantomData,
+        })
     }
 
     pub fn first<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
@@ -1006,37 +1272,82 @@ impl<'t> Cursor<'t> {
 
     pub fn set_range<'c>(&'c mut self, key: &[u8]) -> Result<Option<(&'c [u8], &'c [u8])>> {
         let mut k = to_val(key);
-        let mut v = sys::MDBX_val { iov_base: std::ptr::null_mut(), iov_len: 0 };
-        let rc = unsafe { sys::mdbx_cursor_get(self.ptr, &mut k as *mut _, &mut v as *mut _, sys::MDBX_cursor_op_MDBX_SET_RANGE) } as i32;
+        let mut v = sys::MDBX_val {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        };
+        let rc = unsafe {
+            sys::mdbx_cursor_get(
+                self.ptr,
+                &mut k as *mut _,
+                &mut v as *mut _,
+                sys::MDBX_cursor_op_MDBX_SET_RANGE,
+            )
+        } as i32;
         if rc == 0 {
             // Safety: as above; returned pointers are owned by DB and valid while txn lives.
-            let ks: &'c [u8] = unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
-            let vs: &'c [u8] = unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
+            let ks: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
+            let vs: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
             Ok(Some((ks, vs)))
-        } else if rc == sys::MDBX_error_MDBX_NOTFOUND { Ok(None) } else { Err(mk_error(rc)) }
+        } else if rc == sys::MDBX_error_MDBX_NOTFOUND {
+            Ok(None)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     fn get_op<'c>(&'c mut self, op: c_int) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        let mut k = sys::MDBX_val { iov_base: std::ptr::null_mut(), iov_len: 0 };
-        let mut v = sys::MDBX_val { iov_base: std::ptr::null_mut(), iov_len: 0 };
-        let rc = unsafe { sys::mdbx_cursor_get(self.ptr, &mut k as *mut _, &mut v as *mut _, op) } as i32;
+        let mut k = sys::MDBX_val {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        };
+        let mut v = sys::MDBX_val {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        };
+        let rc = unsafe { sys::mdbx_cursor_get(self.ptr, &mut k as *mut _, &mut v as *mut _, op) }
+            as i32;
         if rc == 0 {
-            let ks: &'c [u8] = unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
-            let vs: &'c [u8] = unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
+            let ks: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
+            let vs: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
             Ok(Some((ks, vs)))
-        } else if rc == sys::MDBX_error_MDBX_NOTFOUND { Ok(None) } else { Err(mk_error(rc)) }
+        } else if rc == sys::MDBX_error_MDBX_NOTFOUND {
+            Ok(None)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
-        /// Position cursor at exact key if present and return current pair.
+    /// Position cursor at exact key if present and return current pair.
     pub fn seek_key<'c>(&'c mut self, key: &[u8]) -> Result<Option<(&'c [u8], &'c [u8])>> {
         let mut k = to_val(key);
-        let mut v = sys::MDBX_val { iov_base: std::ptr::null_mut(), iov_len: 0 };
-        let rc = unsafe { sys::mdbx_cursor_get(self.ptr, &mut k as *mut _, &mut v as *mut _, sys::MDBX_cursor_op_MDBX_SET) } as i32;
+        let mut v = sys::MDBX_val {
+            iov_base: std::ptr::null_mut(),
+            iov_len: 0,
+        };
+        let rc = unsafe {
+            sys::mdbx_cursor_get(
+                self.ptr,
+                &mut k as *mut _,
+                &mut v as *mut _,
+                sys::MDBX_cursor_op_MDBX_SET,
+            )
+        } as i32;
         if rc == 0 {
-            let ks: &'c [u8] = unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
-            let vs: &'c [u8] = unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
+            let ks: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
+            let vs: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
             Ok(Some((ks, vs)))
-        } else if rc == sys::MDBX_error_MDBX_NOTFOUND { Ok(None) } else { Err(mk_error(rc)) }
+        } else if rc == sys::MDBX_error_MDBX_NOTFOUND {
+            Ok(None)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// For DUPSORT tables: move to first duplicate at current key.
@@ -1070,27 +1381,61 @@ impl<'t> Cursor<'t> {
     }
 
     /// Seek to exact (key,data) pair in DUPSORT tables.
-    pub fn get_both<'c>(&'c mut self, key: &[u8], data: &[u8]) -> Result<Option<(&'c [u8], &'c [u8])>> {
+    pub fn get_both<'c>(
+        &'c mut self,
+        key: &[u8],
+        data: &[u8],
+    ) -> Result<Option<(&'c [u8], &'c [u8])>> {
         let mut k = to_val(key);
         let mut v = to_val(data);
-        let rc = unsafe { sys::mdbx_cursor_get(self.ptr, &mut k as *mut _, &mut v as *mut _, sys::MDBX_cursor_op_MDBX_GET_BOTH) } as i32;
+        let rc = unsafe {
+            sys::mdbx_cursor_get(
+                self.ptr,
+                &mut k as *mut _,
+                &mut v as *mut _,
+                sys::MDBX_cursor_op_MDBX_GET_BOTH,
+            )
+        } as i32;
         if rc == 0 {
-            let ks: &'c [u8] = unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
-            let vs: &'c [u8] = unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
+            let ks: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
+            let vs: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
             Ok(Some((ks, vs)))
-        } else if rc == sys::MDBX_error_MDBX_NOTFOUND { Ok(None) } else { Err(mk_error(rc)) }
+        } else if rc == sys::MDBX_error_MDBX_NOTFOUND {
+            Ok(None)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Seek to key and the smallest data >= given data (DUPSORT tables).
-    pub fn get_both_range<'c>(&'c mut self, key: &[u8], data: &[u8]) -> Result<Option<(&'c [u8], &'c [u8])>> {
+    pub fn get_both_range<'c>(
+        &'c mut self,
+        key: &[u8],
+        data: &[u8],
+    ) -> Result<Option<(&'c [u8], &'c [u8])>> {
         let mut k = to_val(key);
         let mut v = to_val(data);
-        let rc = unsafe { sys::mdbx_cursor_get(self.ptr, &mut k as *mut _, &mut v as *mut _, sys::MDBX_cursor_op_MDBX_GET_BOTH_RANGE) } as i32;
+        let rc = unsafe {
+            sys::mdbx_cursor_get(
+                self.ptr,
+                &mut k as *mut _,
+                &mut v as *mut _,
+                sys::MDBX_cursor_op_MDBX_GET_BOTH_RANGE,
+            )
+        } as i32;
         if rc == 0 {
-            let ks: &'c [u8] = unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
-            let vs: &'c [u8] = unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
+            let ks: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
+            let vs: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
             Ok(Some((ks, vs)))
-        } else if rc == sys::MDBX_error_MDBX_NOTFOUND { Ok(None) } else { Err(mk_error(rc)) }
+        } else if rc == sys::MDBX_error_MDBX_NOTFOUND {
+            Ok(None)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Return the current key/value without moving the cursor.
@@ -1099,10 +1444,16 @@ impl<'t> Cursor<'t> {
     }
 
     /// Reset/unset the cursor position.
-    pub fn reset(&mut self) -> Result<()> { let rc = unsafe { sys::mdbx_cursor_reset(self.ptr) } as i32; check(rc) }
+    pub fn reset(&mut self) -> Result<()> {
+        let rc = unsafe { sys::mdbx_cursor_reset(self.ptr) } as i32;
+        check(rc)
+    }
 
     /// Unbind cursor from its current transaction keeping DBI for reuse.
-    pub fn unbind(&mut self) -> Result<()> { let rc = unsafe { sys::mdbx_cursor_unbind(self.ptr) } as i32; check(rc) }
+    pub fn unbind(&mut self) -> Result<()> {
+        let rc = unsafe { sys::mdbx_cursor_unbind(self.ptr) } as i32;
+        check(rc)
+    }
 
     /// Bind cursor to a transaction and dbi handle.
     pub fn bind(&mut self, txn: &mut Txn<'t>, dbi: Dbi) -> Result<()> {
@@ -1111,54 +1462,106 @@ impl<'t> Cursor<'t> {
     }
 
     /// Renew cursor for a transaction using its previous DBI.
-    pub fn renew(&mut self, txn: &mut Txn<'t>) -> Result<()> { let rc = unsafe { sys::mdbx_cursor_renew(txn.ptr, self.ptr) } as i32; check(rc) }
+    pub fn renew(&mut self, txn: &mut Txn<'t>) -> Result<()> {
+        let rc = unsafe { sys::mdbx_cursor_renew(txn.ptr, self.ptr) } as i32;
+        check(rc)
+    }
 
     /// Check whether cursor is on last key/value.
     pub fn on_last(&self) -> Result<bool> {
         let rc = unsafe { sys::mdbx_cursor_on_last(self.ptr as *const _) } as i32;
-        if rc == 0 { Ok(false) } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(true) } else { Err(mk_error(rc)) }
+        if rc == 0 {
+            Ok(false)
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(true)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Check whether cursor is on last duplicate for current key.
     pub fn on_last_dup(&self) -> Result<bool> {
         let rc = unsafe { sys::mdbx_cursor_on_last_dup(self.ptr as *const _) } as i32;
-        if rc == 0 { Ok(false) } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(true) } else { Err(mk_error(rc)) }
+        if rc == 0 {
+            Ok(false)
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(true)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Estimate distance between this cursor and another cursor (same dbi/txn).
     pub fn estimate_distance(&self, other: &Cursor<'t>) -> Result<isize> {
         let mut out: isize = 0;
-        let rc = unsafe { sys::mdbx_estimate_distance(self.ptr as *const _, other.ptr as *const _, &mut out as *mut _) } as i32;
+        let rc = unsafe {
+            sys::mdbx_estimate_distance(
+                self.ptr as *const _,
+                other.ptr as *const _,
+                &mut out as *mut _,
+            )
+        } as i32;
         check(rc).map(|_| out)
     }
 
     /// Estimate distance for a move op relative to current position (does not move the cursor).
-    pub fn estimate_move(&self, op: sys::MDBX_cursor_op, key_out: &mut &[u8], val_out: &mut &[u8]) -> Result<isize> {
+    pub fn estimate_move(
+        &self,
+        op: sys::MDBX_cursor_op,
+        key_out: &mut &[u8],
+        val_out: &mut &[u8],
+    ) -> Result<isize> {
         let mut k = to_val(*key_out);
         let mut v = to_val(*val_out);
         let mut out: isize = 0;
-        let rc = unsafe { sys::mdbx_estimate_move(self.ptr as *const _, &mut k as *mut _, &mut v as *mut _, op, &mut out as *mut _) } as i32;
-        if rc != 0 { return Err(mk_error(rc)); }
+        let rc = unsafe {
+            sys::mdbx_estimate_move(
+                self.ptr as *const _,
+                &mut k as *mut _,
+                &mut v as *mut _,
+                op,
+                &mut out as *mut _,
+            )
+        } as i32;
+        if rc != 0 {
+            return Err(mk_error(rc));
+        }
         *key_out = unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
         *val_out = unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
         Ok(out)
     }
 
     /// Estimate distance for a move op relative to current position using CursorOp enum (does not move the cursor).
-    pub fn estimate_move_with_op(&self, op: CursorOp, key_out: &mut &[u8], val_out: &mut &[u8]) -> Result<isize> {
+    pub fn estimate_move_with_op(
+        &self,
+        op: CursorOp,
+        key_out: &mut &[u8],
+        val_out: &mut &[u8],
+    ) -> Result<isize> {
         self.estimate_move(op.to_raw(), key_out, val_out)
     }
 
     /// Get the owning transaction pointer (unsafe low-level).
-    pub fn txn_ptr(&self) -> *mut sys::MDBX_txn { unsafe { sys::mdbx_cursor_txn(self.ptr as *const _) } }
+    pub fn txn_ptr(&self) -> *mut sys::MDBX_txn {
+        unsafe { sys::mdbx_cursor_txn(self.ptr as *const _) }
+    }
 
     /// Get the DBI handle for this cursor.
-    pub fn dbi(&self) -> Dbi { Dbi(unsafe { sys::mdbx_cursor_dbi(self.ptr as *const _) }) }
+    pub fn dbi(&self) -> Dbi {
+        Dbi(unsafe { sys::mdbx_cursor_dbi(self.ptr as *const _) })
+    }
 
     /// For DUPFIXED tables: GET_MULTIPLE. Returns the contiguous payload slice and element count (computed from elem_size).
     pub fn get_multiple<'c>(&'c mut self, elem_size: usize) -> Result<Option<(&'c [u8], usize)>> {
         match self.get_op(sys::MDBX_cursor_op_MDBX_GET_MULTIPLE as c_int)? {
-            Some((_k, v)) => Ok(Some((v, if elem_size > 0 { v.len() / elem_size } else { 0 }))),
+            Some((_k, v)) => Ok(Some((
+                v,
+                if elem_size > 0 {
+                    v.len() / elem_size
+                } else {
+                    0
+                },
+            ))),
             None => Ok(None),
         }
     }
@@ -1166,7 +1569,14 @@ impl<'t> Cursor<'t> {
     /// NEXT_MULTIPLE variant for DUPFIXED tables.
     pub fn next_multiple<'c>(&'c mut self, elem_size: usize) -> Result<Option<(&'c [u8], usize)>> {
         match self.get_op(sys::MDBX_cursor_op_MDBX_NEXT_MULTIPLE as c_int)? {
-            Some((_k, v)) => Ok(Some((v, if elem_size > 0 { v.len() / elem_size } else { 0 }))),
+            Some((_k, v)) => Ok(Some((
+                v,
+                if elem_size > 0 {
+                    v.len() / elem_size
+                } else {
+                    0
+                },
+            ))),
             None => Ok(None),
         }
     }
@@ -1174,7 +1584,14 @@ impl<'t> Cursor<'t> {
     /// PREV_MULTIPLE variant for DUPFIXED tables.
     pub fn prev_multiple<'c>(&'c mut self, elem_size: usize) -> Result<Option<(&'c [u8], usize)>> {
         match self.get_op(sys::MDBX_cursor_op_MDBX_PREV_MULTIPLE as c_int)? {
-            Some((_k, v)) => Ok(Some((v, if elem_size > 0 { v.len() / elem_size } else { 0 }))),
+            Some((_k, v)) => Ok(Some((
+                v,
+                if elem_size > 0 {
+                    v.len() / elem_size
+                } else {
+                    0
+                },
+            ))),
             None => Ok(None),
         }
     }
@@ -1182,14 +1599,28 @@ impl<'t> Cursor<'t> {
     /// Insert/replace using this cursor. For MULTIPLE semantics, prefer put_multiple.
     pub fn put(&mut self, key: &[u8], data: &mut [u8], flags: PutFlags) -> Result<()> {
         let kv = to_val(key);
-        let mut dv = sys::MDBX_val { iov_base: data.as_mut_ptr() as *mut c_void, iov_len: data.len() };
-        let rc = unsafe { sys::mdbx_cursor_put(self.ptr, &kv as *const _, &mut dv as *mut _, flags.bits() as c_int) } as i32;
+        let mut dv = sys::MDBX_val {
+            iov_base: data.as_mut_ptr() as *mut c_void,
+            iov_len: data.len(),
+        };
+        let rc = unsafe {
+            sys::mdbx_cursor_put(
+                self.ptr,
+                &kv as *const _,
+                &mut dv as *mut _,
+                flags.bits() as c_int,
+            )
+        } as i32;
         check(rc)
     }
 
     /// Delete at current position; if all_dups then delete all duplicates for this key.
     pub fn del_current(&mut self, all_dups: bool) -> Result<()> {
-        let flag = if all_dups { sys::MDBX_put_flags_MDBX_ALLDUPS } else { sys::MDBX_put_flags_MDBX_CURRENT };
+        let flag = if all_dups {
+            sys::MDBX_put_flags_MDBX_ALLDUPS
+        } else {
+            sys::MDBX_put_flags_MDBX_CURRENT
+        };
         let rc = unsafe { sys::mdbx_cursor_del(self.ptr, flag) } as i32;
         check(rc)
     }
@@ -1204,14 +1635,28 @@ impl<'t> Cursor<'t> {
     /// Return EOF state of cursor.
     pub fn eof(&self) -> Result<bool> {
         let rc = unsafe { sys::mdbx_cursor_eof(self.ptr as *const _) } as i32;
-        if rc == 0 { Ok(false) } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(true) } else { Err(mk_error(rc)) }
+        if rc == 0 {
+            Ok(false)
+        } else if rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(true)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Disable order checks for this cursor (for custom comparators scenarios).
-    pub fn ignore_order(&mut self) -> Result<()> { let rc = unsafe { sys::mdbx_cursor_ignord(self.ptr) } as i32; check(rc) }
+    pub fn ignore_order(&mut self) -> Result<()> {
+        let rc = unsafe { sys::mdbx_cursor_ignord(self.ptr) } as i32;
+        check(rc)
+    }
 
     /// Scan using a predicate function starting from start_op then turning with turn_op until predicate returns true or end.
-    pub fn scan<F>(&mut self, start_op: sys::MDBX_cursor_op, turn_op: sys::MDBX_cursor_op, mut pred: F) -> Result<i32>
+    pub fn scan<F>(
+        &mut self,
+        start_op: sys::MDBX_cursor_op,
+        turn_op: sys::MDBX_cursor_op,
+        mut pred: F,
+    ) -> Result<i32>
     where
         F: FnMut(&[u8], &mut [u8]) -> Result<bool>,
     {
@@ -1221,9 +1666,13 @@ impl<'t> Cursor<'t> {
             value: *mut sys::MDBX_val,
             _arg: *mut c_void,
         ) -> c_int {
-            let cb = unsafe { &mut *(ctx as *mut &mut dyn FnMut(&[u8], &mut [u8]) -> Result<bool>) };
-            let ks = unsafe { std::slice::from_raw_parts((*key).iov_base as *const u8, (*key).iov_len) };
-            let vs = unsafe { std::slice::from_raw_parts_mut((*value).iov_base as *mut u8, (*value).iov_len) };
+            let cb =
+                unsafe { &mut *(ctx as *mut &mut dyn FnMut(&[u8], &mut [u8]) -> Result<bool>) };
+            let ks =
+                unsafe { std::slice::from_raw_parts((*key).iov_base as *const u8, (*key).iov_len) };
+            let vs = unsafe {
+                std::slice::from_raw_parts_mut((*value).iov_base as *mut u8, (*value).iov_len)
+            };
             match cb(ks, vs) {
                 Ok(true) => sys::MDBX_error_MDBX_RESULT_TRUE,
                 Ok(false) => 0,
@@ -1242,11 +1691,20 @@ impl<'t> Cursor<'t> {
                 std::ptr::null_mut(),
             )
         } as i32;
-        if rc >= 0 || rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(rc) } else { Err(mk_error(rc)) }
+        if rc >= 0 || rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(rc)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Scan using a predicate function with CursorOp enum.
-    pub fn scan_with_ops<F>(&mut self, start_op: CursorOp, turn_op: CursorOp, pred: F) -> Result<i32>
+    pub fn scan_with_ops<F>(
+        &mut self,
+        start_op: CursorOp,
+        turn_op: CursorOp,
+        pred: F,
+    ) -> Result<i32>
     where
         F: FnMut(&[u8], &mut [u8]) -> Result<bool>,
     {
@@ -1254,7 +1712,14 @@ impl<'t> Cursor<'t> {
     }
 
     /// Scan from a given (key,value) position using predicate.
-    pub fn scan_from<F>(&mut self, from_op: sys::MDBX_cursor_op, from_key: &mut [u8], from_value: &mut [u8], turn_op: sys::MDBX_cursor_op, mut pred: F) -> Result<i32>
+    pub fn scan_from<F>(
+        &mut self,
+        from_op: sys::MDBX_cursor_op,
+        from_key: &mut [u8],
+        from_value: &mut [u8],
+        turn_op: sys::MDBX_cursor_op,
+        mut pred: F,
+    ) -> Result<i32>
     where
         F: FnMut(&[u8], &mut [u8]) -> Result<bool>,
     {
@@ -1264,9 +1729,13 @@ impl<'t> Cursor<'t> {
             value: *mut sys::MDBX_val,
             _arg: *mut c_void,
         ) -> c_int {
-            let cb = unsafe { &mut *(ctx as *mut &mut dyn FnMut(&[u8], &mut [u8]) -> Result<bool>) };
-            let ks = unsafe { std::slice::from_raw_parts((*key).iov_base as *const u8, (*key).iov_len) };
-            let vs = unsafe { std::slice::from_raw_parts_mut((*value).iov_base as *mut u8, (*value).iov_len) };
+            let cb =
+                unsafe { &mut *(ctx as *mut &mut dyn FnMut(&[u8], &mut [u8]) -> Result<bool>) };
+            let ks =
+                unsafe { std::slice::from_raw_parts((*key).iov_base as *const u8, (*key).iov_len) };
+            let vs = unsafe {
+                std::slice::from_raw_parts_mut((*value).iov_base as *mut u8, (*value).iov_len)
+            };
             match cb(ks, vs) {
                 Ok(true) => sys::MDBX_error_MDBX_RESULT_TRUE,
                 Ok(false) => 0,
@@ -1274,8 +1743,14 @@ impl<'t> Cursor<'t> {
             }
         }
 
-        let mut k = sys::MDBX_val { iov_base: from_key.as_mut_ptr() as *mut c_void, iov_len: from_key.len() };
-        let mut v = sys::MDBX_val { iov_base: from_value.as_mut_ptr() as *mut c_void, iov_len: from_value.len() };
+        let mut k = sys::MDBX_val {
+            iov_base: from_key.as_mut_ptr() as *mut c_void,
+            iov_len: from_key.len(),
+        };
+        let mut v = sys::MDBX_val {
+            iov_base: from_value.as_mut_ptr() as *mut c_void,
+            iov_len: from_value.len(),
+        };
         let mut cb: &mut dyn FnMut(&[u8], &mut [u8]) -> Result<bool> = &mut pred;
         let rc = unsafe {
             sys::mdbx_cursor_scan_from(
@@ -1289,15 +1764,32 @@ impl<'t> Cursor<'t> {
                 std::ptr::null_mut(),
             )
         } as i32;
-        if rc >= 0 || rc == sys::MDBX_error_MDBX_RESULT_TRUE { Ok(rc) } else { Err(mk_error(rc)) }
+        if rc >= 0 || rc == sys::MDBX_error_MDBX_RESULT_TRUE {
+            Ok(rc)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 
     /// Scan from a given (key,value) position using predicate with CursorOp enum.
-    pub fn scan_from_with_ops<F>(&mut self, from_op: CursorOp, from_key: &mut [u8], from_value: &mut [u8], turn_op: CursorOp, pred: F) -> Result<i32>
+    pub fn scan_from_with_ops<F>(
+        &mut self,
+        from_op: CursorOp,
+        from_key: &mut [u8],
+        from_value: &mut [u8],
+        turn_op: CursorOp,
+        pred: F,
+    ) -> Result<i32>
     where
         F: FnMut(&[u8], &mut [u8]) -> Result<bool>,
     {
-        self.scan_from(from_op.to_raw(), from_key, from_value, turn_op.to_raw(), pred)
+        self.scan_from(
+            from_op.to_raw(),
+            from_key,
+            from_value,
+            turn_op.to_raw(),
+            pred,
+        )
     }
 
     /// Generic cursor operation using the CursorOp enum.
@@ -1308,15 +1800,28 @@ impl<'t> Cursor<'t> {
 
     /// Generic cursor operation with key/value parameters using the CursorOp enum.
     /// This is useful for operations that require key/value input like Set, GetBoth, etc.
-    pub fn get_with_op_and_data<'c>(&'c mut self, op: CursorOp, key: &[u8], data: &[u8]) -> Result<Option<(&'c [u8], &'c [u8])>> {
+    pub fn get_with_op_and_data<'c>(
+        &'c mut self,
+        op: CursorOp,
+        key: &[u8],
+        data: &[u8],
+    ) -> Result<Option<(&'c [u8], &'c [u8])>> {
         let mut k = to_val(key);
         let mut v = to_val(data);
-        let rc = unsafe { sys::mdbx_cursor_get(self.ptr, &mut k as *mut _, &mut v as *mut _, op.to_raw()) } as i32;
+        let rc = unsafe {
+            sys::mdbx_cursor_get(self.ptr, &mut k as *mut _, &mut v as *mut _, op.to_raw())
+        } as i32;
         if rc == 0 {
-            let ks: &'c [u8] = unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
-            let vs: &'c [u8] = unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
+            let ks: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(k.iov_base as *const u8, k.iov_len) };
+            let vs: &'c [u8] =
+                unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, v.iov_len) };
             Ok(Some((ks, vs)))
-        } else if rc == sys::MDBX_error_MDBX_NOTFOUND { Ok(None) } else { Err(mk_error(rc)) }
+        } else if rc == sys::MDBX_error_MDBX_NOTFOUND {
+            Ok(None)
+        } else {
+            Err(mk_error(rc))
+        }
     }
 }
 
@@ -1379,7 +1884,9 @@ pub fn estimate_range(
 }
 
 impl<'t> Drop for Cursor<'t> {
-    fn drop(&mut self) { unsafe { sys::mdbx_cursor_close(self.ptr) } }
+    fn drop(&mut self) {
+        unsafe { sys::mdbx_cursor_close(self.ptr) }
+    }
 }
 
 // ----- Unbound cursor (create first, bind later) -----
@@ -1391,15 +1898,24 @@ pub struct UnboundCursor {
 impl UnboundCursor {
     pub fn create(context: Option<*mut c_void>) -> Option<Self> {
         let ptr = unsafe { sys::mdbx_cursor_create(context.unwrap_or(std::ptr::null_mut())) };
-        if ptr.is_null() { None } else { Some(Self { ptr }) }
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Self { ptr })
+        }
     }
 
     pub fn into_bound<'t>(mut self, txn: &'t mut Txn<'t>, dbi: Dbi) -> Result<Cursor<'t>> {
         let rc = unsafe { sys::mdbx_cursor_bind(txn.ptr, self.ptr, dbi.0) } as i32;
-        if rc != 0 { return Err(mk_error(rc)); }
+        if rc != 0 {
+            return Err(mk_error(rc));
+        }
         let ptr = std::mem::replace(&mut self.ptr, std::ptr::null_mut());
         std::mem::forget(self);
-        Ok(Cursor { ptr, _marker: PhantomData })
+        Ok(Cursor {
+            ptr,
+            _marker: PhantomData,
+        })
     }
 }
 
@@ -1417,14 +1933,38 @@ mod tests {
 
     #[test]
     fn test_cursor_op_to_raw() {
-        assert_eq!(CursorOp::First.to_raw(), sys::MDBX_cursor_op_MDBX_FIRST as sys::MDBX_cursor_op);
-        assert_eq!(CursorOp::Last.to_raw(), sys::MDBX_cursor_op_MDBX_LAST as sys::MDBX_cursor_op);
-        assert_eq!(CursorOp::Next.to_raw(), sys::MDBX_cursor_op_MDBX_NEXT as sys::MDBX_cursor_op);
-        assert_eq!(CursorOp::Prev.to_raw(), sys::MDBX_cursor_op_MDBX_PREV as sys::MDBX_cursor_op);
-        assert_eq!(CursorOp::Set.to_raw(), sys::MDBX_cursor_op_MDBX_SET as sys::MDBX_cursor_op);
-        assert_eq!(CursorOp::SetKey.to_raw(), sys::MDBX_cursor_op_MDBX_SET_KEY as sys::MDBX_cursor_op);
-        assert_eq!(CursorOp::SetRange.to_raw(), sys::MDBX_cursor_op_MDBX_SET_RANGE as sys::MDBX_cursor_op);
-        assert_eq!(CursorOp::GetCurrent.to_raw(), sys::MDBX_cursor_op_MDBX_GET_CURRENT as sys::MDBX_cursor_op);
+        assert_eq!(
+            CursorOp::First.to_raw(),
+            sys::MDBX_cursor_op_MDBX_FIRST as sys::MDBX_cursor_op
+        );
+        assert_eq!(
+            CursorOp::Last.to_raw(),
+            sys::MDBX_cursor_op_MDBX_LAST as sys::MDBX_cursor_op
+        );
+        assert_eq!(
+            CursorOp::Next.to_raw(),
+            sys::MDBX_cursor_op_MDBX_NEXT as sys::MDBX_cursor_op
+        );
+        assert_eq!(
+            CursorOp::Prev.to_raw(),
+            sys::MDBX_cursor_op_MDBX_PREV as sys::MDBX_cursor_op
+        );
+        assert_eq!(
+            CursorOp::Set.to_raw(),
+            sys::MDBX_cursor_op_MDBX_SET as sys::MDBX_cursor_op
+        );
+        assert_eq!(
+            CursorOp::SetKey.to_raw(),
+            sys::MDBX_cursor_op_MDBX_SET_KEY as sys::MDBX_cursor_op
+        );
+        assert_eq!(
+            CursorOp::SetRange.to_raw(),
+            sys::MDBX_cursor_op_MDBX_SET_RANGE as sys::MDBX_cursor_op
+        );
+        assert_eq!(
+            CursorOp::GetCurrent.to_raw(),
+            sys::MDBX_cursor_op_MDBX_GET_CURRENT as sys::MDBX_cursor_op
+        );
     }
 
     #[test]
@@ -1442,23 +1982,59 @@ mod tests {
 
     #[test]
     fn test_error_code_to_raw() {
-        assert_eq!(ErrorCode::Success.to_raw(), sys::MDBX_error_MDBX_SUCCESS as sys::MDBX_error);
-        assert_eq!(ErrorCode::NotFound.to_raw(), sys::MDBX_error_MDBX_NOTFOUND as sys::MDBX_error);
-        assert_eq!(ErrorCode::KeyExist.to_raw(), sys::MDBX_error_MDBX_KEYEXIST as sys::MDBX_error);
-        assert_eq!(ErrorCode::Corrupted.to_raw(), sys::MDBX_error_MDBX_CORRUPTED as sys::MDBX_error);
-        assert_eq!(ErrorCode::MapFull.to_raw(), sys::MDBX_error_MDBX_MAP_FULL as sys::MDBX_error);
-        assert_eq!(ErrorCode::Busy.to_raw(), sys::MDBX_error_MDBX_BUSY as sys::MDBX_error);
+        assert_eq!(
+            ErrorCode::Success.to_raw(),
+            sys::MDBX_error_MDBX_SUCCESS as sys::MDBX_error
+        );
+        assert_eq!(
+            ErrorCode::NotFound.to_raw(),
+            sys::MDBX_error_MDBX_NOTFOUND as sys::MDBX_error
+        );
+        assert_eq!(
+            ErrorCode::KeyExist.to_raw(),
+            sys::MDBX_error_MDBX_KEYEXIST as sys::MDBX_error
+        );
+        assert_eq!(
+            ErrorCode::Corrupted.to_raw(),
+            sys::MDBX_error_MDBX_CORRUPTED as sys::MDBX_error
+        );
+        assert_eq!(
+            ErrorCode::MapFull.to_raw(),
+            sys::MDBX_error_MDBX_MAP_FULL as sys::MDBX_error
+        );
+        assert_eq!(
+            ErrorCode::Busy.to_raw(),
+            sys::MDBX_error_MDBX_BUSY as sys::MDBX_error
+        );
     }
 
     #[test]
     fn test_error_code_from_raw() {
         unsafe {
-            assert_eq!(ErrorCode::from_raw(sys::MDBX_error_MDBX_SUCCESS as i32), ErrorCode::Success);
-            assert_eq!(ErrorCode::from_raw(sys::MDBX_error_MDBX_NOTFOUND as i32), ErrorCode::NotFound);
-            assert_eq!(ErrorCode::from_raw(sys::MDBX_error_MDBX_KEYEXIST as i32), ErrorCode::KeyExist);
-            assert_eq!(ErrorCode::from_raw(sys::MDBX_error_MDBX_CORRUPTED as i32), ErrorCode::Corrupted);
-            assert_eq!(ErrorCode::from_raw(sys::MDBX_error_MDBX_MAP_FULL as i32), ErrorCode::MapFull);
-            assert_eq!(ErrorCode::from_raw(sys::MDBX_error_MDBX_BUSY as i32), ErrorCode::Busy);
+            assert_eq!(
+                ErrorCode::from_raw(sys::MDBX_error_MDBX_SUCCESS as i32),
+                ErrorCode::Success
+            );
+            assert_eq!(
+                ErrorCode::from_raw(sys::MDBX_error_MDBX_NOTFOUND as i32),
+                ErrorCode::NotFound
+            );
+            assert_eq!(
+                ErrorCode::from_raw(sys::MDBX_error_MDBX_KEYEXIST as i32),
+                ErrorCode::KeyExist
+            );
+            assert_eq!(
+                ErrorCode::from_raw(sys::MDBX_error_MDBX_CORRUPTED as i32),
+                ErrorCode::Corrupted
+            );
+            assert_eq!(
+                ErrorCode::from_raw(sys::MDBX_error_MDBX_MAP_FULL as i32),
+                ErrorCode::MapFull
+            );
+            assert_eq!(
+                ErrorCode::from_raw(sys::MDBX_error_MDBX_BUSY as i32),
+                ErrorCode::Busy
+            );
         }
     }
 
@@ -1501,10 +2077,22 @@ mod tests {
 
     #[test]
     fn test_option_key_to_raw() {
-        assert_eq!(OptionKey::MaxDbs.to_raw(), sys::MDBX_option_MDBX_opt_max_db as c_int);
-        assert_eq!(OptionKey::MaxReaders.to_raw(), sys::MDBX_option_MDBX_opt_max_readers as c_int);
-        assert_eq!(OptionKey::SyncBytes.to_raw(), sys::MDBX_option_MDBX_opt_sync_bytes as c_int);
-        assert_eq!(OptionKey::SyncPeriod.to_raw(), sys::MDBX_option_MDBX_opt_sync_period as c_int);
+        assert_eq!(
+            OptionKey::MaxDbs.to_raw(),
+            sys::MDBX_option_MDBX_opt_max_db as c_int
+        );
+        assert_eq!(
+            OptionKey::MaxReaders.to_raw(),
+            sys::MDBX_option_MDBX_opt_max_readers as c_int
+        );
+        assert_eq!(
+            OptionKey::SyncBytes.to_raw(),
+            sys::MDBX_option_MDBX_opt_sync_bytes as c_int
+        );
+        assert_eq!(
+            OptionKey::SyncPeriod.to_raw(),
+            sys::MDBX_option_MDBX_opt_sync_period as c_int
+        );
     }
 
     #[test]
@@ -1653,7 +2241,11 @@ mod tests {
             for variant in variants {
                 let raw = variant.to_raw() as i32;
                 let converted_back = ErrorCode::from_raw(raw);
-                assert_eq!(variant, converted_back, "Failed roundtrip for {:?}", variant);
+                assert_eq!(
+                    variant, converted_back,
+                    "Failed roundtrip for {:?}",
+                    variant
+                );
             }
         }
     }

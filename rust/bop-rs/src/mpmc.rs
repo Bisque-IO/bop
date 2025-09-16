@@ -1,14 +1,73 @@
-//! # Zero-Copy MPMC Queue Wrapper
+//! # MPMC Queue Wrapper
 //!
-//! High-performance Multi-Producer Multi-Consumer (MPMC) queue implementation using 
-//! moodycamel's concurrent queue library through BOP's C API.
+//! High-performance multi-producer multi-consumer queue implementation using
+//! the moodycamel C++ library through BOP's C API.
 //!
-//! This module provides zero-copy operations by leveraging the fact that on 64-bit
-//! architectures, `Box<T>` and `Arc<T>` pointers fit in u64 values.
+//! This module provides safe Rust wrappers around the high-performance moodycamel
+//! concurrent queue, offering both non-blocking and blocking variants.
+//!
+//! ## Features
+//!
+//! - **Lock-free**: Non-blocking operations for maximum performance
+//! - **Thread-safe**: Multiple producers and consumers can operate concurrently
+//! - **Token-based optimization**: Producer/consumer tokens for better performance
+//! - **Bulk operations**: Efficient batch enqueue/dequeue operations
+//! - **Blocking variant**: Optional blocking operations with timeout support
+//! - **Memory efficient**: Zero-copy operations where possible
+//!
+//! ## Usage
+//!
+//! ### Basic Non-blocking Queue
+//!
+//! ```rust,no_run
+//! use bop_rs::mpmc::MpmcQueue;
+//!
+//! let queue = MpmcQueue::new()?;
+//!
+//! // Producer thread
+//! if queue.try_enqueue(42) {
+//!     println!("Enqueued successfully");
+//! }
+//!
+//! // Consumer thread
+//! if let Some(item) = queue.try_dequeue() {
+//!     println!("Dequeued: {}", item);
+//! }
+//! ```
+//!
+//! ### Token-based Optimization
+//!
+//! ```rust,no_run
+//! use bop_rs::mpmc::{MpmcQueue, ProducerToken, ConsumerToken};
+//!
+//! let queue = MpmcQueue::new()?;
+//! let producer_token = queue.create_producer_token()?;
+//! let consumer_token = queue.create_consumer_token()?;
+//!
+//! // More efficient operations with tokens
+//! producer_token.try_enqueue(42)?;
+//! if let Some(item) = consumer_token.try_dequeue()? {
+//!     println!("Got: {}", item);
+//! }
+//! ```
+//!
+//! ### Blocking Queue with Timeouts
+//!
+//! ```rust,no_run
+//! use bop_rs::mpmc::BlockingMpmcQueue;
+//! use std::time::Duration;
+//!
+//! let queue = BlockingMpmcQueue::new()?;
+//!
+//! // Blocks until item is available or timeout expires
+//! if let Some(item) = queue.dequeue_wait(Duration::from_millis(1000))? {
+//!     println!("Got item within timeout: {}", item);
+//! }
+//! ```
 
 use bop_sys::*;
-use std::ptr::NonNull;
 use std::marker::PhantomData;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -18,16 +77,16 @@ use thiserror::Error;
 pub enum MpmcError {
     #[error("Failed to create MPMC queue")]
     CreationFailed,
-    
+
     #[error("Failed to create producer token")]
     ProducerTokenCreationFailed,
-    
+
     #[error("Failed to create consumer token")]
     ConsumerTokenCreationFailed,
-    
+
     #[error("Queue operation failed")]
     OperationFailed,
-    
+
     #[error("Invalid timeout value")]
     InvalidTimeout,
 }
@@ -48,67 +107,60 @@ impl Queue {
         if ptr.is_null() {
             return Err(MpmcError::CreationFailed);
         }
-        
+
         Ok(Queue {
             ptr: NonNull::new(ptr).unwrap(),
         })
     }
-    
+
     pub fn size_approx(&self) -> usize {
         unsafe { bop_mpmc_size_approx(self.ptr.as_ptr()) }
     }
-    
+
     pub fn try_enqueue(&self, item: u64) -> bool {
         unsafe { bop_mpmc_enqueue(self.ptr.as_ptr(), item) }
     }
-    
+
     pub fn try_dequeue(&self) -> Option<u64> {
         let mut item: u64 = 0;
         let success = unsafe { bop_mpmc_dequeue(self.ptr.as_ptr(), &mut item as *mut u64) };
-        
-        if success {
-            Some(item)
-        } else {
-            None
-        }
+
+        if success { Some(item) } else { None }
     }
-    
+
     /// Zero-copy bulk enqueue - directly uses the slice memory layout
     pub fn try_enqueue_bulk(&self, items: &[u64]) -> bool {
         if items.is_empty() {
             return true;
         }
-        
+
         unsafe {
             bop_mpmc_enqueue_bulk(
                 self.ptr.as_ptr(),
                 items.as_ptr() as *mut u64, // Cast away const for C API
-                items.len()
+                items.len(),
             )
         }
     }
-    
+
     /// Zero-copy bulk dequeue - directly uses the slice memory layout
     pub fn try_dequeue_bulk(&self, buffer: &mut [u64]) -> usize {
         if buffer.is_empty() {
             return 0;
         }
-        
+
         unsafe {
-            let result = bop_mpmc_dequeue_bulk(
-                self.ptr.as_ptr(),
-                buffer.as_mut_ptr(),
-                buffer.len()
-            );
+            let result =
+                bop_mpmc_dequeue_bulk(self.ptr.as_ptr(), buffer.as_mut_ptr(), buffer.len());
             result.max(0) as usize
         }
     }
-    
+
     /// Create a producer token for optimized enqueue operations
     pub fn create_producer_token(&self) -> MpmcResult<ProducerToken<'_>> {
         ProducerToken::new(self)
     }
-    
+
     /// Create a consumer token for optimized dequeue operations
     pub fn create_consumer_token(&self) -> MpmcResult<ConsumerToken<'_>> {
         ConsumerToken::new(self)
@@ -137,30 +189,26 @@ impl<'a> ProducerToken<'a> {
         if ptr.is_null() {
             return Err(MpmcError::ProducerTokenCreationFailed);
         }
-        
+
         Ok(ProducerToken {
             ptr: NonNull::new(ptr).unwrap(),
             _queue: PhantomData,
         })
     }
-    
+
     /// Try to enqueue an item using this producer token (non-blocking)
     pub fn enqueue(&self, item: u64) -> bool {
         unsafe { bop_mpmc_enqueue_token(self.ptr.as_ptr(), item) }
     }
-    
+
     /// Try to enqueue multiple items in bulk using this token (non-blocking)
     pub fn enqueue_bulk(&self, items: &[u64]) -> bool {
         if items.is_empty() {
             return true;
         }
-        
+
         unsafe {
-            bop_mpmc_enqueue_bulk_token(
-                self.ptr.as_ptr(),
-                items.as_ptr() as *mut u64,
-                items.len()
-            )
+            bop_mpmc_enqueue_bulk_token(self.ptr.as_ptr(), items.as_ptr() as *mut u64, items.len())
         }
     }
 }
@@ -187,37 +235,30 @@ impl<'a> ConsumerToken<'a> {
         if ptr.is_null() {
             return Err(MpmcError::ConsumerTokenCreationFailed);
         }
-        
+
         Ok(ConsumerToken {
             ptr: NonNull::new(ptr).unwrap(),
             _queue: PhantomData,
         })
     }
-    
+
     /// Try to dequeue an item using this consumer token (non-blocking)
     pub fn dequeue(&self) -> Option<u64> {
         let mut item: u64 = 0;
         let success = unsafe { bop_mpmc_dequeue_token(self.ptr.as_ptr(), &mut item as *mut u64) };
-        
-        if success {
-            Some(item)
-        } else {
-            None
-        }
+
+        if success { Some(item) } else { None }
     }
-    
+
     /// Try to dequeue multiple items in bulk using this token (non-blocking)
     pub fn dequeue_bulk(&self, buffer: &mut [u64]) -> usize {
         if buffer.is_empty() {
             return 0;
         }
-        
+
         unsafe {
-            let result = bop_mpmc_dequeue_bulk_token(
-                self.ptr.as_ptr(),
-                buffer.as_mut_ptr(),
-                buffer.len()
-            );
+            let result =
+                bop_mpmc_dequeue_bulk_token(self.ptr.as_ptr(), buffer.as_mut_ptr(), buffer.len());
             result.max(0) as usize
         }
     }
@@ -248,38 +289,39 @@ impl<T: Send + 'static> BoxQueue<T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Get approximate size of the queue
     pub fn size_approx(&self) -> usize {
         self.queue.size_approx()
     }
-    
+
     /// Enqueue a boxed item (transfers ownership)
     pub fn enqueue(&self, boxed: Box<T>) -> bool {
         let ptr = Box::into_raw(boxed) as u64;
         self.queue.try_enqueue(ptr)
     }
-    
+
     /// Dequeue as a boxed item
     pub fn dequeue(&self) -> Option<Box<T>> {
-        self.queue.try_dequeue().map(|ptr| {
-            unsafe { Box::from_raw(ptr as *mut T) }
-        })
+        self.queue
+            .try_dequeue()
+            .map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
     }
-    
+
     /// Zero-copy bulk enqueue - directly converts slice of Box<T> to slice of u64
-    /// 
+    ///
     /// On 64-bit systems, `&[Box<T>]` has the same memory layout as `&[u64]`
     pub fn enqueue_bulk(&self, boxes: Vec<Box<T>>) -> bool {
         if boxes.is_empty() {
             return true;
         }
-        
+
         // Convert Vec<Box<T>> to Vec<u64> by transmuting pointers
-        let ptrs: Vec<u64> = boxes.into_iter()
+        let ptrs: Vec<u64> = boxes
+            .into_iter()
             .map(|boxed| Box::into_raw(boxed) as u64)
             .collect();
-            
+
         if self.queue.try_enqueue_bulk(&ptrs) {
             // Successfully enqueued all items
             std::mem::forget(ptrs); // Don't drop the ptrs as they're now owned by the queue
@@ -292,28 +334,29 @@ impl<T: Send + 'static> BoxQueue<T> {
             false
         }
     }
-    
+
     /// Zero-copy bulk dequeue - up to buffer.len() items
     pub fn dequeue_bulk(&self, max_items: usize) -> Vec<Box<T>> {
         if max_items == 0 {
             return Vec::new();
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.queue.try_dequeue_bulk(&mut buffer);
-        
+
         // Convert u64 pointers back to Box<T>
         buffer.truncate(count);
-        buffer.into_iter()
+        buffer
+            .into_iter()
             .map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
             .collect()
     }
-    
+
     /// Create a producer token for optimized enqueue operations
     pub fn create_producer_token(&self) -> MpmcResult<BoxProducerToken<'_, T>> {
         BoxProducerToken::new(&self.queue)
     }
-    
+
     /// Create a consumer token for optimized dequeue operations
     pub fn create_consumer_token(&self) -> MpmcResult<BoxConsumerToken<'_, T>> {
         BoxConsumerToken::new(&self.queue)
@@ -342,7 +385,7 @@ impl<'a, T: Send + 'static> BoxProducerToken<'a, T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Try to enqueue a Box with producer token (optimized)
     pub fn try_enqueue(&self, item: Box<T>) -> bool {
         let ptr = Box::into_raw(item) as u64;
@@ -354,23 +397,19 @@ impl<'a, T: Send + 'static> BoxProducerToken<'a, T> {
             false
         }
     }
-    
+
     /// Try to enqueue multiple Box items with producer token (zero-copy)
     pub fn try_enqueue_bulk(&self, items: Vec<Box<T>>) -> bool {
         if items.is_empty() {
             return true;
         }
-        
+
         // Convert Vec<Box<T>> to Vec<u64> without allocation
         let ptrs = unsafe {
             let mut ptrs = std::mem::ManuallyDrop::new(items);
-            Vec::from_raw_parts(
-                ptrs.as_mut_ptr() as *mut u64,
-                ptrs.len(),
-                ptrs.capacity()
-            )
+            Vec::from_raw_parts(ptrs.as_mut_ptr() as *mut u64, ptrs.len(), ptrs.capacity())
         };
-        
+
         if self.token.enqueue_bulk(&ptrs) {
             // Successfully enqueued all items
             std::mem::forget(ptrs);
@@ -398,26 +437,27 @@ impl<'a, T: Send + 'static> BoxConsumerToken<'a, T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Try to dequeue a Box with consumer token (optimized)
     pub fn try_dequeue(&self) -> Option<Box<T>> {
-        self.token.dequeue().map(|ptr| {
-            unsafe { Box::from_raw(ptr as *mut T) }
-        })
+        self.token
+            .dequeue()
+            .map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
     }
-    
+
     /// Try to dequeue multiple Box items with consumer token (zero-copy)
     pub fn try_dequeue_bulk(&self, max_items: usize) -> Vec<Box<T>> {
         if max_items == 0 {
             return Vec::new();
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.token.dequeue_bulk(&mut buffer);
-        
+
         // Convert u64 pointers back to Box<T>
         buffer.truncate(count);
-        buffer.into_iter()
+        buffer
+            .into_iter()
             .map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
             .collect()
     }
@@ -440,41 +480,42 @@ impl<T: Send + Sync + 'static> ArcQueue<T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Get approximate size of the queue
     pub fn size_approx(&self) -> usize {
         self.queue.size_approx()
     }
-    
+
     /// Enqueue an Arc (transfers ownership)
     pub fn enqueue(&self, arc: Arc<T>) -> bool {
         let ptr = Arc::into_raw(arc) as u64;
         self.queue.try_enqueue(ptr)
     }
-    
+
     /// Enqueue a clone of an Arc (increments reference count)
     pub fn enqueue_cloned(&self, arc: &Arc<T>) -> bool {
         self.enqueue(Arc::clone(arc))
     }
-    
+
     /// Dequeue as an Arc
     pub fn dequeue(&self) -> Option<Arc<T>> {
-        self.queue.try_dequeue().map(|ptr| {
-            unsafe { Arc::from_raw(ptr as *const T) }
-        })
+        self.queue
+            .try_dequeue()
+            .map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
     }
-    
+
     /// Zero-copy bulk enqueue of Arc clones
     pub fn enqueue_bulk_cloned(&self, arcs: &[Arc<T>]) -> bool {
         if arcs.is_empty() {
             return true;
         }
-        
+
         // Clone all Arcs and convert to u64 pointers
-        let ptrs: Vec<u64> = arcs.iter()
+        let ptrs: Vec<u64> = arcs
+            .iter()
             .map(|arc| Arc::into_raw(Arc::clone(arc)) as u64)
             .collect();
-            
+
         if self.queue.try_enqueue_bulk(&ptrs) {
             // Successfully enqueued all items
             std::mem::forget(ptrs);
@@ -487,28 +528,29 @@ impl<T: Send + Sync + 'static> ArcQueue<T> {
             false
         }
     }
-    
+
     /// Zero-copy bulk dequeue - up to max_items
     pub fn dequeue_bulk(&self, max_items: usize) -> Vec<Arc<T>> {
         if max_items == 0 {
             return Vec::new();
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.queue.try_dequeue_bulk(&mut buffer);
-        
+
         // Convert u64 pointers back to Arc<T>
         buffer.truncate(count);
-        buffer.into_iter()
+        buffer
+            .into_iter()
             .map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
             .collect()
     }
-    
+
     /// Create a producer token for optimized enqueue operations
     pub fn create_producer_token(&self) -> MpmcResult<ArcProducerToken<'_, T>> {
         ArcProducerToken::new(&self.queue)
     }
-    
+
     /// Create a consumer token for optimized dequeue operations
     pub fn create_consumer_token(&self) -> MpmcResult<ArcConsumerToken<'_, T>> {
         ArcConsumerToken::new(&self.queue)
@@ -537,7 +579,7 @@ impl<'a, T: Send + Sync + 'static> ArcProducerToken<'a, T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Try to enqueue an Arc with producer token (optimized)
     pub fn try_enqueue(&self, arc: Arc<T>) -> bool {
         let ptr = Arc::into_raw(arc) as u64;
@@ -549,23 +591,24 @@ impl<'a, T: Send + Sync + 'static> ArcProducerToken<'a, T> {
             false
         }
     }
-    
+
     /// Try to enqueue a clone of an Arc with producer token
     pub fn try_enqueue_cloned(&self, arc: &Arc<T>) -> bool {
         self.try_enqueue(Arc::clone(arc))
     }
-    
+
     /// Try to enqueue multiple Arc clones with producer token (zero-copy)
     pub fn try_enqueue_bulk_cloned(&self, arcs: &[Arc<T>]) -> bool {
         if arcs.is_empty() {
             return true;
         }
-        
+
         // Clone all Arcs and convert to u64 pointers
-        let ptrs: Vec<u64> = arcs.iter()
+        let ptrs: Vec<u64> = arcs
+            .iter()
             .map(|arc| Arc::into_raw(Arc::clone(arc)) as u64)
             .collect();
-            
+
         if self.token.enqueue_bulk(&ptrs) {
             // Successfully enqueued all items
             std::mem::forget(ptrs);
@@ -593,26 +636,27 @@ impl<'a, T: Send + Sync + 'static> ArcConsumerToken<'a, T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Try to dequeue an Arc with consumer token (optimized)
     pub fn try_dequeue(&self) -> Option<Arc<T>> {
-        self.token.dequeue().map(|ptr| {
-            unsafe { Arc::from_raw(ptr as *const T) }
-        })
+        self.token
+            .dequeue()
+            .map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
     }
-    
+
     /// Try to dequeue multiple Arc items with consumer token (zero-copy)
     pub fn try_dequeue_bulk(&self, max_items: usize) -> Vec<Arc<T>> {
         if max_items == 0 {
             return Vec::new();
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.token.dequeue_bulk(&mut buffer);
-        
+
         // Convert u64 pointers back to Arc<T>
         buffer.truncate(count);
-        buffer.into_iter()
+        buffer
+            .into_iter()
             .map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
             .collect()
     }
@@ -632,111 +676,108 @@ impl BlockingQueue {
         if ptr.is_null() {
             return Err(MpmcError::CreationFailed);
         }
-        
+
         Ok(BlockingQueue {
             ptr: NonNull::new(ptr).unwrap(),
         })
     }
-    
+
     pub fn size_approx(&self) -> usize {
         unsafe { bop_mpmc_blocking_size_approx(self.ptr.as_ptr()) }
     }
-    
+
     pub fn enqueue(&self, item: u64) -> bool {
         unsafe { bop_mpmc_blocking_enqueue(self.ptr.as_ptr(), item) }
     }
-    
+
     pub fn dequeue(&self) -> Option<u64> {
         let mut item: u64 = 0;
-        let success = unsafe { bop_mpmc_blocking_dequeue(self.ptr.as_ptr(), &mut item as *mut u64) };
-        
-        if success {
-            Some(item)
-        } else {
-            None
-        }
+        let success =
+            unsafe { bop_mpmc_blocking_dequeue(self.ptr.as_ptr(), &mut item as *mut u64) };
+
+        if success { Some(item) } else { None }
     }
-    
+
     pub fn dequeue_wait(&self, timeout: Duration) -> MpmcResult<Option<u64>> {
         let timeout_ms = timeout.as_millis() as u64;
         if timeout_ms > u64::MAX {
             return Err(MpmcError::InvalidTimeout);
         }
-        
+
         let mut item: u64 = 0;
         let result = unsafe {
             bop_mpmc_blocking_dequeue_wait(
                 self.ptr.as_ptr(),
                 &mut item as *mut u64,
-                timeout_ms as i64
+                timeout_ms as i64,
             )
         };
-        
+
         if result {
             Ok(Some(item))
         } else {
             Ok(None) // Timeout or failure
         }
     }
-    
+
     /// Zero-copy bulk enqueue - directly uses the slice memory layout
     pub fn enqueue_bulk(&self, items: &[u64]) -> bool {
         if items.is_empty() {
             return true;
         }
-        
+
         unsafe {
             bop_mpmc_blocking_enqueue_bulk(
                 self.ptr.as_ptr(),
                 items.as_ptr() as *mut u64, // Cast away const for C API
-                items.len()
+                items.len(),
             )
         }
     }
-    
+
     /// Zero-copy bulk dequeue - directly uses the slice memory layout
     pub fn dequeue_bulk(&self, buffer: &mut [u64]) -> usize {
         if buffer.is_empty() {
             return 0;
         }
-        
+
         unsafe {
             let result = bop_mpmc_blocking_dequeue_bulk(
                 self.ptr.as_ptr(),
                 buffer.as_mut_ptr(),
-                buffer.len()
+                buffer.len(),
             );
             result.max(0) as usize
         }
     }
-    
+
     /// Bulk dequeue with timeout
     pub fn dequeue_bulk_wait(&self, buffer: &mut [u64], timeout: Duration) -> MpmcResult<usize> {
         let timeout_ms = timeout.as_millis() as u64;
         if timeout_ms > u64::MAX {
             return Err(MpmcError::InvalidTimeout);
         }
-        
+
         if buffer.is_empty() {
             return Ok(0);
         }
-        
+
         unsafe {
             let result = bop_mpmc_blocking_dequeue_bulk_wait(
                 self.ptr.as_ptr(),
                 buffer.as_mut_ptr(),
                 buffer.len(),
-                timeout_ms as i64
+                timeout_ms as i64,
             );
             Ok(result.max(0) as usize)
         }
     }
-    
+
     /// Create a producer token for optimized enqueue operations
     pub fn create_producer_token(&self) -> MpmcResult<BlockingProducerToken<'_>> {
         BlockingProducerToken::new(self)
     }
-    
+
     /// Create a consumer token for optimized dequeue operations
     pub fn create_consumer_token(&self) -> MpmcResult<BlockingConsumerToken<'_>> {
         BlockingConsumerToken::new(self)
@@ -766,44 +807,44 @@ impl<'a> BlockingProducerToken<'a> {
         if ptr.is_null() {
             return Err(MpmcError::CreationFailed);
         }
-        
+
         Ok(BlockingProducerToken {
             ptr: NonNull::new(ptr).unwrap(),
             _queue: PhantomData,
         })
     }
-    
+
     /// Enqueue item with producer token (blocking)
     pub fn enqueue(&self, item: u64) -> bool {
         unsafe { bop_mpmc_blocking_enqueue_token(self.ptr.as_ptr(), item) }
     }
-    
+
     /// Bulk enqueue with producer token (blocking)
     pub fn enqueue_bulk(&self, items: &[u64]) -> bool {
         if items.is_empty() {
             return true;
         }
-        
+
         unsafe {
             bop_mpmc_blocking_enqueue_bulk_token(
                 self.ptr.as_ptr(),
                 items.as_ptr() as *mut u64,
-                items.len()
+                items.len(),
             )
         }
     }
-    
+
     /// Try bulk enqueue with producer token (non-blocking)
     pub fn try_enqueue_bulk(&self, items: &[u64]) -> bool {
         if items.is_empty() {
             return true;
         }
-        
+
         unsafe {
             bop_mpmc_blocking_try_enqueue_bulk_token(
                 self.ptr.as_ptr(),
                 items.as_ptr() as *mut u64,
-                items.len()
+                items.len(),
             )
         }
     }
@@ -832,83 +873,78 @@ impl<'a> BlockingConsumerToken<'a> {
         if ptr.is_null() {
             return Err(MpmcError::CreationFailed);
         }
-        
+
         Ok(BlockingConsumerToken {
             ptr: NonNull::new(ptr).unwrap(),
             _queue: PhantomData,
         })
     }
-    
+
     /// Dequeue item with consumer token (blocking)
     pub fn dequeue(&self) -> Option<u64> {
         let mut item: u64 = 0;
-        let success = unsafe {
-            bop_mpmc_blocking_dequeue_token(self.ptr.as_ptr(), &mut item as *mut u64)
-        };
-        
-        if success {
-            Some(item)
-        } else {
-            None
-        }
+        let success =
+            unsafe { bop_mpmc_blocking_dequeue_token(self.ptr.as_ptr(), &mut item as *mut u64) };
+
+        if success { Some(item) } else { None }
     }
-    
+
     /// Dequeue item with timeout using consumer token
     pub fn dequeue_wait(&self, timeout: Duration) -> MpmcResult<Option<u64>> {
         let timeout_ms = timeout.as_millis() as u64;
         if timeout_ms > u64::MAX {
             return Err(MpmcError::InvalidTimeout);
         }
-        
+
         let mut item: u64 = 0;
         let result = unsafe {
             bop_mpmc_blocking_dequeue_wait_token(
                 self.ptr.as_ptr(),
                 &mut item as *mut u64,
-                timeout_ms as i64
+                timeout_ms as i64,
             )
         };
-        
+
         if result {
             Ok(Some(item))
         } else {
             Ok(None) // Timeout or failure
         }
     }
-    
+
     /// Bulk dequeue with consumer token (blocking)
     pub fn dequeue_bulk(&self, buffer: &mut [u64]) -> usize {
         if buffer.is_empty() {
             return 0;
         }
-        
+
         unsafe {
             let result = bop_mpmc_blocking_dequeue_bulk_token(
                 self.ptr.as_ptr(),
                 buffer.as_mut_ptr(),
-                buffer.len()
+                buffer.len(),
             );
             result.max(0) as usize
         }
     }
-    
+
     /// Bulk dequeue with timeout using consumer token
     pub fn dequeue_bulk_wait(&self, buffer: &mut [u64], timeout: Duration) -> MpmcResult<usize> {
         let timeout_ms = timeout.as_millis() as u64;
         if timeout_ms > u64::MAX {
             return Err(MpmcError::InvalidTimeout);
         }
-        
+
         if buffer.is_empty() {
             return Ok(0);
         }
-        
+
         unsafe {
             let result = bop_mpmc_blocking_dequeue_bulk_wait_token(
                 self.ptr.as_ptr(),
                 buffer.as_mut_ptr(),
                 buffer.len(),
-                timeout_ms as i64
+                timeout_ms as i64,
             );
             Ok(result.max(0) as usize)
         }
@@ -940,31 +976,32 @@ impl<T: Send + 'static> BlockingBoxQueue<T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Enqueue a boxed item (non-blocking)
     pub fn enqueue(&self, boxed: Box<T>) -> bool {
         let ptr = Box::into_raw(boxed) as u64;
         self.queue.enqueue(ptr)
     }
-    
+
     /// Dequeue with timeout
     pub fn dequeue_wait(&self, timeout: Duration) -> MpmcResult<Option<Box<T>>> {
-        self.queue.dequeue_wait(timeout).map(|opt| {
-            opt.map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
-        })
+        self.queue
+            .dequeue_wait(timeout)
+            .map(|opt| opt.map(|ptr| unsafe { Box::from_raw(ptr as *mut T) }))
     }
-    
+
     /// Zero-copy bulk enqueue - directly converts slice of Box<T> to slice of u64
     pub fn enqueue_bulk(&self, boxes: Vec<Box<T>>) -> bool {
         if boxes.is_empty() {
             return true;
         }
-        
+
         // Convert Vec<Box<T>> to Vec<u64> by transmuting pointers
-        let ptrs: Vec<u64> = boxes.into_iter()
+        let ptrs: Vec<u64> = boxes
+            .into_iter()
             .map(|boxed| Box::into_raw(boxed) as u64)
             .collect();
-            
+
         if self.queue.enqueue_bulk(&ptrs) {
             // Successfully enqueued all items
             std::mem::forget(ptrs); // Don't drop the ptrs as they're now owned by the queue
@@ -977,44 +1014,50 @@ impl<T: Send + 'static> BlockingBoxQueue<T> {
             false
         }
     }
-    
+
     /// Zero-copy bulk dequeue - up to max_items
     pub fn dequeue_bulk(&self, max_items: usize) -> Vec<Box<T>> {
         if max_items == 0 {
             return Vec::new();
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.queue.dequeue_bulk(&mut buffer);
-        
+
         // Convert u64 pointers back to Box<T>
         buffer.truncate(count);
-        buffer.into_iter()
+        buffer
+            .into_iter()
             .map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
             .collect()
     }
-    
+
     /// Bulk dequeue with timeout
-    pub fn dequeue_bulk_wait(&self, max_items: usize, timeout: Duration) -> MpmcResult<Vec<Box<T>>> {
+    pub fn dequeue_bulk_wait(
+        &self,
+        max_items: usize,
+        timeout: Duration,
+    ) -> MpmcResult<Vec<Box<T>>> {
         if max_items == 0 {
             return Ok(Vec::new());
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.queue.dequeue_bulk_wait(&mut buffer, timeout)?;
-        
+
         // Convert u64 pointers back to Box<T>
         buffer.truncate(count);
-        Ok(buffer.into_iter()
+        Ok(buffer
+            .into_iter()
             .map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
             .collect())
     }
-    
+
     /// Create a producer token for optimized enqueue operations
     pub fn create_producer_token(&self) -> MpmcResult<BlockingBoxProducerToken<'_, T>> {
         BlockingBoxProducerToken::new(&self.queue)
     }
-    
+
     /// Create a consumer token for optimized dequeue operations
     pub fn create_consumer_token(&self) -> MpmcResult<BlockingBoxConsumerToken<'_, T>> {
         BlockingBoxConsumerToken::new(&self.queue)
@@ -1043,7 +1086,7 @@ impl<'a, T: Send + 'static> BlockingBoxProducerToken<'a, T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Enqueue a Box with producer token (blocking)
     pub fn enqueue(&self, item: Box<T>) -> bool {
         let ptr = Box::into_raw(item) as u64;
@@ -1055,18 +1098,19 @@ impl<'a, T: Send + 'static> BlockingBoxProducerToken<'a, T> {
             false
         }
     }
-    
+
     /// Enqueue multiple Box items with producer token (blocking)
     pub fn enqueue_bulk(&self, items: Vec<Box<T>>) -> bool {
         if items.is_empty() {
             return true;
         }
-        
+
         // Convert Vec<Box<T>> to Vec<u64> without allocation
-        let ptrs: Vec<u64> = items.into_iter()
+        let ptrs: Vec<u64> = items
+            .into_iter()
             .map(|boxed| Box::into_raw(boxed) as u64)
             .collect();
-        
+
         if self.token.enqueue_bulk(&ptrs) {
             // Successfully enqueued all items
             std::mem::forget(ptrs);
@@ -1079,18 +1123,19 @@ impl<'a, T: Send + 'static> BlockingBoxProducerToken<'a, T> {
             false
         }
     }
-    
+
     /// Try enqueue multiple Box items with producer token (non-blocking)
     pub fn try_enqueue_bulk(&self, items: Vec<Box<T>>) -> bool {
         if items.is_empty() {
             return true;
         }
-        
+
         // Convert Vec<Box<T>> to Vec<u64> without allocation
-        let ptrs: Vec<u64> = items.into_iter()
+        let ptrs: Vec<u64> = items
+            .into_iter()
             .map(|boxed| Box::into_raw(boxed) as u64)
             .collect();
-        
+
         if self.token.enqueue_bulk(&ptrs) {
             // Successfully enqueued all items
             std::mem::forget(ptrs);
@@ -1118,49 +1163,55 @@ impl<'a, T: Send + 'static> BlockingBoxConsumerToken<'a, T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Dequeue a Box with consumer token (blocking)
     pub fn dequeue(&self) -> Option<Box<T>> {
-        self.token.dequeue().map(|ptr| {
-            unsafe { Box::from_raw(ptr as *mut T) }
-        })
+        self.token
+            .dequeue()
+            .map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
     }
-    
+
     /// Dequeue a Box with timeout using consumer token
     pub fn dequeue_wait(&self, timeout: Duration) -> MpmcResult<Option<Box<T>>> {
-        self.token.dequeue_wait(timeout).map(|opt| {
-            opt.map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
-        })
+        self.token
+            .dequeue_wait(timeout)
+            .map(|opt| opt.map(|ptr| unsafe { Box::from_raw(ptr as *mut T) }))
     }
-    
+
     /// Dequeue multiple Box items with consumer token (blocking)
     pub fn dequeue_bulk(&self, max_items: usize) -> Vec<Box<T>> {
         if max_items == 0 {
             return Vec::new();
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.token.dequeue_bulk(&mut buffer);
-        
+
         // Convert u64 pointers back to Box<T>
         buffer.truncate(count);
-        buffer.into_iter()
+        buffer
+            .into_iter()
             .map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
             .collect()
     }
-    
+
     /// Dequeue multiple Box items with timeout using consumer token
-    pub fn dequeue_bulk_wait(&self, max_items: usize, timeout: Duration) -> MpmcResult<Vec<Box<T>>> {
+    pub fn dequeue_bulk_wait(
+        &self,
+        max_items: usize,
+        timeout: Duration,
+    ) -> MpmcResult<Vec<Box<T>>> {
         if max_items == 0 {
             return Ok(Vec::new());
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.token.dequeue_bulk_wait(&mut buffer, timeout)?;
-        
+
         // Convert u64 pointers back to Box<T>
         buffer.truncate(count);
-        Ok(buffer.into_iter()
+        Ok(buffer
+            .into_iter()
             .map(|ptr| unsafe { Box::from_raw(ptr as *mut T) })
             .collect())
     }
@@ -1183,36 +1234,37 @@ impl<T: Send + Sync + 'static> BlockingArcQueue<T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Enqueue an Arc (non-blocking)
     pub fn enqueue(&self, arc: Arc<T>) -> bool {
         let ptr = Arc::into_raw(arc) as u64;
         self.queue.enqueue(ptr)
     }
-    
+
     /// Enqueue a cloned Arc (non-blocking)
     pub fn enqueue_cloned(&self, arc: &Arc<T>) -> bool {
         self.enqueue(Arc::clone(arc))
     }
-    
+
     /// Dequeue with timeout
     pub fn dequeue_wait(&self, timeout: Duration) -> MpmcResult<Option<Arc<T>>> {
-        self.queue.dequeue_wait(timeout).map(|opt| {
-            opt.map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
-        })
+        self.queue
+            .dequeue_wait(timeout)
+            .map(|opt| opt.map(|ptr| unsafe { Arc::from_raw(ptr as *const T) }))
     }
-    
+
     /// Zero-copy bulk enqueue of Arc clones
     pub fn enqueue_bulk_cloned(&self, arcs: &[Arc<T>]) -> bool {
         if arcs.is_empty() {
             return true;
         }
-        
+
         // Clone all Arcs and convert to u64 pointers
-        let ptrs: Vec<u64> = arcs.iter()
+        let ptrs: Vec<u64> = arcs
+            .iter()
             .map(|arc| Arc::into_raw(Arc::clone(arc)) as u64)
             .collect();
-            
+
         if self.queue.enqueue_bulk(&ptrs) {
             // Successfully enqueued all items
             std::mem::forget(ptrs);
@@ -1225,44 +1277,50 @@ impl<T: Send + Sync + 'static> BlockingArcQueue<T> {
             false
         }
     }
-    
+
     /// Zero-copy bulk dequeue - up to max_items
     pub fn dequeue_bulk(&self, max_items: usize) -> Vec<Arc<T>> {
         if max_items == 0 {
             return Vec::new();
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.queue.dequeue_bulk(&mut buffer);
-        
+
         // Convert u64 pointers back to Arc<T>
         buffer.truncate(count);
-        buffer.into_iter()
+        buffer
+            .into_iter()
             .map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
             .collect()
     }
-    
+
     /// Bulk dequeue with timeout
-    pub fn dequeue_bulk_wait(&self, max_items: usize, timeout: Duration) -> MpmcResult<Vec<Arc<T>>> {
+    pub fn dequeue_bulk_wait(
+        &self,
+        max_items: usize,
+        timeout: Duration,
+    ) -> MpmcResult<Vec<Arc<T>>> {
         if max_items == 0 {
             return Ok(Vec::new());
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.queue.dequeue_bulk_wait(&mut buffer, timeout)?;
-        
+
         // Convert u64 pointers back to Arc<T>
         buffer.truncate(count);
-        Ok(buffer.into_iter()
+        Ok(buffer
+            .into_iter()
             .map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
             .collect())
     }
-    
+
     /// Create a producer token for optimized enqueue operations
     pub fn create_producer_token(&self) -> MpmcResult<BlockingArcProducerToken<'_, T>> {
         BlockingArcProducerToken::new(&self.queue)
     }
-    
+
     /// Create a consumer token for optimized dequeue operations
     pub fn create_consumer_token(&self) -> MpmcResult<BlockingArcConsumerToken<'_, T>> {
         BlockingArcConsumerToken::new(&self.queue)
@@ -1291,7 +1349,7 @@ impl<'a, T: Send + Sync + 'static> BlockingArcProducerToken<'a, T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Enqueue an Arc with producer token (blocking)
     pub fn enqueue(&self, arc: Arc<T>) -> bool {
         let ptr = Arc::into_raw(arc) as u64;
@@ -1303,23 +1361,24 @@ impl<'a, T: Send + Sync + 'static> BlockingArcProducerToken<'a, T> {
             false
         }
     }
-    
+
     /// Enqueue a clone of an Arc with producer token (blocking)
     pub fn enqueue_cloned(&self, arc: &Arc<T>) -> bool {
         self.enqueue(Arc::clone(arc))
     }
-    
+
     /// Enqueue multiple Arc clones with producer token (blocking)
     pub fn enqueue_bulk_cloned(&self, arcs: &[Arc<T>]) -> bool {
         if arcs.is_empty() {
             return true;
         }
-        
+
         // Clone all Arcs and convert to u64 pointers
-        let ptrs: Vec<u64> = arcs.iter()
+        let ptrs: Vec<u64> = arcs
+            .iter()
             .map(|arc| Arc::into_raw(Arc::clone(arc)) as u64)
             .collect();
-            
+
         if self.token.enqueue_bulk(&ptrs) {
             // Successfully enqueued all items
             std::mem::forget(ptrs);
@@ -1332,18 +1391,19 @@ impl<'a, T: Send + Sync + 'static> BlockingArcProducerToken<'a, T> {
             false
         }
     }
-    
+
     /// Try enqueue multiple Arc clones with producer token (non-blocking)
     pub fn try_enqueue_bulk_cloned(&self, arcs: &[Arc<T>]) -> bool {
         if arcs.is_empty() {
             return true;
         }
-        
+
         // Clone all Arcs and convert to u64 pointers
-        let ptrs: Vec<u64> = arcs.iter()
+        let ptrs: Vec<u64> = arcs
+            .iter()
             .map(|arc| Arc::into_raw(Arc::clone(arc)) as u64)
             .collect();
-            
+
         if self.token.enqueue_bulk(&ptrs) {
             // Successfully enqueued all items
             std::mem::forget(ptrs);
@@ -1371,49 +1431,55 @@ impl<'a, T: Send + Sync + 'static> BlockingArcConsumerToken<'a, T> {
             _phantom: PhantomData,
         })
     }
-    
+
     /// Dequeue an Arc with consumer token (blocking)
     pub fn dequeue(&self) -> Option<Arc<T>> {
-        self.token.dequeue().map(|ptr| {
-            unsafe { Arc::from_raw(ptr as *const T) }
-        })
+        self.token
+            .dequeue()
+            .map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
     }
-    
+
     /// Dequeue an Arc with timeout using consumer token
     pub fn dequeue_wait(&self, timeout: Duration) -> MpmcResult<Option<Arc<T>>> {
-        self.token.dequeue_wait(timeout).map(|opt| {
-            opt.map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
-        })
+        self.token
+            .dequeue_wait(timeout)
+            .map(|opt| opt.map(|ptr| unsafe { Arc::from_raw(ptr as *const T) }))
     }
-    
+
     /// Dequeue multiple Arc items with consumer token (blocking)
     pub fn dequeue_bulk(&self, max_items: usize) -> Vec<Arc<T>> {
         if max_items == 0 {
             return Vec::new();
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.token.dequeue_bulk(&mut buffer);
-        
+
         // Convert u64 pointers back to Arc<T>
         buffer.truncate(count);
-        buffer.into_iter()
+        buffer
+            .into_iter()
             .map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
             .collect()
     }
-    
+
     /// Dequeue multiple Arc items with timeout using consumer token
-    pub fn dequeue_bulk_wait(&self, max_items: usize, timeout: Duration) -> MpmcResult<Vec<Arc<T>>> {
+    pub fn dequeue_bulk_wait(
+        &self,
+        max_items: usize,
+        timeout: Duration,
+    ) -> MpmcResult<Vec<Arc<T>>> {
         if max_items == 0 {
             return Ok(Vec::new());
         }
-        
+
         let mut buffer = vec![0u64; max_items];
         let count = self.token.dequeue_bulk_wait(&mut buffer, timeout)?;
-        
+
         // Convert u64 pointers back to Arc<T>
         buffer.truncate(count);
-        Ok(buffer.into_iter()
+        Ok(buffer
+            .into_iter()
             .map(|ptr| unsafe { Arc::from_raw(ptr as *const T) })
             .collect())
     }
@@ -1422,146 +1488,154 @@ impl<'a, T: Send + Sync + 'static> BlockingArcConsumerToken<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
+    // use std::thread;
     use std::sync::Arc as StdArc;
     use std::time::Duration;
 
     #[test]
     fn test_box_queue_basic() {
         let queue: BoxQueue<i32> = BoxQueue::new().unwrap();
-        
+
         assert!(queue.enqueue(Box::new(42)));
         assert_eq!(queue.size_approx(), 1);
-        
+
         let result = queue.dequeue().unwrap();
         assert_eq!(*result, 42);
         assert_eq!(queue.size_approx(), 0);
     }
-    
+
     #[test]
     fn test_arc_queue_basic() {
         let queue: ArcQueue<String> = ArcQueue::new().unwrap();
-        
+
         let data = StdArc::new("Hello".to_string());
         assert!(queue.enqueue_cloned(&data));
-        
+
         let result = queue.dequeue().unwrap();
         assert_eq!(*result, "Hello");
-        
+
         // Original Arc should still be valid
         assert_eq!(*data, "Hello");
     }
-    
+
     #[test]
     fn test_box_queue_bulk() {
         let queue: BoxQueue<u64> = BoxQueue::new().unwrap();
-        
+
         let items: Vec<Box<u64>> = (0..10).map(|i| Box::new(i)).collect();
         assert!(queue.enqueue_bulk(items));
-        
+
         let results = queue.dequeue_bulk(15); // Request more than available
         assert_eq!(results.len(), 10);
-        
+
         for (i, boxed) in results.iter().enumerate() {
             // Note: order might not be preserved in concurrent queue
             assert!(**boxed < 10);
         }
     }
-    
+
     #[test]
     fn test_arc_queue_bulk() {
         let queue: ArcQueue<i32> = ArcQueue::new().unwrap();
-        
+
         let arcs: Vec<StdArc<i32>> = (0..5).map(|i| StdArc::new(i)).collect();
         assert!(queue.enqueue_bulk_cloned(&arcs));
-        
+
         let results = queue.dequeue_bulk(5);
         assert_eq!(results.len(), 5);
-        
+
         // Original arcs should still be valid
         for (i, arc) in arcs.iter().enumerate() {
             assert_eq!(**arc, i as i32);
         }
     }
-    
+
     #[test]
     fn test_blocking_queue_bulk() {
         let queue = BlockingQueue::new().unwrap();
-        
+
         let items: Vec<u64> = (0..10).collect();
         assert!(queue.enqueue_bulk(&items));
-        
+
         let mut buffer = vec![0u64; 15]; // Larger than available
         let count = queue.dequeue_bulk(&mut buffer);
         assert_eq!(count, 10);
-        
+
         // Verify items (order may vary in concurrent queue)
         let mut dequeued = buffer[..count].to_vec();
         dequeued.sort_unstable();
         assert_eq!(dequeued, items);
     }
-    
+
     #[test]
     fn test_blocking_queue_bulk_timeout() {
         let queue = BlockingQueue::new().unwrap();
-        
+
         // Test timeout on empty queue
         let mut buffer = vec![0u64; 5];
-        let count = queue.dequeue_bulk_wait(&mut buffer, Duration::from_millis(50)).unwrap();
+        let count = queue
+            .dequeue_bulk_wait(&mut buffer, Duration::from_millis(50))
+            .unwrap();
         assert_eq!(count, 0);
-        
+
         // Add some items
         let items = vec![1, 2, 3];
         assert!(queue.enqueue_bulk(&items));
-        
+
         // Should get items immediately
         let mut buffer = vec![0u64; 5];
-        let count = queue.dequeue_bulk_wait(&mut buffer, Duration::from_millis(100)).unwrap();
+        let count = queue
+            .dequeue_bulk_wait(&mut buffer, Duration::from_millis(100))
+            .unwrap();
         assert_eq!(count, 3);
     }
-    
+
     #[test]
     fn test_blocking_box_queue_bulk() {
         let queue = BlockingBoxQueue::<String>::new().unwrap();
-        
+
         let items: Vec<Box<String>> = (0..3).map(|i| Box::new(format!("item-{}", i))).collect();
         assert!(queue.enqueue_bulk(items));
-        
+
         let results = queue.dequeue_bulk(5); // Request more than available
         assert_eq!(results.len(), 3);
-        
+
         for (i, item) in results.iter().enumerate() {
             // Note: order might not be preserved
             assert!(item.starts_with("item-"));
         }
     }
-    
+
     #[test]
     fn test_blocking_box_queue_bulk_timeout() {
         let queue = BlockingBoxQueue::<i32>::new().unwrap();
-        
+
         // Test timeout on empty queue
-        let results = queue.dequeue_bulk_wait(3, Duration::from_millis(50)).unwrap();
+        let results = queue
+            .dequeue_bulk_wait(3, Duration::from_millis(50))
+            .unwrap();
         assert_eq!(results.len(), 0);
-        
+
         // Add items and test successful bulk dequeue with timeout
         let items: Vec<Box<i32>> = vec![Box::new(10), Box::new(20)];
         assert!(queue.enqueue_bulk(items));
-        
-        let results = queue.dequeue_bulk_wait(5, Duration::from_millis(100)).unwrap();
+
+        let results = queue
+            .dequeue_bulk_wait(5, Duration::from_millis(100))
+            .unwrap();
         assert_eq!(results.len(), 2);
     }
-    
+
     #[test]
     fn test_blocking_arc_queue_bulk() {
         let queue = BlockingArcQueue::<i32>::new().unwrap();
-        
+
         let arcs: Vec<StdArc<i32>> = (0..3).map(|i| StdArc::new(i * 10)).collect();
         assert!(queue.enqueue_bulk_cloned(&arcs));
-        
+
         let results = queue.dequeue_bulk(5); // Request more than available
         assert_eq!(results.len(), 3);
-        
+
         // Original arcs should still be valid
         for (i, arc) in arcs.iter().enumerate() {
             assert_eq!(**arc, i as i32 * 10);

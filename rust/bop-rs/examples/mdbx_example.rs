@@ -1,4 +1,4 @@
-use bop_rs::mdbx::{Env, EnvFlags, OptionKey, TxnFlags, Dbi, DbFlags, put, get};
+use bop_rs::mdbx::{DbFlags, Dbi, Env, EnvFlags, OptionKey, TxnFlags, get, put};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create environment
@@ -16,7 +16,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dbi = Dbi::open(&wtx, None, DbFlags::DEFAULTS)?;
 
     // Put a key/value
-    put(&wtx, dbi, b"hello", b"world", bop_rs::mdbx::PutFlags::empty())?;
+    put(
+        &wtx,
+        dbi,
+        b"hello",
+        b"world",
+        bop_rs::mdbx::PutFlags::empty(),
+    )?;
     wtx.commit()?;
 
     // Read it back
@@ -25,7 +31,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("hello -> {}", String::from_utf8_lossy(v));
     // Cursor example
     let mut cur = bop_rs::mdbx::Cursor::open(&rtx, dbi)?;
-    if let Some((k, v)) = cur.first()? { println!("first: {} -> {}", String::from_utf8_lossy(k), String::from_utf8_lossy(v)); }
+    if let Some((k, v)) = cur.first()? {
+        println!(
+            "first: {} -> {}",
+            String::from_utf8_lossy(k),
+            String::from_utf8_lossy(v)
+        );
+    }
     drop(cur);
 
     // Example using the new CursorOp enum
@@ -34,15 +46,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Using the enum for cursor operations
     if let Some((k, v)) = cur.get_with_op(CursorOp::First)? {
-        println!("CursorOp::First: {} -> {}", String::from_utf8_lossy(k), String::from_utf8_lossy(v));
+        println!(
+            "CursorOp::First: {} -> {}",
+            String::from_utf8_lossy(k),
+            String::from_utf8_lossy(v)
+        );
     }
 
     if let Some((k, v)) = cur.get_with_op(CursorOp::Next)? {
-        println!("CursorOp::Next: {} -> {}", String::from_utf8_lossy(k), String::from_utf8_lossy(v));
+        println!(
+            "CursorOp::Next: {} -> {}",
+            String::from_utf8_lossy(k),
+            String::from_utf8_lossy(v)
+        );
     }
 
     if let Some((k, v)) = cur.get_with_op(CursorOp::Last)? {
-        println!("CursorOp::Last: {} -> {}", String::from_utf8_lossy(k), String::from_utf8_lossy(v));
+        println!(
+            "CursorOp::Last: {} -> {}",
+            String::from_utf8_lossy(k),
+            String::from_utf8_lossy(v)
+        );
     }
 
     drop(cur);
@@ -52,8 +76,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // Minimal convenience to allow read-only txn abort in example
-trait AbortExt { fn abort(self) -> Result<(), Box<dyn std::error::Error>>; }
-impl<'e> AbortExt for bop_rs::mdbx::Txn<'e> {
-    fn abort(self) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+trait AbortExt {
+    fn abort(self) -> Result<(), Box<dyn std::error::Error>>;
 }
-
+impl<'e> AbortExt for bop_rs::mdbx::Txn<'e> {
+    fn abort(self) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+}

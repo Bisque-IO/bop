@@ -42,7 +42,6 @@ pub mod net;
 // Re-export the main types for convenience
 pub use fsm::{process_message, State};
 pub use wire::{FramedMessage, Message, RequestId, StateSyncOperation, PROTOCOL_VERSION};
-pub use net::{TcpServerConfig, TlsConfig, ConnectionHandler, EchoHandler, NetError, NetResult};
 // Note: TcpServer is generic over the handler type, use net::TcpServer<YourHandler> directly
 
 // Re-export BOP platform components

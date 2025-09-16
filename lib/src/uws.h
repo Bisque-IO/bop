@@ -2,8 +2,6 @@
 #ifndef UWS_WRAPPER_H
 #define UWS_WRAPPER_H
 
-#include <cstddef>
-#include <cstdint>
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -1,5 +1,6 @@
 /*
  * Authored by Alex Hultman, 2018-2021.
+ *             Clay Molocznik, 2025.
  * Intellectual property of third-party.
 
  * Licensed under the Apache License, Version 2.0 (the "License");

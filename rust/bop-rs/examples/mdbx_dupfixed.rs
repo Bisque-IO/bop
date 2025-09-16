@@ -12,8 +12,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Write multiple fixed-size values under one key
     let key = b"k1";
     let elems: &[u32] = &[10, 20, 30, 40];
-    let payload = unsafe { std::slice::from_raw_parts(elems.as_ptr() as *const u8, elems.len() * std::mem::size_of::<u32>()) };
-    let written = put_multiple(&wtx, dbi, key, std::mem::size_of::<u32>(), payload, PutFlags::UPSERT)?;
+    let payload = unsafe {
+        std::slice::from_raw_parts(
+            elems.as_ptr() as *const u8,
+            elems.len() * std::mem::size_of::<u32>(),
+        )
+    };
+    let written = put_multiple(
+        &wtx,
+        dbi,
+        key,
+        std::mem::size_of::<u32>(),
+        payload,
+        PutFlags::UPSERT,
+    )?;
     println!("wrote {} elements", written);
     wtx.commit()?;
 
@@ -28,4 +40,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-

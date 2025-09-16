@@ -16,12 +16,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rtx = Txn::begin(&env, None, TxnFlags::RDONLY)?;
     let mut cur = Cursor::open(&rtx, dbi)?;
     // Scan from first, stop when key == "k03"
-    let rc = cur.scan(bop_sys::MDBX_cursor_op_MDBX_FIRST, bop_sys::MDBX_cursor_op_MDBX_NEXT, |k, _v| {
-        let stop = k == b"k03";
-        println!("visit {}", String::from_utf8_lossy(k));
-        Ok(stop)
-    })?;
-    println!("scan rc={} (MDBX_RESULT_TRUE indicates predicate matched)", rc);
+    let rc = cur.scan(
+        bop_sys::MDBX_cursor_op_MDBX_FIRST,
+        bop_sys::MDBX_cursor_op_MDBX_NEXT,
+        |k, _v| {
+            let stop = k == b"k03";
+            println!("visit {}", String::from_utf8_lossy(k));
+            Ok(stop)
+        },
+    )?;
+    println!(
+        "scan rc={} (MDBX_RESULT_TRUE indicates predicate matched)",
+        rc
+    );
     Ok(())
 }
-
