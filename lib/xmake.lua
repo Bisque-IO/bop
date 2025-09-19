@@ -42,12 +42,12 @@ local target_of = function(kind, use_openssl)
     -- ./configure --enable-static --enable-pic --enable-opensslall --enable-opensslextra --enable-aesni --enable-asio
 
     if is_plat("windows") then
-        --add_toolchains("@llvm")
-        --add_defines("MDBX_DISABLE_CPU_FEATURES=1")
-        --add_defines("MDBX_HAVE_BUILTIN_CPU_SUPPORTS=0")
+        -- add_toolchains("@llvm")
+        add_defines("MDBX_DISABLE_CPU_FEATURES=1")
+        add_defines("MDBX_HAVE_BUILTIN_CPU_SUPPORTS=0")
         --add_defines("LIBMDBX_EXPORTS=1")
+        -- add_toolchains("@llvm")
     else
-        --add_toolchains("@llvm")
     end
     -- set_pcxxheader("include/pch.hpp")
 
@@ -88,7 +88,7 @@ local target_of = function(kind, use_openssl)
     --add_syslinks("c++")
 
     add_defines(
-        "UWS_HTTPRESPONSE_NO_WRITEMARK",
+        -- "UWS_HTTPRESPONSE_NO_WRITEMARK",
     -- "ASIO_STANDALONE=1",
         "SNMALLOC_USE_WAIT_ON_ADDRESS",
         "USE_BOOST_ASIO",
@@ -106,10 +106,6 @@ local target_of = function(kind, use_openssl)
     )
 
     add_defines("ASIO_DISABLE_STD_ALIGNED_ALLOC")
-    add_defines("YLT_ENABLE_SSL")
-    add_defines("CINATRA_ENABLE_SSL")
-    add_defines("CINATRA_ENABLE_GZIP")
-    add_defines("CINATRA_ENABLE_BROTLI")
 
     if kind == "static" then
         add_defines("BOP_STATIC_BUILD=1")
@@ -163,7 +159,8 @@ local target_of = function(kind, use_openssl)
             add_defines("BOOST_ASIO_USE_WOLFSSL=1")
             add_defines("ASIO_USE_WOLFSSL=1")
             add_defines("HAVE_WOLFSSL_ASIO=1")
-            add_links("odin/libbop/windows/amd64/wolfssl.lib")
+            -- add_packages("wolfssl")
+            add_links(os.projectdir() .. "\\odin\\libbop\\linux\\amd64\\wolfssl.lib")
             add_includedirs("wolfssl", "wolfssl/wolfssl", { public = true })
         end
 
@@ -172,9 +169,9 @@ local target_of = function(kind, use_openssl)
         add_syslinks("bcrypt", "advapi32", "iphlpapi", "psapi", "user32", "userenv", "ws2_32", "shell32", "ole32", "uuid",
             "Dbghelp")
 
-        add_files("libuv/src/*.c", "libuv/src/win/*.c")
-        add_includedirs("libuv/src", { public = false })
-        add_includedirs("libuv/include", { public = true })
+        -- add_files("libuv/src/*.c", "libuv/src/win/*.c")
+        -- add_includedirs("libuv/src", { public = false })
+        -- add_includedirs("libuv/include", { public = true })
     else
         if not use_openssl then
             add_defines("ASIO_USE_WOLFSSL=1")
@@ -227,19 +224,19 @@ local target_of = function(kind, use_openssl)
         -- add_defines("LIBUS_USE_OPENSSL")
         -- add_packages("openssl3")
     end
-    add_files("usockets/src/**.c", { languages = "c23", includedirs = "include", cflags = "-O3" })
-    add_files("usockets/src/**.cpp", { languages = "c++23", includedirs = "include", cflags = "-O3" })
-    remove_files("usockets/src/eventing/asio.cpp")
-    add_includedirs("usockets/src", { public = false })
-    add_includedirs("usockets/include", { public = true })
+    -- add_files("usockets/src/**.c", { languages = "c23", includedirs = "include", cflags = "-O3" })
+    -- add_files("usockets/src/**.cpp", { languages = "c++23", includedirs = "include", cflags = "-O3" })
+    -- remove_files("usockets/src/eventing/asio.cpp")
+    -- add_includedirs("usockets/src", { public = false })
+    -- add_includedirs("usockets/include", { public = true })
 
     -- bop
     add_includedirs(".", { public = true })
     --add_includedirs("ylt/thirdparty", { public = true })
     add_files("src/**.cpp")
 
-    add_includedirs("llco", { public = true })
-    add_files("llco/llco.c", { languages = "c23", includedirs = "include", cflags = "-O3" })
+    -- add_includedirs("llco", { public = true })
+    -- add_files("llco/llco.c", { languages = "c23", includedirs = "include", cflags = "-O3" })
 
     -- add_includedirs("../lib/uwebsockets/src")
 
@@ -270,9 +267,9 @@ local target_of = function(kind, use_openssl)
     -- )
 
     -- set_symbols("debug")
-    --set_strip("all")
+    set_strip("all")
 
-    add_packages("zlib", "zstd")
+    -- add_packages("zlib", "zstd")
 
     --     add_ldflags("-fPIC")
     if kind == "shared" then
@@ -283,7 +280,7 @@ local target_of = function(kind, use_openssl)
         end
     end
     if kind == "static" then
-        -- set_policy("build.merge_archive", true)
+        set_policy("build.merge_archive", true)
     end
 
     -- on_build(function(target)
@@ -297,9 +294,9 @@ end
 
 if not is_plat("windows", "mingw") then
     target_of("static", false)
-    target_of("static", true)
-    target_of("shared", false)
-    target_of("shared", true)
+    -- target_of("static", true)
+    -- target_of("shared", false)
+    -- target_of("shared", true)
 else
     target_of("static", false)
 end

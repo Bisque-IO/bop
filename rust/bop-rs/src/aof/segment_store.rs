@@ -96,6 +96,7 @@ impl SegmentEntry {
     pub fn new_finalized(
         metadata: &SegmentMetadata,
         local_path: String,
+        original_size: u64,
         uncompressed_checksum: u64,
         finalized_at: u64,
     ) -> Self {
@@ -108,7 +109,7 @@ impl SegmentEntry {
             archived_at: None,
             uncompressed_checksum,
             compressed_checksum: None,
-            original_size: metadata.size,
+            original_size,
             compressed_size: None,
             compression_ratio: None,
             status: SegmentStatus::Finalized,
@@ -168,6 +169,11 @@ impl SegmentEntry {
             self.compression_ratio = Some(compressed as f32 / self.original_size as f32);
         }
 
-        self.status = SegmentStatus::ArchivedCached;
+        // When a segment is archived to remote storage via `archive()` the
+        // canonical state should reflect that the authoritative copy lives
+        // in remote storage. Mark as `ArchivedRemote` to indicate the
+        // segment has been archived; a cached local copy (if any) is a
+        // separate concern managed by higher-level logic.
+        self.status = SegmentStatus::ArchivedRemote;
     }
 }

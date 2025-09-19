@@ -6,7 +6,7 @@
 
 use crate::aof::archive::ArchiveStorage;
 use crate::aof::error::{AofError, AofResult};
-use aws_config::meta::region::RegionProviderChain;
+// region provider not used in this module yet
 use aws_credential_types::Credentials;
 use aws_sdk_s3::config::SharedCredentialsProvider;
 use aws_sdk_s3::{Client, Config};
@@ -61,6 +61,7 @@ impl S3Config {
 /// This implementation provides a complete interface for S3 storage operations.
 /// The actual S3 operations are implemented as working stubs that can be easily
 /// completed with proper MinIO client integration.
+#[allow(dead_code)]
 pub struct S3ArchiveStorage {
     config: S3Config,
     client: Client,

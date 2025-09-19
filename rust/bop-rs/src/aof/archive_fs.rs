@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::aof::archive::ArchiveStorage;
-use crate::aof::error::{AofError, AofResult};
+use crate::aof::error::AofResult;
 use crate::aof::filesystem::AsyncFileSystem;
 
 /// Filesystem-based archive storage

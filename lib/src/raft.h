@@ -1,16 +1,22 @@
-
 #ifndef BOP_RAFT_H
 #define BOP_RAFT_H
-
-#include "./lib.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#include "./lib.h"
+
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdbool.h>
+
+// #ifdef __cplusplus
+// extern "C" {
+// #include <wolfssl/options.h>
+// #include <wolfssl/wolfssl/ssl.h>
+// }
+// #endif
 
 ////////////////////////////////////////////////////////////////
 //
@@ -368,7 +374,7 @@ typedef void (*bop_raft_asio_service_worker_stop_fn)(void *user_data, uint32_t v
 
 typedef bool (*bop_raft_asio_service_verify_sn_fn)(void *user_data, const char *data, size_t size);
 
-typedef struct SSL_CTX * (*bop_raft_asio_service_ssl_ctx_provider_fn)(void *user_data);
+typedef void * (*bop_raft_asio_service_ssl_ctx_provider_fn)(void *user_data);
 
 typedef void (*bop_raft_asio_service_custom_resolver_response_fn)(
     void *response_impl, const char *v1, size_t v1_size, const char *v2, size_t v2_size,

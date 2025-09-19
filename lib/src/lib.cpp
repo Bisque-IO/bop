@@ -8,14 +8,6 @@
 #include <cstddef>
 
 extern "C" {
-#ifdef _WIN32
-#define BOP_API __declspec(dllexport)
-#else
-#define BOP_API
-#endif
-
-#include "./libusockets.h"
-
 
 BOP_API void bop_stub() {
 }

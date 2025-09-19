@@ -6,6 +6,7 @@
 use crate::aof::error::AofResult;
 
 /// Archive storage abstraction for different backends
+#[allow(async_fn_in_trait)]
 pub trait ArchiveStorage: Send + Sync {
     /// Store a compressed segment in the archive
     async fn store_segment(

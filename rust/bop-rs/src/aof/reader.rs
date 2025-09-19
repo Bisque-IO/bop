@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -5,7 +6,7 @@ use tokio::sync::Notify;
 
 use crate::aof::error::{AofError, AofResult};
 use crate::aof::filesystem::FileSystem;
-use crate::aof::record::RecordHeader;
+use crate::aof::record::{FlushCheckpointStamp, RecordHeader, RecordTrailer, SegmentHeader};
 use crate::aof::segment::Segment;
 
 /// Segment position information for a reader
@@ -84,6 +85,21 @@ impl<FS: FileSystem> Reader<FS> {
         Ok(())
     }
 
+    /// Wait for the next record when tailing; returns None if not tailing anymore
+    pub async fn tail_next_record(&mut self) -> AofResult<Option<Vec<u8>>> {
+        loop {
+            if let Some(record) = self.read_next_record().await? {
+                return Ok(Some(record));
+            }
+
+            if !self.is_tailing.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+
+            self.wait_for_tail_notification().await?;
+        }
+    }
+
     /// Set the current segment for reading
     pub fn set_current_segment(&mut self, segment: Arc<Segment<FS>>, offset: u64) {
         self.current_segment = Some(segment);
@@ -101,50 +117,94 @@ impl<FS: FileSystem> Reader<FS> {
         let mmap_data = segment.get_mmap_data()?;
         let current_offset = self.segment_offset;
 
-        // Check if we have enough data for a header
-        if current_offset + std::mem::size_of::<RecordHeader>() as u64 >= mmap_data.len() as u64 {
-            return Ok(None); // End of segment
+        let header_size = std::mem::size_of::<RecordHeader>();
+        let trailer_size = std::mem::size_of::<RecordTrailer>();
+        let checkpoint_size = std::mem::size_of::<FlushCheckpointStamp>();
+        let segment_header_size = std::mem::size_of::<SegmentHeader>();
+
+        let mut offset = current_offset as usize;
+
+        loop {
+            if offset == 0 && mmap_data.len() >= segment_header_size {
+                let header_bytes = &mmap_data[..segment_header_size];
+                if let Ok(header) = bincode::deserialize::<SegmentHeader>(header_bytes) {
+                    if header.verify() {
+                        offset = segment_header_size;
+                        continue;
+                    }
+                }
+            }
+
+            if offset + checkpoint_size <= mmap_data.len() {
+                let magic = u32::from_le_bytes(
+                    mmap_data[offset..offset + 4]
+                        .try_into()
+                        .expect("slice length checked"),
+                );
+                if magic == FlushCheckpointStamp::MAGIC {
+                    offset += checkpoint_size;
+                    if offset >= mmap_data.len() {
+                        self.segment_offset = offset as u64;
+                        return Ok(None);
+                    }
+                    continue;
+                }
+            }
+
+            if offset + header_size > mmap_data.len() {
+                self.segment_offset = offset as u64;
+                return Ok(None);
+            }
+
+            let header_bytes = &mmap_data[offset..offset + header_size];
+            let header = bincode::deserialize::<RecordHeader>(header_bytes).map_err(|e| {
+                AofError::Serialization(format!("Failed to deserialize header: {}", e))
+            })?;
+
+            if header.size == 0 {
+                self.segment_offset = offset as u64;
+                return Ok(None);
+            }
+
+            let data_start = offset + header_size;
+            let data_end = data_start + header.size as usize;
+            if data_end > mmap_data.len() {
+                return Err(AofError::CorruptedRecord(
+                    "Record data extends beyond segment".to_string(),
+                ));
+            }
+
+            if data_end + trailer_size > mmap_data.len() {
+                return Err(AofError::CorruptedRecord(
+                    "Record trailer extends beyond segment".to_string(),
+                ));
+            }
+
+            let data = &mmap_data[data_start..data_end];
+            if !header.verify_checksum(data) {
+                return Err(AofError::CorruptedRecord(format!(
+                    "Checksum verification failed for record {}",
+                    header.id
+                )));
+            }
+
+            let trailer_bytes = &mmap_data[data_end..data_end + trailer_size];
+            let trailer = bincode::deserialize::<RecordTrailer>(trailer_bytes).map_err(|e| {
+                AofError::Serialization(format!("Failed to deserialize trailer: {}", e))
+            })?;
+
+            if !trailer.validate(&header, None) {
+                return Err(AofError::CorruptedRecord(format!(
+                    "Trailer validation failed for record {}",
+                    header.id
+                )));
+            }
+
+            let next_offset = data_end + trailer_size;
+            self.segment_offset = next_offset as u64;
+            self.record_id = header.id;
+            return Ok(Some(data.to_vec()));
         }
-
-        // Read record header
-        let header_start = current_offset as usize;
-        let header_end = header_start + std::mem::size_of::<RecordHeader>();
-        let header_bytes = &mmap_data[header_start..header_end];
-
-        let header = bincode::deserialize::<RecordHeader>(header_bytes)
-            .map_err(|e| AofError::Serialization(format!("Failed to deserialize header: {}", e)))?;
-
-        // Validate header
-        if header.size == 0 {
-            return Ok(None); // End marker or empty record
-        }
-
-        let data_start = header_end;
-        let data_end = data_start + header.size as usize;
-
-        // Check if we have enough data for the payload
-        if data_end > mmap_data.len() {
-            return Err(AofError::CorruptedRecord(
-                "Record data extends beyond segment".to_string(),
-            ));
-        }
-
-        // Extract record data
-        let data = &mmap_data[data_start..data_end];
-
-        // Verify checksum
-        if !header.verify_checksum(data) {
-            return Err(AofError::CorruptedRecord(format!(
-                "Checksum verification failed for record {}",
-                header.id
-            )));
-        }
-
-        // Update position for next read
-        self.segment_offset = data_end as u64;
-        self.record_id = header.id;
-
-        Ok(Some(data.to_vec()))
     }
 
     /// Get current position
@@ -187,10 +247,35 @@ impl<FS: FileSystem> Reader<FS> {
 
         let data = segment.get_mmap_data()?;
         let header_size = RecordHeader::size();
+        let trailer_size = RecordTrailer::size();
+        let checkpoint_size = FlushCheckpointStamp::size();
+        let segment_header_size = SegmentHeader::size();
         let mut offset = 0usize;
         let segment_size = segment.metadata().size as usize;
 
         while offset + header_size <= segment_size {
+            if offset == 0 && segment_size >= segment_header_size {
+                let header_bytes = &data[..segment_header_size];
+                if let Ok(header) = SegmentHeader::from_bytes(header_bytes) {
+                    if header.verify() {
+                        offset = segment_header_size;
+                        continue;
+                    }
+                }
+            }
+
+            if offset + checkpoint_size <= segment_size {
+                let magic = u32::from_le_bytes(
+                    data[offset..offset + 4]
+                        .try_into()
+                        .expect("slice length checked"),
+                );
+                if magic == FlushCheckpointStamp::MAGIC {
+                    offset += checkpoint_size;
+                    continue;
+                }
+            }
+
             let header_bytes = &data[offset..offset + header_size];
             let header = RecordHeader::from_bytes(header_bytes).map_err(|e| {
                 AofError::CorruptedRecord(format!("Failed to deserialize header: {}", e))
@@ -202,7 +287,7 @@ impl<FS: FileSystem> Reader<FS> {
                 return Ok(());
             }
 
-            offset += header_size + header.size as usize;
+            offset += header_size + header.size as usize + trailer_size;
         }
 
         self.segment_offset = segment_size as u64;

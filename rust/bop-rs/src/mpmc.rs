@@ -1528,7 +1528,7 @@ mod tests {
         let results = queue.dequeue_bulk(15); // Request more than available
         assert_eq!(results.len(), 10);
 
-        for (i, boxed) in results.iter().enumerate() {
+        for (_i, boxed) in results.iter().enumerate() {
             // Note: order might not be preserved in concurrent queue
             assert!(**boxed < 10);
         }

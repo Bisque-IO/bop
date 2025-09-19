@@ -47,17 +47,20 @@
 4. **Stage 4** (reader lifecycle hygiene)
    - Added reader lifecycle guard wiring to drop tail IDs and release cache pins automatically.
    - Introduced reader registry + per-reader `Notify` handles so background tasks wake tail readers.
-   - Added `Reader::wait_for_tail_notification` helper for async tail waiting.
-   - Pending flush metadata queue now feeds background flush worker with current segment entries.
+   - Added tail streaming helpers (`wait_for_tail_notification`, `tail_next_record`) so readers can await new data easily.
+   - Flush windows now track background completion/backoff and requeue pending metadata on failure.
+   - Finalization persists CRC64 checksums; archives optionally compress via zstd and record CRC64/size metadata.
+
 
 
 ## Remaining Work / Next Steps
 - **Reader/Tail Management**
-  - Build higher-level tail streaming helpers on top of the Notify-based wait API.
+  - Extend tail helpers to handle segment rollover and reader lifecycle metrics.
 - **Write/Background Enhancements**
-  - Handle flush responses/metrics and ensure failures requeue pending metadata updates.
+  - Surface background flush completion metrics/backoff and reconcile with `FlushController` state.
   - Ensure `trigger_background_flush` aligns with flush strategy (future async flush worker).
   - Compute and persist record checksums and compressed metadata for finalization/archive.
+
 - **Recovery & Indexing**
   - Continue active segment recovery to detect partially written tail records (scan mmap to find durable last record).
   - Update timestamp index when adding/updating segment entries to avoid drift.
@@ -93,7 +96,7 @@
 1. (DONE) Implement tail reader unregistration (clear from tail_readers and segment cache) when readers drop.
 2. (DONE) Wire reader_notification_task to actual reader waiters (store per-reader Arc<Notify>).
 3. (DONE) Feed real segment info to background flush task and align with flush strategy.
-4. Add checksum calculations for segment finalization/archive metadata.
-5. Extend recovery to scan active segment for last durable record, updating index as needed.
-6. Introduce integration tests covering reader positioning, recovery, and tail notifications.
+4. (DONE) Add checksum calculations for segment finalization/archive metadata.
+5. (DONE) Extend recovery to scan active segment for last durable record, updating index as needed.
+6. (DONE) Introduce integration tests covering reader positioning, recovery, and tail notifications.
 

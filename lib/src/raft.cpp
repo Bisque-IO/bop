@@ -11,15 +11,13 @@ extern "C" {
 #endif
 
 #include <cstring>
-#include <iostream>
 #include <memory>
-
-#include "./lib.h"
 
 #include "libnuraft/nuraft.hxx"
 #include "libnuraft/asio_service_options.hxx"
 
 extern "C" {
+#include "./lib.h"
 //    #define LIBMDBX_API BOP_API
 //    #define LIBMDBX_EXPORTS BOP_API
 //    #define SQLITE_API BOP_API
@@ -242,7 +240,7 @@ BOP_API void bop_raft_async_buffer_delete(const bop_raft_async_buffer_ptr *self)
     }
 }
 
-BOP_API void *bop_raft_async_buffer_get_user_data(bop_raft_async_buffer_ptr *self) {
+BOP_API void *bop_raft_async_buffer_get_user_data(const bop_raft_async_buffer_ptr *self) {
     if (!self) return nullptr;
     return self->user_data;
 }
@@ -253,7 +251,7 @@ BOP_API void bop_raft_async_buffer_set_user_data(bop_raft_async_buffer_ptr *self
 }
 
 BOP_API bop_raft_async_buffer_when_ready
-bop_raft_async_buffer_get_when_ready(bop_raft_async_buffer_ptr *self) {
+bop_raft_async_buffer_get_when_ready(const bop_raft_async_buffer_ptr *self) {
     if (!self) return nullptr;
     return self->when_ready;
 }
@@ -825,16 +823,14 @@ BOP_API bop_raft_asio_service_ptr *bop_raft_asio_service_make(
                 };
     }
     if (options->ssl_context_provider_server != nullptr) {
-        opts.ssl_context_provider_server_ = [ssl_context_provider_server = options->ssl_context_provider_server,
-                    ssl_context_provider_server_user_data = options->ssl_context_provider_server_user_data]() {
-                    return ssl_context_provider_server(ssl_context_provider_server_user_data);
-                };
+        opts.ssl_context_provider_server_ = [=]() {
+            return reinterpret_cast<SSL_CTX *>(options->ssl_context_provider_server(options->ssl_context_provider_server_user_data));
+        };
     }
     if (options->ssl_context_provider_client != nullptr) {
-        opts.ssl_context_provider_client_ = [ssl_context_provider_client = options->ssl_context_provider_client,
-                    ssl_context_provider_client_user_data = options->ssl_context_provider_client_user_data]() {
-                    return ssl_context_provider_client(ssl_context_provider_client_user_data);
-                };
+        opts.ssl_context_provider_client_ = [=]() {
+            return reinterpret_cast<SSL_CTX *>(options->ssl_context_provider_client(options->ssl_context_provider_client_user_data));
+        };
     }
     if (options->custom_resolver != nullptr) {
         opts.custom_resolver_ = [custom_resolver = options->custom_resolver, custom_resolver_user_data = options->
@@ -1375,7 +1371,7 @@ struct bop_raft_state_machine : nuraft::state_machine {
      */
     nuraft::ptr<nuraft::buffer> commit(const nuraft::ulong log_idx, nuraft::buffer &data) override {
         nuraft::buffer *result{nullptr};
-        commit_(user_data_, log_idx, data.data_begin(), data.size(), &result);
+        commit_(user_data_, log_idx, data.data_begin(), data.size(), reinterpret_cast<bop_raft_buffer **>(&result));
         return result != nullptr ? nuraft::buffer::make_shared(result) : nullptr;
     }
 
@@ -1418,7 +1414,7 @@ struct bop_raft_state_machine : nuraft::state_machine {
         if (!cb)
             return nullptr;
         nuraft::buffer *result{nullptr};
-        cb(user_data_, log_idx, data.data_begin(), data.size(), &result);
+        cb(user_data_, log_idx, data.data_begin(), data.size(), reinterpret_cast<bop_raft_buffer **>(&result));
         return result != nullptr ? nuraft::buffer::make_shared(result) : nullptr;
     }
 
@@ -2110,10 +2106,10 @@ struct bop_raft_log_entry_vector {
 };
 
 BOP_API void bop_raft_log_entry_vec_push(
-    const bop_raft_log_entry_vector *vec, uint64_t term, nuraft::buffer *data, uint64_t timestamp,
+    const struct bop_raft_log_entry_vector *vec, uint64_t term, struct bop_raft_buffer *data, uint64_t timestamp,
     bool has_crc32, uint32_t crc32
 ) {
-    const auto buf = nuraft::ptr<nuraft::buffer>(data);
+    const auto buf = nuraft::ptr<nuraft::buffer>(reinterpret_cast<nuraft::buffer *>(data));
     vec->log_entries->push_back(
         std::make_shared<nuraft::log_entry>(
             term, std::move(buf), nuraft::log_val_type::app_log, timestamp, has_crc32, crc32
@@ -2122,9 +2118,9 @@ BOP_API void bop_raft_log_entry_vec_push(
 }
 
 BOP_API bop_raft_log_entry *bop_raft_log_entry_make(
-    uint64_t term, nuraft::buffer *data, uint64_t timestamp, bool has_crc32, uint32_t crc32
+    uint64_t term, struct bop_raft_buffer *data, uint64_t timestamp, bool has_crc32, uint32_t crc32
 ) {
-    const auto buf = nuraft::ptr<nuraft::buffer>(data);
+    const auto buf = nuraft::ptr<nuraft::buffer>(reinterpret_cast<nuraft::buffer *>(data));
     return reinterpret_cast<bop_raft_log_entry *>(new nuraft::log_entry(
         term, std::move(buf), nuraft::log_val_type::app_log, timestamp, has_crc32, crc32
     ));
@@ -2673,28 +2669,28 @@ struct bop_raft_server_peer_info_vec {
     bop_raft_server_peer_info_vec() = default;
 };
 
-BOP_API bop_raft_server_peer_info_vec *bop_raft_server_peer_info_vec_make() {
-    bop_raft_server_peer_info_vec *vec = new bop_raft_server_peer_info_vec();
+BOP_API struct bop_raft_server_peer_info_vec *bop_raft_server_peer_info_vec_make() {
+    struct bop_raft_server_peer_info_vec *vec = new bop_raft_server_peer_info_vec();
     vec->peers.reserve(16);
     return vec;
 }
 
-BOP_API void bop_raft_server_peer_info_vec_delete(const bop_raft_server_peer_info_vec *vec) {
+BOP_API void bop_raft_server_peer_info_vec_delete(const struct bop_raft_server_peer_info_vec *vec) {
     if (vec) {
         delete vec;
     }
 }
 
-BOP_API size_t bop_raft_server_peer_info_vec_size(bop_raft_server_peer_info_vec *vec) {
+BOP_API size_t bop_raft_server_peer_info_vec_size(const struct bop_raft_server_peer_info_vec *vec) {
     return vec->peers.size();
 }
 
 BOP_API bop_raft_server_peer_info *
-bop_raft_server_peer_info_vec_get(bop_raft_server_peer_info_vec *vec, size_t idx) {
+bop_raft_server_peer_info_vec_get(const struct bop_raft_server_peer_info_vec *vec, size_t idx) {
     if (idx >= vec->peers.size()) {
         return nullptr;
     }
-    return reinterpret_cast<bop_raft_server_peer_info *>(&vec->peers[idx]);
+    return reinterpret_cast<bop_raft_server_peer_info *>(const_cast<nuraft::raft_server::peer_info *>(&vec->peers[idx]));
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2715,7 +2711,7 @@ BOP_API void bop_raft_append_entries_delete(const bop_raft_append_entries_ptr *s
     }
 }
 
-BOP_API size_t bop_raft_append_entries_size(bop_raft_append_entries_ptr *self) {
+BOP_API size_t bop_raft_append_entries_size(const bop_raft_append_entries_ptr *self) {
     return self->logs.size();
 }
 
@@ -3271,8 +3267,8 @@ BOP_API uint64_t bop_raft_server_get_log_idx_at_becoming_leader(const bop_raft_s
  * @return
  * Expected committed log index.
  */
-BOP_API uint64_t bop_raft_server_get_expected_committed_log_idx(bop_raft_server *rs) {
-    return reinterpret_cast<nuraft::raft_server *>(rs)->get_expected_committed_log_idx();
+BOP_API uint64_t bop_raft_server_get_expected_committed_log_idx(const bop_raft_server *rs) {
+    return const_cast<nuraft::raft_server *>(reinterpret_cast<const nuraft::raft_server *>(rs))->get_expected_committed_log_idx();
 }
 
 /**
@@ -3854,20 +3850,20 @@ BOP_API void bop_raft_cb_get_req_msg(bop_raft_cb_req_resp *req_resp, bop_raft_cb
     req_msg->commit_idx = req->get_commit_idx();
 }
 
-BOP_API size_t bop_raft_cb_get_req_msg_entries_size(bop_raft_cb_req_resp *req_resp) {
+BOP_API size_t bop_raft_cb_get_req_msg_entries_size(const bop_raft_cb_req_resp *req_resp) {
     if (!req_resp)
         return 0;
-    auto req = reinterpret_cast<nuraft::cb_func::ReqResp *>(req_resp)->req;
+    auto req = const_cast<nuraft::cb_func::ReqResp *>(reinterpret_cast<const nuraft::cb_func::ReqResp *>(req_resp))->req;
     if (!req)
         return 0;
     return req->log_entries().size();
 }
 
 BOP_API bop_raft_log_entry *
-bop_raft_cb_get_req_msg_get_entry(bop_raft_cb_req_resp *req_resp, size_t idx) {
+bop_raft_cb_get_req_msg_get_entry(const bop_raft_cb_req_resp *req_resp, size_t idx) {
     if (!req_resp)
         return 0;
-    auto req = reinterpret_cast<nuraft::cb_func::ReqResp *>(req_resp)->req;
+    auto req = const_cast<nuraft::cb_func::ReqResp *>(reinterpret_cast<const nuraft::cb_func::ReqResp *>(req_resp))->req;
     if (!req)
         return 0;
     auto size = req->log_entries().size();

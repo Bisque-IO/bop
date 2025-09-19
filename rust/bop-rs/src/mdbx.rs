@@ -80,6 +80,13 @@ bitflags::bitflags! {
     }
 }
 
+impl EnvFlags {
+    #[inline]
+    fn to_raw(self) -> sys::MDBX_env_flags_t {
+        self.bits() as sys::MDBX_env_flags_t
+    }
+}
+
 bitflags::bitflags! {
     pub struct WarmupFlags: i32 {
         const DEFAULT     = sys::MDBX_warmup_flags_MDBX_warmup_default as i32;
@@ -88,6 +95,13 @@ bitflags::bitflags! {
         const LOCK        = sys::MDBX_warmup_flags_MDBX_warmup_lock as i32;
         const TOUCHLIMIT  = sys::MDBX_warmup_flags_MDBX_warmup_touchlimit as i32;
         const RELEASE     = sys::MDBX_warmup_flags_MDBX_warmup_release as i32;
+    }
+}
+
+impl WarmupFlags {
+    #[inline]
+    fn to_raw(self) -> sys::MDBX_warmup_flags_t {
+        self.bits() as sys::MDBX_warmup_flags_t
     }
 }
 
@@ -105,6 +119,13 @@ bitflags::bitflags! {
     }
 }
 
+impl DbFlags {
+    #[inline]
+    fn to_raw(self) -> sys::MDBX_db_flags_t {
+        self.bits() as sys::MDBX_db_flags_t
+    }
+}
+
 bitflags::bitflags! {
     pub struct PutFlags: i32 {
         const UPSERT      = sys::MDBX_put_flags_MDBX_UPSERT as i32;
@@ -116,6 +137,13 @@ bitflags::bitflags! {
         const APPEND      = sys::MDBX_put_flags_MDBX_APPEND as i32;
         const APPENDDUP   = sys::MDBX_put_flags_MDBX_APPENDDUP as i32;
         const MULTIPLE    = sys::MDBX_put_flags_MDBX_MULTIPLE as i32;
+    }
+}
+
+impl PutFlags {
+    #[inline]
+    fn to_raw(self) -> sys::MDBX_put_flags_t {
+        self.bits() as sys::MDBX_put_flags_t
     }
 }
 
@@ -341,12 +369,12 @@ pub enum OptionKey {
 }
 
 impl OptionKey {
-    fn to_raw(self) -> c_int {
+    fn to_raw(self) -> sys::MDBX_option_t {
         match self {
-            OptionKey::MaxDbs => sys::MDBX_option_MDBX_opt_max_db as c_int,
-            OptionKey::MaxReaders => sys::MDBX_option_MDBX_opt_max_readers as c_int,
-            OptionKey::SyncBytes => sys::MDBX_option_MDBX_opt_sync_bytes as c_int,
-            OptionKey::SyncPeriod => sys::MDBX_option_MDBX_opt_sync_period as c_int,
+            OptionKey::MaxDbs => sys::MDBX_option_MDBX_opt_max_db,
+            OptionKey::MaxReaders => sys::MDBX_option_MDBX_opt_max_readers,
+            OptionKey::SyncBytes => sys::MDBX_option_MDBX_opt_sync_bytes,
+            OptionKey::SyncPeriod => sys::MDBX_option_MDBX_opt_sync_period,
         }
     }
 }
@@ -405,7 +433,7 @@ impl Env {
             sys::mdbx_env_open(
                 self.ptr,
                 cpath.as_ptr() as *const c_char,
-                flags.bits() as c_int,
+                flags.to_raw(),
                 mode as sys::mdbx_mode_t,
             )
         } as i32;
@@ -475,7 +503,7 @@ impl Env {
 
     /// Set or clear environment flags at runtime.
     pub fn set_flags(&self, flags: EnvFlags, on: bool) -> Result<()> {
-        let rc = unsafe { sys::mdbx_env_set_flags(self.ptr, flags.bits() as c_int, on) } as i32;
+        let rc = unsafe { sys::mdbx_env_set_flags(self.ptr, flags.to_raw(), on) } as i32;
         check(rc)
     }
 
@@ -497,15 +525,11 @@ impl Env {
 
     /// Returns various max sizes for keys/values given flags.
     pub fn max_key_size(&self, flags: DbFlags) -> i32 {
-        unsafe {
-            sys::mdbx_env_get_maxkeysize_ex(self.ptr as *const _, flags.bits() as c_int) as i32
-        }
+        unsafe { sys::mdbx_env_get_maxkeysize_ex(self.ptr as *const _, flags.to_raw()) as i32 }
     }
 
     pub fn max_val_size(&self, flags: DbFlags) -> i32 {
-        unsafe {
-            sys::mdbx_env_get_maxvalsize_ex(self.ptr as *const _, flags.bits() as c_int) as i32
-        }
+        unsafe { sys::mdbx_env_get_maxvalsize_ex(self.ptr as *const _, flags.to_raw()) as i32 }
     }
 
     /// Warm up database pages according to flags; returns true if timeout reached.
@@ -519,7 +543,7 @@ impl Env {
             sys::mdbx_env_warmup(
                 self.ptr as *const _,
                 txn.map(|t| t.ptr as *const _).unwrap_or(std::ptr::null()),
-                flags.bits() as c_int,
+                flags.to_raw(),
                 timeout_16dot16 as c_uint,
             )
         } as i32;
@@ -549,22 +573,22 @@ impl Env {
         unsafe { sys::mdbx_limits_dbsize_max(pagesize) }
     }
     pub fn limits_keysize_max(pagesize: isize, flags: DbFlags) -> isize {
-        unsafe { sys::mdbx_limits_keysize_max(pagesize, flags.bits() as c_int) }
+        unsafe { sys::mdbx_limits_keysize_max(pagesize, flags.to_raw()) }
     }
     pub fn limits_keysize_min(flags: DbFlags) -> isize {
-        unsafe { sys::mdbx_limits_keysize_min(flags.bits() as c_int) }
+        unsafe { sys::mdbx_limits_keysize_min(flags.to_raw()) }
     }
     pub fn limits_valsize_max(pagesize: isize, flags: DbFlags) -> isize {
-        unsafe { sys::mdbx_limits_valsize_max(pagesize, flags.bits() as c_int) }
+        unsafe { sys::mdbx_limits_valsize_max(pagesize, flags.to_raw()) }
     }
     pub fn limits_valsize_min(flags: DbFlags) -> isize {
-        unsafe { sys::mdbx_limits_valsize_min(flags.bits() as c_int) }
+        unsafe { sys::mdbx_limits_valsize_min(flags.to_raw()) }
     }
     pub fn limits_pairsize4page_max(pagesize: isize, flags: DbFlags) -> isize {
-        unsafe { sys::mdbx_limits_pairsize4page_max(pagesize, flags.bits() as c_int) }
+        unsafe { sys::mdbx_limits_pairsize4page_max(pagesize, flags.to_raw()) }
     }
     pub fn limits_valsize4page_max(pagesize: isize, flags: DbFlags) -> isize {
-        unsafe { sys::mdbx_limits_valsize4page_max(pagesize, flags.bits() as c_int) }
+        unsafe { sys::mdbx_limits_valsize4page_max(pagesize, flags.to_raw()) }
     }
 
     /// Set/Get a raw user context pointer for this environment (advanced).
@@ -700,14 +724,13 @@ impl Env {
     pub fn copy_to_path<P: AsRef<Path>>(&self, dest: P, flags: CopyFlags) -> Result<()> {
         let cpath = CString::new(dest.as_ref().as_os_str().to_string_lossy().into_owned())
             .map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;
-        let rc =
-            unsafe { sys::mdbx_env_copy(self.ptr, cpath.as_ptr(), flags.bits() as c_int) } as i32;
+        let rc = unsafe { sys::mdbx_env_copy(self.ptr, cpath.as_ptr(), flags.to_raw()) } as i32;
         check(rc)
     }
 
     /// Copy the environment to a file descriptor.
     pub fn copy_to_fd(&self, fd: sys::mdbx_filehandle_t, flags: CopyFlags) -> Result<()> {
-        let rc = unsafe { sys::mdbx_env_copy2fd(self.ptr, fd, flags.bits() as c_int) } as i32;
+        let rc = unsafe { sys::mdbx_env_copy2fd(self.ptr, fd, flags.to_raw()) } as i32;
         check(rc)
     }
 
@@ -745,6 +768,13 @@ bitflags::bitflags! {
     }
 }
 
+impl TxnFlags {
+    #[inline]
+    fn to_raw(self) -> sys::MDBX_txn_flags_t {
+        self.bits() as sys::MDBX_txn_flags_t
+    }
+}
+
 pub struct Txn<'e> {
     ptr: *mut sys::MDBX_txn,
     _marker: PhantomData<&'e mut Env>,
@@ -761,7 +791,7 @@ impl<'e> Txn<'e> {
             sys::mdbx_txn_begin_ex(
                 env.ptr,
                 parent.unwrap_or(std::ptr::null_mut()),
-                flags.bits() as c_int,
+                flags.to_raw(),
                 &mut txn_ptr as *mut _,
                 std::ptr::null_mut(),
             )
@@ -872,14 +902,13 @@ impl<'e> Txn<'e> {
         let cpath = CString::new(dest.as_ref().as_os_str().to_string_lossy().into_owned())
             .map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;
         let rc =
-            unsafe { sys::mdbx_txn_copy2pathname(self.ptr, cpath.as_ptr(), flags.bits() as c_int) }
-                as i32;
+            unsafe { sys::mdbx_txn_copy2pathname(self.ptr, cpath.as_ptr(), flags.to_raw()) } as i32;
         check(rc)
     }
 
     /// Copy a consistent snapshot of the environment to a file descriptor via this read txn.
     pub fn copy_to_fd(&self, fd: sys::mdbx_filehandle_t, flags: CopyFlags) -> Result<()> {
-        let rc = unsafe { sys::mdbx_txn_copy2fd(self.ptr, fd, flags.bits() as c_int) } as i32;
+        let rc = unsafe { sys::mdbx_txn_copy2fd(self.ptr, fd, flags.to_raw()) } as i32;
         check(rc)
     }
 
@@ -974,7 +1003,7 @@ impl Dbi {
             sys::mdbx_dbi_open(
                 txn.ptr,
                 cname.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
-                flags.bits() as c_int,
+                flags.to_raw(),
                 &mut dbi as *mut _,
             )
         } as i32;
@@ -1080,7 +1109,7 @@ pub fn put(txn: &Txn<'_>, dbi: Dbi, key: &[u8], value: &[u8], flags: PutFlags) -
             dbi.0,
             &mut key_val as *mut _,
             &mut data_val as *mut _,
-            flags.bits() as c_int,
+            flags.to_raw(),
         )
     } as i32;
     check(rc)
@@ -1120,7 +1149,7 @@ pub fn put_multiple(
             dbi.0,
             &mut key_val as *mut _,
             vals.as_mut_ptr(),
-            (flags | PutFlags::MULTIPLE).bits() as c_int,
+            (flags | PutFlags::MULTIPLE).to_raw(),
         )
     } as i32;
     if rc == 0 {
@@ -1215,7 +1244,7 @@ pub fn replace(
                 .as_mut()
                 .map_or(std::ptr::null_mut(), |v| v as *mut _),
             &mut old_val as *mut _,
-            flags.bits() as c_int,
+            flags.to_raw(),
             None,
             std::ptr::null_mut(),
         )
@@ -1255,19 +1284,19 @@ impl<'t> Cursor<'t> {
     }
 
     pub fn first<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_FIRST as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_FIRST)
     }
 
     pub fn next<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_NEXT as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_NEXT)
     }
 
     pub fn last<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_LAST as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_LAST)
     }
 
     pub fn prev<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_PREV as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_PREV)
     }
 
     pub fn set_range<'c>(&'c mut self, key: &[u8]) -> Result<Option<(&'c [u8], &'c [u8])>> {
@@ -1298,7 +1327,7 @@ impl<'t> Cursor<'t> {
         }
     }
 
-    fn get_op<'c>(&'c mut self, op: c_int) -> Result<Option<(&'c [u8], &'c [u8])>> {
+    fn get_op<'c>(&'c mut self, op: sys::MDBX_cursor_op) -> Result<Option<(&'c [u8], &'c [u8])>> {
         let mut k = sys::MDBX_val {
             iov_base: std::ptr::null_mut(),
             iov_len: 0,
@@ -1352,32 +1381,32 @@ impl<'t> Cursor<'t> {
 
     /// For DUPSORT tables: move to first duplicate at current key.
     pub fn first_dup<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_FIRST_DUP as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_FIRST_DUP)
     }
 
     /// For DUPSORT tables: move to last duplicate at current key.
     pub fn last_dup<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_LAST_DUP as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_LAST_DUP)
     }
 
     /// For DUPSORT tables: move to next duplicate (stay on same key).
     pub fn next_dup<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_NEXT_DUP as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_NEXT_DUP)
     }
 
     /// For DUPSORT tables: move to previous duplicate (stay on same key).
     pub fn prev_dup<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_PREV_DUP as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_PREV_DUP)
     }
 
     /// Move to next non-duplicate key.
     pub fn next_no_dup<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_NEXT_NODUP as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_NEXT_NODUP)
     }
 
     /// Move to previous non-duplicate key.
     pub fn prev_no_dup<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_PREV_NODUP as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_PREV_NODUP)
     }
 
     /// Seek to exact (key,data) pair in DUPSORT tables.
@@ -1440,7 +1469,7 @@ impl<'t> Cursor<'t> {
 
     /// Return the current key/value without moving the cursor.
     pub fn current<'c>(&'c mut self) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(sys::MDBX_cursor_op_MDBX_GET_CURRENT as c_int)
+        self.get_op(sys::MDBX_cursor_op_MDBX_GET_CURRENT)
     }
 
     /// Reset/unset the cursor position.
@@ -1553,7 +1582,7 @@ impl<'t> Cursor<'t> {
 
     /// For DUPFIXED tables: GET_MULTIPLE. Returns the contiguous payload slice and element count (computed from elem_size).
     pub fn get_multiple<'c>(&'c mut self, elem_size: usize) -> Result<Option<(&'c [u8], usize)>> {
-        match self.get_op(sys::MDBX_cursor_op_MDBX_GET_MULTIPLE as c_int)? {
+        match self.get_op(sys::MDBX_cursor_op_MDBX_GET_MULTIPLE)? {
             Some((_k, v)) => Ok(Some((
                 v,
                 if elem_size > 0 {
@@ -1568,7 +1597,7 @@ impl<'t> Cursor<'t> {
 
     /// NEXT_MULTIPLE variant for DUPFIXED tables.
     pub fn next_multiple<'c>(&'c mut self, elem_size: usize) -> Result<Option<(&'c [u8], usize)>> {
-        match self.get_op(sys::MDBX_cursor_op_MDBX_NEXT_MULTIPLE as c_int)? {
+        match self.get_op(sys::MDBX_cursor_op_MDBX_NEXT_MULTIPLE)? {
             Some((_k, v)) => Ok(Some((
                 v,
                 if elem_size > 0 {
@@ -1583,7 +1612,7 @@ impl<'t> Cursor<'t> {
 
     /// PREV_MULTIPLE variant for DUPFIXED tables.
     pub fn prev_multiple<'c>(&'c mut self, elem_size: usize) -> Result<Option<(&'c [u8], usize)>> {
-        match self.get_op(sys::MDBX_cursor_op_MDBX_PREV_MULTIPLE as c_int)? {
+        match self.get_op(sys::MDBX_cursor_op_MDBX_PREV_MULTIPLE)? {
             Some((_k, v)) => Ok(Some((
                 v,
                 if elem_size > 0 {
@@ -1604,12 +1633,7 @@ impl<'t> Cursor<'t> {
             iov_len: data.len(),
         };
         let rc = unsafe {
-            sys::mdbx_cursor_put(
-                self.ptr,
-                &kv as *const _,
-                &mut dv as *mut _,
-                flags.bits() as c_int,
-            )
+            sys::mdbx_cursor_put(self.ptr, &kv as *const _, &mut dv as *mut _, flags.to_raw())
         } as i32;
         check(rc)
     }
@@ -1795,7 +1819,7 @@ impl<'t> Cursor<'t> {
     /// Generic cursor operation using the CursorOp enum.
     /// This provides a unified interface for all cursor operations.
     pub fn get_with_op<'c>(&'c mut self, op: CursorOp) -> Result<Option<(&'c [u8], &'c [u8])>> {
-        self.get_op(op.to_raw() as c_int)
+        self.get_op(op.to_raw())
     }
 
     /// Generic cursor operation with key/value parameters using the CursorOp enum.
@@ -1835,6 +1859,13 @@ bitflags::bitflags! {
         // The following two flags refer to txn copy behavior in mdl version; exposed for completeness
         const DISPOSE_TXN       = sys::MDBX_copy_flags_MDBX_CP_DISPOSE_TXN as i32;
         const RENEW_TXN         = sys::MDBX_copy_flags_MDBX_CP_RENEW_TXN as i32;
+    }
+}
+
+impl CopyFlags {
+    #[inline]
+    fn to_raw(self) -> sys::MDBX_copy_flags_t {
+        self.bits() as sys::MDBX_copy_flags_t
     }
 }
 
@@ -2077,21 +2108,18 @@ mod tests {
 
     #[test]
     fn test_option_key_to_raw() {
-        assert_eq!(
-            OptionKey::MaxDbs.to_raw(),
-            sys::MDBX_option_MDBX_opt_max_db as c_int
-        );
+        assert_eq!(OptionKey::MaxDbs.to_raw(), sys::MDBX_option_MDBX_opt_max_db);
         assert_eq!(
             OptionKey::MaxReaders.to_raw(),
-            sys::MDBX_option_MDBX_opt_max_readers as c_int
+            sys::MDBX_option_MDBX_opt_max_readers
         );
         assert_eq!(
             OptionKey::SyncBytes.to_raw(),
-            sys::MDBX_option_MDBX_opt_sync_bytes as c_int
+            sys::MDBX_option_MDBX_opt_sync_bytes
         );
         assert_eq!(
             OptionKey::SyncPeriod.to_raw(),
-            sys::MDBX_option_MDBX_opt_sync_period as c_int
+            sys::MDBX_option_MDBX_opt_sync_period
         );
     }
 

@@ -1,8 +1,8 @@
-use crc32fast::Hasher as Crc32Hasher;
+use crc64fast_nvme::Digest as Crc64Digest;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::aof::error::{AofError, AofResult};
+use crate::aof::error::AofError;
 
 /// Serializable index for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,7 +10,7 @@ pub struct SerializableIndex {
     pub version: u32,
     pub record_count: u64,
     pub entries: Vec<(u64, u64)>, // (record_id, offset)
-    pub checksum: u32,
+    pub checksum: u64,
 }
 
 /// Segment footer for InSegment index storage
@@ -21,9 +21,9 @@ pub struct SegmentFooter {
     pub index_offset: u64,    // Offset where index data starts
     pub index_size: u64,      // Size of index data in bytes
     pub record_count: u64,    // Number of records in segment
-    pub data_checksum: u32,   // Checksum of all record data
-    pub index_checksum: u32,  // Checksum of index data
-    pub footer_checksum: u32, // Checksum of footer data (excluding this field)
+    pub data_checksum: u64,   // Checksum of all record data
+    pub index_checksum: u64,  // Checksum of index data
+    pub footer_checksum: u64, // Checksum of footer data (excluding this field)
 }
 
 pub const SEGMENT_FOOTER_MAGIC: u32 = 0x5E6F07E5; // "SEgment Footer" in hex-ish
@@ -34,8 +34,8 @@ impl SegmentFooter {
         index_offset: u64,
         index_size: u64,
         record_count: u64,
-        data_checksum: u32,
-        index_checksum: u32,
+        data_checksum: u64,
+        index_checksum: u64,
     ) -> Self {
         let mut footer = Self {
             magic: SEGMENT_FOOTER_MAGIC,
@@ -49,15 +49,15 @@ impl SegmentFooter {
         };
 
         // Calculate footer checksum (excluding the checksum field itself)
-        let mut hasher = Crc32Hasher::new();
-        hasher.update(&footer.magic.to_le_bytes());
-        hasher.update(&footer.version.to_le_bytes());
-        hasher.update(&footer.index_offset.to_le_bytes());
-        hasher.update(&footer.index_size.to_le_bytes());
-        hasher.update(&footer.record_count.to_le_bytes());
-        hasher.update(&footer.data_checksum.to_le_bytes());
-        hasher.update(&footer.index_checksum.to_le_bytes());
-        footer.footer_checksum = hasher.finalize();
+        let mut hasher = Crc64Digest::new();
+        hasher.write(&footer.magic.to_le_bytes());
+        hasher.write(&footer.version.to_le_bytes());
+        hasher.write(&footer.index_offset.to_le_bytes());
+        hasher.write(&footer.index_size.to_le_bytes());
+        hasher.write(&footer.record_count.to_le_bytes());
+        hasher.write(&footer.data_checksum.to_le_bytes());
+        hasher.write(&footer.index_checksum.to_le_bytes());
+        footer.footer_checksum = hasher.sum64();
 
         footer
     }
@@ -72,16 +72,16 @@ impl SegmentFooter {
         }
 
         // Verify footer checksum
-        let mut hasher = Crc32Hasher::new();
-        hasher.update(&self.magic.to_le_bytes());
-        hasher.update(&self.version.to_le_bytes());
-        hasher.update(&self.index_offset.to_le_bytes());
-        hasher.update(&self.index_size.to_le_bytes());
-        hasher.update(&self.record_count.to_le_bytes());
-        hasher.update(&self.data_checksum.to_le_bytes());
-        hasher.update(&self.index_checksum.to_le_bytes());
+        let mut hasher = Crc64Digest::new();
+        hasher.write(&self.magic.to_le_bytes());
+        hasher.write(&self.version.to_le_bytes());
+        hasher.write(&self.index_offset.to_le_bytes());
+        hasher.write(&self.index_size.to_le_bytes());
+        hasher.write(&self.record_count.to_le_bytes());
+        hasher.write(&self.data_checksum.to_le_bytes());
+        hasher.write(&self.index_checksum.to_le_bytes());
 
-        hasher.finalize() == self.footer_checksum
+        hasher.sum64() == self.footer_checksum
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>, AofError> {
@@ -119,31 +119,31 @@ impl SegmentFooter {
 impl SerializableIndex {
     pub fn new(index: &BTreeMap<u64, u64>) -> Self {
         let entries: Vec<(u64, u64)> = index.iter().map(|(&k, &v)| (k, v)).collect();
-        let mut hasher = Crc32Hasher::new();
+        let mut hasher = Crc64Digest::new();
 
         // Calculate checksum of the index data
         for (id, offset) in &entries {
-            hasher.update(&id.to_le_bytes());
-            hasher.update(&offset.to_le_bytes());
+            hasher.write(&id.to_le_bytes());
+            hasher.write(&offset.to_le_bytes());
         }
 
         Self {
             version: 1,
             record_count: entries.len() as u64,
             entries,
-            checksum: hasher.finalize(),
+            checksum: hasher.sum64(),
         }
     }
 
     pub fn to_btree_map(&self) -> Result<BTreeMap<u64, u64>, AofError> {
         // Verify checksum
-        let mut hasher = Crc32Hasher::new();
+        let mut hasher = Crc64Digest::new();
         for (id, offset) in &self.entries {
-            hasher.update(&id.to_le_bytes());
-            hasher.update(&offset.to_le_bytes());
+            hasher.write(&id.to_le_bytes());
+            hasher.write(&offset.to_le_bytes());
         }
 
-        if hasher.finalize() != self.checksum {
+        if hasher.sum64() != self.checksum {
             return Err(AofError::CorruptedRecord(
                 "Index checksum verification failed".to_string(),
             ));

@@ -16,6 +16,7 @@ pub mod record;
 pub mod s3;
 pub mod segment;
 pub mod segment_index;
+pub mod sqlite_segment_index;
 pub mod segment_store;
 
 // Re-export the main types and traits
@@ -40,6 +41,7 @@ pub use record::{
 pub use s3::{S3Client, S3ObjectMetadata};
 pub use segment::Segment;
 pub use segment_index::MdbxSegmentIndex;
+pub use sqlite_segment_index::SqliteSegmentIndex;
 pub use segment_store::{SegmentEntry, SegmentStatus};
 
 // Main AOF implementation

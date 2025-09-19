@@ -1,11 +1,18 @@
 #![feature(thread_id_value)]
+// Suppress lints that are noisy for this codebase during development.
+// These are intentionally permissive to avoid invasive API changes.
+#![allow(async_fn_in_trait)]
+#![allow(private_interfaces)]
+#![allow(dead_code)]
 
 pub mod allocator;
-pub mod aof;
+// pub mod aof;
+pub mod aof2;
 pub mod mdbx;
 pub mod mpmc;
-pub mod numa;
+#[cfg(feature = "usockets-udp")]
 pub mod socket;
+#[cfg(feature = "usockets-udp")]
 pub mod usockets;
 // pub mod raft_integration;
 

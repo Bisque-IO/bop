@@ -185,58 +185,148 @@ pub fn read_next_record(&mut self) -> AofResult<Option<(u64, Vec<u8>)>> {
 
 ## File Format Specification
 
-### Segment Structure
+### Segment Layout
+
+Segments are append-only, memory-mapped files with durable checkpoints. The on-disk layout is:
 
 ```
-[Record 1][Record 2]...[Record N][Metadata Record][Binary Index][Footer]
+[SegmentHeader]
+[RecordEnvelope 0]
+[RecordEnvelope 1]
+ ...
+[RecordEnvelope N]
+[FlushCheckpointStamp 0]
+ ...
+[FlushCheckpointStamp M]
+[SegmentMetadataRecord]
+[BinaryIndex]
+[SegmentFooter]
 ```
 
-### Record Format
+`RecordEnvelope` describes a single logical record (`RecordHeader` + payload + trailer). `FlushCheckpointStamp` entries accumulate over time; each represents a fully durable flush boundary and supersedes the previous one.
+
+### Segment Header
+
+The header guards segment identity, configuration, and crash recovery hints. Planned structure:
+
+```rust
+#[repr(C)]
+pub struct SegmentHeader {
+    pub magic: u32,           // 0x53454730 ("SEG0")
+    pub version: u16,         // Segment format version
+    pub flags: u16,           // Compression/encryption indicators
+    pub base_id: u64,         // First record ID for this segment
+    pub created_at: u64,      // Microseconds since epoch
+    pub generation: u64,      // Monotonic segment instance counter
+    pub writer_epoch: u64,    // Flush epoch used by recovery tooling
+    pub header_checksum: u64, // CRC64-NVME over the preceding fields
+}
+```
+
+The header checksum is validated before any record scanning. `generation` and `writer_epoch` allow fast detection of stale shadow copies.
+
+### Record Envelope
+
+Each record is written with a header, payload, and trailer. The header matches the live implementation.
 
 ```rust
 #[repr(C)]
 pub struct RecordHeader {
-    pub checksum: u32,     // CRC32 of record data
-    pub size: u32,         // Size of record data
+    pub checksum: u32,     // Folded CRC64-NVME of payload (u32 for cache friendliness)
+    pub size: u32,         // Payload size in bytes
     pub id: u64,           // Monotonic record ID
     pub timestamp: u64,    // Microseconds since epoch
-    pub version: u8,       // Format version
-    pub flags: u8,         // Compression, encryption flags
-    pub reserved: [u8; 6], // Future use
+    pub version: u8,       // Header format version
+    pub flags: u8,         // Compression/encryption markers
+    pub reserved: [u8; 6], // Future extensions (e.g., TTL)
 }
 ```
 
-### Segment Metadata Record (Durable Index)
+To enable O(1) backward iteration and robust crash detection, the payload is followed by a fixed trailer:
+
+```rust
+#[repr(C)]
+pub struct RecordTrailer {
+    pub checksum: u32,     // Mirror of folded CRC64 to validate backward scans
+    pub size: u32,         // Mirror of payload size
+    pub prev_span: u64,    // Distance in bytes to the previous RecordTrailer (0 for first record)
+    pub trailer_crc64: u64,// CRC64-NVME over trailer fields for tamper detection
+}
+```
+
+Writers flush the header and payload before emitting the trailer. During recovery the trailer is validated first, allowing the scanner to jump backward without re-reading the entire segment.
+
+### Flush Checkpoint Stamp
+
+Every durability boundary appends a stamp describing the highest fully persisted byte. Only the last valid stamp is authoritative.
+
+```rust
+#[repr(C)]
+pub struct FlushCheckpointStamp {
+    pub magic: u32,           // 0xF17C504 ("FCP\0")
+    pub version: u16,         // Stamp version
+    pub flags: u16,           // Reserved for WAL modes
+    pub durable_offset: u64,  // Absolute byte offset after the final committed trailer
+    pub last_record_id: u64,  // Highest record ID covered by this flush
+    pub data_crc64: u64,      // CRC64-NVME of bytes [SegmentHeader..durable_offset)
+    pub stamp_crc64: u64,     // CRC64-NVME over the stamp fields above
+}
+```
+
+Recovery walks stamps from the end of the file until one verifies; bytes after `durable_offset` are truncated/zeroed before the segment is reopened.
+
+### Segment Metadata Record
+
+The metadata record, stored immediately after the final checkpoint, captures logical information for index rebuilds.
 
 ```rust
 pub struct SegmentMetadataRecord {
-    pub magic: u32,            // 0xABCDEF02 (identifies metadata record)
-    pub record_count: u64,     // Number of records in segment
-    pub last_record_id: u64,   // Last record ID in segment
-    pub base_id: u64,          // First record ID in segment
-    pub finalized_at: u64,     // Finalization timestamp
-    pub data_checksum: u64,    // Checksum of all record data
-    pub version: u8,           // Metadata version
-    pub reserved: [u8; 7],     // Future use
+    pub magic: u32,            // 0xABCDEF02 (metadata marker)
+    pub record_count: u64,     // Number of envelopes written
+    pub last_record_id: u64,   // Highest record ID
+    pub base_id: u64,          // First record ID
+    pub finalized_at: u64,     // Microseconds since epoch when finalized
+    pub data_checksum: u64,    // CRC64-NVME over durable payload bytes
+    pub version: u8,           // Metadata format version
+    pub reserved: [u8; 7],     // Future expansion
 }
 ```
 
-**Purpose:**
-- **Durable indexing**: Provides segment bounds without scanning
-- **EOF detection**: Distinguishes complete vs. incomplete segments
-- **Integrity verification**: Data checksum for corruption detection
-- **Tailing support**: Enables efficient tail detection
-
 ### Binary Index Format
+
+Binary indexes are optional but recommended for random access and backward iteration. Entries are sorted by `record_id` and may be duplicated for coarse fan-out.
 
 ```rust
 pub struct BinaryIndexEntry {
     pub record_id: u64,
-    pub file_offset: u64,
+    pub file_offset: u64,  // Offset of the corresponding RecordHeader
 }
 ```
 
-Optional binary index for O(log n) record lookup within segments.
+Readers can perform binary search to reach any record, then rely on trailers for constant-time stepping backward.
+
+### Segment Footer
+
+The footer (`SegmentFooter`) already implemented in `index.rs` authenticates the metadata and index region. Its CRC64 fields tie the entire segment together. The footer is the final write during finalization.
+
+### Crash Recovery Flow
+
+1. Validate `SegmentHeader` checksum; reject the file if it fails.
+2. Seek from the end to locate the newest valid `FlushCheckpointStamp`.
+3. Truncate/zero bytes beyond `durable_offset`.
+4. Scan forward from `SegmentHeader` to `durable_offset`, validating `(RecordHeader, payload, RecordTrailer)` triplets.
+5. Recompute the rolling CRC64 using the same folding strategy used by the writer; confirm it matches `data_crc64` in both the checkpoint and metadata record.
+6. If any step fails, mark the segment as corrupted and require operator intervention.
+
+This flow prevents partially written records because a trailer is only emitted once the payload is durable, and a checkpoint is only emitted after the trailer is flushed.
+
+### Iteration Semantics
+
+- **Forward iteration**: Readers map the segment, start from `SegmentHeader`, and walk record headers sequentially. Each header contains the payload size and folded checksum.
+- **Backward iteration**: Walk begins at the trailer preceding the checkpoint offset, using `prev_span` to jump to the previous record without scanning intermediate data. The mirrored checksum fields guarantee integrity in both directions.
+- **Random access**: Binary index entries locate the nearest header; forward/backward stepping completes the read.
+
+Together, the header, trailer, checkpoint, and footer chain ensure that every logical boundary is covered by a CRC64-NVME checksum, enabling deterministic recovery even after power loss.
 
 ## Thread Safety Guarantees
 

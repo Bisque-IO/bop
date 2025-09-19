@@ -308,7 +308,7 @@ impl<
 
         for (instance_id, instance) in selected_instances {
             match {
-                let mut aof = instance.lock().await;
+                let aof = instance.lock().await;
                 aof.create_reader_from_id(record_id)
             } {
                 Ok(reader) => {
@@ -340,7 +340,7 @@ impl<
 
         for (instance_id, instance) in selected_instances {
             match {
-                let mut aof = instance.lock().await;
+                let aof = instance.lock().await;
                 aof.create_reader_from_timestamp(timestamp)
             } {
                 Ok(reader) => {

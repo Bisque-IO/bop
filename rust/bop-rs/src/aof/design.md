@@ -56,7 +56,7 @@ pub enum AofError {
 #### `record.rs` - Data Structures and Configuration
 ```rust
 pub struct RecordHeader {
-    pub checksum: u32,           // CRC32 checksum for data integrity
+    pub checksum: u32,           // Folded CRC64-NVME checksum for data integrity
     pub size: u32,               // Data payload size in bytes
     pub id: u64,                 // Monotonic record ID
     pub timestamp: u64,          // Creation timestamp (microseconds)
@@ -95,7 +95,7 @@ pub enum FlushStrategy {
 ```
 
 **Features:**
-- Enhanced record header with CRC32 integrity checks
+- Enhanced record header with folded CRC64-NVME integrity checks
 - Comprehensive configuration system with builder pattern
 - Flexible flush strategies for different durability requirements
 - TTL support for automatic cleanup

@@ -3,7 +3,9 @@
 //! This module provides a clean S3 client interface specifically for use
 //! with the archive storage system, without mixing filesystem concerns.
 
-use crate::aof::error::{AofError, AofResult};
+use crate::aof::error::AofResult;
+#[cfg(test)]
+use crate::aof::AofError;
 use std::time::SystemTime;
 
 /// S3 object metadata
@@ -15,6 +17,7 @@ pub struct S3ObjectMetadata {
 }
 
 /// S3 client abstraction for archive operations
+#[allow(async_fn_in_trait)]
 pub trait S3Client: Send + Sync {
     /// Put an object into S3
     async fn put_object(&self, bucket: &str, key: &str, data: &[u8]) -> AofResult<()>;

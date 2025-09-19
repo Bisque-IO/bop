@@ -1,7 +1,12 @@
 //! Main AOF implementation with fully async operations and SegmentIndex as source of truth
 
-use memmap2::{Mmap, MmapMut};
+#![allow(dead_code)]
+
+use crc64fast_nvme::Digest as Crc64Digest;
+
+use memmap2::MmapMut;
 use std::collections::{HashMap, HashSet};
+use std::convert::TryInto;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Handle;
@@ -10,15 +15,20 @@ use tokio::sync::{Notify, RwLock as TokioRwLock, mpsc, mpsc::error::TrySendError
 use crate::aof::archive::ArchiveStorage;
 use crate::aof::error::{AofError, AofResult};
 use crate::aof::filesystem::{FileHandle, FileSystem};
-use crate::aof::flush::{FlushController, FlushControllerMetrics};
+use crate::aof::flush::{FlushController, FlushControllerMetrics, FlushWindow};
+use crate::aof::index::SegmentFooter;
 use crate::aof::reader::{
     AofMetrics, Reader, ReaderLifecycleGuard, ReaderLifecycleHooks, SegmentPosition,
 };
-use crate::aof::record::{AofConfig, SegmentMetadata, ensure_segment_size_is_valid};
-use crate::aof::record::{FlushStrategy, RecordHeader, current_timestamp};
+use crate::aof::record::{
+    AofConfig, FlushCheckpointStamp, RecordHeader, RecordTrailer, SegmentHeader, SegmentMetadata,
+    SegmentMetadataRecord, ensure_segment_size_is_valid,
+};
+use crate::aof::record::{FlushStrategy, current_timestamp};
 use crate::aof::segment::Segment;
 use crate::aof::segment_index::MdbxSegmentIndex;
 use crate::aof::segment_store::SegmentEntry;
+use zstd::stream::encode_all;
 
 /// Reader-aware cached segment with reference counting
 struct CachedSegment<FS: FileSystem> {
@@ -130,6 +140,15 @@ impl<FS: FileSystem> ReaderAwareSegmentCache<FS> {
         }
     }
 
+    /// Remove a segment entry entirely (used when segment is finalized)
+    fn remove_segment(&mut self, segment_id: u64) {
+        self.segments.remove(&segment_id);
+        self.reader_segments.retain(|_, segments| {
+            segments.remove(&segment_id);
+            !segments.is_empty()
+        });
+    }
+
     /// Evict least recently used segment that can be evicted
     fn evict_lru(&mut self) -> AofResult<()> {
         let mut lru_candidate = None;
@@ -183,6 +202,36 @@ impl ReaderRegistry {
     }
 }
 
+struct FlushTaskState {
+    pending_segments: Vec<SegmentEntry>,
+}
+
+impl FlushTaskState {
+    fn new() -> Self {
+        Self {
+            pending_segments: Vec::new(),
+        }
+    }
+
+    fn queue_segments(&mut self, mut entries: Vec<SegmentEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        self.pending_segments.append(&mut entries);
+    }
+
+    fn take_segments(&mut self) -> Vec<SegmentEntry> {
+        std::mem::take(&mut self.pending_segments)
+    }
+
+    fn restore_segments(&mut self, mut entries: Vec<SegmentEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        self.pending_segments.append(&mut entries);
+    }
+}
+
 struct ReaderLifecycleManager<FS: FileSystem> {
     segment_cache: Arc<TokioRwLock<ReaderAwareSegmentCache<FS>>>,
     reader_registry: Arc<ReaderRegistry>,
@@ -227,6 +276,16 @@ struct ActiveSegment<FS: FileSystem> {
     metadata: SegmentMetadata,
     /// Current offset in the file
     current_offset: u64,
+    /// Offset of the most recently written record trailer (if any)
+    last_trailer_offset: Option<u64>,
+    /// Offset of the most recently written flush checkpoint stamp
+    last_checkpoint_offset: Option<u64>,
+    /// Generation identifier for this segment instance
+    generation: u64,
+    /// Writer epoch incremented whenever a flush boundary is recorded
+    writer_epoch: u64,
+    /// Rolling data checksum used for flush stamps and metadata records
+    data_hasher: Crc64Digest,
     /// Notification for readers tailing this segment
     reader_notify: Arc<Notify>,
     /// Flag to track if notification is in progress
@@ -236,12 +295,18 @@ struct ActiveSegment<FS: FileSystem> {
 impl<FS: FileSystem> ActiveSegment<FS> {
     /// Create a new active segment
     fn new(file: FS::Handle, metadata: SegmentMetadata) -> Self {
+        let generation = current_timestamp();
         Self {
             file,
             write_mmap: None,
             shadow_segment: None,
             metadata,
             current_offset: 0,
+            last_trailer_offset: None,
+            last_checkpoint_offset: None,
+            generation,
+            writer_epoch: 0,
+            data_hasher: Crc64Digest::new(),
             reader_notify: Arc::new(Notify::new()),
             notify_in_progress: AtomicBool::new(false),
         }
@@ -255,6 +320,35 @@ impl<FS: FileSystem> ActiveSegment<FS> {
         self.write_mmap = Some(self.file.memory_map_mut().await?.ok_or_else(|| {
             AofError::FileSystem("Mutable memory mapping not supported".to_string())
         })?);
+
+        // Write segment header if this is a freshly created segment
+        if self.current_offset == 0 {
+            let header = SegmentHeader::new(
+                self.metadata.base_id,
+                self.metadata.created_at,
+                self.generation,
+                self.writer_epoch,
+                0,
+            );
+            let header_bytes = header.to_bytes().map_err(|e| {
+                AofError::Serialization(format!("Failed to serialize header: {}", e))
+            })?;
+
+            if let Some(ref mut mmap) = self.write_mmap {
+                if header_bytes.len() > mmap.len() {
+                    return Err(AofError::SegmentFull(
+                        "Segment header exceeds segment size".to_string(),
+                    ));
+                }
+                mmap[..header_bytes.len()].copy_from_slice(&header_bytes);
+                self.current_offset = header_bytes.len() as u64;
+                self.metadata.size = self.current_offset;
+                self.metadata.checksum = 0;
+                self.data_hasher = Crc64Digest::new();
+                let _ = self.data_hasher.write(&header_bytes);
+            }
+        }
+
         Ok(())
     }
 
@@ -343,6 +437,17 @@ impl<FS: FileSystem> ActiveSegment<FS> {
     }
 }
 
+struct ScanActiveSegmentResult {
+    last_id: u64,
+    record_count: u64,
+    last_offset: u64,
+    data_end_offset: u64,
+    checksum: u64,
+    last_trailer_offset: Option<u64>,
+    last_checkpoint_offset: Option<u64>,
+    segment_header: Option<SegmentHeader>,
+}
+
 /// Performance metrics for the AOF
 #[derive(Debug)]
 pub struct AofPerformanceMetrics {
@@ -374,12 +479,14 @@ impl Default for AofPerformanceMetrics {
 }
 
 /// Background task request types
+#[allow(private_interfaces)]
 pub struct PreAllocationRequest<FS: FileSystem> {
     pub segment_size: u64,
     pub base_id_hint: u64, // Hint for what the base_id might be
     pub response: oneshot::Sender<AofResult<ActiveSegment<FS>>>,
 }
 
+#[allow(private_interfaces)]
 pub struct FinalizationRequest<FS: FileSystem> {
     pub segment: ActiveSegment<FS>,
     pub response: oneshot::Sender<AofResult<SegmentEntry>>,
@@ -387,6 +494,7 @@ pub struct FinalizationRequest<FS: FileSystem> {
 
 pub struct FlushRequest {
     pub segments: Vec<SegmentEntry>,
+    pub window: FlushWindow,
     pub response: oneshot::Sender<AofResult<()>>,
 }
 
@@ -426,6 +534,7 @@ pub struct BackgroundTaskChannels<FS: FileSystem + 'static> {
 }
 
 /// Shared state that background tasks need access to
+#[allow(private_interfaces)]
 pub struct SharedAofState<FS: FileSystem, A: ArchiveStorage> {
     pub config: AofConfig,
     pub local_fs: Arc<FS>,
@@ -434,6 +543,7 @@ pub struct SharedAofState<FS: FileSystem, A: ArchiveStorage> {
     pub metrics: Arc<AofPerformanceMetrics>,
     pub errors: Arc<TokioRwLock<BackgroundTaskErrors>>,
     pub reader_registry: Arc<ReaderRegistry>,
+    pub flush_controller: FlushController,
 }
 
 /// The main AOF (Append-Only File) implementation
@@ -569,6 +679,7 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
             metrics: self.metrics.clone(),
             errors: self.background_errors.clone(),
             reader_registry: Arc::clone(&self.reader_registry),
+            flush_controller: self.flush_controller.clone(),
         });
 
         let mut task_handles = Vec::new();
@@ -646,23 +757,62 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
             .clone()
             .unwrap_or_else(|| format!("segment_{}.log", entry.base_id));
 
+        let mut entry = entry;
         let metadata = Self::segment_entry_to_metadata(&entry);
         let file = self.local_fs.open_file_mut(&segment_path).await?;
         let mut active = ActiveSegment::new(file, metadata.clone());
-        active.current_offset = entry.original_size;
-        active.metadata.last_id = entry.last_id;
-        active.metadata.record_count = entry.record_count;
-        active.metadata.size = entry.original_size;
 
         active.init_write_mmap(self.config.segment_size).await?;
+        if let Some(ref mut mmap) = active.write_mmap {
+            let scan =
+                Self::scan_active_segment(mmap, metadata.base_id, entry.original_size as usize)?;
+
+            if scan.last_offset as usize > 0 && scan.last_offset < entry.original_size {
+                mmap[scan.last_offset as usize..].fill(0);
+            }
+
+            active.current_offset = scan.last_offset;
+            active.last_trailer_offset = scan.last_trailer_offset;
+            active.last_checkpoint_offset = scan.last_checkpoint_offset;
+            if let Some(header) = scan.segment_header {
+                active.generation = header.generation;
+                active.writer_epoch = header.writer_epoch;
+            }
+            active.metadata.last_id = scan.last_id;
+            active.metadata.record_count = scan.record_count;
+            active.metadata.size = scan.last_offset;
+            active.metadata.checksum = scan.checksum;
+
+            entry.last_id = scan.last_id;
+            entry.record_count = scan.record_count;
+            entry.original_size = scan.last_offset;
+            entry.uncompressed_checksum = scan.checksum;
+
+            // Rebuild rolling checksum state to continue appending.
+            active.data_hasher = Crc64Digest::new();
+            let upto = scan.data_end_offset as usize;
+            if upto > 0 {
+                let _ = active.data_hasher.write(&mmap[..upto]);
+            }
+
+            self.segment_index.update_segment_entry(&entry)?;
+            self.pending_flush_segments
+                .lock()
+                .unwrap()
+                .insert(entry.base_id, entry.clone());
+
+            self.next_record_id
+                .store(scan.last_id.saturating_add(1), Ordering::SeqCst);
+        } else {
+            self.next_record_id
+                .store(metadata.last_id.saturating_add(1), Ordering::SeqCst);
+        }
+
         let shadow = active
             .update_shadow_segment(Arc::clone(&self.local_fs))
             .await?;
         self.cache_segment(entry.base_id, Arc::clone(&shadow))
             .await?;
-
-        self.next_record_id
-            .store(entry.last_id + 1, Ordering::SeqCst);
         self.active_segment = Some(active);
         self.trigger_pre_allocation();
 
@@ -846,7 +996,7 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
             record_count: entry.record_count,
             created_at: entry.created_at,
             size: entry.original_size,
-            checksum: entry.uncompressed_checksum as u32,
+            checksum: entry.uncompressed_checksum,
             compressed: entry.compressed_size.is_some(),
             encrypted: false,
         }
@@ -856,8 +1006,178 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
         SegmentEntry::new_active(
             metadata,
             format!("segment_{}.log", metadata.base_id),
-            metadata.checksum as u64,
+            metadata.checksum,
         )
+    }
+
+    fn scan_active_segment(
+        mmap: &mut MmapMut,
+        base_id: u64,
+        original_size: usize,
+    ) -> AofResult<ScanActiveSegmentResult> {
+        let mut offset = 0usize;
+        let mut digest = Crc64Digest::new();
+        let mut segment_header: Option<SegmentHeader> = None;
+        let mut last_trailer_offset: Option<u64> = None;
+        let mut last_checkpoint_offset: Option<u64> = None;
+
+        if original_size >= SegmentHeader::size() {
+            let header_slice = &mmap[..SegmentHeader::size()];
+            if let Ok(header) = SegmentHeader::from_bytes(header_slice) {
+                if header.verify() {
+                    segment_header = Some(header);
+                    digest.write(header_slice);
+                    offset = SegmentHeader::size();
+                }
+            }
+        }
+
+        let header_size = RecordHeader::size();
+        let trailer_size = RecordTrailer::size();
+        let checkpoint_size = FlushCheckpointStamp::size();
+
+        let mut last_id = base_id.saturating_sub(1);
+        let mut record_count = 0u64;
+        let mut last_data_end = offset as u64;
+
+        while offset + header_size <= original_size {
+            if offset + checkpoint_size <= original_size {
+                let magic = u32::from_le_bytes(
+                    mmap[offset..offset + 4]
+                        .try_into()
+                        .expect("slice length checked"),
+                );
+                if magic == FlushCheckpointStamp::MAGIC {
+                    let stamp_bytes = &mmap[offset..offset + checkpoint_size];
+                    if let Ok(stamp) = FlushCheckpointStamp::from_bytes(stamp_bytes) {
+                        if stamp.verify() {
+                            last_checkpoint_offset = Some(offset as u64);
+                            offset += checkpoint_size;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+
+            let header_bytes = &mmap[offset..offset + header_size];
+            let header = match RecordHeader::from_bytes(header_bytes) {
+                Ok(header) => header,
+                Err(_) => break,
+            };
+
+            if header.size == 0 {
+                break;
+            }
+
+            let data_start = offset + header_size;
+            let data_end = data_start + header.size as usize;
+            if data_end > original_size {
+                break;
+            }
+
+            if data_end + trailer_size > original_size {
+                break;
+            }
+
+            let data = &mmap[data_start..data_end];
+            if !header.verify_checksum(data) {
+                break;
+            }
+
+            let trailer_bytes = &mmap[data_end..data_end + trailer_size];
+            let trailer = match RecordTrailer::from_bytes(trailer_bytes) {
+                Ok(trailer) => trailer,
+                Err(_) => break,
+            };
+
+            let trailer_offset = data_end as u64;
+            let expected_span = match last_trailer_offset {
+                Some(prev) => Some(trailer_offset - prev),
+                None => Some(0),
+            };
+            if !trailer.validate(&header, expected_span) {
+                break;
+            }
+
+            digest.write(header_bytes);
+            digest.write(data);
+            digest.write(trailer_bytes);
+
+            offset = data_end + trailer_size;
+            last_trailer_offset = Some(trailer_offset);
+            last_id = header.id;
+            record_count = record_count.saturating_add(1);
+            last_data_end = offset as u64;
+        }
+
+        if record_count == 0 && segment_header.is_none() {
+            return Self::scan_active_segment_legacy(mmap, base_id, original_size);
+        }
+
+        Ok(ScanActiveSegmentResult {
+            last_id,
+            record_count,
+            last_offset: offset as u64,
+            data_end_offset: last_data_end,
+            checksum: digest.sum64(),
+            last_trailer_offset,
+            last_checkpoint_offset,
+            segment_header,
+        })
+    }
+
+    fn scan_active_segment_legacy(
+        mmap: &mut MmapMut,
+        base_id: u64,
+        original_size: usize,
+    ) -> AofResult<ScanActiveSegmentResult> {
+        let header_size = RecordHeader::size();
+        let mut offset = 0usize;
+        let mut last_id = base_id.saturating_sub(1);
+        let mut record_count = 0u64;
+        let mut digest = Crc64Digest::new();
+
+        while offset + header_size <= original_size {
+            let header_bytes = &mmap[offset..offset + header_size];
+            let header = match RecordHeader::from_bytes(header_bytes) {
+                Ok(header) => header,
+                Err(_) => break,
+            };
+
+            if header.size == 0 {
+                break;
+            }
+
+            let data_start = offset + header_size;
+            let data_end = data_start + header.size as usize;
+            if data_end > original_size {
+                break;
+            }
+
+            let data = &mmap[data_start..data_end];
+            if !header.verify_checksum(data) {
+                break;
+            }
+
+            digest.write(header_bytes);
+            digest.write(data);
+
+            offset = data_end;
+            last_id = header.id;
+            record_count = record_count.saturating_add(1);
+        }
+
+        Ok(ScanActiveSegmentResult {
+            last_id,
+            record_count,
+            last_offset: offset as u64,
+            data_end_offset: offset as u64,
+            checksum: digest.sum64(),
+            last_trailer_offset: None,
+            last_checkpoint_offset: None,
+            segment_header: None,
+        })
     }
 
     fn enqueue_flush_entry(&self, entry: SegmentEntry) {
@@ -892,8 +1212,33 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
         let segment_size = segment.metadata().size as usize;
         let mut offset = 0usize;
         let header_size = RecordHeader::size();
+        let trailer_size = RecordTrailer::size();
+        let checkpoint_size = FlushCheckpointStamp::size();
+        let segment_header_size = SegmentHeader::size();
 
         while offset + header_size <= segment_size {
+            if offset == 0 && segment_size >= segment_header_size {
+                let header_bytes = &data[..segment_header_size];
+                if let Ok(header) = SegmentHeader::from_bytes(header_bytes) {
+                    if header.verify() {
+                        offset = segment_header_size;
+                        continue;
+                    }
+                }
+            }
+
+            if offset + checkpoint_size <= segment_size {
+                let magic = u32::from_le_bytes(
+                    data[offset..offset + 4]
+                        .try_into()
+                        .expect("slice length checked"),
+                );
+                if magic == FlushCheckpointStamp::MAGIC {
+                    offset += checkpoint_size;
+                    continue;
+                }
+            }
+
             let header_bytes = &data[offset..offset + header_size];
             let header = RecordHeader::from_bytes(header_bytes).map_err(|e| {
                 AofError::CorruptedRecord(format!("Failed to deserialize header: {}", e))
@@ -903,7 +1248,7 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
                 return Ok(offset as u64);
             }
 
-            offset += header_size + header.size as usize;
+            offset += header_size + header.size as usize + trailer_size;
         }
 
         Ok(segment_size as u64)
@@ -929,7 +1274,8 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
         let header_bytes = bincode::serialize(&header)
             .map_err(|e| AofError::Serialization(format!("Failed to serialize header: {}", e)))?;
 
-        let total_size = header_bytes.len() + data.len();
+        let trailer_reserved = RecordTrailer::size();
+        let total_size = header_bytes.len() + data.len() + trailer_reserved;
 
         let prepare_result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
@@ -942,30 +1288,115 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
             return Err(err);
         }
 
-        let active_segment = match &mut self.active_segment {
-            Some(active) if active.is_mmap_ready() => active,
-            _ => {
-                self.trigger_pre_allocation();
-                return Err(AofError::WouldBlock(
-                    "No active segment ready for writing".to_string(),
+        let (flush_entry, segment_id, new_record_count, should_pre_allocate) = {
+            let active_segment = match &mut self.active_segment {
+                Some(active) if active.is_mmap_ready() => active,
+                _ => {
+                    self.trigger_pre_allocation();
+                    return Err(AofError::WouldBlock(
+                        "No active segment ready for writing".to_string(),
+                    ));
+                }
+            };
+
+            let record_start = active_segment.current_offset as usize;
+            let data_start = record_start + header_bytes.len();
+            let trailer_offset = data_start + data.len();
+
+            // Prepare trailer
+            let prev_trailer_offset = active_segment.last_trailer_offset;
+            let prev_span = prev_trailer_offset
+                .map(|offset| trailer_offset as u64 - offset)
+                .unwrap_or(0);
+            let trailer = RecordTrailer::new(&header, prev_span);
+            let trailer_bytes = trailer.to_bytes().map_err(|e| {
+                AofError::Serialization(format!("Failed to serialize trailer: {}", e))
+            })?;
+
+            if trailer_bytes.len() != trailer_reserved {
+                return Err(AofError::InternalError(
+                    "Record trailer serialization size mismatch".to_string(),
                 ));
             }
+
+            // Write to mmap
+            active_segment.write_to_mmap(record_start, &header_bytes)?;
+            active_segment.write_to_mmap(data_start, data)?;
+            active_segment.write_to_mmap(trailer_offset, &trailer_bytes)?;
+
+            // Update rolling checksum
+            let header_bytes_file = header_bytes.clone();
+            let data_file = data.to_vec();
+            let trailer_bytes_file = trailer_bytes.clone();
+            let file_handle = &mut active_segment.file;
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let expected_header = header_bytes_file.len();
+                    let written_header = file_handle
+                        .write_at(record_start as u64, &header_bytes_file)
+                        .await?;
+                    if written_header != expected_header {
+                        return Err(AofError::FileSystem(format!(
+                            "Failed to persist record header: wrote {} of {} bytes",
+                            written_header, expected_header
+                        )));
+                    }
+
+                    let written_data = file_handle
+                        .write_at(data_start as u64, &data_file)
+                        .await?;
+                    if written_data != data_file.len() {
+                        return Err(AofError::FileSystem(format!(
+                            "Failed to persist record data: wrote {} of {} bytes",
+                            written_data, data_file.len()
+                        )));
+                    }
+
+                    let written_trailer = file_handle
+                        .write_at(trailer_offset as u64, &trailer_bytes_file)
+                        .await?;
+                    if written_trailer != trailer_bytes_file.len() {
+                        return Err(AofError::FileSystem(format!(
+                            "Failed to persist record trailer: wrote {} of {} bytes",
+                            written_trailer, trailer_bytes_file.len()
+                        )));
+                    }
+
+                    Ok::<(), AofError>(())
+                })
+            })?;
+            let _ = active_segment.data_hasher.write(&header_bytes);
+            let _ = active_segment.data_hasher.write(data);
+            let _ = active_segment.data_hasher.write(&trailer_bytes);
+
+            // Update offsets and metadata
+            active_segment.current_offset = (trailer_offset + trailer_bytes.len()) as u64;
+            active_segment.last_trailer_offset = Some(trailer_offset as u64);
+            active_segment.metadata.last_id = record_id;
+            active_segment.metadata.record_count += 1;
+            active_segment.metadata.size = active_segment.current_offset;
+            active_segment.metadata.checksum = active_segment.data_hasher.sum64();
+
+            let flush_entry = Self::metadata_to_active_entry(&active_segment.metadata);
+            let segment_id = active_segment.metadata.base_id;
+            let new_record_count = active_segment.metadata.record_count;
+            let should_pre_allocate =
+                self.config.pre_allocate_enabled && self.next_segment.is_none() && {
+                    let current_usage = active_segment.current_offset as f32;
+                    let total_capacity = self.config.segment_size as f32;
+                    let usage_percentage = current_usage / total_capacity;
+                    usage_percentage >= self.config.pre_allocate_threshold
+                };
+
+            (
+                flush_entry,
+                segment_id,
+                new_record_count,
+                should_pre_allocate,
+            )
         };
 
-        let current_offset = active_segment.current_offset as usize;
-
-        // Write to mmap
-        active_segment.write_to_mmap(current_offset, &header_bytes)?;
-        active_segment.write_to_mmap(current_offset + header_bytes.len(), data)?;
-
-        // Update metadata
-        active_segment.current_offset += total_size as u64;
-        active_segment.metadata.last_id = record_id;
-        active_segment.metadata.record_count += 1;
-        active_segment.metadata.size = active_segment.current_offset;
-
         // Queue updated metadata for background flush/index persistence
-        let flush_entry = Self::metadata_to_active_entry(&active_segment.metadata);
         self.enqueue_flush_entry(flush_entry);
 
         // Increment unflushed count
@@ -973,19 +1404,6 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
 
         // Record the append with flush controller for metrics
         self.flush_controller.record_append(total_size as u64);
-
-        // Extract notification data while we still have the mutable borrow
-        let segment_id = active_segment.metadata.base_id;
-        let new_record_count = active_segment.metadata.record_count;
-
-        // Check if pre-allocation is needed
-        let should_pre_allocate =
-            self.config.pre_allocate_enabled && self.next_segment.is_none() && {
-                let current_usage = active_segment.current_offset as f32;
-                let total_capacity = self.config.segment_size as f32;
-                let usage_percentage = current_usage / total_capacity;
-                usage_percentage >= self.config.pre_allocate_threshold
-            };
 
         if should_pre_allocate {
             self.trigger_pre_allocation();
@@ -1003,6 +1421,25 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
         self.trigger_reader_notification(segment_id, new_record_count, readers_to_notify);
 
         Ok(record_id)
+    }
+
+    /// Wait for the next record for a tailing reader, automatically handling new segments.
+    pub async fn tail_next_record(&self, reader: &mut Reader<FS>) -> AofResult<Option<Vec<u8>>> {
+        loop {
+            if let Some(record) = reader.read_next_record().await? {
+                return Ok(Some(record));
+            }
+
+            if !reader.is_tailing.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+
+            if self.advance_tail_reader(reader).await? {
+                continue;
+            }
+
+            reader.wait_for_tail_notification().await?;
+        }
     }
 
     /// Check for background task errors that prevent forward progress
@@ -1095,9 +1532,11 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
                 return;
             }
 
+            let window = self.flush_controller.prepare_window();
             let (response_tx, _response_rx) = oneshot::channel();
             let request = FlushRequest {
                 segments,
+                window,
                 response: response_tx,
             };
 
@@ -1159,34 +1598,58 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
     /// Finalize the current active segment and optionally archive
     async fn finalize_active_segment(&mut self) -> AofResult<()> {
         if let Some(mut active) = self.active_segment.take() {
-            // Flush the file
+            let base_id = active.metadata.base_id;
+
+            // Release shadow segment mmaps before truncating the file
+            if let Some(shadow) = active.shadow_segment.take() {
+                drop(shadow);
+            }
+            {
+                let mut cache = self.segment_cache.write().await;
+                cache.remove_segment(base_id);
+            }
+
+            let finalized_at = current_timestamp();
+            let final_file_size = Self::write_finalization_trailers(&mut active, finalized_at)?;
+
             active.flush_mmap()?;
             active.file.flush().await?;
             active.file.sync().await?;
 
-            // Update metadata size and finalization time
-            let mut metadata = active.metadata;
-            metadata.size = active.current_offset;
-            let finalized_at = current_timestamp();
+            let mut metadata = active.metadata.clone();
+            let data_region_len = metadata.size as usize;
+            let uncompressed_checksum = if let Some(ref mmap) = active.write_mmap {
+                let mut digest = Crc64Digest::new();
+                digest.write(&mmap[..data_region_len]);
+                digest.sum64()
+            } else {
+                0
+            };
+            metadata.checksum = uncompressed_checksum;
 
-            // Create segment entry
+            if let Some(mmap) = active.write_mmap.take() {
+                drop(mmap);
+            }
+            active.file.set_size(final_file_size).await?;
+
             let segment_path = format!("segment_{}.log", metadata.base_id);
-            let uncompressed_checksum = 0; // TODO: Calculate checksum
-
             let segment_entry = SegmentEntry::new_finalized(
                 &metadata,
                 segment_path,
+                final_file_size,
                 uncompressed_checksum,
                 finalized_at,
             );
 
-            // Add to segment index
             self.segment_index.add_segment_entry(&segment_entry)?;
+            self.pending_flush_segments
+                .lock()
+                .unwrap()
+                .remove(&segment_entry.base_id);
             self.metrics
                 .segments_finalized
                 .fetch_add(1, Ordering::Relaxed);
 
-            // Check if archiving is needed
             if self.config.archive_enabled {
                 self.check_and_archive_segments().await?;
             }
@@ -1231,9 +1694,14 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
         // Compress data if enabled
         let (archive_data, compressed_size, compressed_checksum) =
             if self.config.archive_compression_level > 0 {
-                // TODO: Implement compression with zstd
-                // For now, store uncompressed
-                (segment_data.clone(), None, None)
+                let compressed =
+                    encode_all(&segment_data[..], self.config.archive_compression_level)
+                        .map_err(|e| AofError::CompressionError(e.to_string()))?;
+                let mut digest = Crc64Digest::new();
+                digest.write(&compressed);
+                let checksum = digest.sum64();
+                let size = compressed.len() as u64;
+                (compressed, Some(size), Some(checksum))
             } else {
                 (segment_data, None, None)
             };
@@ -1272,24 +1740,24 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
     pub async fn flush(&mut self) -> AofResult<()> {
         use std::time::Instant;
 
-        let start_time = Instant::now();
-        let pending_records = self
+        let window = self
             .flush_controller
-            .metrics()
-            .pending_records
-            .load(Ordering::Relaxed);
-        let pending_bytes = self
-            .flush_controller
-            .metrics()
-            .pending_bytes
-            .load(Ordering::Relaxed);
+            .prepare_window_with_start(Instant::now());
 
         let flush_result = async {
-            if let Some(ref mut active) = self.active_segment {
+            let updated_entry = if let Some(ref mut active) = self.active_segment {
+                Self::append_flush_checkpoint_stamp(active).await?;
                 active.flush_mmap()?;
                 active.file.flush().await?;
                 active.file.sync().await?;
                 self.unflushed_count.store(0, Ordering::Relaxed);
+                Some(Self::metadata_to_active_entry(&active.metadata))
+            } else {
+                None
+            };
+
+            if let Some(entry) = updated_entry {
+                self.enqueue_flush_entry(entry);
             }
 
             let flush_entries = self.drain_pending_flush_entries();
@@ -1307,21 +1775,136 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
         }
         .await;
 
-        let latency_us = start_time.elapsed().as_micros() as u64;
-
         match flush_result {
             Ok(()) => {
-                // Record successful flush
-                self.flush_controller
-                    .record_flush(latency_us, pending_records, pending_bytes);
+                self.flush_controller.complete_window_success(&window);
                 Ok(())
             }
             Err(e) => {
-                // Record failed flush
-                self.flush_controller.record_flush_failure(latency_us);
+                self.flush_controller.complete_window_failure(&window);
                 Err(e)
             }
         }
+    }
+
+    async fn append_flush_checkpoint_stamp(active: &mut ActiveSegment<FS>) -> AofResult<()> {
+        if active.metadata.record_count == 0 {
+            return Ok(());
+        }
+
+        let durable_offset = active.current_offset;
+        let stamp = FlushCheckpointStamp::new(
+            durable_offset,
+            active.metadata.last_id,
+            active.data_hasher.sum64(),
+        );
+        let stamp_bytes = stamp
+            .to_bytes()
+            .map_err(|e| AofError::Serialization(format!("Failed to serialize stamp: {}", e)))?;
+
+        if stamp_bytes.len() > active.available_space() {
+            return Err(AofError::SegmentFull(
+                "Insufficient space for flush checkpoint stamp".to_string(),
+            ));
+        }
+
+        active.write_to_mmap(durable_offset as usize, &stamp_bytes)?;
+        let written = active
+            .file
+            .write_at(durable_offset, &stamp_bytes)
+            .await?;
+        println!(
+            "DEBUG: checkpoint stamp file write bytes {} (expected {}) at offset {}",
+            written,
+            stamp_bytes.len(),
+            durable_offset
+        );
+        println!(
+            "DEBUG: stamp bytes {:?}",
+            &stamp_bytes[..std::cmp::min(16, stamp_bytes.len())]
+        );
+        if written != stamp_bytes.len() {
+            return Err(AofError::FileSystem(format!(
+                "Failed to write full checkpoint stamp: wrote {} of {} bytes",
+                written,
+                stamp_bytes.len()
+            )));
+        }
+        active.last_checkpoint_offset = Some(durable_offset);
+        active.current_offset = durable_offset + stamp_bytes.len() as u64;
+
+        Ok(())
+    }
+
+    fn write_finalization_trailers(
+        active: &mut ActiveSegment<FS>,
+        finalized_at: u64,
+    ) -> AofResult<u64> {
+        if active.metadata.record_count == 0 {
+            return Ok(active.current_offset);
+        }
+
+        let metadata_bytes = SegmentMetadataRecord::new(
+            active.metadata.base_id,
+            active.metadata.last_id,
+            active.metadata.record_count,
+            active.metadata.checksum,
+            finalized_at,
+        )
+        .to_bytes()
+        .map_err(|e| AofError::Serialization(format!("Failed to serialize metadata: {}", e)))?;
+
+        if metadata_bytes.len() > active.available_space() {
+            return Err(AofError::SegmentFull(
+                "Insufficient space for segment metadata record".to_string(),
+            ));
+        }
+
+        let metadata_offset = active.current_offset as usize;
+        active.write_to_mmap(metadata_offset, &metadata_bytes)?;
+        active.current_offset += metadata_bytes.len() as u64;
+
+        let footer = SegmentFooter::new(
+            active.current_offset,
+            0,
+            active.metadata.record_count,
+            active.metadata.checksum,
+            0,
+        );
+
+        let footer_bytes = footer
+            .serialize()
+            .map_err(|e| AofError::Serialization(format!("Failed to serialize footer: {}", e)))?;
+
+        if footer_bytes.len() != SegmentFooter::size() {
+            return Err(AofError::CorruptedRecord(format!(
+                "Footer serialized size mismatch ({} != {})",
+                footer_bytes.len(),
+                SegmentFooter::size()
+            )));
+        }
+
+        if !SegmentFooter::deserialize(&footer_bytes)
+            .map(|f| f.verify())
+            .unwrap_or(false)
+        {
+            return Err(AofError::CorruptedRecord(
+                "Footer verification failed before write".to_string(),
+            ));
+        }
+
+        if footer_bytes.len() > active.available_space() {
+            return Err(AofError::SegmentFull(
+                "Insufficient space for segment footer".to_string(),
+            ));
+        }
+
+        let footer_offset = active.current_offset as usize;
+        active.write_to_mmap(footer_offset, &footer_bytes)?;
+        active.current_offset += footer_bytes.len() as u64;
+        active.last_checkpoint_offset = None;
+
+        Ok(active.current_offset)
     }
 
     /// Perform incremental archiving - archive one segment per call
@@ -1366,11 +1949,15 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
     /// Closes the AOF and ensures all data is properly persisted for recovery.
     /// This method should be called before dropping the AOF to ensure proper cleanup.
     pub async fn close(mut self) -> AofResult<()> {
-        // Flush any pending data
+        // Finalize the active segment so metadata/footer land on disk and the index is updated
+        self.finalize_active_segment().await?;
+
+        // Drain any remaining buffered metadata updates after finalization
         self.flush().await?;
 
-        // Mark as closed
-        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Mark as closed to suppress drop warnings
+        self.closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         Ok(())
     }
@@ -1582,7 +2169,7 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
             record_count: entry.record_count,
             created_at: entry.created_at,
             size: entry.original_size,
-            checksum: entry.uncompressed_checksum as u32,
+            checksum: entry.uncompressed_checksum,
             compressed: entry.compressed_size.is_some(),
             encrypted: false, // Encryption not yet implemented
         };
@@ -1656,7 +2243,7 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
             record_count: entry.record_count,
             created_at: entry.created_at,
             size: entry.original_size,
-            checksum: entry.uncompressed_checksum as u32,
+            checksum: entry.uncompressed_checksum,
             compressed: entry.compressed_size.is_some(),
             encrypted: false, // Encryption not yet implemented
         };
@@ -1792,8 +2379,9 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
                 let segment_entry = SegmentEntry::new_finalized(
                     &metadata,
                     segment_path,
-                    finalized_at,
+                    segment.current_offset,
                     uncompressed_checksum,
+                    finalized_at,
                 );
 
                 // Add to segment index
@@ -1831,24 +2419,30 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
     /// Flush task - runs on blocking thread pool
     fn flush_task(shared_state: Arc<SharedAofState<FS, A>>, mut rx: mpsc::Receiver<FlushRequest>) {
         let rt = tokio::runtime::Handle::current();
-        while let Some(request) = rt.block_on(rx.recv()) {
-            let result = rt.block_on(async {
-                // Perform flush operations for segments
-                for segment_entry in &request.segments {
-                    // Update segment index
+        let mut state = FlushTaskState::new();
+        while let Some(mut request) = rt.block_on(rx.recv()) {
+            let window = request.window;
+            let segments_to_queue = std::mem::take(&mut request.segments);
+            state.queue_segments(segments_to_queue);
+            let segments = state.take_segments();
+
+            let process_result = rt.block_on(async {
+                for segment_entry in &segments {
                     shared_state
                         .segment_index
                         .update_segment_entry(segment_entry)?;
                 }
 
-                // Sync the segment index
                 shared_state.segment_index.sync()?;
 
                 Ok::<_, AofError>(())
             });
 
-            match result {
+            match process_result {
                 Ok(()) => {
+                    shared_state
+                        .flush_controller
+                        .complete_window_success(&window);
                     let _ = request.response.send(Ok(()));
                     let _ = rt.block_on(async {
                         let mut errors = shared_state.errors.write().await;
@@ -1856,6 +2450,10 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
                     });
                 }
                 Err(err) => {
+                    shared_state
+                        .flush_controller
+                        .complete_window_failure(&window);
+                    state.restore_segments(segments);
                     let message = err.to_string();
                     let _ = rt.block_on(async {
                         let mut errors = shared_state.errors.write().await;
@@ -2008,6 +2606,38 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> AofMetrics for Aof<F
     }
 }
 
+impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Aof<FS, A> {
+    async fn advance_tail_reader(&self, reader: &mut Reader<FS>) -> AofResult<bool> {
+        let position = reader.position();
+        let current_segment_id = position.segment_id;
+
+        if let Some(entry) = self
+            .segment_index
+            .get_next_segment_after(current_segment_id)?
+        {
+            self.position_reader_in_segment(reader, &entry, None)?;
+            reader.seek_to_start();
+            return Ok(true);
+        }
+
+        if let Some(active) = self.active_segment.as_ref() {
+            if active.metadata.base_id > current_segment_id {
+                if let Some(shadow) = active.get_shadow_segment() {
+                    reader.set_current_segment(Arc::clone(&shadow), active.current_offset);
+                    reader.set_position(SegmentPosition {
+                        segment_id: active.metadata.base_id,
+                        file_offset: active.current_offset,
+                        record_id: active.metadata.last_id,
+                    });
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+}
+
 impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Drop for Aof<FS, A> {
     fn drop(&mut self) {
         // Only warn if AOF was not properly closed
@@ -2019,3 +2649,19 @@ impl<FS: FileSystem + 'static, A: ArchiveStorage + 'static> Drop for Aof<FS, A> 
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

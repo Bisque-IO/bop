@@ -1,11 +1,13 @@
 //! MDBX-based persistent segment index for archive storage
 
-use serde::{Deserialize, Serialize};
+// serde derive not required in this file currently
+use std::mem::transmute;
 use std::path::Path;
 
 use crate::aof::error::{AofError, AofResult};
-use crate::aof::segment_store::SegmentEntry;
-use crate::mdbx::{self, Cursor, DbFlags, Dbi, Env, EnvFlags, PutFlags, Txn, TxnFlags};
+use crate::aof::segment_store::{SegmentEntry, SegmentStatus};
+use crate::mdbx::{self, CopyFlags, Cursor, DbFlags, Dbi, Env, EnvFlags, PutFlags, Txn, TxnFlags};
+use bop_sys as mdbx_sys;
 
 /// MDBX-backed persistent segment index
 pub struct MdbxSegmentIndex {
@@ -14,8 +16,37 @@ pub struct MdbxSegmentIndex {
     id_db: Dbi,
     /// Database for timestamp-based lookups: created_at -> base_id
     time_db: Dbi,
+    /// Database for status lookups: status code -> base_id (dup sort)
+    status_db: Dbi,
     /// Index metadata
     version: u32,
+}
+
+#[inline]
+fn encode_u64(value: u64) -> [u8; 8] {
+    unsafe { transmute::<u64, [u8; 8]>(value) }
+}
+
+#[inline]
+fn decode_u64(bytes: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&bytes[..8]);
+    unsafe { transmute::<[u8; 8], u64>(buf) }
+}
+
+#[inline]
+fn encode_status_key(status: SegmentStatus) -> [u8; 4] {
+    let code = status_to_code(&status);
+    unsafe { transmute::<u32, [u8; 4]>(code) }
+}
+
+#[allow(dead_code)]
+#[inline]
+fn decode_status_key(bytes: &[u8]) -> SegmentStatus {
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&bytes[..4]);
+    let code = unsafe { transmute::<[u8; 4], u32>(buf) };
+    code_to_status(code)
 }
 
 impl MdbxSegmentIndex {
@@ -37,7 +68,7 @@ impl MdbxSegmentIndex {
             .map_err(|e| AofError::IndexError(format!("Failed to set max readers: {}", e)))?;
 
         // Open environment
-        let flags = EnvFlags::COALESCE | EnvFlags::LIFORECLAIM;
+        let flags = EnvFlags::COALESCE | EnvFlags::LIFORECLAIM | EnvFlags::SYNC_DURABLE;
         env.open(path, flags, 0o644)
             .map_err(|e| AofError::IndexError(format!("Failed to open MDBX env: {}", e)))?;
 
@@ -45,11 +76,26 @@ impl MdbxSegmentIndex {
         let txn = Txn::begin(&env, None, TxnFlags::empty())
             .map_err(|e| AofError::IndexError(format!("Failed to begin transaction: {}", e)))?;
 
-        let id_db = Dbi::open(&txn, Some("segments_by_id"), DbFlags::CREATE)
-            .map_err(|e| AofError::IndexError(format!("Failed to open id_db: {}", e)))?;
+        let id_db = Dbi::open(
+            &txn,
+            Some("segments_by_id"),
+            DbFlags::CREATE | DbFlags::INTEGERKEY,
+        )
+        .map_err(|e| AofError::IndexError(format!("Failed to open id_db: {}", e)))?;
 
-        let time_db = Dbi::open(&txn, Some("segments_by_time"), DbFlags::CREATE)
-            .map_err(|e| AofError::IndexError(format!("Failed to open time_db: {}", e)))?;
+        let time_db = Dbi::open(
+            &txn,
+            Some("segments_by_time"),
+            DbFlags::CREATE | DbFlags::INTEGERKEY,
+        )
+        .map_err(|e| AofError::IndexError(format!("Failed to open time_db: {}", e)))?;
+
+        let status_db = Dbi::open(
+            &txn,
+            Some("segments_by_status"),
+            DbFlags::CREATE | DbFlags::DUPSORT | DbFlags::DUPFIXED,
+        )
+        .map_err(|e| AofError::IndexError(format!("Failed to open status_db: {}", e)))?;
 
         txn.commit()
             .map_err(|e| AofError::IndexError(format!("Failed to commit transaction: {}", e)))?;
@@ -58,6 +104,7 @@ impl MdbxSegmentIndex {
             env,
             id_db,
             time_db,
+            status_db,
             version: 1,
         })
     }
@@ -71,12 +118,12 @@ impl MdbxSegmentIndex {
             created_at: metadata.created_at,
             finalized_at: None, // New segments start as not finalized
             archived_at: None,
-            uncompressed_checksum: metadata.checksum as u64,
+            uncompressed_checksum: metadata.checksum,
             compressed_checksum: None,
             original_size: metadata.size,
             compressed_size: None,
             compression_ratio: None,
-            status: crate::aof::segment_store::SegmentStatus::Active,
+            status: SegmentStatus::Active,
             local_path: Some(format!("{}.log", metadata.base_id)),
             archive_key: None,
         };
@@ -85,29 +132,105 @@ impl MdbxSegmentIndex {
 
     /// Add an archive entry to the index
     pub fn add_entry(&mut self, entry: SegmentEntry) -> AofResult<()> {
+        self.store_entry(&entry, true)?;
+        self.version += 1;
+        Ok(())
+    }
+
+    fn store_entry(&self, entry: &SegmentEntry, treat_as_new: bool) -> AofResult<()> {
         let txn = Txn::begin(&self.env, None, TxnFlags::empty())
             .map_err(|e| AofError::IndexError(format!("Failed to begin transaction: {}", e)))?;
 
-        // Serialize entry
-        let entry_bytes = bincode::serialize(&entry)
+        let existing_entry = if treat_as_new {
+            None
+        } else {
+            self.fetch_entry(&txn, entry.base_id)?
+        };
+
+        if let Some(previous) = existing_entry {
+            // Remove previous time mapping if timestamp changed
+            if previous.created_at != entry.created_at {
+                let old_time_key = encode_u64(previous.created_at);
+                let base_bytes = encode_u64(previous.base_id);
+                self.delete_optional(&txn, self.time_db, &old_time_key, Some(&base_bytes))?;
+            }
+
+            // Remove previous status mapping (always remove to avoid duplicates)
+            let prev_status = previous.status;
+            let prev_base_id = previous.base_id;
+            self.remove_status_mapping(&txn, prev_status, prev_base_id)?;
+        }
+
+        // Serialize entry for primary DB
+        let entry_bytes = bincode::serialize(entry)
             .map_err(|e| AofError::Serialization(format!("Failed to serialize entry: {}", e)))?;
 
-        // Store in ID database: base_id -> SegmentEntry
-        let id_key = entry.base_id.to_le_bytes();
+        let id_key = encode_u64(entry.base_id);
         mdbx::put(&txn, self.id_db, &id_key, &entry_bytes, PutFlags::empty())
             .map_err(|e| AofError::IndexError(format!("Failed to put in id_db: {}", e)))?;
 
-        // Store in time database: created_at -> base_id
-        let time_key = entry.created_at.to_le_bytes();
-        let id_bytes = entry.base_id.to_le_bytes();
-        mdbx::put(&txn, self.time_db, &time_key, &id_bytes, PutFlags::empty())
+        let time_key = encode_u64(entry.created_at);
+        let id_value = encode_u64(entry.base_id);
+        mdbx::put(&txn, self.time_db, &time_key, &id_value, PutFlags::empty())
             .map_err(|e| AofError::IndexError(format!("Failed to put in time_db: {}", e)))?;
+
+        self.put_status_mapping(&txn, entry.status.clone(), entry.base_id)?;
 
         txn.commit()
             .map_err(|e| AofError::IndexError(format!("Failed to commit transaction: {}", e)))?;
 
-        self.version += 1;
         Ok(())
+    }
+
+    fn fetch_entry(&self, txn: &Txn<'_>, base_id: u64) -> AofResult<Option<SegmentEntry>> {
+        let key = encode_u64(base_id);
+        let value = mdbx::get(txn, self.id_db, &key)
+            .map_err(|e| AofError::IndexError(format!("Failed to read entry: {}", e)))?;
+        if let Some(bytes) = value {
+            let entry: SegmentEntry = bincode::deserialize(bytes).map_err(|e| {
+                AofError::Serialization(format!("Failed to deserialize entry: {}", e))
+            })?;
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn delete_optional(
+        &self,
+        txn: &Txn<'_>,
+        dbi: Dbi,
+        key: &[u8],
+        value: Option<&[u8]>,
+    ) -> AofResult<()> {
+        match mdbx::del(txn, dbi, key, value) {
+            Ok(()) => Ok(()),
+            Err(err) if err.code() == mdbx_sys::MDBX_error_MDBX_NOTFOUND => Ok(()),
+            Err(err) => Err(AofError::IndexError(format!("Failed to delete entry: {}", err))),
+        }
+    }
+
+    fn put_status_mapping(
+        &self,
+        txn: &Txn<'_>,
+        status: SegmentStatus,
+        base_id: u64,
+    ) -> AofResult<()> {
+        let key = encode_status_key(status);
+        let value = encode_u64(base_id);
+        mdbx::put(txn, self.status_db, &key, &value, PutFlags::empty())
+            .map_err(|e| AofError::IndexError(format!("Failed to update status index: {}", e)))
+    }
+
+    fn remove_status_mapping(
+        &self,
+        txn: &Txn<'_>,
+        status: SegmentStatus,
+        base_id: u64,
+    ) -> AofResult<()> {
+        let key = encode_status_key(status);
+        let value = encode_u64(base_id);
+        self.delete_optional(txn, self.status_db, &key, Some(&value))
     }
 
     /// Remove a segment from the index
@@ -116,7 +239,7 @@ impl MdbxSegmentIndex {
             .map_err(|e| AofError::IndexError(format!("Failed to begin transaction: {}", e)))?;
 
         // First, get the entry to find its timestamp
-        let id_key = base_id.to_le_bytes();
+        let id_key = encode_u64(base_id);
         let entry = if let Some(entry_bytes) = mdbx::get(&txn, self.id_db, &id_key)
             .map_err(|e| AofError::IndexError(format!("Failed to get from id_db: {}", e)))?
         {
@@ -125,14 +248,18 @@ impl MdbxSegmentIndex {
             })?;
 
             // Remove from time database
-            let time_key = entry.created_at.to_le_bytes();
-            mdbx::del(&txn, self.time_db, &time_key, None).map_err(|e| {
-                AofError::IndexError(format!("Failed to delete from time_db: {}", e))
-            })?;
+            let time_key = encode_u64(entry.created_at);
+            let base_bytes = encode_u64(entry.base_id);
+            self.delete_optional(&txn, self.time_db, &time_key, Some(&base_bytes))?;
 
             // Remove from ID database
             mdbx::del(&txn, self.id_db, &id_key, None)
                 .map_err(|e| AofError::IndexError(format!("Failed to delete from id_db: {}", e)))?;
+
+            // Remove status mapping
+            let status = entry.status.clone();
+            let base_id_copy = entry.base_id;
+            self.remove_status_mapping(&txn, status, base_id_copy)?;
 
             Some(entry)
         } else {
@@ -159,13 +286,13 @@ impl MdbxSegmentIndex {
             let mut cursor = Cursor::open(&txn, self.id_db)
                 .map_err(|e| AofError::IndexError(format!("Failed to open cursor: {}", e)))?;
 
-            let target_key = record_id.to_le_bytes();
+            let target_key = encode_u64(record_id);
 
             // Position cursor at the target key or the next smaller key
             match cursor.set_range(&target_key) {
                 Ok(Some((key, value))) => {
                     // Check if this exact key works
-                    let key_id = u64::from_le_bytes(key.try_into().unwrap_or([0; 8]));
+                    let key_id = decode_u64(key);
                     if key_id <= record_id {
                         let entry: SegmentEntry = bincode::deserialize(value).map_err(|e| {
                             AofError::Serialization(format!("Failed to deserialize entry: {}", e))
@@ -179,7 +306,7 @@ impl MdbxSegmentIndex {
                         // Go to previous entry
                         match cursor.prev() {
                             Ok(Some((key, value))) => {
-                                let key_id = u64::from_le_bytes(key.try_into().unwrap_or([0; 8]));
+                                let key_id = decode_u64(key);
                                 if key_id <= record_id {
                                     let entry: SegmentEntry =
                                         bincode::deserialize(value).map_err(|e| {
@@ -205,7 +332,7 @@ impl MdbxSegmentIndex {
                     // No key >= target, check last entry
                     match cursor.last() {
                         Ok(Some((key, value))) => {
-                            let key_id = u64::from_le_bytes(key.try_into().unwrap_or([0; 8]));
+                            let key_id = decode_u64(key);
                             if key_id <= record_id {
                                 let entry: SegmentEntry =
                                     bincode::deserialize(value).map_err(|e| {
@@ -248,12 +375,12 @@ impl MdbxSegmentIndex {
                 .map_err(|e| AofError::IndexError(format!("Failed to open cursor: {}", e)))?;
 
             // Start from first entry and check all entries
-            if let Ok(Some((mut key, mut id_bytes))) = cursor.first() {
+            if let Ok(Some((mut _key, mut id_bytes))) = cursor.first() {
                 loop {
-                    let base_id = u64::from_le_bytes(id_bytes.try_into().unwrap_or([0; 8]));
+                    let base_id = decode_u64(id_bytes);
 
                     // Get the full entry from ID database
-                    let id_key = base_id.to_le_bytes();
+                    let id_key = encode_u64(base_id);
                     if let Ok(Some(entry_bytes)) = mdbx::get(&txn, self.id_db, &id_key) {
                         let entry: SegmentEntry =
                             bincode::deserialize(entry_bytes).map_err(|e| {
@@ -270,7 +397,7 @@ impl MdbxSegmentIndex {
 
                     match cursor.next() {
                         Ok(Some((next_key, next_id_bytes))) => {
-                            key = next_key;
+                            _key = next_key;
                             id_bytes = next_id_bytes;
                         }
                         _ => break,
@@ -296,22 +423,23 @@ impl MdbxSegmentIndex {
             let mut cursor = Cursor::open(&txn, self.id_db)
                 .map_err(|e| AofError::IndexError(format!("Failed to open cursor: {}", e)))?;
 
-            // Iterate from first entry until we reach min_base_id
-            if let Ok(Some((mut key, mut value))) = cursor.first() {
+            // Iterate from first entry until we reach or pass min_base_id
+            if let Ok(Some((mut _key, mut value))) = cursor.first() {
                 loop {
-                    let base_id = u64::from_le_bytes(key.try_into().unwrap_or([0; 8]));
-                    if base_id >= min_base_id {
-                        break;
-                    }
-
                     let entry: SegmentEntry = bincode::deserialize(value).map_err(|e| {
                         AofError::Serialization(format!("Failed to deserialize entry: {}", e))
                     })?;
+
+                    // Stop when we reach a segment with base_id >= min_base_id
+                    if entry.base_id >= min_base_id {
+                        break;
+                    }
+
                     results.push(entry);
 
                     match cursor.next() {
                         Ok(Some((next_key, next_value))) => {
-                            key = next_key;
+                            _key = next_key;
                             value = next_value;
                         }
                         _ => break,
@@ -360,7 +488,7 @@ impl MdbxSegmentIndex {
             let mut cursor = Cursor::open(&txn, self.id_db)
                 .map_err(|e| AofError::IndexError(format!("Failed to open cursor: {}", e)))?;
 
-            if let Ok(Some((mut key, mut value))) = cursor.first() {
+            if let Ok(Some((mut _key, mut value))) = cursor.first() {
                 loop {
                     let entry: SegmentEntry = bincode::deserialize(value).map_err(|e| {
                         AofError::Serialization(format!("Failed to deserialize entry: {}", e))
@@ -375,7 +503,7 @@ impl MdbxSegmentIndex {
 
                     match cursor.next() {
                         Ok(Some((next_key, next_value))) => {
-                            key = next_key;
+                               _key = next_key;
                             value = next_value;
                         }
                         _ => break,
@@ -448,7 +576,7 @@ impl MdbxSegmentIndex {
                     AofError::Serialization(format!("Failed to deserialize entry: {}", e))
                 })?;
 
-                if entry.status == crate::aof::segment_store::SegmentStatus::Active {
+                if entry.status == SegmentStatus::Active {
                     active_segment = Some(entry);
                 } else {
                     // Continue searching for active segment
@@ -458,7 +586,7 @@ impl MdbxSegmentIndex {
                             AofError::Serialization(format!("Failed to deserialize entry: {}", e))
                         })?;
 
-                        if entry.status == crate::aof::segment_store::SegmentStatus::Active {
+                        if entry.status == SegmentStatus::Active {
                             active_segment = Some(entry);
                             break;
                         }
@@ -530,7 +658,7 @@ impl MdbxSegmentIndex {
             let mut cursor = Cursor::open(&txn, self.id_db)
                 .map_err(|e| AofError::IndexError(format!("Failed to open cursor: {}", e)))?;
 
-            if let Ok(Some((mut key, mut value))) = cursor.first() {
+            if let Ok(Some((mut _key, mut value))) = cursor.first() {
                 loop {
                     let entry: SegmentEntry = bincode::deserialize(value).map_err(|e| {
                         AofError::Serialization(format!("Failed to deserialize entry: {}", e))
@@ -539,7 +667,7 @@ impl MdbxSegmentIndex {
 
                     match cursor.next() {
                         Ok(Some((next_key, next_value))) => {
-                            key = next_key;
+                            _key = next_key;
                             value = next_value;
                         }
                         _ => break,
@@ -565,7 +693,7 @@ impl MdbxSegmentIndex {
             AofError::IndexError(format!("Failed to begin read transaction: {}", e))
         })?;
 
-        let id_key = base_id.to_le_bytes();
+        let id_key = encode_u64(base_id);
         let result = if let Some(entry_bytes) = mdbx::get(&txn, self.id_db, &id_key)
             .map_err(|e| AofError::IndexError(format!("Failed to get from id_db: {}", e)))?
         {
@@ -589,7 +717,7 @@ impl MdbxSegmentIndex {
             AofError::IndexError(format!("Failed to begin read transaction: {}", e))
         })?;
 
-        let start_key = (base_id + 1).to_le_bytes();
+        let start_key = encode_u64(base_id + 1);
         let result = {
             let mut cursor = Cursor::open(&txn, self.id_db)
                 .map_err(|e| AofError::IndexError(format!("Failed to open cursor: {}", e)))?;
@@ -612,61 +740,67 @@ impl MdbxSegmentIndex {
         Ok(result)
     }
 
-    /// Update segment status (finalized flag)
-    pub fn update_segment_status(&mut self, base_id: u64, finalized: bool) -> AofResult<()> {
-        let txn = Txn::begin(&self.env, None, TxnFlags::empty())
-            .map_err(|e| AofError::IndexError(format!("Failed to begin transaction: {}", e)))?;
+    /// Retrieve all segments for a given status using the dedicated status index.
+    pub fn get_segments_by_status(&self, status: SegmentStatus) -> AofResult<Vec<SegmentEntry>> {
+        let txn = Txn::begin(&self.env, None, TxnFlags::RDONLY).map_err(|e| {
+            AofError::IndexError(format!("Failed to begin read transaction: {}", e))
+        })?;
 
-        let id_key = base_id.to_le_bytes();
-        if let Some(entry_bytes) = mdbx::get(&txn, self.id_db, &id_key)
-            .map_err(|e| AofError::IndexError(format!("Failed to get from id_db: {}", e)))?
+        let mut results = Vec::new();
         {
-            let mut entry: SegmentEntry = bincode::deserialize(entry_bytes).map_err(|e| {
-                AofError::Serialization(format!("Failed to deserialize entry: {}", e))
-            })?;
+            let mut cursor = Cursor::open(&txn, self.status_db)
+                .map_err(|e| AofError::IndexError(format!("Failed to open status cursor: {}", e)))?;
 
-            if finalized {
-                entry.finalized_at = Some(crate::aof::record::current_timestamp());
-                entry.status = crate::aof::segment_store::SegmentStatus::Finalized;
-            } else {
-                entry.finalized_at = None;
-                entry.status = crate::aof::segment_store::SegmentStatus::Active;
+            if let Some((_key, mut value)) = cursor
+                .seek_key(&encode_status_key(status))
+                .map_err(|e| AofError::IndexError(format!("Failed to seek status cursor: {}", e)))?
+            {
+                loop {
+                    let base_id = decode_u64(value);
+                    if let Some(entry) = self.fetch_entry(&txn, base_id)? {
+                        results.push(entry);
+                    }
+
+                    match cursor.next_dup() {
+                        Ok(Some((_next_key, next_value))) => {
+                            value = next_value;
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            return Err(AofError::IndexError(format!(
+                                "Failed to advance status cursor: {}",
+                                e
+                            )));
+                        }
+                    }
+                }
             }
-
-            let updated_bytes = bincode::serialize(&entry).map_err(|e| {
-                AofError::Serialization(format!("Failed to serialize updated entry: {}", e))
-            })?;
-
-            mdbx::put(&txn, self.id_db, &id_key, &updated_bytes, PutFlags::empty())
-                .map_err(|e| AofError::IndexError(format!("Failed to update in id_db: {}", e)))?;
         }
 
-        txn.commit()
-            .map_err(|e| AofError::IndexError(format!("Failed to commit transaction: {}", e)))?;
+        txn.abort()
+            .map_err(|e| AofError::IndexError(format!("Failed to abort transaction: {}", e)))?;
 
-        self.version += 1;
+        Ok(results)
+    }
+
+    /// Update segment status (finalized flag)
+    pub fn update_segment_status(&mut self, base_id: u64, finalized: bool) -> AofResult<()> {
+        if let Some(mut entry) = self.get_segment(base_id)? {
+            if finalized {
+                let now = crate::aof::record::current_timestamp();
+                entry.finalize(now);
+            } else {
+                entry.finalized_at = None;
+                entry.status = SegmentStatus::Active;
+            }
+            self.update_entry(entry)?;
+        }
         Ok(())
     }
 
     /// Update an existing segment entry
     pub fn update_entry(&mut self, entry: SegmentEntry) -> AofResult<()> {
-        let txn = Txn::begin(&self.env, None, TxnFlags::empty())
-            .map_err(|e| AofError::IndexError(format!("Failed to begin transaction: {}", e)))?;
-
-        // Serialize updated entry
-        let entry_bytes = bincode::serialize(&entry)
-            .map_err(|e| AofError::Serialization(format!("Failed to serialize entry: {}", e)))?;
-
-        // Update in ID database: base_id -> SegmentEntry
-        let id_key = entry.base_id.to_le_bytes();
-        mdbx::put(&txn, self.id_db, &id_key, &entry_bytes, PutFlags::empty())
-            .map_err(|e| AofError::IndexError(format!("Failed to update in id_db: {}", e)))?;
-
-        // Note: We don't update the time database since created_at shouldn't change
-
-        txn.commit()
-            .map_err(|e| AofError::IndexError(format!("Failed to commit transaction: {}", e)))?;
-
+        self.store_entry(&entry, false)?;
         self.version += 1;
         Ok(())
     }
@@ -677,17 +811,7 @@ impl MdbxSegmentIndex {
             "DEBUG: update_segment_tail - base_id={}, last_id={}, size={}",
             base_id, last_id, size
         );
-        let txn = Txn::begin(&self.env, None, TxnFlags::empty())
-            .map_err(|e| AofError::IndexError(format!("Failed to begin transaction: {}", e)))?;
-
-        let id_key = base_id.to_le_bytes();
-        if let Some(entry_bytes) = mdbx::get(&txn, self.id_db, &id_key)
-            .map_err(|e| AofError::IndexError(format!("Failed to get from id_db: {}", e)))?
-        {
-            let mut entry: SegmentEntry = bincode::deserialize(entry_bytes).map_err(|e| {
-                AofError::Serialization(format!("Failed to deserialize entry: {}", e))
-            })?;
-
+        if let Some(mut entry) = self.get_segment(base_id)? {
             println!(
                 "DEBUG: Before update - last_id={}, record_count={}, size={}",
                 entry.last_id, entry.record_count, entry.original_size
@@ -695,7 +819,6 @@ impl MdbxSegmentIndex {
 
             entry.last_id = last_id;
             entry.original_size = size;
-            // Prevent underflow when last_id < base_id (can happen during rapid segment rotation)
             entry.record_count = if last_id >= entry.base_id {
                 last_id - entry.base_id + 1
             } else {
@@ -707,57 +830,29 @@ impl MdbxSegmentIndex {
                 entry.last_id, entry.record_count, entry.original_size
             );
 
-            let updated_bytes = bincode::serialize(&entry).map_err(|e| {
-                AofError::Serialization(format!("Failed to serialize updated entry: {}", e))
-            })?;
+            self.update_entry(entry)?;
 
-            mdbx::put(&txn, self.id_db, &id_key, &updated_bytes, PutFlags::empty())
-                .map_err(|e| AofError::IndexError(format!("Failed to update in id_db: {}", e)))?;
+            // Force sync to disk to ensure data is persisted
+            self.env
+                .sync(true, false)
+                .map_err(|e| AofError::IndexError(format!("Failed to sync database: {}", e)))?;
 
-            println!("DEBUG: Successfully updated segment entry in database");
+            println!("DEBUG: Transaction committed and synced successfully");
         } else {
             println!("DEBUG: No entry found for base_id={}", base_id);
         }
 
-        txn.commit()
-            .map_err(|e| AofError::IndexError(format!("Failed to commit transaction: {}", e)))?;
-
-        // Force sync to disk to ensure data is persisted
-        self.env
-            .sync(true, false)
-            .map_err(|e| AofError::IndexError(format!("Failed to sync database: {}", e)))?;
-
-        println!("DEBUG: Transaction committed and synced successfully");
-        self.version += 1;
         Ok(())
     }
 
     /// Add a segment entry to the index
     pub fn add_segment_entry(&self, entry: &SegmentEntry) -> AofResult<()> {
-        let txn = Txn::begin(&self.env, None, TxnFlags::empty())
-            .map_err(|e| AofError::IndexError(format!("Failed to begin transaction: {}", e)))?;
-
-        let serialized = bincode::serialize(entry)
-            .map_err(|e| AofError::Serialization(format!("Failed to serialize entry: {}", e)))?;
-
-        mdbx::put(
-            &txn,
-            self.id_db,
-            &entry.base_id.to_le_bytes(),
-            &serialized,
-            PutFlags::empty(),
-        )
-        .map_err(|e| AofError::IndexError(format!("Failed to put entry: {}", e)))?;
-
-        txn.commit()
-            .map_err(|e| AofError::IndexError(format!("Failed to commit: {}", e)))?;
-
-        Ok(())
+        self.store_entry(entry, true)
     }
 
     /// Update a segment entry in the index
     pub fn update_segment_entry(&self, entry: &SegmentEntry) -> AofResult<()> {
-        self.add_segment_entry(entry) // Same operation as add
+        self.store_entry(entry, false)
     }
 
     /// Get total segment count
@@ -776,53 +871,118 @@ impl MdbxSegmentIndex {
 
     /// Get segments for archiving (oldest first, up to count)
     pub fn get_segments_for_archiving(&self, count: u64) -> AofResult<Vec<SegmentEntry>> {
-        let txn = Txn::begin(&self.env, None, TxnFlags::RDONLY).map_err(|e| {
-            AofError::IndexError(format!("Failed to begin read transaction: {}", e))
+        let mut segments = self.get_segments_by_status(SegmentStatus::Finalized)?;
+        segments.sort_by_key(|entry| entry.created_at);
+        if segments.len() as u64 > count {
+            segments.truncate(count as usize);
+        }
+        Ok(segments)
+    }
+
+    /// Create a consistent backup of the index file at the specified path.
+    pub fn backup_to_path<P: AsRef<Path>>(&self, dest: P, flags: CopyFlags) -> AofResult<()> {
+        self.env
+            .copy_to_path(dest, flags)
+            .map_err(|e| AofError::IndexError(format!("Failed to backup index: {}", e)))
+    }
+
+    /// Copy the index to an existing file descriptor (useful for streaming backups).
+    pub fn backup_to_fd(&self, fd: mdbx_sys::mdbx_filehandle_t, flags: CopyFlags) -> AofResult<()> {
+        self.env
+            .copy_to_fd(fd, flags)
+            .map_err(|e| AofError::IndexError(format!("Failed to backup index fd: {}", e)))
+    }
+
+    /// Export the complete segment index state as a serialized snapshot for RAFT replication.
+    pub fn export_snapshot(&self) -> AofResult<Vec<u8>> {
+        let segments = self.get_all_segments()?;
+        bincode::serialize(&segments)
+            .map_err(|e| AofError::Serialization(format!("Failed to serialize snapshot: {}", e)))
+    }
+
+    /// Import a serialized snapshot, replacing the current index contents.
+    pub fn import_snapshot(&mut self, snapshot: &[u8]) -> AofResult<()> {
+        let entries: Vec<SegmentEntry> = bincode::deserialize(snapshot).map_err(|e| {
+            AofError::Serialization(format!("Failed to deserialize snapshot: {}", e))
         })?;
 
-        let mut results = Vec::new();
-        let mut cursor = Cursor::open(&txn, self.id_db)
-            .map_err(|e| AofError::IndexError(format!("Failed to open cursor: {}", e)))?;
+        self.clear_database(self.id_db, false)?;
+        self.clear_database(self.time_db, false)?;
+        self.clear_database(self.status_db, true)?;
 
-        if let Ok(Some((_key, mut value))) = cursor.first() {
-            let mut collected = 0;
+        self.version = 1;
+        for entry in entries {
+            self.store_entry(&entry, true)?;
+            self.version += 1;
+        }
+
+        self.env
+            .sync(true, false)
+            .map_err(|e| AofError::IndexError(format!("Failed to sync after snapshot import: {}", e)))?;
+        Ok(())
+    }
+
+    fn clear_database(&self, dbi: Dbi, remove_all_dups: bool) -> AofResult<()> {
+        let txn = Txn::begin(&self.env, None, TxnFlags::empty())
+            .map_err(|e| AofError::IndexError(format!("Failed to begin transaction: {}", e)))?;
+
+        {
+            let mut cursor = Cursor::open(&txn, dbi)
+                .map_err(|e| AofError::IndexError(format!("Failed to open cursor: {}", e)))?;
+
             loop {
-                if collected >= count {
-                    break;
-                }
-
-                let entry: SegmentEntry = bincode::deserialize(value).map_err(|e| {
-                    AofError::Serialization(format!("Failed to deserialize entry: {}", e))
-                })?;
-
-                // Only include finalized segments
-                if entry.finalized_at.is_some() {
-                    results.push(entry);
-                    collected += 1;
-                }
-
-                match cursor.next() {
-                    Ok(Some((_next_key, next_value))) => {
-                        value = next_value;
+                match cursor.first() {
+                    Ok(Some(_)) => {
+                        cursor
+                            .del_current(remove_all_dups)
+                            .map_err(|e| {
+                                AofError::IndexError(format!(
+                                    "Failed to clear database: {}",
+                                    e
+                                ))
+                            })?;
                     }
                     Ok(None) => break,
-                    Err(_) => break,
+                    Err(e) => {
+                        return Err(AofError::IndexError(format!(
+                            "Failed to iterate database during clear: {}",
+                            e
+                        )));
+                    }
                 }
             }
         }
 
-        // Sort by creation time (oldest first)
-        results.sort_by_key(|entry| entry.created_at);
-        Ok(results)
+        txn.commit()
+            .map_err(|e| AofError::IndexError(format!("Failed to commit database clear: {}", e)))
     }
 }
 
 // Note: MDBX environment is automatically closed when dropped
 
+fn status_to_code(status: &SegmentStatus) -> u32 {
+    match status {
+        SegmentStatus::Active => 0,
+        SegmentStatus::Finalized => 1,
+        SegmentStatus::ArchivedCached => 2,
+        SegmentStatus::ArchivedRemote => 3,
+    }
+}
+
+fn code_to_status(code: u32) -> SegmentStatus {
+    match code {
+        0 => SegmentStatus::Active,
+        1 => SegmentStatus::Finalized,
+        2 => SegmentStatus::ArchivedCached,
+        3 => SegmentStatus::ArchivedRemote,
+        _ => SegmentStatus::Active,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aof::record::{SegmentMetadata, current_timestamp};
+    use crate::aof::record::SegmentMetadata;
     use crate::aof::segment_store::SegmentStatus;
     use tempfile::tempdir;
 
@@ -1041,6 +1201,33 @@ mod tests {
     }
 
     #[test]
+    fn test_update_segment_entry_refreshes_timestamp_index() {
+        let temp_dir = tempdir().unwrap();
+        let index_path = temp_dir.path().join("test_index");
+        let mut index = MdbxSegmentIndex::open(&index_path).unwrap();
+
+        let mut entry = create_test_entry(10, 20, 1_000);
+        index.add_entry(entry.clone()).unwrap();
+
+        let initial = index.find_segments_for_timestamp(1_500).unwrap();
+        assert_eq!(initial.len(), 1);
+
+        entry.created_at = 4_000;
+        index.update_segment_entry(&entry).unwrap();
+
+        let old_results = index.find_segments_for_timestamp(2_000).unwrap();
+        assert!(
+            old_results.is_empty(),
+            "timestamp index should reflect updated created_at"
+        );
+
+        let new_results = index.find_segments_for_timestamp(4_500).unwrap();
+        assert_eq!(new_results.len(), 1);
+        assert_eq!(new_results[0].base_id, entry.base_id);
+        assert_eq!(new_results[0].created_at, 4_000);
+    }
+
+    #[test]
     fn test_mdbx_get_segments_before() {
         let temp_dir = tempdir().unwrap();
         let index_path = temp_dir.path().join("test_index");
@@ -1141,6 +1328,72 @@ mod tests {
 
         assert_eq!(found1.base_id, 1);
         assert_eq!(found2.base_id, 51);
+    }
+
+    #[test]
+    fn test_mdbx_status_index_lookup() {
+        let temp_dir = tempdir().unwrap();
+        let index_path = temp_dir.path().join("status_index");
+        let mut index = MdbxSegmentIndex::open(&index_path).unwrap();
+
+        let active_entry = create_test_entry(1, 50, 1000);
+        let mut finalized_entry = create_test_entry(51, 100, 1500);
+        finalized_entry.finalize(2000);
+
+        let mut archived_entry = create_test_entry(101, 150, 2500);
+        archived_entry.finalize(2800);
+        archived_entry.archive(
+            "segment_101.zst".to_string(),
+            3000,
+            Some(512),
+            Some(0xAA55AA55),
+        );
+
+        index.add_entry(active_entry.clone()).unwrap();
+        index.add_entry(finalized_entry.clone()).unwrap();
+        index.add_entry(archived_entry.clone()).unwrap();
+
+        let active_segments = index.get_segments_by_status(SegmentStatus::Active).unwrap();
+        assert_eq!(active_segments.len(), 1);
+        assert_eq!(active_segments[0].base_id, active_entry.base_id);
+
+        let finalized_segments = index.get_segments_by_status(SegmentStatus::Finalized).unwrap();
+        assert_eq!(finalized_segments.len(), 1);
+        assert_eq!(finalized_segments[0].base_id, finalized_entry.base_id);
+
+        let archived_segments = index
+            .get_segments_by_status(SegmentStatus::ArchivedRemote)
+            .unwrap();
+        assert_eq!(archived_segments.len(), 1);
+        assert_eq!(archived_segments[0].base_id, archived_entry.base_id);
+    }
+
+    #[test]
+    fn test_mdbx_snapshot_roundtrip() {
+        let temp_dir = tempdir().unwrap();
+        let index_path = temp_dir.path().join("primary.db");
+        let mut index = MdbxSegmentIndex::open(&index_path).unwrap();
+
+        let entries = vec![
+            create_test_entry(1, 50, 1000),
+            create_test_entry(51, 100, 1500),
+        ];
+
+        for entry in &entries {
+            index.add_entry(entry.clone()).unwrap();
+        }
+
+        let snapshot = index.export_snapshot().unwrap();
+
+        let replica_path = temp_dir.path().join("replica.db");
+        let mut replica = MdbxSegmentIndex::open(&replica_path).unwrap();
+        replica.import_snapshot(&snapshot).unwrap();
+
+        assert_eq!(replica.len().unwrap(), entries.len());
+        let restored = replica.get_all_segments().unwrap();
+        assert_eq!(restored.len(), entries.len());
+        assert_eq!(restored[0].base_id, 1);
+        assert_eq!(restored[1].base_id, 51);
     }
 
     #[test]

@@ -1,3 +1,7 @@
+#include <stddef.h>
+#include <stdbool.h>
+#include "../../lib/src/uws.h"
+#define uws_ws_send_status enum uws_ws_send_status
 // Minimal umbrella header for bindgen.
 // Adjust includes to the exact C-compatible headers you want exposed.
 // The build script adds the project include path: ../../lib/src

@@ -2,6 +2,7 @@ use crossbeam::queue::SegQueue;
 use hdrhistogram::Histogram;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::aof::record::{FlushStrategy, current_timestamp};
 
@@ -161,9 +162,8 @@ impl FlushControllerMetrics {
                 .store(bytes_flushed / records_flushed, Ordering::Relaxed);
         }
 
-        // Reset pending counters
-        self.pending_records.store(0, Ordering::Relaxed);
-        self.pending_bytes.store(0, Ordering::Relaxed);
+        Self::decrement_pending(&self.pending_records, records_flushed);
+        Self::decrement_pending(&self.pending_bytes, bytes_flushed);
     }
 
     /// Record a failed flush operation
@@ -239,6 +239,21 @@ impl FlushControllerMetrics {
         }
         total_time / total_flushes
     }
+
+    fn decrement_pending(counter: &AtomicU64, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            let new = current.saturating_sub(amount);
+            match counter.compare_exchange(current, new, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
 }
 
 /// Types of flush operations for metrics tracking
@@ -247,6 +262,14 @@ pub enum FlushType {
     Forced,   // Manually triggered flush
     Periodic, // Time-based flush
     Batched,  // Batch size threshold flush
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FlushWindow {
+    pub start_time: Instant,
+    pub flush_type: FlushType,
+    pub records: u64,
+    pub bytes: u64,
 }
 
 /// Enhanced flush control with comprehensive metrics
@@ -333,15 +356,107 @@ impl FlushController {
         self.metrics.record_append(record_size);
     }
 
-    pub fn record_flush(&self, latency_us: u64, records_flushed: u64, bytes_flushed: u64) {
-        let flush_type = self.flush_type();
+    pub fn prepare_window_with_start(&self, start: Instant) -> FlushWindow {
+        FlushWindow {
+            start_time: start,
+            flush_type: self.flush_type(),
+            records: self.metrics.pending_records.load(Ordering::Acquire),
+            bytes: self.metrics.pending_bytes.load(Ordering::Acquire),
+        }
+    }
+
+    pub fn prepare_window(&self) -> FlushWindow {
+        self.prepare_window_with_start(Instant::now())
+    }
+
+    pub fn complete_window_success(&self, window: &FlushWindow) {
+        let latency_us = window.start_time.elapsed().as_micros() as u64;
+        self.record_flush(window.flush_type, latency_us, window.records, window.bytes);
+    }
+
+    pub fn complete_window_failure(&self, window: &FlushWindow) {
+        let latency_us = window.start_time.elapsed().as_micros() as u64;
+        self.record_flush_failure_with_type(window.flush_type, latency_us);
+    }
+
+    pub fn record_flush(
+        &self,
+        flush_type: FlushType,
+        latency_us: u64,
+        records_flushed: u64,
+        bytes_flushed: u64,
+    ) {
         self.metrics
             .record_flush(latency_us, records_flushed, bytes_flushed, flush_type);
         self.last_flush
             .store(current_timestamp(), Ordering::Relaxed);
     }
 
-    pub fn record_flush_failure(&self, latency_us: u64) {
+    pub fn record_flush_failure_with_type(&self, flush_type: FlushType, latency_us: u64) {
         self.metrics.record_flush_failure(latency_us);
+        if matches!(flush_type, FlushType::Forced) {
+            self.last_flush
+                .store(current_timestamp(), Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_flush_failure(&self, latency_us: u64) {
+        self.record_flush_failure_with_type(FlushType::Forced, latency_us);
+    }
+}
+
+impl Clone for FlushController {
+    fn clone(&self) -> Self {
+        Self {
+            strategy: self.strategy.clone(),
+            last_flush: Arc::clone(&self.last_flush),
+            metrics: Arc::clone(&self.metrics),
+            flush_queue: Arc::clone(&self.flush_queue),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn flush_window_success_updates_metrics() {
+        let controller = FlushController::new(FlushStrategy::Batched(1));
+        controller.record_append(128);
+        let window = controller.prepare_window_with_start(Instant::now());
+
+        controller.complete_window_success(&window);
+
+        let metrics = controller.metrics();
+        assert_eq!(metrics.pending_records.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.pending_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.successful_flushes.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics.total_records_flushed.load(Ordering::Relaxed),
+            window.records
+        );
+        assert_eq!(
+            metrics.total_bytes_flushed.load(Ordering::Relaxed),
+            window.bytes
+        );
+    }
+
+    #[test]
+    fn flush_window_failure_preserves_pending_counts() {
+        let controller = FlushController::new(FlushStrategy::Sync);
+        controller.record_append(256);
+        let window = controller.prepare_window_with_start(Instant::now());
+
+        controller.complete_window_failure(&window);
+
+        let metrics = controller.metrics();
+        assert_eq!(metrics.failed_flushes.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            metrics.pending_records.load(Ordering::Relaxed),
+            window.records
+        );
+        assert_eq!(metrics.pending_bytes.load(Ordering::Relaxed), window.bytes);
     }
 }
