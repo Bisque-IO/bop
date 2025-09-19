@@ -2,8 +2,39 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 use std::path::PathBuf;
 
-const DEFAULT_SEGMENT_MAX_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
-const DEFAULT_SEGMENT_TARGET_BYTES: u64 = 224 * 1024 * 1024; // 224 MiB
+const SEGMENT_SIZE_MIN_LIMIT: u64 = 64 * 1024; // 64 KiB
+const SEGMENT_SIZE_MAX_LIMIT: u64 = u32::MAX as u64; // ~4 GiB
+const DEFAULT_SEGMENT_MIN_BYTES: u64 = SEGMENT_SIZE_MIN_LIMIT;
+const DEFAULT_SEGMENT_MAX_BYTES: u64 = SEGMENT_SIZE_MIN_LIMIT;
+const DEFAULT_SEGMENT_TARGET_BYTES: u64 = SEGMENT_SIZE_MIN_LIMIT;
+
+#[inline]
+fn floor_power_of_two(value: u64) -> u64 {
+    if value == 0 {
+        0
+    } else {
+        let shift = 63_u32 - value.leading_zeros();
+        1_u64 << shift
+    }
+}
+
+#[inline]
+fn clamp_power_of_two(value: u64, min: u64, max: u64) -> u64 {
+    let clamped = value.clamp(min, max);
+    if clamped.is_power_of_two() {
+        return clamped;
+    }
+
+    let lower = floor_power_of_two(clamped).max(min);
+    let upper = (lower << 1).min(max).max(min);
+
+    if clamped - lower <= upper.saturating_sub(clamped) {
+        lower
+    } else {
+        upper
+    }
+}
+
 const DEFAULT_MAX_UNFLUSHED_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 const DEFAULT_FLUSH_WATERMARK_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB
 const DEFAULT_FLUSH_INTERVAL_MS: u64 = 5; // 5 milliseconds
@@ -30,6 +61,11 @@ impl SegmentId {
     #[inline]
     pub const fn as_u32(self) -> u32 {
         self.0 as u32
+    }
+
+    #[inline]
+    pub const fn next(self) -> Self {
+        Self(self.0 + 1)
     }
 }
 
@@ -73,6 +109,21 @@ impl RecordId {
 
     #[inline]
     pub const fn as_u32(self) -> u32 {
+        self.0 as u32
+    }
+
+    #[inline]
+    pub const fn from_parts(segment_index: u32, segment_offset: u32) -> Self {
+        Self(((segment_index as u64) << 32) | segment_offset as u64)
+    }
+
+    #[inline]
+    pub const fn segment_index(self) -> u32 {
+        (self.0 >> 32) as u32
+    }
+
+    #[inline]
+    pub const fn segment_offset(self) -> u32 {
         self.0 as u32
     }
 }
@@ -186,7 +237,9 @@ impl Default for FlushConfig {
 pub struct AofConfig {
     /// Root directory that contains metadata/ and segments/ subdirectories.
     pub root_dir: PathBuf,
-    /// Hard ceiling for a single segment file (bytes).
+    /// Lower bound for dynamically sized segments (bytes).
+    pub segment_min_bytes: u64,
+    /// Upper bound for a single segment file (bytes).
     pub segment_max_bytes: u64,
     /// Soft target for rollover before reaching `segment_max_bytes`.
     pub segment_target_bytes: u64,
@@ -210,6 +263,7 @@ impl Default for AofConfig {
     fn default() -> Self {
         Self {
             root_dir: PathBuf::from("./data/aof"),
+            segment_min_bytes: DEFAULT_SEGMENT_MIN_BYTES,
             segment_max_bytes: DEFAULT_SEGMENT_MAX_BYTES,
             segment_target_bytes: DEFAULT_SEGMENT_TARGET_BYTES,
             preallocate_segments: DEFAULT_PREALLOCATE_SEGMENTS,
@@ -224,11 +278,40 @@ impl Default for AofConfig {
 }
 
 impl AofConfig {
-    /// Returns a copy of the configuration with `segment_target_bytes` clamped to `segment_max_bytes`.
+    /// Returns a copy of the configuration with segment sizing rounded into the configured power-of-two window.
     pub fn normalized(mut self) -> Self {
-        if self.segment_target_bytes > self.segment_max_bytes {
-            self.segment_target_bytes = self.segment_max_bytes;
+        let min_raw = if self.segment_min_bytes == 0 {
+            DEFAULT_SEGMENT_MIN_BYTES
+        } else {
+            self.segment_min_bytes
+        };
+        self.segment_min_bytes =
+            clamp_power_of_two(min_raw, SEGMENT_SIZE_MIN_LIMIT, SEGMENT_SIZE_MAX_LIMIT);
+
+        let max_raw = if self.segment_max_bytes == 0 {
+            DEFAULT_SEGMENT_MAX_BYTES
+        } else {
+            self.segment_max_bytes
+        };
+        self.segment_max_bytes =
+            clamp_power_of_two(max_raw, self.segment_min_bytes, SEGMENT_SIZE_MAX_LIMIT);
+
+        if self.segment_max_bytes < self.segment_min_bytes {
+            self.segment_max_bytes = self.segment_min_bytes;
         }
+
+        let target_raw = if self.segment_target_bytes == 0 {
+            self.segment_min_bytes
+        } else {
+            self.segment_target_bytes
+        };
+        self.segment_target_bytes =
+            clamp_power_of_two(target_raw, self.segment_min_bytes, self.segment_max_bytes);
+
+        if self.preallocate_segments == 0 {
+            self.preallocate_segments = 1;
+        }
+
         self
     }
 }
@@ -237,8 +320,9 @@ impl Display for AofConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "AofConfig(root_dir={:?}, segment_max_bytes={}, segment_target_bytes={}, preallocate_segments={}, id_strategy={:?}, compression={:?}, retention={:?}, compaction={:?}, flush_watermark_bytes={}, flush_interval_ms={}, max_unflushed_bytes={}, enable_sparse_index={})",
+            "AofConfig(root_dir={:?}, segment_min_bytes={}, segment_max_bytes={}, segment_target_bytes={}, preallocate_segments={}, id_strategy={:?}, compression={:?}, retention={:?}, compaction={:?}, flush_watermark_bytes={}, flush_interval_ms={}, max_unflushed_bytes={}, enable_sparse_index={})",
             self.root_dir,
+            self.segment_min_bytes,
             self.segment_max_bytes,
             self.segment_target_bytes,
             self.preallocate_segments,
@@ -261,8 +345,29 @@ mod tests {
     #[test]
     fn defaults_are_reasonable() {
         let cfg = AofConfig::default();
+        assert!(cfg.segment_min_bytes.is_power_of_two());
+        assert!(cfg.segment_max_bytes.is_power_of_two());
+        assert!(cfg.segment_target_bytes.is_power_of_two());
+        assert!(cfg.segment_min_bytes >= SEGMENT_SIZE_MIN_LIMIT);
+        assert!(cfg.segment_max_bytes <= SEGMENT_SIZE_MAX_LIMIT);
+        assert!(cfg.segment_min_bytes <= cfg.segment_target_bytes);
         assert!(cfg.segment_target_bytes <= cfg.segment_max_bytes);
         assert!(cfg.flush.max_unflushed_bytes >= cfg.flush.flush_watermark_bytes);
+    }
+
+    #[test]
+    fn normalized_clamps_segment_bounds() {
+        let cfg = AofConfig {
+            segment_min_bytes: 10 * 1024 * 1024,
+            segment_max_bytes: 3 * 1024 * 1024 * 1024,
+            segment_target_bytes: 123 * 1024 * 1024,
+            ..AofConfig::default()
+        }
+        .normalized();
+
+        assert_eq!(cfg.segment_min_bytes, 8 * 1024 * 1024);
+        assert_eq!(cfg.segment_max_bytes, SEGMENT_SIZE_MAX_LIMIT);
+        assert_eq!(cfg.segment_target_bytes, 128 * 1024 * 1024);
     }
 
     #[test]

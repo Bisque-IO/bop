@@ -42,6 +42,9 @@ tempfile = "3.8"
 thiserror = "1.0"
 zstd = "0.13"
 
+arc-swap = "1.7"
+parking_lot = "0.12"
+
 # Async runtime
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -109,3 +112,4 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+

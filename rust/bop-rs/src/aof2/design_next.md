@@ -87,48 +87,51 @@
 ## 4. Core Components
 ### 4.1 `AofManager`
 - Owns the shared `Arc<Runtime>` and coordinates background workers for flush, seal, and retention tasks.
-- Tracks active maintenance jobs per segment in a `DashMap` keyed by `SegmentId`.
-- Provides a command queue used by `Aof` instances to request fsync, rollover, and archival work.
+- Tracks active maintenance jobs via `SegmentFlushState` handles contributed by every `Aof`; a concurrent registry lets the manager service many streams in parallel.
+- Uses lock-free command queues so enqueue/dequeue never contend with appenders; commands carry `Arc<SegmentFlushState>` instances or archival directives and are processed on a dedicated worker pool.
+- Emits lightweight notifications when flushes or seals complete so individual `Aof` instances can release backpressure or advance to the next segment.
 - Enforces the "two unfinalized segments" rule by delaying new allocations when finalization of the previous tail has not completed.
 
 ### 4.2 `Aof`
 - Represents one logical append-only stream backed solely by the `segments/` directory under its configured root.
-- Holds runtime configuration (`AofConfig`) and mutable state guarded by a `Mutex`: ordered segments, the active tail, `next_segment_index`, `next_offset`, and `record_count`.
-- `ensure_active_segment` creates a new segment by calling `Segment::create_active` with the current cumulative counters and a size chosen within the configured range.
-- All durable metadata lives in memory while the process runs; on restart it is reconstructed by scanning segment headers.
+- Splits its internal state into two tiers:
+  * **Hot append state** stored in atomics (`tail_ptr`, `next_offset`, `record_count`, backpressure gauges) that can be read/written without locking.
+  * **Management state** (pending finalisations, preallocation queue, recovery metadata) protected by an async-aware mutex so background workers can coordinate without blocking appenders.
+- Provides `append_record` (non-blocking) and `append_record_with_timeout` which delegates to `wait_for_writable_segment(timeout)` when the tail is missing or backpressure requires waiting.
+- On restart it reconstructs the hot state by scanning segment headers/footers using the recovery helpers introduced in this design.
 
 ### 4.3 `Segment`
-- Wraps a memory-mapped file and exposes `create_active`, `append_record`, `mark_durable`, and pending `seal` APIs.
-- Maintains atomic counters for bytes written, durable bytes, record count, and timestamps so multiple subsystems can observe progress without locks.
-- Lazily emits the segment header the first time `append_record` runs, ensuring the base timestamp reflects the first payload.
+- Wraps a memory-mapped file and exposes `create_active`, `append_record`, `mark_durable`, `seal`, `load_header`, and `scan_tail`.
+- Maintains atomic counters so multiple subsystems can observe progress without locks; sealing verifies durability and writes the footer at the reserved tail slot.
+- `Segment::load_header` and `Segment::scan_tail` feed recovery with header/footer metadata and per-record checksums, ensuring manifest-free bootstrap.
 - Returns a `SegmentAppendResult` containing the segment-relative offset, the cumulative byte position, and an `is_full` flag used to trigger rollover.
-- Future work will add footer writing and read-only remapping once a segment is sealed.
 
 ### 4.4 `Layout`
 - Encapsulates directory handling, including parsing and formatting segment filenames.
 - Creates temp files through `TempFileGuard` so sealing can write footers to a temporary copy and atomically persist the result.
 
 ## 5. Concurrency and Synchronization
-- A single writer holds the `AofState` lock while selecting or rolling segments; actual payload writes are lock-free after the reservation.
-- `Segment::append_record` uses atomics for reservation (`size.fetch_update`) and for state tracking (`header_written`, `record_count`, `last_timestamp`).
-- Readers share `Arc<Segment>` handles; finalized segments are mapped read-only so random access requires no coordination with the writer.
-- Manager commands execute on dedicated threads or blocking tasks to keep async callers from paying fsync latency.
-- The writer may have at most two segments without confirmed footers: the current active segment and the segment that just sealed. Allocation of another segment waits for the older pending footer to be persisted.
+- Append threads interact solely with lock-free hot-path state: atomics hold the active tail pointer, `next_offset`, logical record count, and backpressure gauges. `Segment::append_record` never touches the management mutex.
+- Management tasks (pending finalisations, preallocated segments, recovery metadata) live behind a separate async-aware mutex. Background workers operate on this lock without affecting append throughput.
+- `wait_for_writable_segment(timeout)` bridges the two domains. It first checks the atomic tail; only if no writable handle exists does it briefly acquire the management lock to trigger allocation or wait for a flush. When the timeout expires it returns `AofError::WouldBlock` instead of blocking the caller.
+- Backpressure bookkeeping is entirely atomic. Exceeding thresholds flips a flag that causes `append_record` to fail fast with `WouldBlock`, leaving higher layers to decide when to retry or wait.
+- Manager commands run on dedicated threads, working directly with `SegmentFlushState` handles so fsync and allocation latency never block appenders.
+- Readers continue to share `Arc<Segment>` handles; finalized segments are mapped read-only so random access requires no coordination with the writer.
 
 ## 6. Append Pipeline
-1. `Aof::append_record(payload)` validates the payload and captures the current timestamp.
-2. With the state lock held, `ensure_active_segment` either reuses the existing tail or allocates a new segment using cumulative counters and the dynamic size selector.
-3. The append loop calls `Segment::append_record`, which writes the header on first use, copies the record header and payload into the mmap, and returns the previous offset.
-4. `Aof` converts the returned offset into a logical id using `RecordId::from_parts(segment_index, segment_offset)`.
-5. State counters (`next_offset`, `record_count`) update atomically. If the segment filled, the tail is cleared so the next loop iteration allocates a new segment.
-6. Before activating a second successor segment, the runtime waits for the prior segment’s footer write to complete to honour the two-unfinalized rule.
-7. The caller receives the `RecordId` once bytes are copied into the memory map; durability is handled asynchronously via flush commands.
+1. `Aof::append_record(payload)` validates the payload and reads the current tail atomically.
+2. If no writable tail exists, it returns `AofError::WouldBlock`; callers that need blocking semantics invoke `wait_for_writable_segment(timeout)` to drive allocation or wait within the provided deadline.
+3. Once a writable segment handle is available, the append loop writes through `Segment::append_record`, which updates atomics but never touches the management mutex.
+4. `RecordId` values are synthesised from the segment index and returned offset and handed back immediately.
+5. When a segment reports `is_full`, the handle enqueues its `SegmentFlushState` for the manager and clears the hot tail pointer; the management lock is touched only during this enqueue.
+6. If atomic backpressure gauges indicate thresholds were exceeded, `append_record` fails fast with `WouldBlock`, leaving decisions about waiting or retrying to the caller.
+7. Durability work happens on the background queue; appenders never wait on a flush just to progress.
 
 ## 7. Flush and Durability
-- Flush jobs run per segment and advance `durable_size` via `Segment::mark_durable`.
-- `FlushConfig` thresholds (watermark bytes and interval) determine when the manager schedules fsync for the active segment.
-- Sealing forces a final flush, writes the footer at the reserved tail location, remaps the file read-only, and notifies waiting readers.
-- `Aof::flush(record_id)` (future work) will translate the id into a byte boundary and await `durable_size >= offset`.
+- Each segment exposes a `SegmentFlushState` describing its durability goal and providing async notifiers. The `AofManager` polls these states concurrently without touching the append lock.
+- `FlushConfig` thresholds still determine when to enqueue a flush, but enqueues happen via lock-free command queues so appenders never contend with background work.
+- Sealing consumes a flush-state handle: once durable bytes reach the logical size, `Segment::seal` writes the footer, marks the state finalized, and the manager moves on to the next segment.
+- `Aof::flush(record_id)` (future work) will map the record to its `SegmentFlushState` and await its notifier instead of blocking on a global mutex.
 
 ## 8. Segment Lifecycle
 1. **Allocation**: preallocate a zeroed file under `segments/` using a power-of-two size within the configured 64 MiB–1 GiB window. No header is emitted yet.
@@ -166,9 +169,9 @@
 
 ## 13. Configuration Surface (`AofConfig`)
 - `root_dir`: directory containing `segments/` and `archive/`.
-- `segment_min_bytes`: lower bound for dynamically sized segments (default 64 MiB, enforced power-of-two).
-- `segment_max_bytes`: upper bound for segment preallocation (default 1 GiB, enforced power-of-two).
-- `segment_target_bytes`: soft rollover point; it is clamped to the active segment size and may slide within the configured range based on runtime heuristics.
+- `segment_min_bytes`: lower bound for dynamically sized segments (default 64 KiB, enforced power-of-two).
+- `segment_max_bytes`: upper bound for segment preallocation (default ~4 GiB, enforced power-of-two).
+- `segment_target_bytes`: soft rollover point; it is clamped to the active segment size and may slide within the configured range based on runtime heuristics (defaults to 64 KiB).
 - `preallocate_segments`: number of spare segments to create ahead of time (respected by the two-unfinalized constraint).
 - `id_strategy`: strategy for generating ids (currently the packed `{segment, offset}` form).
 - `compression`: optional compression mode applied during sealing (future enhancement).

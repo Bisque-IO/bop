@@ -1,16 +1,434 @@
+use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crossbeam::channel::{Receiver, Sender, TrySendError, unbounded};
 use tokio::runtime::Runtime;
+use tokio::sync::Notify;
 
+use super::config::SegmentId;
+use super::error::{AofError, AofResult};
+use super::segment::Segment;
+
+pub enum FlushCommand {
+    RegisterSegment { segment: Arc<Segment> },
+    Shutdown,
+}
+
+pub struct SegmentFlushState {
+    segment_id: SegmentId,
+    requested_bytes: AtomicU32,
+    durable_bytes: AtomicU32,
+    notify: Notify,
+    in_flight: AtomicBool,
+    last_flush_millis: AtomicU64,
+}
+
+impl SegmentFlushState {
+    pub fn new(segment_id: SegmentId) -> Arc<Self> {
+        Arc::new(Self {
+            segment_id,
+            requested_bytes: AtomicU32::new(0),
+            durable_bytes: AtomicU32::new(0),
+            notify: Notify::new(),
+            in_flight: AtomicBool::new(false),
+            last_flush_millis: AtomicU64::new(now_millis()),
+        })
+    }
+
+    pub fn with_progress(segment_id: SegmentId, requested: u32, durable: u32) -> Arc<Self> {
+        Arc::new(Self {
+            segment_id,
+            requested_bytes: AtomicU32::new(requested),
+            durable_bytes: AtomicU32::new(durable.min(requested)),
+            notify: Notify::new(),
+            in_flight: AtomicBool::new(false),
+            last_flush_millis: AtomicU64::new(now_millis()),
+        })
+    }
+
+    #[inline]
+    pub fn segment_id(&self) -> SegmentId {
+        self.segment_id
+    }
+
+    #[inline]
+    pub fn requested_bytes(&self) -> u32 {
+        self.requested_bytes.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn durable_bytes(&self) -> u32 {
+        self.durable_bytes.load(Ordering::Acquire)
+    }
+
+    pub fn request_flush(&self, bytes: u32) {
+        store_max(&self.requested_bytes, bytes);
+        if self.durable_bytes.load(Ordering::Acquire) >= bytes {
+            self.notify.notify_waiters();
+        }
+    }
+
+    pub fn mark_durable(&self, bytes: u32) {
+        let previous = store_max(&self.durable_bytes, bytes);
+        if previous < bytes {
+            self.last_flush_millis
+                .store(now_millis(), Ordering::Release);
+            self.notify.notify_waiters();
+        }
+    }
+
+    pub async fn wait_for(&self, target_bytes: u32) {
+        loop {
+            if self.durable_bytes.load(Ordering::Acquire) >= target_bytes {
+                return;
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    pub fn try_begin_flush(&self) -> bool {
+        self.in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn finish_flush(&self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
+
+    pub fn last_flush_millis(&self) -> u64 {
+        self.last_flush_millis.load(Ordering::Acquire)
+    }
+}
+
+fn store_max(cell: &AtomicU32, value: u32) -> u32 {
+    let mut current = cell.load(Ordering::Acquire);
+    while current < value {
+        match cell.compare_exchange(current, value, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(prev) => return prev,
+            Err(observed) => current = observed,
+        }
+    }
+    current
+}
+
+pub(crate) fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::ZERO)
+        .as_millis() as u64
+}
+
+const FLUSH_RETRY_MAX_ATTEMPTS: u32 = 5;
+const FLUSH_RETRY_BASE_DELAY_MS: u64 = 5;
+const FLUSH_RETRY_MAX_DELAY_MS: u64 = 250;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FlushMetricsSnapshot {
+    pub scheduled_watermark: u64,
+    pub scheduled_interval: u64,
+    pub scheduled_backpressure: u64,
+    pub synchronous_flushes: u64,
+    pub asynchronous_flushes: u64,
+    pub retry_attempts: u64,
+    pub retry_failures: u64,
+    pub backlog_bytes: u64,
+}
+
+#[derive(Default)]
+pub struct FlushMetrics {
+    scheduled_watermark: AtomicU64,
+    scheduled_interval: AtomicU64,
+    scheduled_backpressure: AtomicU64,
+    synchronous_flushes: AtomicU64,
+    asynchronous_flushes: AtomicU64,
+    retry_attempts: AtomicU64,
+    retry_failures: AtomicU64,
+    backlog_bytes: AtomicU64,
+}
+
+impl FlushMetrics {
+    #[inline]
+    pub fn incr_watermark(&self) {
+        self.scheduled_watermark.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn incr_interval(&self) {
+        self.scheduled_interval.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn incr_backpressure(&self) {
+        self.scheduled_backpressure.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn incr_sync_flush(&self) {
+        self.synchronous_flushes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn incr_async_flush(&self) {
+        self.asynchronous_flushes.fetch_add(1, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn add_retry_attempts(&self, attempts: u64) {
+        if attempts > 0 {
+            self.retry_attempts.fetch_add(attempts, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn incr_retry_failure(&self) {
+        self.retry_failures.fetch_add(1, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn record_backlog(&self, bytes: u64) {
+        self.backlog_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> FlushMetricsSnapshot {
+        FlushMetricsSnapshot {
+            scheduled_watermark: self.scheduled_watermark.load(Ordering::Relaxed),
+            scheduled_interval: self.scheduled_interval.load(Ordering::Relaxed),
+            scheduled_backpressure: self.scheduled_backpressure.load(Ordering::Relaxed),
+            synchronous_flushes: self.synchronous_flushes.load(Ordering::Relaxed),
+            asynchronous_flushes: self.asynchronous_flushes.load(Ordering::Relaxed),
+            retry_attempts: self.retry_attempts.load(Ordering::Relaxed),
+            retry_failures: self.retry_failures.load(Ordering::Relaxed),
+            backlog_bytes: self.backlog_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+pub(crate) fn flush_with_retry(
+    segment: &Arc<Segment>,
+    metrics: &Arc<FlushMetrics>,
+) -> AofResult<()> {
+    let mut retries = 0u32;
+    loop {
+        match segment.flush_to_disk() {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if retries < FLUSH_RETRY_MAX_ATTEMPTS && is_retryable_error(&err) {
+                    retries += 1;
+                    metrics.add_retry_attempts(1);
+                    thread::sleep(retry_backoff_delay(retries));
+                    continue;
+                }
+                if retries > 0 {
+                    metrics.incr_retry_failure();
+                }
+                return Err(err);
+            }
+        }
+    }
+}
+
+fn retry_backoff_delay(retries: u32) -> Duration {
+    if retries == 0 {
+        return Duration::from_millis(FLUSH_RETRY_BASE_DELAY_MS.min(FLUSH_RETRY_MAX_DELAY_MS));
+    }
+    let shift = retries.saturating_sub(1).min(6);
+    let base = FLUSH_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << shift);
+    let jitter_window = base.max(1);
+    let jitter_seed = now_millis() & 0x3f;
+    let jitter = jitter_seed.min(jitter_window);
+    let delay = base.saturating_add(jitter);
+    Duration::from_millis(delay.min(FLUSH_RETRY_MAX_DELAY_MS))
+}
+
+fn is_retryable_error(err: &AofError) -> bool {
+    match err {
+        AofError::Io(io_err) => is_retryable_io_error(io_err),
+        _ => false,
+    }
+}
+
+fn is_retryable_io_error(err: &io::Error) -> bool {
+    match err.kind() {
+        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+            return true;
+        }
+        _ => {}
+    }
+    if let Some(code) = err.raw_os_error() {
+        if matches!(
+            code,
+            libc::EINTR | libc::EAGAIN | libc::EBUSY | libc::ETIMEDOUT
+        ) {
+            return true;
+        }
+        if cfg!(windows) && matches!(code, 32 | 33 | 170 | 996 | 997) {
+            return true;
+        }
+    }
+    false
+}
 pub struct FlushManager {
-    rt: Arc<Runtime>,
+    _rt: Arc<Runtime>,
+    command_tx: Sender<FlushCommand>,
+    total_unflushed: Arc<AtomicU64>,
+    metrics: Arc<FlushMetrics>,
+}
+
+impl FlushManager {
+    pub fn new(
+        rt: Arc<Runtime>,
+        total_unflushed: Arc<AtomicU64>,
+        metrics: Arc<FlushMetrics>,
+    ) -> Arc<Self> {
+        let (tx, rx) = unbounded();
+        let manager = Arc::new(Self {
+            _rt: rt.clone(),
+            command_tx: tx,
+            total_unflushed: total_unflushed.clone(),
+            metrics: metrics.clone(),
+        });
+        Self::spawn_worker(rt, rx, total_unflushed, metrics);
+        manager
+    }
+
+    pub fn enqueue_segment(&self, segment: Arc<Segment>) -> AofResult<()> {
+        self.command_tx
+            .try_send(FlushCommand::RegisterSegment { segment })
+            .map_err(|err| match err {
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => AofError::Backpressure,
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shutdown_worker_for_tests(&self) {
+        let _ = self.command_tx.send(FlushCommand::Shutdown);
+    }
+
+    fn spawn_worker(
+        rt: Arc<Runtime>,
+        rx: Receiver<FlushCommand>,
+        total_unflushed: Arc<AtomicU64>,
+        metrics: Arc<FlushMetrics>,
+    ) {
+        let _ = thread::Builder::new()
+            .name("aof-flush".to_string())
+            .spawn(move || Self::worker_loop(rt, rx, total_unflushed, metrics));
+    }
+
+    fn worker_loop(
+        _rt: Arc<Runtime>,
+        rx: Receiver<FlushCommand>,
+        total_unflushed: Arc<AtomicU64>,
+        metrics: Arc<FlushMetrics>,
+    ) {
+        let _ = _rt;
+        while let Ok(cmd) = rx.recv() {
+            match cmd {
+                FlushCommand::RegisterSegment { segment } => {
+                    if let Err(err) = Self::flush_segment(&segment, &total_unflushed, &metrics) {
+                        eprintln!(
+                            "flush manager failed for segment {}: {}",
+                            segment.id().as_u64(),
+                            err
+                        );
+                    }
+                }
+                FlushCommand::Shutdown => break,
+            }
+        }
+    }
+
+    fn flush_segment(
+        segment: &Arc<Segment>,
+        total_unflushed: &Arc<AtomicU64>,
+        metrics: &Arc<FlushMetrics>,
+    ) -> AofResult<()> {
+        let flush_state = segment.flush_state();
+        if flush_state.requested_bytes() <= flush_state.durable_bytes() {
+            let snapshot = total_unflushed.load(Ordering::Acquire);
+            metrics.record_backlog(snapshot);
+            flush_state.finish_flush();
+            return Ok(());
+        }
+
+        let result = flush_with_retry(segment, metrics);
+        let mut backlog_snapshot = total_unflushed.load(Ordering::Acquire);
+        let outcome = match result {
+            Ok(()) => {
+                let logical = segment.current_size();
+                let delta = segment.mark_durable(logical);
+                backlog_snapshot = if delta > 0 {
+                    total_unflushed
+                        .fetch_sub(delta as u64, Ordering::AcqRel)
+                        .saturating_sub(delta as u64)
+                } else {
+                    backlog_snapshot
+                };
+                metrics.incr_async_flush();
+                Ok(())
+            }
+            Err(err) => Err(err),
+        };
+        flush_state.finish_flush();
+        metrics.record_backlog(backlog_snapshot);
+        outcome
+    }
+}
+
+impl Drop for FlushManager {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(FlushCommand::Shutdown);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use memmap2::MmapMut;
-    use std::fs::File;
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn flush_state_progress_updates() {
+        let segment_id = SegmentId::new(7);
+        let state = SegmentFlushState::new(segment_id);
+        assert_eq!(state.durable_bytes(), 0);
+        state.request_flush(128);
+        assert_eq!(state.requested_bytes(), 128);
+        state.mark_durable(64);
+        assert_eq!(state.durable_bytes(), 64);
+        state.mark_durable(256);
+        assert_eq!(state.durable_bytes(), 256);
+
+        assert!(state.try_begin_flush());
+        assert!(!state.try_begin_flush());
+        state.finish_flush();
+        assert!(state.try_begin_flush());
+        state.finish_flush();
+    }
 
     #[test]
-    fn test_flush() {}
+    fn retryable_error_detection() {
+        let transient = AofError::Io(io::Error::from_raw_os_error(libc::EINTR));
+        assert!(super::is_retryable_error(&transient));
+        let fatal = AofError::Io(io::Error::from_raw_os_error(libc::EIO));
+        assert!(!super::is_retryable_error(&fatal));
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded() {
+        let first = super::retry_backoff_delay(1);
+        let second = super::retry_backoff_delay(2);
+        assert!(second >= first);
+        assert!(second <= Duration::from_millis(super::FLUSH_RETRY_MAX_DELAY_MS));
+    }
+
+    #[test]
+    fn backlog_snapshot_records_bytes() {
+        let metrics = FlushMetrics::default();
+        metrics.record_backlog(123);
+        assert_eq!(metrics.snapshot().backlog_bytes, 123);
+        metrics.record_backlog(456);
+        assert_eq!(metrics.snapshot().backlog_bytes, 456);
+    }
 }

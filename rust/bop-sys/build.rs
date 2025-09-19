@@ -56,7 +56,9 @@ fn main() {
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
     // Apply default allowlist for BOP API prefixes
-    let default_prefixes = ["bop_", "us_", "mdbx_", "uws_", "MDBX", "BOP", "LIBUS", "UWS"];
+    let default_prefixes = [
+        "bop_", "us_", "mdbx_", "uws_", "MDBX", "BOP", "LIBUS", "UWS",
+    ];
     for prefix in &default_prefixes {
         let pattern = format!("{}.*", prefix);
         builder = builder
@@ -99,7 +101,10 @@ fn main() {
         "macos" => "macos",
         "windows" => "windows",
         other => {
-            println!("cargo:warning=Unsupported target OS for prebuilt lib: {}", other);
+            println!(
+                "cargo:warning=Unsupported target OS for prebuilt lib: {}",
+                other
+            );
             "" // no auto path
         }
     };
@@ -107,7 +112,10 @@ fn main() {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         other => {
-            println!("cargo:warning=Unsupported target arch for prebuilt lib: {}", other);
+            println!(
+                "cargo:warning=Unsupported target arch for prebuilt lib: {}",
+                other
+            );
             ""
         }
     };
@@ -147,10 +155,16 @@ fn main() {
         let wants_gnu = target_os == "windows" && target_env == "gnu";
 
         if wants_msvc && !have_lib {
-            println!("cargo:warning=Target is windows-msvc but {} not found. Provide bop.lib or set BOP_NATIVE_LIBS/DIR.", lib_lib.display());
+            println!(
+                "cargo:warning=Target is windows-msvc but {} not found. Provide bop.lib or set BOP_NATIVE_LIBS/DIR.",
+                lib_lib.display()
+            );
         }
         if !wants_msvc && !have_a {
-            println!("cargo:warning=Static archive {} not found. Provide libbop.a or set BOP_NATIVE_LIBS/DIR.", lib_a.display());
+            println!(
+                "cargo:warning=Static archive {} not found. Provide libbop.a or set BOP_NATIVE_LIBS/DIR.",
+                lib_a.display()
+            );
         }
 
         // Default link kind/name

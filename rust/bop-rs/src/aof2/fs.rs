@@ -30,7 +30,7 @@ pub struct SegmentFileName {
 impl SegmentFileName {
     pub fn format(segment_id: SegmentId, base_offset: u64, created_at: i64) -> String {
         format!(
-            "{id:pad$}{sep}{offset:pad$}{sep}{ts:pad$}{ext}",
+            "{id:0pad$}{sep}{offset:0pad$}{sep}{ts:0pad$}{ext}",
             id = segment_id.as_u64(),
             sep = SEGMENT_FILE_BREAK,
             offset = base_offset,
@@ -55,17 +55,20 @@ impl SegmentFileName {
 
         let segment_id = parts
             .next()
+            .map(str::trim)
             .and_then(|raw| raw.parse::<u64>().ok())
             .map(SegmentId::new)
             .ok_or_else(|| invalid_segment_filename(name))?;
 
         let base_offset = parts
             .next()
+            .map(str::trim)
             .and_then(|raw| raw.parse::<u64>().ok())
             .ok_or_else(|| invalid_segment_filename(name))?;
 
         let created_at = parts
             .next()
+            .map(str::trim)
             .and_then(|raw| raw.parse::<i64>().ok())
             .ok_or_else(|| invalid_segment_filename(name))?;
 
@@ -171,7 +174,7 @@ pub fn fsync_dir(path: &Path) -> AofResult<()> {
 
 /// Guard for atomic file persistence.
 pub struct TempFileGuard {
-    inner: NamedTempFile,
+    inner: Option<NamedTempFile>,
     committed: bool,
 }
 
@@ -183,31 +186,38 @@ impl TempFileGuard {
             .tempfile_in(parent)
             .map_err(|err| AofError::FileSystem(err.to_string()))?;
         Ok(Self {
-            inner,
+            inner: Some(inner),
             committed: false,
         })
     }
 
     pub fn file_mut(&mut self) -> &mut File {
-        self.inner.as_file_mut()
+        self.inner
+            .as_mut()
+            .expect("temp file already consumed")
+            .as_file_mut()
     }
 
     pub fn persist(mut self, dst: &Path) -> AofResult<()> {
-        self.inner
-            .as_file()
-            .sync_all()
-            .map_err(AofError::from)?;
+        let temp = self
+            .inner
+            .take()
+            .ok_or_else(|| AofError::InvalidState("temp file already consumed".to_string()))?;
+        temp.as_file().sync_all().map_err(AofError::from)?;
         let parent = dst
             .parent()
             .ok_or_else(|| AofError::invalid_config("destination path missing parent"))?;
-        match self.inner.persist(dst) {
+        match temp.persist(dst) {
             Ok(file) => {
                 file.sync_all().map_err(AofError::from)?;
                 let _ = fsync_dir(parent);
                 self.committed = true;
                 Ok(())
             }
-            Err(err) => Err(AofError::FileSystem(err.error.to_string())),
+            Err(err) => {
+                self.inner = Some(err.file);
+                Err(AofError::FileSystem(err.error.to_string()))
+            }
         }
     }
 }
@@ -215,16 +225,15 @@ impl TempFileGuard {
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = self.inner.close();
+            if let Some(temp) = self.inner.take() {
+                let _ = temp.close();
+            }
         }
     }
 }
 
 pub fn invalid_segment_filename(name: &Path) -> AofError {
-    AofError::InvalidState(format!(
-        "invalid segment filename: {}",
-        name.display()
-    ))
+    AofError::InvalidState(format!("invalid segment filename: {}", name.display()))
 }
 
 #[cfg(test)]

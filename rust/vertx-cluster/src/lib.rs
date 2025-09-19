@@ -1,47 +1,47 @@
 //! # Vertx Cluster
-//! 
+//!
 //! Distributed clustering and state management for the BOP platform.
-//! 
+//!
 //! This crate provides high-level abstractions for building distributed applications
 //! using the BOP platform's networking, consensus, and storage capabilities.
-//! 
+//!
 //! ## Architecture
-//! 
+//!
 //! - **State Machine**: Finite state machine for managing cluster state transitions
 //! - **Wire Protocol**: Serialization and messaging for inter-node communication  
 //! - **Cluster Management**: Node discovery, health monitoring, and failover
 //! - **Application Layer**: High-level APIs for distributed applications
-//! 
+//!
 //! ## Features
-//! 
+//!
 //! - Message-driven state management with strong consistency
 //! - Binary wire protocol with CRC validation
 //! - Support for Raft consensus (when enabled)
 //! - Integration with BOP's high-performance networking
 //! - Custom memory allocation for optimal performance
-//! 
+//!
 //! ## Example
-//! 
+//!
 //! ```rust,no_run
 //! use vertx_cluster::{App, State};
-//! 
+//!
 //! // Create a new cluster application
 //! let app = App::new();
-//! 
+//!
 //! // Access the shared state
 //! let state = app.state();
-//! 
+//!
 //! // Process messages and handle state transitions
 //! // let response = app.process_message(message, connection_id, node_id);
 //! ```
 
 pub mod fsm;
-pub mod wire;
 pub mod net;
+pub mod wire;
 
 // Re-export the main types for convenience
-pub use fsm::{process_message, State};
-pub use wire::{FramedMessage, Message, RequestId, StateSyncOperation, PROTOCOL_VERSION};
+pub use fsm::{State, process_message};
+pub use wire::{FramedMessage, Message, PROTOCOL_VERSION, RequestId, StateSyncOperation};
 // Note: TcpServer is generic over the handler type, use net::TcpServer<YourHandler> directly
 
 // Re-export BOP platform components
@@ -173,7 +173,7 @@ mod tests {
             .node_id(1)
             .address("127.0.0.1:8080")
             .build();
-        
+
         // assert!(!app.state().is_null());
     }
 
@@ -181,7 +181,7 @@ mod tests {
     fn test_convenience_functions() {
         let app1 = app();
         let app2 = builder().build();
-        
+
         // assert!(!app1.state().is_null());
         // assert!(!app2.state().is_null());
     }

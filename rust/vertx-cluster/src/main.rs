@@ -1,4 +1,4 @@
-use vertx_cluster::{fsm::*, wire::*, App, greeting};
+use vertx_cluster::{App, fsm::*, greeting, wire::*};
 
 fn main() {
     println!("{}", greeting());
@@ -57,7 +57,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Test get nodes
         let response = send_message(
@@ -66,7 +72,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Test leave cluster
         let response = send_message(
@@ -77,7 +89,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -96,7 +114,13 @@ mod tests {
         );
         // Since process_message returns ErrorResponse for now, we'll use the map name directly
         let map_name = "test_map".to_string();
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Put a value
         let response = send_message(
@@ -109,7 +133,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Get the value
         let response = send_message(
@@ -121,7 +151,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Remove the value
         let response = send_message(
@@ -133,7 +169,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Get size
         let response = send_message(
@@ -144,7 +186,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -163,7 +211,13 @@ mod tests {
         );
         // Since process_message returns ErrorResponse for now, we'll use the lock name directly
         let lock_name = "test_lock".to_string();
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Acquire the lock
         let response = send_message(
@@ -174,7 +228,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Release the lock
         let response = send_message(
@@ -185,7 +245,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -222,7 +288,13 @@ mod tests {
         );
         // Since process_message returns ErrorResponse for now, we'll use the lock name directly
         let lock_name = "queue_lock".to_string();
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Node1 acquires the lock
         let response = send_message(
@@ -233,7 +305,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Node2 tries to acquire the same lock (should be queued)
         let response = send_message(
@@ -244,7 +322,13 @@ mod tests {
             Some(2),
             Some("node2".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Node1 releases the lock
         let response = send_message(
@@ -255,7 +339,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -311,7 +401,13 @@ mod tests {
         );
 
         // Should return error because some locks failed to sync
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -352,7 +448,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Read operations should work
         let response = send_message(
@@ -361,7 +463,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         // Become leader - mutation should work
         ensure_leader(&app);
@@ -373,7 +481,13 @@ mod tests {
             Some(1),
             Some("node1".to_string()),
         );
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -516,7 +630,13 @@ mod tests {
             Some("node1".to_string()),
         );
         let map_name = "test_map".to_string();
-        assert!(matches!(response.payload, Message::ErrorResponse { code: ResponseCode::ERR, .. }));
+        assert!(matches!(
+            response.payload,
+            Message::ErrorResponse {
+                code: ResponseCode::ERR,
+                ..
+            }
+        ));
 
         send_message(
             &app,

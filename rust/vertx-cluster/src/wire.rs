@@ -316,7 +316,10 @@ impl WireSerializable for (Vec<u8>, Vec<u8>) {
     }
 
     fn deserialize(cursor: &mut Cursor<&[u8]>) -> Result<Self, WireError> {
-        Ok((Vec::<u8>::deserialize(cursor)?, Vec::<u8>::deserialize(cursor)?))
+        Ok((
+            Vec::<u8>::deserialize(cursor)?,
+            Vec::<u8>::deserialize(cursor)?,
+        ))
     }
 }
 
@@ -377,7 +380,9 @@ impl WireSerializable for Option<usize> {
         match has_value {
             0 => Ok(None),
             1 => Ok(Some(usize::deserialize(cursor)?)),
-            _ => Err(WireError::InvalidData("Invalid Option<usize> value".to_string())),
+            _ => Err(WireError::InvalidData(
+                "Invalid Option<usize> value".to_string(),
+            )),
         }
     }
 }
@@ -389,7 +394,11 @@ impl WireSerializable for StateSyncOperation {
                 0u8.serialize(buf)?;
                 map_name.serialize(buf)?;
             }
-            StateSyncOperation::MapUpdated { map_name, key, value } => {
+            StateSyncOperation::MapUpdated {
+                map_name,
+                key,
+                value,
+            } => {
                 1u8.serialize(buf)?;
                 map_name.serialize(buf)?;
                 key.serialize(buf)?;
@@ -403,7 +412,11 @@ impl WireSerializable for StateSyncOperation {
                 3u8.serialize(buf)?;
                 set_name.serialize(buf)?;
             }
-            StateSyncOperation::SetUpdated { set_name, value, added } => {
+            StateSyncOperation::SetUpdated {
+                set_name,
+                value,
+                added,
+            } => {
                 4u8.serialize(buf)?;
                 set_name.serialize(buf)?;
                 value.serialize(buf)?;
@@ -417,7 +430,10 @@ impl WireSerializable for StateSyncOperation {
                 6u8.serialize(buf)?;
                 counter_name.serialize(buf)?;
             }
-            StateSyncOperation::CounterUpdated { counter_name, value } => {
+            StateSyncOperation::CounterUpdated {
+                counter_name,
+                value,
+            } => {
                 7u8.serialize(buf)?;
                 counter_name.serialize(buf)?;
                 value.serialize(buf)?;
@@ -430,7 +446,12 @@ impl WireSerializable for StateSyncOperation {
                 9u8.serialize(buf)?;
                 multimap_name.serialize(buf)?;
             }
-            StateSyncOperation::MultimapUpdated { multimap_name, key, value, added } => {
+            StateSyncOperation::MultimapUpdated {
+                multimap_name,
+                key,
+                value,
+                added,
+            } => {
                 10u8.serialize(buf)?;
                 multimap_name.serialize(buf)?;
                 key.serialize(buf)?;
@@ -472,12 +493,18 @@ impl WireSerializable for StateSyncOperation {
                 18u8.serialize(buf)?;
                 node_id.serialize(buf)?;
             }
-            StateSyncOperation::NodeConnectionAdded { node_id, connection_id } => {
+            StateSyncOperation::NodeConnectionAdded {
+                node_id,
+                connection_id,
+            } => {
                 19u8.serialize(buf)?;
                 node_id.serialize(buf)?;
                 connection_id.serialize(buf)?;
             }
-            StateSyncOperation::NodeConnectionRemoved { node_id, connection_id } => {
+            StateSyncOperation::NodeConnectionRemoved {
+                node_id,
+                connection_id,
+            } => {
                 20u8.serialize(buf)?;
                 node_id.serialize(buf)?;
                 connection_id.serialize(buf)?;
@@ -565,7 +592,10 @@ impl WireSerializable for StateSyncOperation {
                 node_id: String::deserialize(cursor)?,
                 connection_id: u64::deserialize(cursor)?,
             }),
-            _ => Err(WireError::InvalidData(format!("Unknown StateSyncOperation type: {}", op_type))),
+            _ => Err(WireError::InvalidData(format!(
+                "Unknown StateSyncOperation type: {}",
+                op_type
+            ))),
         }
     }
 }
@@ -625,7 +655,10 @@ impl WireSerializable for ResponseCode {
         match val {
             0 => Ok(ResponseCode::OK),
             1 => Ok(ResponseCode::ERR),
-            _ => Err(WireError::InvalidData(format!("Invalid ResponseCode: {}", val))),
+            _ => Err(WireError::InvalidData(format!(
+                "Invalid ResponseCode: {}",
+                val
+            ))),
         }
     }
 }
@@ -642,31 +675,31 @@ impl MessageFlags {
     pub const RESPONSE: MessageFlags = MessageFlags(0x02);
     pub const PING: MessageFlags = MessageFlags(0x04);
     pub const PONG: MessageFlags = MessageFlags(0x08);
-    
+
     pub fn new(value: u8) -> Self {
         MessageFlags(value)
     }
-    
+
     pub fn as_u8(&self) -> u8 {
         self.0
     }
-    
+
     pub fn is_request(&self) -> bool {
         self.0 & Self::REQUEST.0 != 0
     }
-    
+
     pub fn is_response(&self) -> bool {
         self.0 & Self::RESPONSE.0 != 0
     }
-    
+
     pub fn is_ping(&self) -> bool {
         self.0 & Self::PING.0 != 0
     }
-    
+
     pub fn is_pong(&self) -> bool {
         self.0 & Self::PONG.0 != 0
     }
-    
+
     pub fn contains(&self, flag: MessageFlags) -> bool {
         self.0 & flag.0 != 0
     }
@@ -756,37 +789,92 @@ pub const MSG_STATE_SYNC_ACK: MessageKind = 74;
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateSyncOperation {
     // Map operations
-    MapCreated { map_name: String },
-    MapUpdated { map_name: String, key: Vec<u8>, value: Option<Vec<u8>> }, // None = deletion
-    MapDeleted { map_name: String },
-    
+    MapCreated {
+        map_name: String,
+    },
+    MapUpdated {
+        map_name: String,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    }, // None = deletion
+    MapDeleted {
+        map_name: String,
+    },
+
     // Set operations
-    SetCreated { set_name: String },
-    SetUpdated { set_name: String, value: Vec<u8>, added: bool }, // added=true for add, false for remove
-    SetDeleted { set_name: String },
-    
+    SetCreated {
+        set_name: String,
+    },
+    SetUpdated {
+        set_name: String,
+        value: Vec<u8>,
+        added: bool,
+    }, // added=true for add, false for remove
+    SetDeleted {
+        set_name: String,
+    },
+
     // Counter operations
-    CounterCreated { counter_name: String },
-    CounterUpdated { counter_name: String, value: i64 },
-    CounterDeleted { counter_name: String },
-    
+    CounterCreated {
+        counter_name: String,
+    },
+    CounterUpdated {
+        counter_name: String,
+        value: i64,
+    },
+    CounterDeleted {
+        counter_name: String,
+    },
+
     // Multimap operations
-    MultimapCreated { multimap_name: String },
-    MultimapUpdated { multimap_name: String, key: Vec<u8>, value: Vec<u8>, added: bool },
-    MultimapKeyCleared { multimap_name: String, key: Vec<u8> },
-    MultimapDeleted { multimap_name: String },
-    
+    MultimapCreated {
+        multimap_name: String,
+    },
+    MultimapUpdated {
+        multimap_name: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        added: bool,
+    },
+    MultimapKeyCleared {
+        multimap_name: String,
+        key: Vec<u8>,
+    },
+    MultimapDeleted {
+        multimap_name: String,
+    },
+
     // Lock operations
-    LockCreated { lock_name: String },
-    LockAcquired { lock_name: String, node_id: String },
-    LockReleased { lock_name: String, node_id: String },
-    LockDeleted { lock_name: String },
-    
+    LockCreated {
+        lock_name: String,
+    },
+    LockAcquired {
+        lock_name: String,
+        node_id: String,
+    },
+    LockReleased {
+        lock_name: String,
+        node_id: String,
+    },
+    LockDeleted {
+        lock_name: String,
+    },
+
     // Node operations
-    NodeJoined { node_id: String },
-    NodeLeft { node_id: String },
-    NodeConnectionAdded { node_id: String, connection_id: u64 },
-    NodeConnectionRemoved { node_id: String, connection_id: u64 },
+    NodeJoined {
+        node_id: String,
+    },
+    NodeLeft {
+        node_id: String,
+    },
+    NodeConnectionAdded {
+        node_id: String,
+        connection_id: u64,
+    },
+    NodeConnectionRemoved {
+        node_id: String,
+        connection_id: u64,
+    },
 }
 
 /// Response code for all response messages
@@ -802,96 +890,287 @@ pub enum ResponseCode {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     // Cluster management
-    JoinRequest { node_id: String },
-    JoinResponse { code: ResponseCode, connection_id: u64 },
-    LeaveRequest { node_id: String },
-    LeaveResponse { code: ResponseCode },
+    JoinRequest {
+        node_id: String,
+    },
+    JoinResponse {
+        code: ResponseCode,
+        connection_id: u64,
+    },
+    LeaveRequest {
+        node_id: String,
+    },
+    LeaveResponse {
+        code: ResponseCode,
+    },
     GetNodesRequest,
-    GetNodesResponse { code: ResponseCode, nodes: Vec<String> },
+    GetNodesResponse {
+        code: ResponseCode,
+        nodes: Vec<String>,
+    },
 
-    // AsyncMap operations  
-    CreateMapRequest { name: String },
-    CreateMapResponse { code: ResponseCode, map_name: String },
-    MapPutRequest { map_name: String, key: Vec<u8>, value: Vec<u8> },
-    MapPutResponse { code: ResponseCode },
-    MapGetRequest { map_name: String, key: Vec<u8> },
-    MapGetResponse { code: ResponseCode, value: Option<Vec<u8>> },
-    MapRemoveRequest { map_name: String, key: Vec<u8> },
-    MapRemoveResponse { code: ResponseCode },
-    MapSizeRequest { map_name: String },
-    MapSizeResponse { code: ResponseCode, size: usize },
+    // AsyncMap operations
+    CreateMapRequest {
+        name: String,
+    },
+    CreateMapResponse {
+        code: ResponseCode,
+        map_name: String,
+    },
+    MapPutRequest {
+        map_name: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    MapPutResponse {
+        code: ResponseCode,
+    },
+    MapGetRequest {
+        map_name: String,
+        key: Vec<u8>,
+    },
+    MapGetResponse {
+        code: ResponseCode,
+        value: Option<Vec<u8>>,
+    },
+    MapRemoveRequest {
+        map_name: String,
+        key: Vec<u8>,
+    },
+    MapRemoveResponse {
+        code: ResponseCode,
+    },
+    MapSizeRequest {
+        map_name: String,
+    },
+    MapSizeResponse {
+        code: ResponseCode,
+        size: usize,
+    },
 
     // AsyncSet operations
-    CreateSetRequest { name: String },
-    CreateSetResponse { code: ResponseCode, set_name: String },
-    SetAddRequest { set_name: String, value: Vec<u8> },
-    SetAddResponse { code: ResponseCode },
-    SetRemoveRequest { set_name: String, value: Vec<u8> },
-    SetRemoveResponse { code: ResponseCode },
-    SetContainsRequest { set_name: String, value: Vec<u8> },
-    SetContainsResponse { code: ResponseCode, contains: bool },
-    SetSizeRequest { set_name: String },
-    SetSizeResponse { code: ResponseCode, size: usize },
+    CreateSetRequest {
+        name: String,
+    },
+    CreateSetResponse {
+        code: ResponseCode,
+        set_name: String,
+    },
+    SetAddRequest {
+        set_name: String,
+        value: Vec<u8>,
+    },
+    SetAddResponse {
+        code: ResponseCode,
+    },
+    SetRemoveRequest {
+        set_name: String,
+        value: Vec<u8>,
+    },
+    SetRemoveResponse {
+        code: ResponseCode,
+    },
+    SetContainsRequest {
+        set_name: String,
+        value: Vec<u8>,
+    },
+    SetContainsResponse {
+        code: ResponseCode,
+        contains: bool,
+    },
+    SetSizeRequest {
+        set_name: String,
+    },
+    SetSizeResponse {
+        code: ResponseCode,
+        size: usize,
+    },
 
     // AsyncCounter operations
-    CreateCounterRequest { name: String },
-    CreateCounterResponse { code: ResponseCode, counter_name: String },
-    CounterGetRequest { counter_name: String },
-    CounterGetResponse { code: ResponseCode, value: i64 },
-    CounterIncrementRequest { counter_name: String, delta: i64 },
-    CounterIncrementResponse { code: ResponseCode, new_value: i64 },
+    CreateCounterRequest {
+        name: String,
+    },
+    CreateCounterResponse {
+        code: ResponseCode,
+        counter_name: String,
+    },
+    CounterGetRequest {
+        counter_name: String,
+    },
+    CounterGetResponse {
+        code: ResponseCode,
+        value: i64,
+    },
+    CounterIncrementRequest {
+        counter_name: String,
+        delta: i64,
+    },
+    CounterIncrementResponse {
+        code: ResponseCode,
+        new_value: i64,
+    },
 
     // AsyncLock operations
-    CreateLockRequest { name: String },
-    CreateLockResponse { code: ResponseCode, lock_name: String },
-    LockAcquireRequest { lock_name: String },
-    LockAcquireResponse { code: ResponseCode, acquired: bool, queue_position: Option<usize> },
-    LockReleaseRequest { lock_name: String },
-    LockReleaseResponse { code: ResponseCode },
-    LockSyncRequest { held_locks: Vec<String> },
-    LockSyncResponse { code: ResponseCode, synchronized_locks: Vec<String>, failed_locks: Vec<String> },
+    CreateLockRequest {
+        name: String,
+    },
+    CreateLockResponse {
+        code: ResponseCode,
+        lock_name: String,
+    },
+    LockAcquireRequest {
+        lock_name: String,
+    },
+    LockAcquireResponse {
+        code: ResponseCode,
+        acquired: bool,
+        queue_position: Option<usize>,
+    },
+    LockReleaseRequest {
+        lock_name: String,
+    },
+    LockReleaseResponse {
+        code: ResponseCode,
+    },
+    LockSyncRequest {
+        held_locks: Vec<String>,
+    },
+    LockSyncResponse {
+        code: ResponseCode,
+        synchronized_locks: Vec<String>,
+        failed_locks: Vec<String>,
+    },
 
     // AsyncMultimap operations
-    CreateMultimapRequest { name: String },
-    CreateMultimapResponse { code: ResponseCode, multimap_name: String },
-    MultimapPutRequest { multimap_name: String, key: Vec<u8>, value: Vec<u8> },
-    MultimapPutResponse { code: ResponseCode },
-    MultimapGetRequest { multimap_name: String, key: Vec<u8> },
-    MultimapGetResponse { code: ResponseCode, values: std::collections::HashSet<Vec<u8>> },
-    MultimapRemoveRequest { multimap_name: String, key: Vec<u8> },
-    MultimapRemoveResponse { code: ResponseCode },
-    MultimapRemoveValueRequest { multimap_name: String, key: Vec<u8>, value: Vec<u8> },
-    MultimapRemoveValueResponse { code: ResponseCode },
-    MultimapSizeRequest { multimap_name: String },
-    MultimapSizeResponse { code: ResponseCode, size: usize },
-    MultimapKeySizeRequest { multimap_name: String, key: Vec<u8> },
-    MultimapKeySizeResponse { code: ResponseCode, size: usize },
-    MultimapContainsKeyRequest { multimap_name: String, key: Vec<u8> },
-    MultimapContainsKeyResponse { code: ResponseCode, contains: bool },
-    MultimapContainsValueRequest { multimap_name: String, value: Vec<u8> },
-    MultimapContainsValueResponse { code: ResponseCode, contains: bool },
-    MultimapContainsEntryRequest { multimap_name: String, key: Vec<u8>, value: Vec<u8> },
-    MultimapContainsEntryResponse { code: ResponseCode, contains: bool },
-    MultimapKeysRequest { multimap_name: String },
-    MultimapKeysResponse { code: ResponseCode, keys: std::collections::HashSet<Vec<u8>> },
-    MultimapValuesRequest { multimap_name: String },
-    MultimapValuesResponse { code: ResponseCode, values: Vec<Vec<u8>> },
-    MultimapEntriesRequest { multimap_name: String },
-    MultimapEntriesResponse { code: ResponseCode, entries: std::collections::HashMap<Vec<u8>, std::collections::HashSet<Vec<u8>>> },
-    MultimapClearRequest { multimap_name: String },
-    MultimapClearResponse { code: ResponseCode },
+    CreateMultimapRequest {
+        name: String,
+    },
+    CreateMultimapResponse {
+        code: ResponseCode,
+        multimap_name: String,
+    },
+    MultimapPutRequest {
+        multimap_name: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    MultimapPutResponse {
+        code: ResponseCode,
+    },
+    MultimapGetRequest {
+        multimap_name: String,
+        key: Vec<u8>,
+    },
+    MultimapGetResponse {
+        code: ResponseCode,
+        values: std::collections::HashSet<Vec<u8>>,
+    },
+    MultimapRemoveRequest {
+        multimap_name: String,
+        key: Vec<u8>,
+    },
+    MultimapRemoveResponse {
+        code: ResponseCode,
+    },
+    MultimapRemoveValueRequest {
+        multimap_name: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    MultimapRemoveValueResponse {
+        code: ResponseCode,
+    },
+    MultimapSizeRequest {
+        multimap_name: String,
+    },
+    MultimapSizeResponse {
+        code: ResponseCode,
+        size: usize,
+    },
+    MultimapKeySizeRequest {
+        multimap_name: String,
+        key: Vec<u8>,
+    },
+    MultimapKeySizeResponse {
+        code: ResponseCode,
+        size: usize,
+    },
+    MultimapContainsKeyRequest {
+        multimap_name: String,
+        key: Vec<u8>,
+    },
+    MultimapContainsKeyResponse {
+        code: ResponseCode,
+        contains: bool,
+    },
+    MultimapContainsValueRequest {
+        multimap_name: String,
+        value: Vec<u8>,
+    },
+    MultimapContainsValueResponse {
+        code: ResponseCode,
+        contains: bool,
+    },
+    MultimapContainsEntryRequest {
+        multimap_name: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    MultimapContainsEntryResponse {
+        code: ResponseCode,
+        contains: bool,
+    },
+    MultimapKeysRequest {
+        multimap_name: String,
+    },
+    MultimapKeysResponse {
+        code: ResponseCode,
+        keys: std::collections::HashSet<Vec<u8>>,
+    },
+    MultimapValuesRequest {
+        multimap_name: String,
+    },
+    MultimapValuesResponse {
+        code: ResponseCode,
+        values: Vec<Vec<u8>>,
+    },
+    MultimapEntriesRequest {
+        multimap_name: String,
+    },
+    MultimapEntriesResponse {
+        code: ResponseCode,
+        entries: std::collections::HashMap<Vec<u8>, std::collections::HashSet<Vec<u8>>>,
+    },
+    MultimapClearRequest {
+        multimap_name: String,
+    },
+    MultimapClearResponse {
+        code: ResponseCode,
+    },
 
     // Error and control messages
-    ErrorResponse { code: ResponseCode, error: String },
-    LeaderRedirectResponse { code: ResponseCode, leader_address: String },
-    
+    ErrorResponse {
+        code: ResponseCode,
+        error: String,
+    },
+    LeaderRedirectResponse {
+        code: ResponseCode,
+        leader_address: String,
+    },
+
     // Ping/Pong for heartbeat
     Ping,
     Pong,
 
     // Synchronization messages for client-side caching
-    StateSync { sync_id: u64, operations: Vec<StateSyncOperation> },
-    StateSyncAck { code: ResponseCode, sync_id: u64 },
+    StateSync {
+        sync_id: u64,
+        operations: Vec<StateSyncOperation>,
+    },
+    StateSyncAck {
+        code: ResponseCode,
+        sync_id: u64,
+    },
 }
 
 impl Message {
@@ -974,45 +1253,46 @@ impl Message {
             Message::StateSyncAck { .. } => MSG_STATE_SYNC_ACK,
         }
     }
-    
+
     /// Check if this is a request message (as opposed to a response)
     pub fn is_request(&self) -> bool {
-        matches!(self,
-            Message::JoinRequest { .. } |
-            Message::LeaveRequest { .. } |
-            Message::GetNodesRequest |
-            Message::CreateMapRequest { .. } |
-            Message::MapPutRequest { .. } |
-            Message::MapGetRequest { .. } |
-            Message::MapRemoveRequest { .. } |
-            Message::MapSizeRequest { .. } |
-            Message::CreateSetRequest { .. } |
-            Message::SetAddRequest { .. } |
-            Message::SetRemoveRequest { .. } |
-            Message::SetContainsRequest { .. } |
-            Message::SetSizeRequest { .. } |
-            Message::CreateCounterRequest { .. } |
-            Message::CounterGetRequest { .. } |
-            Message::CounterIncrementRequest { .. } |
-            Message::CreateLockRequest { .. } |
-            Message::LockAcquireRequest { .. } |
-            Message::LockReleaseRequest { .. } |
-            Message::LockSyncRequest { .. } |
-            Message::CreateMultimapRequest { .. } |
-            Message::MultimapPutRequest { .. } |
-            Message::MultimapGetRequest { .. } |
-            Message::MultimapRemoveRequest { .. } |
-            Message::MultimapRemoveValueRequest { .. } |
-            Message::MultimapSizeRequest { .. } |
-            Message::MultimapKeySizeRequest { .. } |
-            Message::MultimapContainsKeyRequest { .. } |
-            Message::MultimapContainsValueRequest { .. } |
-            Message::MultimapContainsEntryRequest { .. } |
-            Message::MultimapKeysRequest { .. } |
-            Message::MultimapValuesRequest { .. } |
-            Message::MultimapEntriesRequest { .. } |
-            Message::MultimapClearRequest { .. } |
-            Message::Ping
+        matches!(
+            self,
+            Message::JoinRequest { .. }
+                | Message::LeaveRequest { .. }
+                | Message::GetNodesRequest
+                | Message::CreateMapRequest { .. }
+                | Message::MapPutRequest { .. }
+                | Message::MapGetRequest { .. }
+                | Message::MapRemoveRequest { .. }
+                | Message::MapSizeRequest { .. }
+                | Message::CreateSetRequest { .. }
+                | Message::SetAddRequest { .. }
+                | Message::SetRemoveRequest { .. }
+                | Message::SetContainsRequest { .. }
+                | Message::SetSizeRequest { .. }
+                | Message::CreateCounterRequest { .. }
+                | Message::CounterGetRequest { .. }
+                | Message::CounterIncrementRequest { .. }
+                | Message::CreateLockRequest { .. }
+                | Message::LockAcquireRequest { .. }
+                | Message::LockReleaseRequest { .. }
+                | Message::LockSyncRequest { .. }
+                | Message::CreateMultimapRequest { .. }
+                | Message::MultimapPutRequest { .. }
+                | Message::MultimapGetRequest { .. }
+                | Message::MultimapRemoveRequest { .. }
+                | Message::MultimapRemoveValueRequest { .. }
+                | Message::MultimapSizeRequest { .. }
+                | Message::MultimapKeySizeRequest { .. }
+                | Message::MultimapContainsKeyRequest { .. }
+                | Message::MultimapContainsValueRequest { .. }
+                | Message::MultimapContainsEntryRequest { .. }
+                | Message::MultimapKeysRequest { .. }
+                | Message::MultimapValuesRequest { .. }
+                | Message::MultimapEntriesRequest { .. }
+                | Message::MultimapClearRequest { .. }
+                | Message::Ping
         )
     }
 }
@@ -1024,7 +1304,10 @@ impl WireSerializable for Message {
             Message::JoinRequest { node_id } => {
                 node_id.serialize(buf)?;
             }
-            Message::JoinResponse { code, connection_id } => {
+            Message::JoinResponse {
+                code,
+                connection_id,
+            } => {
                 code.serialize(buf)?;
                 connection_id.serialize(buf)?;
             }
@@ -1049,7 +1332,11 @@ impl WireSerializable for Message {
                 code.serialize(buf)?;
                 map_name.serialize(buf)?;
             }
-            Message::MapPutRequest { map_name, key, value } => {
+            Message::MapPutRequest {
+                map_name,
+                key,
+                value,
+            } => {
                 map_name.serialize(buf)?;
                 key.serialize(buf)?;
                 value.serialize(buf)?;
@@ -1094,7 +1381,10 @@ impl WireSerializable for Message {
                 code.serialize(buf)?;
                 value.serialize(buf)?;
             }
-            Message::CounterIncrementRequest { counter_name, delta } => {
+            Message::CounterIncrementRequest {
+                counter_name,
+                delta,
+            } => {
                 counter_name.serialize(buf)?;
                 delta.serialize(buf)?;
             }
@@ -1113,7 +1403,11 @@ impl WireSerializable for Message {
             Message::LockAcquireRequest { lock_name } => {
                 lock_name.serialize(buf)?;
             }
-            Message::LockAcquireResponse { code, acquired, queue_position } => {
+            Message::LockAcquireResponse {
+                code,
+                acquired,
+                queue_position,
+            } => {
                 code.serialize(buf)?;
                 acquired.serialize(buf)?;
                 queue_position.serialize(buf)?;
@@ -1127,7 +1421,11 @@ impl WireSerializable for Message {
             Message::LockSyncRequest { held_locks } => {
                 held_locks.serialize(buf)?;
             }
-            Message::LockSyncResponse { code, synchronized_locks, failed_locks } => {
+            Message::LockSyncResponse {
+                code,
+                synchronized_locks,
+                failed_locks,
+            } => {
                 code.serialize(buf)?;
                 synchronized_locks.serialize(buf)?;
                 failed_locks.serialize(buf)?;
@@ -1137,14 +1435,20 @@ impl WireSerializable for Message {
                 code.serialize(buf)?;
                 error.serialize(buf)?;
             }
-            Message::LeaderRedirectResponse { code, leader_address } => {
+            Message::LeaderRedirectResponse {
+                code,
+                leader_address,
+            } => {
                 code.serialize(buf)?;
                 leader_address.serialize(buf)?;
             }
             Message::Ping | Message::Pong => {
                 // No data to serialize
             }
-            Message::StateSync { sync_id, operations } => {
+            Message::StateSync {
+                sync_id,
+                operations,
+            } => {
                 sync_id.serialize(buf)?;
                 operations.serialize(buf)?;
             }
@@ -1193,11 +1497,18 @@ impl WireSerializable for Message {
             Message::CreateMultimapRequest { name } => {
                 name.serialize(buf)?;
             }
-            Message::CreateMultimapResponse { code, multimap_name } => {
+            Message::CreateMultimapResponse {
+                code,
+                multimap_name,
+            } => {
                 code.serialize(buf)?;
                 multimap_name.serialize(buf)?;
             }
-            Message::MultimapPutRequest { multimap_name, key, value } => {
+            Message::MultimapPutRequest {
+                multimap_name,
+                key,
+                value,
+            } => {
                 multimap_name.serialize(buf)?;
                 key.serialize(buf)?;
                 value.serialize(buf)?;
@@ -1220,7 +1531,11 @@ impl WireSerializable for Message {
             Message::MultimapRemoveResponse { code } => {
                 code.serialize(buf)?;
             }
-            Message::MultimapRemoveValueRequest { multimap_name, key, value } => {
+            Message::MultimapRemoveValueRequest {
+                multimap_name,
+                key,
+                value,
+            } => {
                 multimap_name.serialize(buf)?;
                 key.serialize(buf)?;
                 value.serialize(buf)?;
@@ -1251,7 +1566,10 @@ impl WireSerializable for Message {
                 code.serialize(buf)?;
                 contains.serialize(buf)?;
             }
-            Message::MultimapContainsValueRequest { multimap_name, value } => {
+            Message::MultimapContainsValueRequest {
+                multimap_name,
+                value,
+            } => {
                 multimap_name.serialize(buf)?;
                 value.serialize(buf)?;
             }
@@ -1259,7 +1577,11 @@ impl WireSerializable for Message {
                 code.serialize(buf)?;
                 contains.serialize(buf)?;
             }
-            Message::MultimapContainsEntryRequest { multimap_name, key, value } => {
+            Message::MultimapContainsEntryRequest {
+                multimap_name,
+                key,
+                value,
+            } => {
                 multimap_name.serialize(buf)?;
                 key.serialize(buf)?;
                 value.serialize(buf)?;
@@ -1298,19 +1620,22 @@ impl WireSerializable for Message {
         }
         Ok(())
     }
-    
+
     fn deserialize(cursor: &mut Cursor<&[u8]>) -> Result<Self, WireError> {
         // This method would need the action_id to know which variant to deserialize
         // For now, we'll implement it in a separate function that takes action_id
         Err(WireError::InvalidData(
-            "Message deserialization requires action_id parameter".to_string()
+            "Message deserialization requires action_id parameter".to_string(),
         ))
     }
 }
 
 impl Message {
     /// Deserialize a message with the given action ID
-    pub fn deserialize_with_message_kind(cursor: &mut Cursor<&[u8]>, message_kind: MessageKind) -> Result<Self, WireError> {
+    pub fn deserialize_with_message_kind(
+        cursor: &mut Cursor<&[u8]>,
+        message_kind: MessageKind,
+    ) -> Result<Self, WireError> {
         match message_kind {
             MSG_JOIN_REQUEST => Ok(Message::JoinRequest {
                 node_id: String::deserialize(cursor)?,
@@ -1385,7 +1710,7 @@ impl Message {
                 code: ResponseCode::deserialize(cursor)?,
                 sync_id: u64::deserialize(cursor)?,
             }),
-            
+
             // Set operations
             MSG_CREATE_SET_REQUEST => Ok(Message::CreateSetRequest {
                 name: String::deserialize(cursor)?,
@@ -1423,7 +1748,7 @@ impl Message {
                 code: ResponseCode::deserialize(cursor)?,
                 size: usize::deserialize(cursor)?,
             }),
-            
+
             // Counter operations
             MSG_CREATE_COUNTER_REQUEST => Ok(Message::CreateCounterRequest {
                 name: String::deserialize(cursor)?,
@@ -1447,7 +1772,7 @@ impl Message {
                 code: ResponseCode::deserialize(cursor)?,
                 new_value: i64::deserialize(cursor)?,
             }),
-            
+
             // Lock operations
             MSG_CREATE_LOCK_REQUEST => Ok(Message::CreateLockRequest {
                 name: String::deserialize(cursor)?,
@@ -1478,7 +1803,7 @@ impl Message {
                 synchronized_locks: Vec::<String>::deserialize(cursor)?,
                 failed_locks: Vec::<String>::deserialize(cursor)?,
             }),
-            
+
             // Multimap operations
             MSG_CREATE_MULTIMAP_REQUEST => Ok(Message::CreateMultimapRequest {
                 name: String::deserialize(cursor)?,
@@ -1575,18 +1900,26 @@ impl Message {
             MSG_MULTIMAP_ENTRIES_REQUEST => Ok(Message::MultimapEntriesRequest {
                 multimap_name: String::deserialize(cursor)?,
             }),
-            MSG_MULTIMAP_ENTRIES_RESPONSE => Ok(Message::MultimapEntriesResponse {
-                code: ResponseCode::deserialize(cursor)?,
-                entries: std::collections::HashMap::<Vec<u8>, std::collections::HashSet<Vec<u8>>>::deserialize(cursor)?,
-            }),
+            MSG_MULTIMAP_ENTRIES_RESPONSE => {
+                Ok(Message::MultimapEntriesResponse {
+                    code: ResponseCode::deserialize(cursor)?,
+                    entries: std::collections::HashMap::<
+                        Vec<u8>,
+                        std::collections::HashSet<Vec<u8>>,
+                    >::deserialize(cursor)?,
+                })
+            }
             MSG_MULTIMAP_CLEAR_REQUEST => Ok(Message::MultimapClearRequest {
                 multimap_name: String::deserialize(cursor)?,
             }),
             MSG_MULTIMAP_CLEAR_RESPONSE => Ok(Message::MultimapClearResponse {
                 code: ResponseCode::deserialize(cursor)?,
             }),
-            
-            _ => Err(WireError::InvalidData(format!("Unknown message kind: {}", message_kind))),
+
+            _ => Err(WireError::InvalidData(format!(
+                "Unknown message kind: {}",
+                message_kind
+            ))),
         }
     }
 }
@@ -1596,33 +1929,33 @@ impl<T: WireSerializable> WireSerializable for FramedMessage<T> {
         // Reserve space for checksum and size
         let _checksum_placeholder = 0u32;
         let _size_placeholder = 0u32;
-        
+
         // Start building the message
         let mut temp_buf = Vec::new();
-        
+
         // Write header (without checksum and size)
         self.protocol_version.serialize(&mut temp_buf)?;
         self.flags.as_u8().serialize(&mut temp_buf)?;
         self.message_kind.serialize(&mut temp_buf)?;
         self.request_id.serialize(&mut temp_buf)?;
-        
+
         // Write payload
         self.payload.serialize(&mut temp_buf)?;
-        
+
         // Calculate total size (including checksum and size fields)
         let total_size = (4 + 4 + temp_buf.len()) as u32;
-        
+
         // Calculate checksum (CRC32 of everything except the checksum field)
         let mut hasher = Hasher::new();
         hasher.update(&total_size.to_le_bytes());
         hasher.update(&temp_buf);
         let checksum = hasher.finalize();
-        
+
         // Write the complete message
         checksum.serialize(buf)?;
         total_size.serialize(buf)?;
         buf.extend_from_slice(&temp_buf);
-        
+
         Ok(())
     }
 
@@ -1630,28 +1963,28 @@ impl<T: WireSerializable> WireSerializable for FramedMessage<T> {
         // Read checksum and size
         let stored_checksum = u32::deserialize(cursor)?;
         let size = u32::deserialize(cursor)?;
-        
+
         // Read the rest of the message
         let remaining_size = (size - 8) as usize; // Subtract checksum and size fields
         let mut remaining_data = vec![0u8; remaining_size];
         cursor.read_exact(&mut remaining_data)?;
-        
+
         // Verify checksum
         let mut hasher = Hasher::new();
         hasher.update(&size.to_le_bytes());
         hasher.update(&remaining_data);
         let calculated_checksum = hasher.finalize();
-        
+
         if stored_checksum != calculated_checksum {
             return Err(WireError::InvalidData(format!(
                 "Checksum mismatch: expected {}, got {}",
                 stored_checksum, calculated_checksum
             )));
         }
-        
+
         // Parse the remaining data
         let mut data_cursor = Cursor::new(&remaining_data[..]);
-        
+
         Ok(FramedMessage {
             protocol_version: u8::deserialize(&mut data_cursor)?,
             flags: MessageFlags::new(u8::deserialize(&mut data_cursor)?),
@@ -1685,10 +2018,11 @@ pub struct FramedMessage<T> {
     pub payload: T,
 }
 
-
 /// Helper to serialize a framed message to bytes.
 /// Uses custom binary serialization with little-endian byte order.
-pub fn serialize_message<T: WireSerializable>(msg: &FramedMessage<T>) -> Result<Vec<u8>, WireError> {
+pub fn serialize_message<T: WireSerializable>(
+    msg: &FramedMessage<T>,
+) -> Result<Vec<u8>, WireError> {
     let mut buf = Vec::new();
     msg.serialize(&mut buf)?;
     Ok(buf)
@@ -1696,7 +2030,9 @@ pub fn serialize_message<T: WireSerializable>(msg: &FramedMessage<T>) -> Result<
 
 /// Helper to deserialize a framed message from bytes.
 /// Uses custom binary serialization with little-endian byte order.
-pub fn deserialize_message<T: WireSerializable>(data: &[u8]) -> Result<FramedMessage<T>, WireError> {
+pub fn deserialize_message<T: WireSerializable>(
+    data: &[u8],
+) -> Result<FramedMessage<T>, WireError> {
     let mut cursor = Cursor::new(data);
     FramedMessage::deserialize(&mut cursor)
 }
@@ -1705,40 +2041,40 @@ pub fn deserialize_message<T: WireSerializable>(data: &[u8]) -> Result<FramedMes
 /// This overrides the generic deserialize_message for Message specifically.
 pub fn deserialize_message_specialized(data: &[u8]) -> Result<FramedMessage<Message>, WireError> {
     let mut cursor = Cursor::new(data);
-    
+
     // Read checksum and size
     let stored_checksum = u32::deserialize(&mut cursor)?;
     let size = u32::deserialize(&mut cursor)?;
-    
+
     // Read the rest of the message
     let remaining_size = (size - 8) as usize; // Subtract checksum and size fields
     let mut remaining_data = vec![0u8; remaining_size];
     cursor.read_exact(&mut remaining_data)?;
-    
+
     // Verify checksum
     let mut hasher = Hasher::new();
     hasher.update(&size.to_le_bytes());
     hasher.update(&remaining_data);
     let calculated_checksum = hasher.finalize();
-    
+
     if stored_checksum != calculated_checksum {
         return Err(WireError::InvalidData(format!(
             "Checksum mismatch: expected {}, got {}",
             stored_checksum, calculated_checksum
         )));
     }
-    
+
     // Parse the remaining data
     let mut data_cursor = Cursor::new(&remaining_data[..]);
-    
+
     let protocol_version = u8::deserialize(&mut data_cursor)?;
     let flags = MessageFlags::new(u8::deserialize(&mut data_cursor)?);
     let message_kind = u16::deserialize(&mut data_cursor)?;
     let request_id = u32::deserialize(&mut data_cursor)?;
-    
+
     // Use the message_kind to deserialize the Message payload
     let payload = Message::deserialize_with_message_kind(&mut data_cursor, message_kind)?;
-    
+
     Ok(FramedMessage {
         protocol_version,
         flags,
@@ -1749,9 +2085,9 @@ pub fn deserialize_message_specialized(data: &[u8]) -> Result<FramedMessage<Mess
 }
 
 // FFI-friendly functions for external integration (e.g., Java via JNI)
+use crate::App;
 use std::ffi::CString;
 use std::os::raw::c_char;
-use crate::App;
 
 /// Create a new App instance and return a pointer to it.
 /// Caller must free using free_app().
@@ -1773,7 +2109,7 @@ pub extern "C" fn create_app_with_raft_node(node_id: i32, address: *const c_char
             c_str.to_string_lossy().into_owned()
         }
     };
-    
+
     let app = Box::new(App::new_with_raft_node(node_id, address));
     Box::into_raw(app)
 }
@@ -1785,7 +2121,7 @@ pub extern "C" fn create_app_with_raft_node(node_id: i32, address: *const c_char
 pub extern "C" fn process_request_bytes(
     app: *mut App,
     request_bytes: *const u8,
-    len: usize
+    len: usize,
 ) -> *mut c_char {
     unsafe {
         if app.is_null() {
@@ -1793,10 +2129,10 @@ pub extern "C" fn process_request_bytes(
             let c_string = CString::new(error_msg).unwrap();
             return c_string.into_raw();
         }
-        
+
         let app_ref = &*app;
         let data = std::slice::from_raw_parts(request_bytes, len);
-        
+
         if let Ok(message) = deserialize_message::<Message>(data) {
             let response = app_ref.process_message(message, None, None);
             if let Ok(serialized) = serialize_message(&response) {
@@ -1923,7 +2259,11 @@ mod tests {
     fn test_vec_string_serialization() {
         test_round_trip(Vec::<String>::new());
         test_round_trip(vec!["hello".to_string(), "world".to_string()]);
-        test_round_trip(vec!["".to_string(), "test".to_string(), "multiple".to_string()]);
+        test_round_trip(vec![
+            "".to_string(),
+            "test".to_string(),
+            "multiple".to_string(),
+        ]);
     }
 
     #[test]
@@ -1935,13 +2275,19 @@ mod tests {
 
     #[test]
     fn test_message_join_request() {
-        test_message_round_trip(Message::JoinRequest { node_id: "node1".to_string() });
-        test_message_round_trip(Message::JoinRequest { node_id: "".to_string() });
+        test_message_round_trip(Message::JoinRequest {
+            node_id: "node1".to_string(),
+        });
+        test_message_round_trip(Message::JoinRequest {
+            node_id: "".to_string(),
+        });
     }
 
     #[test]
     fn test_message_leave_request() {
-        test_message_round_trip(Message::LeaveRequest { node_id: "node1".to_string() });
+        test_message_round_trip(Message::LeaveRequest {
+            node_id: "node1".to_string(),
+        });
     }
 
     #[test]
@@ -1951,8 +2297,12 @@ mod tests {
 
     #[test]
     fn test_message_create_map_request() {
-        test_message_round_trip(Message::CreateMapRequest { name: "my_map".to_string() });
-        test_message_round_trip(Message::CreateMapRequest { name: "".to_string() });
+        test_message_round_trip(Message::CreateMapRequest {
+            name: "my_map".to_string(),
+        });
+        test_message_round_trip(Message::CreateMapRequest {
+            name: "".to_string(),
+        });
     }
 
     #[test]
@@ -1987,12 +2337,16 @@ mod tests {
 
     #[test]
     fn test_message_map_size_request() {
-        test_message_round_trip(Message::MapSizeRequest { map_name: "map1".to_string() });
+        test_message_round_trip(Message::MapSizeRequest {
+            map_name: "map1".to_string(),
+        });
     }
 
     #[test]
     fn test_message_create_set_request() {
-        test_message_round_trip(Message::CreateSetRequest { name: "my_set".to_string() });
+        test_message_round_trip(Message::CreateSetRequest {
+            name: "my_set".to_string(),
+        });
     }
 
     #[test]
@@ -2021,12 +2375,16 @@ mod tests {
 
     #[test]
     fn test_message_create_counter_request() {
-        test_message_round_trip(Message::CreateCounterRequest { name: "my_counter".to_string() });
+        test_message_round_trip(Message::CreateCounterRequest {
+            name: "my_counter".to_string(),
+        });
     }
 
     #[test]
     fn test_message_counter_get_request() {
-        test_message_round_trip(Message::CounterGetRequest { counter_name: "counter1".to_string() });
+        test_message_round_trip(Message::CounterGetRequest {
+            counter_name: "counter1".to_string(),
+        });
     }
 
     #[test]
@@ -2043,25 +2401,35 @@ mod tests {
 
     #[test]
     fn test_message_create_lock_request() {
-        test_message_round_trip(Message::CreateLockRequest { name: "my_lock".to_string() });
+        test_message_round_trip(Message::CreateLockRequest {
+            name: "my_lock".to_string(),
+        });
     }
 
     #[test]
     fn test_message_lock_acquire_request() {
-        test_message_round_trip(Message::LockAcquireRequest { lock_name: "lock1".to_string() });
+        test_message_round_trip(Message::LockAcquireRequest {
+            lock_name: "lock1".to_string(),
+        });
     }
 
     #[test]
     fn test_message_lock_release_request() {
-        test_message_round_trip(Message::LockReleaseRequest { lock_name: "lock1".to_string() });
+        test_message_round_trip(Message::LockReleaseRequest {
+            lock_name: "lock1".to_string(),
+        });
     }
-    
+
     #[test]
     fn test_message_create_multimap_request() {
-        test_message_round_trip(Message::CreateMultimapRequest { name: "my_multimap".to_string() });
-        test_message_round_trip(Message::CreateMultimapRequest { name: "".to_string() });
+        test_message_round_trip(Message::CreateMultimapRequest {
+            name: "my_multimap".to_string(),
+        });
+        test_message_round_trip(Message::CreateMultimapRequest {
+            name: "".to_string(),
+        });
     }
-    
+
     #[test]
     fn test_message_multimap_put_request() {
         test_message_round_trip(Message::MultimapPutRequest {
@@ -2070,7 +2438,7 @@ mod tests {
             value: b"value".to_vec(),
         });
     }
-    
+
     #[test]
     fn test_message_multimap_get_request() {
         test_message_round_trip(Message::MultimapGetRequest {
@@ -2078,7 +2446,7 @@ mod tests {
             key: b"key".to_vec(),
         });
     }
-    
+
     #[test]
     fn test_message_multimap_remove_request() {
         test_message_round_trip(Message::MultimapRemoveRequest {
@@ -2086,7 +2454,7 @@ mod tests {
             key: b"key".to_vec(),
         });
     }
-    
+
     #[test]
     fn test_message_multimap_remove_value_request() {
         test_message_round_trip(Message::MultimapRemoveValueRequest {
@@ -2095,12 +2463,14 @@ mod tests {
             value: b"value".to_vec(),
         });
     }
-    
+
     #[test]
     fn test_message_multimap_size_request() {
-        test_message_round_trip(Message::MultimapSizeRequest { multimap_name: "multimap1".to_string() });
+        test_message_round_trip(Message::MultimapSizeRequest {
+            multimap_name: "multimap1".to_string(),
+        });
     }
-    
+
     #[test]
     fn test_message_multimap_key_size_request() {
         test_message_round_trip(Message::MultimapKeySizeRequest {
@@ -2108,7 +2478,7 @@ mod tests {
             key: b"key".to_vec(),
         });
     }
-    
+
     #[test]
     fn test_message_multimap_contains_key_request() {
         test_message_round_trip(Message::MultimapContainsKeyRequest {
@@ -2116,7 +2486,7 @@ mod tests {
             key: b"key".to_vec(),
         });
     }
-    
+
     #[test]
     fn test_message_multimap_contains_value_request() {
         test_message_round_trip(Message::MultimapContainsValueRequest {
@@ -2124,7 +2494,7 @@ mod tests {
             value: b"value".to_vec(),
         });
     }
-    
+
     #[test]
     fn test_message_multimap_contains_entry_request() {
         test_message_round_trip(Message::MultimapContainsEntryRequest {
@@ -2133,159 +2503,274 @@ mod tests {
             value: b"value".to_vec(),
         });
     }
-    
+
     #[test]
     fn test_message_multimap_keys_request() {
-        test_message_round_trip(Message::MultimapKeysRequest { multimap_name: "multimap1".to_string() });
+        test_message_round_trip(Message::MultimapKeysRequest {
+            multimap_name: "multimap1".to_string(),
+        });
     }
-    
+
     #[test]
     fn test_message_multimap_values_request() {
-        test_message_round_trip(Message::MultimapValuesRequest { multimap_name: "multimap1".to_string() });
+        test_message_round_trip(Message::MultimapValuesRequest {
+            multimap_name: "multimap1".to_string(),
+        });
     }
-    
+
     #[test]
     fn test_message_multimap_entries_request() {
-        test_message_round_trip(Message::MultimapEntriesRequest { multimap_name: "multimap1".to_string() });
+        test_message_round_trip(Message::MultimapEntriesRequest {
+            multimap_name: "multimap1".to_string(),
+        });
     }
-    
+
     #[test]
     fn test_message_multimap_clear_request() {
-        test_message_round_trip(Message::MultimapClearRequest { multimap_name: "multimap1".to_string() });
+        test_message_round_trip(Message::MultimapClearRequest {
+            multimap_name: "multimap1".to_string(),
+        });
     }
 
     #[test]
     fn test_message_join_response() {
-        test_message_round_trip(Message::JoinResponse { code: ResponseCode::OK, connection_id: 12345 });
+        test_message_round_trip(Message::JoinResponse {
+            code: ResponseCode::OK,
+            connection_id: 12345,
+        });
     }
 
     #[test]
     fn test_message_leave_response() {
-        test_message_round_trip(Message::LeaveResponse { code: ResponseCode::OK });
+        test_message_round_trip(Message::LeaveResponse {
+            code: ResponseCode::OK,
+        });
     }
 
     #[test]
     fn test_message_map_put_response() {
-        test_message_round_trip(Message::MapPutResponse { code: ResponseCode::OK });
+        test_message_round_trip(Message::MapPutResponse {
+            code: ResponseCode::OK,
+        });
     }
 
     #[test]
     fn test_message_map_remove_response() {
-        test_message_round_trip(Message::MapRemoveResponse { code: ResponseCode::OK });
+        test_message_round_trip(Message::MapRemoveResponse {
+            code: ResponseCode::OK,
+        });
     }
 
     #[test]
     fn test_message_set_add_response() {
-        test_message_round_trip(Message::SetAddResponse { code: ResponseCode::OK });
+        test_message_round_trip(Message::SetAddResponse {
+            code: ResponseCode::OK,
+        });
     }
 
     #[test]
     fn test_message_set_remove_response() {
-        test_message_round_trip(Message::SetRemoveResponse { code: ResponseCode::OK });
+        test_message_round_trip(Message::SetRemoveResponse {
+            code: ResponseCode::OK,
+        });
     }
 
     #[test]
     fn test_message_lock_release_response() {
-        test_message_round_trip(Message::LockReleaseResponse { code: ResponseCode::OK });
+        test_message_round_trip(Message::LockReleaseResponse {
+            code: ResponseCode::OK,
+        });
     }
 
     #[test]
     fn test_message_error_response() {
-        test_message_round_trip(Message::ErrorResponse { code: ResponseCode::ERR, error: "error message".to_string() });
-        test_message_round_trip(Message::ErrorResponse { code: ResponseCode::ERR, error: "".to_string() });
+        test_message_round_trip(Message::ErrorResponse {
+            code: ResponseCode::ERR,
+            error: "error message".to_string(),
+        });
+        test_message_round_trip(Message::ErrorResponse {
+            code: ResponseCode::ERR,
+            error: "".to_string(),
+        });
     }
 
     #[test]
     fn test_message_get_nodes_response() {
-        test_message_round_trip(Message::GetNodesResponse { code: ResponseCode::OK, nodes: vec!["node1".to_string(), "node2".to_string()] });
-        test_message_round_trip(Message::GetNodesResponse { code: ResponseCode::OK, nodes: Vec::new() });
+        test_message_round_trip(Message::GetNodesResponse {
+            code: ResponseCode::OK,
+            nodes: vec!["node1".to_string(), "node2".to_string()],
+        });
+        test_message_round_trip(Message::GetNodesResponse {
+            code: ResponseCode::OK,
+            nodes: Vec::new(),
+        });
     }
 
     #[test]
     fn test_message_create_map_response() {
-        test_message_round_trip(Message::CreateMapResponse { code: ResponseCode::OK, map_name: "map1".to_string() });
-        test_message_round_trip(Message::CreateMapResponse { code: ResponseCode::OK, map_name: "map0".to_string() });
+        test_message_round_trip(Message::CreateMapResponse {
+            code: ResponseCode::OK,
+            map_name: "map1".to_string(),
+        });
+        test_message_round_trip(Message::CreateMapResponse {
+            code: ResponseCode::OK,
+            map_name: "map0".to_string(),
+        });
     }
 
     #[test]
     fn test_message_create_set_response() {
-        test_message_round_trip(Message::CreateSetResponse { code: ResponseCode::OK, set_name: "set1".to_string() });
+        test_message_round_trip(Message::CreateSetResponse {
+            code: ResponseCode::OK,
+            set_name: "set1".to_string(),
+        });
     }
 
     #[test]
     fn test_message_create_counter_response() {
-        test_message_round_trip(Message::CreateCounterResponse { code: ResponseCode::OK, counter_name: "counter1".to_string() });
+        test_message_round_trip(Message::CreateCounterResponse {
+            code: ResponseCode::OK,
+            counter_name: "counter1".to_string(),
+        });
     }
 
     #[test]
     fn test_message_create_lock_response() {
-        test_message_round_trip(Message::CreateLockResponse { code: ResponseCode::OK, lock_name: "lock1".to_string() });
+        test_message_round_trip(Message::CreateLockResponse {
+            code: ResponseCode::OK,
+            lock_name: "lock1".to_string(),
+        });
     }
 
     #[test]
     fn test_message_map_get_response() {
-        test_message_round_trip(Message::MapGetResponse { code: ResponseCode::OK, value: Some(b"value".to_vec()) });
-        test_message_round_trip(Message::MapGetResponse { code: ResponseCode::OK, value: None });
-        test_message_round_trip(Message::MapGetResponse { code: ResponseCode::OK, value: Some(Vec::new()) });
+        test_message_round_trip(Message::MapGetResponse {
+            code: ResponseCode::OK,
+            value: Some(b"value".to_vec()),
+        });
+        test_message_round_trip(Message::MapGetResponse {
+            code: ResponseCode::OK,
+            value: None,
+        });
+        test_message_round_trip(Message::MapGetResponse {
+            code: ResponseCode::OK,
+            value: Some(Vec::new()),
+        });
     }
 
     #[test]
     fn test_message_map_size_response() {
-        test_message_round_trip(Message::MapSizeResponse { code: ResponseCode::OK, size: 0 });
-        test_message_round_trip(Message::MapSizeResponse { code: ResponseCode::OK, size: 1000 });
+        test_message_round_trip(Message::MapSizeResponse {
+            code: ResponseCode::OK,
+            size: 0,
+        });
+        test_message_round_trip(Message::MapSizeResponse {
+            code: ResponseCode::OK,
+            size: 1000,
+        });
     }
 
     #[test]
     fn test_message_set_size_response() {
-        test_message_round_trip(Message::SetSizeResponse { code: ResponseCode::OK, size: 0 });
-        test_message_round_trip(Message::SetSizeResponse { code: ResponseCode::OK, size: 1000 });
+        test_message_round_trip(Message::SetSizeResponse {
+            code: ResponseCode::OK,
+            size: 0,
+        });
+        test_message_round_trip(Message::SetSizeResponse {
+            code: ResponseCode::OK,
+            size: 1000,
+        });
     }
 
     #[test]
     fn test_message_set_contains_response() {
-        test_message_round_trip(Message::SetContainsResponse { code: ResponseCode::OK, contains: true });
-        test_message_round_trip(Message::SetContainsResponse { code: ResponseCode::OK, contains: false });
+        test_message_round_trip(Message::SetContainsResponse {
+            code: ResponseCode::OK,
+            contains: true,
+        });
+        test_message_round_trip(Message::SetContainsResponse {
+            code: ResponseCode::OK,
+            contains: false,
+        });
     }
 
     #[test]
     fn test_message_counter_get_response() {
-        test_message_round_trip(Message::CounterGetResponse { code: ResponseCode::OK, value: 42 });
-        test_message_round_trip(Message::CounterGetResponse { code: ResponseCode::OK, value: -42 });
+        test_message_round_trip(Message::CounterGetResponse {
+            code: ResponseCode::OK,
+            value: 42,
+        });
+        test_message_round_trip(Message::CounterGetResponse {
+            code: ResponseCode::OK,
+            value: -42,
+        });
     }
 
     #[test]
     fn test_message_counter_increment_response() {
-        test_message_round_trip(Message::CounterIncrementResponse { code: ResponseCode::OK, new_value: 47 });
-        test_message_round_trip(Message::CounterIncrementResponse { code: ResponseCode::OK, new_value: -37 });
+        test_message_round_trip(Message::CounterIncrementResponse {
+            code: ResponseCode::OK,
+            new_value: 47,
+        });
+        test_message_round_trip(Message::CounterIncrementResponse {
+            code: ResponseCode::OK,
+            new_value: -37,
+        });
     }
 
     #[test]
     fn test_message_lock_acquire_response() {
-        test_message_round_trip(Message::LockAcquireResponse { code: ResponseCode::OK, acquired: true, queue_position: None });
-        test_message_round_trip(Message::LockAcquireResponse { code: ResponseCode::OK, acquired: false, queue_position: Some(5) });
+        test_message_round_trip(Message::LockAcquireResponse {
+            code: ResponseCode::OK,
+            acquired: true,
+            queue_position: None,
+        });
+        test_message_round_trip(Message::LockAcquireResponse {
+            code: ResponseCode::OK,
+            acquired: false,
+            queue_position: Some(5),
+        });
     }
-    
+
     #[test]
     fn test_message_create_multimap_response() {
-        test_message_round_trip(Message::CreateMultimapResponse { code: ResponseCode::OK, multimap_name: "multimap1".to_string() });
-        test_message_round_trip(Message::CreateMultimapResponse { code: ResponseCode::OK, multimap_name: "multimap0".to_string() });
+        test_message_round_trip(Message::CreateMultimapResponse {
+            code: ResponseCode::OK,
+            multimap_name: "multimap1".to_string(),
+        });
+        test_message_round_trip(Message::CreateMultimapResponse {
+            code: ResponseCode::OK,
+            multimap_name: "multimap0".to_string(),
+        });
     }
-    
+
     #[test]
     fn test_message_multimap_values_response() {
-        test_message_round_trip(Message::MultimapValuesResponse { code: ResponseCode::OK, values: vec![b"value1".to_vec(), b"value2".to_vec()] });
-        test_message_round_trip(Message::MultimapValuesResponse { code: ResponseCode::OK, values: Vec::new() });
+        test_message_round_trip(Message::MultimapValuesResponse {
+            code: ResponseCode::OK,
+            values: vec![b"value1".to_vec(), b"value2".to_vec()],
+        });
+        test_message_round_trip(Message::MultimapValuesResponse {
+            code: ResponseCode::OK,
+            values: Vec::new(),
+        });
     }
-    
+
     #[test]
     fn test_message_multimap_keys_response() {
         let mut keys = std::collections::HashSet::new();
         keys.insert(b"key1".to_vec());
         keys.insert(b"key2".to_vec());
-        test_message_round_trip(Message::MultimapKeysResponse { code: ResponseCode::OK, keys: keys.clone() });
-        test_message_round_trip(Message::MultimapKeysResponse { code: ResponseCode::OK, keys: std::collections::HashSet::new() });
+        test_message_round_trip(Message::MultimapKeysResponse {
+            code: ResponseCode::OK,
+            keys: keys.clone(),
+        });
+        test_message_round_trip(Message::MultimapKeysResponse {
+            code: ResponseCode::OK,
+            keys: std::collections::HashSet::new(),
+        });
     }
-    
+
     #[test]
     fn test_message_multimap_entries_response() {
         let mut entries = std::collections::HashMap::new();
@@ -2295,8 +2780,14 @@ mod tests {
         values2.insert(b"value2".to_vec());
         entries.insert(b"key1".to_vec(), values1);
         entries.insert(b"key2".to_vec(), values2);
-        test_message_round_trip(Message::MultimapEntriesResponse { code: ResponseCode::OK, entries });
-        test_message_round_trip(Message::MultimapEntriesResponse { code: ResponseCode::OK, entries: std::collections::HashMap::new() });
+        test_message_round_trip(Message::MultimapEntriesResponse {
+            code: ResponseCode::OK,
+            entries,
+        });
+        test_message_round_trip(Message::MultimapEntriesResponse {
+            code: ResponseCode::OK,
+            entries: std::collections::HashMap::new(),
+        });
     }
 
     #[test]
@@ -2304,58 +2795,102 @@ mod tests {
         let mut values = std::collections::HashSet::new();
         values.insert(b"value1".to_vec());
         values.insert(b"value2".to_vec());
-        test_message_round_trip(Message::MultimapGetResponse { code: ResponseCode::OK, values: values.clone() });
-        test_message_round_trip(Message::MultimapGetResponse { code: ResponseCode::OK, values: std::collections::HashSet::new() });
+        test_message_round_trip(Message::MultimapGetResponse {
+            code: ResponseCode::OK,
+            values: values.clone(),
+        });
+        test_message_round_trip(Message::MultimapGetResponse {
+            code: ResponseCode::OK,
+            values: std::collections::HashSet::new(),
+        });
     }
 
     #[test]
     fn test_message_multimap_size_response() {
-        test_message_round_trip(Message::MultimapSizeResponse { code: ResponseCode::OK, size: 0 });
-        test_message_round_trip(Message::MultimapSizeResponse { code: ResponseCode::OK, size: 1000 });
+        test_message_round_trip(Message::MultimapSizeResponse {
+            code: ResponseCode::OK,
+            size: 0,
+        });
+        test_message_round_trip(Message::MultimapSizeResponse {
+            code: ResponseCode::OK,
+            size: 1000,
+        });
     }
 
     #[test]
     fn test_message_multimap_key_size_response() {
-        test_message_round_trip(Message::MultimapKeySizeResponse { code: ResponseCode::OK, size: 0 });
-        test_message_round_trip(Message::MultimapKeySizeResponse { code: ResponseCode::OK, size: 10 });
+        test_message_round_trip(Message::MultimapKeySizeResponse {
+            code: ResponseCode::OK,
+            size: 0,
+        });
+        test_message_round_trip(Message::MultimapKeySizeResponse {
+            code: ResponseCode::OK,
+            size: 10,
+        });
     }
 
     #[test]
     fn test_message_multimap_contains_key_response() {
-        test_message_round_trip(Message::MultimapContainsKeyResponse { code: ResponseCode::OK, contains: true });
-        test_message_round_trip(Message::MultimapContainsKeyResponse { code: ResponseCode::OK, contains: false });
+        test_message_round_trip(Message::MultimapContainsKeyResponse {
+            code: ResponseCode::OK,
+            contains: true,
+        });
+        test_message_round_trip(Message::MultimapContainsKeyResponse {
+            code: ResponseCode::OK,
+            contains: false,
+        });
     }
 
     #[test]
     fn test_message_multimap_contains_value_response() {
-        test_message_round_trip(Message::MultimapContainsValueResponse { code: ResponseCode::OK, contains: true });
-        test_message_round_trip(Message::MultimapContainsValueResponse { code: ResponseCode::OK, contains: false });
+        test_message_round_trip(Message::MultimapContainsValueResponse {
+            code: ResponseCode::OK,
+            contains: true,
+        });
+        test_message_round_trip(Message::MultimapContainsValueResponse {
+            code: ResponseCode::OK,
+            contains: false,
+        });
     }
 
     #[test]
     fn test_message_multimap_contains_entry_response() {
-        test_message_round_trip(Message::MultimapContainsEntryResponse { code: ResponseCode::OK, contains: true });
-        test_message_round_trip(Message::MultimapContainsEntryResponse { code: ResponseCode::OK, contains: false });
+        test_message_round_trip(Message::MultimapContainsEntryResponse {
+            code: ResponseCode::OK,
+            contains: true,
+        });
+        test_message_round_trip(Message::MultimapContainsEntryResponse {
+            code: ResponseCode::OK,
+            contains: false,
+        });
     }
 
     #[test]
     fn test_message_multimap_put_response() {
-        test_message_round_trip(Message::MultimapPutResponse { code: ResponseCode::OK });
+        test_message_round_trip(Message::MultimapPutResponse {
+            code: ResponseCode::OK,
+        });
     }
 
     #[test]
     fn test_message_multimap_remove_response() {
-        test_message_round_trip(Message::MultimapRemoveResponse { code: ResponseCode::OK });
+        test_message_round_trip(Message::MultimapRemoveResponse {
+            code: ResponseCode::OK,
+        });
     }
 
     #[test]
     fn test_message_multimap_remove_value_response() {
-        test_message_round_trip(Message::MultimapRemoveValueResponse { code: ResponseCode::OK });
+        test_message_round_trip(Message::MultimapRemoveValueResponse {
+            code: ResponseCode::OK,
+        });
     }
 
     #[test]
     fn test_message_multimap_clear_response() {
-        test_message_round_trip(Message::MultimapClearResponse { code: ResponseCode::OK });
+        test_message_round_trip(Message::MultimapClearResponse {
+            code: ResponseCode::OK,
+        });
     }
 
     #[test]
@@ -2365,7 +2900,9 @@ mod tests {
             flags: MessageFlags::REQUEST,
             message_kind: MSG_JOIN_REQUEST,
             request_id: 123,
-            payload: Message::JoinRequest { node_id: "test".to_string() },
+            payload: Message::JoinRequest {
+                node_id: "test".to_string(),
+            },
         };
         let serialized = serialize_message(&msg).unwrap();
         let deserialized = deserialize_message_specialized(&serialized).unwrap();
@@ -2379,7 +2916,10 @@ mod tests {
             flags: MessageFlags::RESPONSE,
             message_kind: MSG_MAP_GET_RESPONSE,
             request_id: 456,
-            payload: Message::MapGetResponse { code: ResponseCode::OK, value: Some(b"data".to_vec()) },
+            payload: Message::MapGetResponse {
+                code: ResponseCode::OK,
+                value: Some(b"data".to_vec()),
+            },
         };
         let serialized = serialize_message(&msg).unwrap();
         let deserialized = deserialize_message_specialized(&serialized).unwrap();
@@ -2414,7 +2954,7 @@ mod tests {
     fn test_protocol_version() {
         assert_eq!(PROTOCOL_VERSION, 1);
     }
-    
+
     #[test]
     fn test_message_flags() {
         let request_flag = MessageFlags::REQUEST;
@@ -2422,25 +2962,25 @@ mod tests {
         assert!(!request_flag.is_response());
         assert!(!request_flag.is_ping());
         assert!(!request_flag.is_pong());
-        
+
         let response_flag = MessageFlags::RESPONSE;
         assert!(!response_flag.is_request());
         assert!(response_flag.is_response());
         assert!(!response_flag.is_ping());
         assert!(!response_flag.is_pong());
-        
+
         let ping_flag = MessageFlags::PING;
         assert!(!ping_flag.is_request());
         assert!(!ping_flag.is_response());
         assert!(ping_flag.is_ping());
         assert!(!ping_flag.is_pong());
-        
+
         let pong_flag = MessageFlags::PONG;
         assert!(!pong_flag.is_request());
         assert!(!pong_flag.is_response());
         assert!(!pong_flag.is_ping());
         assert!(pong_flag.is_pong());
-        
+
         // Test combined flags
         let combined = MessageFlags::new(MessageFlags::REQUEST.0 | MessageFlags::PING.0);
         assert!(combined.is_request());
@@ -2448,7 +2988,7 @@ mod tests {
         assert!(!combined.is_response());
         assert!(!combined.is_pong());
     }
-    
+
     #[test]
     fn test_checksum_validation() {
         let msg = FramedMessage {
@@ -2456,27 +2996,29 @@ mod tests {
             flags: MessageFlags::REQUEST,
             message_kind: MSG_JOIN_REQUEST,
             request_id: 123,
-            payload: Message::JoinRequest { node_id: "test_node".to_string() },
+            payload: Message::JoinRequest {
+                node_id: "test_node".to_string(),
+            },
         };
-        
+
         // Serialize the message
         let serialized = serialize_message(&msg).unwrap();
-        
+
         // Corrupt the data (change a byte after the checksum)
         let mut corrupted = serialized.clone();
         corrupted[10] ^= 0xFF; // Flip bits in a data byte
-        
+
         // Try to deserialize the corrupted message
         let result = deserialize_message_specialized(&corrupted);
         assert!(result.is_err());
-        
+
         // Verify the error is about checksum mismatch
         if let Err(WireError::InvalidData(msg)) = result {
             assert!(msg.contains("Checksum mismatch"));
         } else {
             panic!("Expected checksum mismatch error");
         }
-        
+
         // Original message should still deserialize correctly
         let deserialized = deserialize_message_specialized(&serialized).unwrap();
         assert_eq!(msg, deserialized);
