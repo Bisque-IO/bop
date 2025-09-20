@@ -4,13 +4,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crossbeam::channel::{Receiver, Sender, TrySendError, unbounded};
-use tokio::runtime::Runtime;
-use tokio::sync::Notify;
-
+use super::TieredRuntime;
 use super::config::SegmentId;
 use super::error::{AofError, AofResult};
 use super::segment::Segment;
+use crossbeam::channel::{Receiver, Sender, TrySendError, unbounded};
+use tokio::sync::Notify;
+use tracing::{debug, warn};
 
 pub enum FlushCommand {
     RegisterSegment { segment: Arc<Segment> },
@@ -212,8 +212,19 @@ pub(crate) fn flush_with_retry(
     let mut retries = 0u32;
     loop {
         match segment.flush_to_disk() {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                if retries > 0 {
+                    debug!(
+                        segment_id = segment.id().as_u64(),
+                        retries, "flush succeeded after retries"
+                    );
+                } else {
+                    debug!(segment_id = segment.id().as_u64(), "flush succeeded");
+                }
+                return Ok(());
+            }
             Err(err) => {
+                debug!(segment_id = segment.id().as_u64(), attempt = retries + 1, error = %err, "retrying flush");
                 if retries < FLUSH_RETRY_MAX_ATTEMPTS && is_retryable_error(&err) {
                     retries += 1;
                     metrics.add_retry_attempts(1);
@@ -223,6 +234,7 @@ pub(crate) fn flush_with_retry(
                 if retries > 0 {
                     metrics.incr_retry_failure();
                 }
+                warn!(segment_id = segment.id().as_u64(), retries, error = %err, "flush failed after retries");
                 return Err(err);
             }
         }
@@ -270,7 +282,7 @@ fn is_retryable_io_error(err: &io::Error) -> bool {
     false
 }
 pub struct FlushManager {
-    _rt: Arc<Runtime>,
+    _runtime: Arc<TieredRuntime>,
     command_tx: Sender<FlushCommand>,
     total_unflushed: Arc<AtomicU64>,
     metrics: Arc<FlushMetrics>,
@@ -278,18 +290,18 @@ pub struct FlushManager {
 
 impl FlushManager {
     pub fn new(
-        rt: Arc<Runtime>,
+        runtime: Arc<TieredRuntime>,
         total_unflushed: Arc<AtomicU64>,
         metrics: Arc<FlushMetrics>,
     ) -> Arc<Self> {
         let (tx, rx) = unbounded();
         let manager = Arc::new(Self {
-            _rt: rt.clone(),
+            _runtime: runtime.clone(),
             command_tx: tx,
             total_unflushed: total_unflushed.clone(),
             metrics: metrics.clone(),
         });
-        Self::spawn_worker(rt, rx, total_unflushed, metrics);
+        Self::spawn_worker(rx, total_unflushed, metrics);
         manager
     }
 
@@ -307,23 +319,20 @@ impl FlushManager {
     }
 
     fn spawn_worker(
-        rt: Arc<Runtime>,
         rx: Receiver<FlushCommand>,
         total_unflushed: Arc<AtomicU64>,
         metrics: Arc<FlushMetrics>,
     ) {
         let _ = thread::Builder::new()
             .name("aof-flush".to_string())
-            .spawn(move || Self::worker_loop(rt, rx, total_unflushed, metrics));
+            .spawn(move || Self::worker_loop(rx, total_unflushed, metrics));
     }
 
     fn worker_loop(
-        _rt: Arc<Runtime>,
         rx: Receiver<FlushCommand>,
         total_unflushed: Arc<AtomicU64>,
         metrics: Arc<FlushMetrics>,
     ) {
-        let _ = _rt;
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 FlushCommand::RegisterSegment { segment } => {
@@ -424,6 +433,34 @@ mod tests {
     }
 
     #[test]
+    fn flush_retry_attempts_are_counted() {
+        use crate::aof2::SegmentId;
+        use crate::aof2::config::AofConfig;
+        use crate::aof2::segment::Segment;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("segment.seg");
+        let cfg = AofConfig::default();
+        let segment = Arc::new(
+            Segment::create_active(SegmentId::new(1), 0, 0, 0, cfg.segment_max_bytes, &path)
+                .expect("segment"),
+        );
+        segment.append_record(b"retry", 1).expect("append");
+        segment.inject_flush_error(1);
+
+        let metrics = Arc::new(FlushMetrics::default());
+        flush_with_retry(&segment, &metrics).expect("flush");
+
+        let _ = segment.mark_durable(segment.current_size());
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.retry_attempts, 1);
+        assert_eq!(snapshot.retry_failures, 0);
+        assert_eq!(segment.durable_size(), segment.current_size());
+    }
+
     fn backlog_snapshot_records_bytes() {
         let metrics = FlushMetrics::default();
         metrics.record_backlog(123);

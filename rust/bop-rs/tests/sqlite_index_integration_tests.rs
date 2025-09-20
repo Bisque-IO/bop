@@ -1,3 +1,5 @@
+#![cfg(not(feature = "tiered-store"))]
+
 //! Integration tests demonstrating SqliteSegmentIndex backup, recovery, and operational benefits
 
 use std::fs;

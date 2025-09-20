@@ -1,0 +1,4 @@
+
+trait Vector {
+    type Value;
+}

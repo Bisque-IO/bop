@@ -1,3 +1,5 @@
+#![cfg(not(feature = "tiered-store"))]
+
 use std::sync::Arc;
 
 use bop_rs::aof::Aof;
@@ -243,3 +245,4 @@ async fn tail_reader_picks_up_new_appends() -> AofResult<()> {
     aof.close().await?;
     Ok(())
 }
+#![cfg(not(feature = "tiered-store"))]

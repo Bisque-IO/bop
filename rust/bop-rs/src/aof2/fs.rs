@@ -12,10 +12,12 @@ use super::error::{AofError, AofResult};
 pub struct Layout {
     root: PathBuf,
     segments: PathBuf,
+    warm: PathBuf,
     archive: PathBuf,
 }
 
 pub const SEGMENT_FILE_EXTENSION: &str = ".seg";
+pub const WARM_FILE_EXTENSION: &str = ".zst";
 const SEGMENT_FILE_BREAK: char = '_';
 const SEGMENT_FILE_PAD: usize = 20;
 
@@ -88,10 +90,12 @@ impl Layout {
     pub fn new(config: &AofConfig) -> Self {
         let root = config.root_dir.clone();
         let segments = root.join("segments");
+        let warm = root.join("warm");
         let archive = root.join("archive");
         Self {
             root,
             segments,
+            warm,
             archive,
         }
     }
@@ -99,6 +103,7 @@ impl Layout {
     pub fn ensure(&self) -> AofResult<()> {
         self.create_dir(&self.root)?;
         self.create_dir(&self.segments)?;
+        self.create_dir(&self.warm)?;
         self.create_dir(&self.archive)?;
         let _ = fsync_dir(&self.root);
         Ok(())
@@ -110,6 +115,10 @@ impl Layout {
 
     pub fn segments_dir(&self) -> &Path {
         &self.segments
+    }
+
+    pub fn warm_dir(&self) -> &Path {
+        &self.warm
     }
 
     pub fn archive_dir(&self) -> &Path {
@@ -128,6 +137,40 @@ impl Layout {
     ) -> PathBuf {
         let name = SegmentFileName::format(segment_id, base_offset, created_at);
         self.segment_path(&name)
+    }
+
+    pub fn archive_path(&self, name: &str) -> PathBuf {
+        self.archive.join(name)
+    }
+
+    pub fn warm_path(&self, name: &str) -> PathBuf {
+        self.warm.join(name)
+    }
+
+    pub fn warm_file_path(
+        &self,
+        segment_id: SegmentId,
+        base_offset: u64,
+        sealed_at: i64,
+    ) -> PathBuf {
+        let name = format!(
+            "{id:020}_{offset:020}_{sealed:020}{ext}",
+            id = segment_id.as_u64(),
+            offset = base_offset,
+            sealed = sealed_at,
+            ext = WARM_FILE_EXTENSION,
+        );
+        self.warm_path(&name)
+    }
+
+    pub fn archive_file_path(
+        &self,
+        segment_id: SegmentId,
+        base_offset: u64,
+        created_at: i64,
+    ) -> PathBuf {
+        let name = SegmentFileName::format(segment_id, base_offset, created_at);
+        self.archive_path(&name)
     }
 
     fn create_dir(&self, path: &Path) -> AofResult<()> {
@@ -262,6 +305,8 @@ mod tests {
         layout.ensure().expect("ensure");
         assert!(layout.root_dir().exists());
         assert!(layout.segments_dir().exists());
+        assert!(layout.warm_dir().exists());
+        assert!(layout.warm_dir().exists());
         assert!(layout.archive_dir().exists());
     }
 }

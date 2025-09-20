@@ -1600,7 +1600,7 @@ mod tests {
         let results = queue.dequeue_bulk(5); // Request more than available
         assert_eq!(results.len(), 3);
 
-        for (i, item) in results.iter().enumerate() {
+        for (_i, item) in results.iter().enumerate() {
             // Note: order might not be preserved
             assert!(item.starts_with("item-"));
         }

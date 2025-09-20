@@ -1,15 +1,31 @@
 use std::collections::VecDeque;
-use std::ffi::OsStr;
-use std::fs::read_dir;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "tiered-store")]
+use crate::aof2::store::{
+    ResidencyKind, ResidentSegment, SegmentCheckout, SegmentResidency, Tier0Cache,
+    Tier0CacheConfig, Tier1Cache, Tier1Config, Tier2Config, Tier2Manager, TieredCoordinator,
+    TieredInstance,
+};
 use arc_swap::ArcSwapOption;
 use chrono::Utc;
 use parking_lot::Mutex;
-use tokio::{runtime::Runtime, sync::watch};
+#[cfg(not(feature = "tiered-store"))]
+use store_stub::{
+    ResidencyKind, ResidentSegment, SegmentCheckout, SegmentResidency, Tier0Cache,
+    Tier0CacheConfig, Tier1Cache, Tier1Config, Tier2Config, Tier2Manager, TieredCoordinator,
+    TieredInstance,
+};
+use tokio::{
+    runtime::{Builder, Handle, Runtime},
+    sync::{Notify, watch},
+    task::JoinHandle,
+};
+use tokio_util::sync::CancellationToken;
+use tracing::trace;
 
 pub mod config;
 pub mod error;
@@ -17,6 +33,13 @@ pub mod flush;
 pub mod fs;
 pub mod reader;
 pub mod segment;
+#[cfg(feature = "tiered-store")]
+pub mod store;
+#[cfg(not(feature = "tiered-store"))]
+pub mod store_stub;
+
+#[cfg(not(feature = "tiered-store"))]
+pub use store_stub as store;
 
 pub use config::{
     AofConfig, CompactionPolicy, Compression, FlushConfig, IdStrategy, RecordId, RetentionPolicy,
@@ -84,27 +107,347 @@ use error::{AofError, AofResult};
 use flush::{FlushManager, FlushMetrics, FlushMetricsSnapshot, flush_with_retry};
 use segment::{Segment, SegmentAppendResult};
 
+const DEFAULT_TIER0_CLUSTER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+const DEFAULT_TIER0_INSTANCE_QUOTA_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+const DEFAULT_TIER1_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
+const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
+const TIERED_SERVICE_IDLE_BACKOFF_MS: u64 = 10;
+
+#[derive(Debug, Clone)]
+pub struct TieredStoreConfig {
+    pub tier0: Tier0CacheConfig,
+    pub tier1: Tier1Config,
+    pub tier2: Option<Tier2Config>,
+}
+
+impl Default for TieredStoreConfig {
+    fn default() -> Self {
+        Self {
+            tier0: Tier0CacheConfig::new(
+                DEFAULT_TIER0_CLUSTER_BYTES,
+                DEFAULT_TIER0_INSTANCE_QUOTA_BYTES,
+            ),
+            tier1: Tier1Config::new(DEFAULT_TIER1_CACHE_BYTES),
+            tier2: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AofManagerConfig {
-    pub max_segment_cache: u64,
+    pub runtime_worker_threads: Option<usize>,
+    pub runtime_shutdown_timeout: Duration,
     pub flush: FlushConfig,
+    pub store: TieredStoreConfig,
 }
 
 impl Default for AofManagerConfig {
     fn default() -> Self {
         Self {
-            max_segment_cache: 128,
+            runtime_worker_threads: None,
+            runtime_shutdown_timeout: Duration::from_secs(DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_SECS),
             flush: FlushConfig::default(),
+            store: TieredStoreConfig::default(),
         }
     }
 }
 
+impl AofManagerConfig {
+    pub fn without_tier2(mut self) -> Self {
+        self.store.tier2 = None;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        let mut cfg = Self::default();
+        cfg.runtime_worker_threads = Some(2);
+        cfg.store.tier0 = Tier0CacheConfig::new(32 * 1024 * 1024, 32 * 1024 * 1024);
+        cfg.store.tier1 = Tier1Config::new(64 * 1024 * 1024).with_worker_threads(1);
+        cfg.store.tier2 = None;
+        cfg
+    }
+}
+
+pub(crate) struct TieredRuntime {
+    runtime: Mutex<Option<Runtime>>,
+    handle: Handle,
+    shutdown_token: CancellationToken,
+    shutdown_timeout: Duration,
+}
+
+impl TieredRuntime {
+    pub fn create(worker_threads: Option<usize>, shutdown_timeout: Duration) -> AofResult<Self> {
+        let mut builder = Builder::new_multi_thread();
+        builder.enable_all();
+        if let Some(threads) = worker_threads {
+            builder.worker_threads(threads.max(1));
+        }
+        let runtime = builder
+            .build()
+            .map_err(|err| AofError::other(format!("failed to build Tokio runtime: {err}")))?;
+        Ok(Self::from_runtime(runtime, shutdown_timeout))
+    }
+
+    pub fn from_runtime(runtime: Runtime, shutdown_timeout: Duration) -> Self {
+        let handle = runtime.handle().clone();
+        Self {
+            runtime: Mutex::new(Some(runtime)),
+            handle,
+            shutdown_token: CancellationToken::new(),
+            shutdown_timeout,
+        }
+    }
+
+    pub fn handle(&self) -> Handle {
+        self.handle.clone()
+    }
+
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown_token.clone()
+    }
+
+    pub fn shutdown(&self) {
+        self.shutdown_inner();
+    }
+
+    fn shutdown_inner(&self) {
+        if !self.shutdown_token.is_cancelled() {
+            self.shutdown_token.cancel();
+        }
+        let mut guard = self.runtime.lock();
+        if let Some(runtime) = guard.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                runtime.shutdown_background();
+            } else {
+                runtime.shutdown_timeout(self.shutdown_timeout);
+            }
+        }
+    }
+}
+
+impl Drop for TieredRuntime {
+    fn drop(&mut self) {
+        self.shutdown_inner();
+    }
+}
+
 pub struct AofManager {
-    rt: Arc<Runtime>,
+    runtime: Arc<TieredRuntime>,
+    flush_config: FlushConfig,
+    coordinator: Arc<TieredCoordinator>,
+    handle: Arc<AofManagerHandle>,
+    tiered_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl AofManager {
-    pub fn new(rt: Arc<Runtime>) -> Self {
-        Self { rt }
+    pub fn with_config(config: AofManagerConfig) -> AofResult<Self> {
+        let AofManagerConfig {
+            runtime_worker_threads,
+            runtime_shutdown_timeout,
+            flush,
+            store,
+        } = config;
+
+        let runtime = TieredRuntime::create(runtime_worker_threads, runtime_shutdown_timeout)?;
+        Self::from_parts(Arc::new(runtime), flush, store)
+    }
+
+    pub fn with_runtime(runtime: Runtime, config: AofManagerConfig) -> AofResult<Self> {
+        let AofManagerConfig {
+            runtime_worker_threads: _,
+            runtime_shutdown_timeout,
+            flush,
+            store,
+        } = config;
+
+        let runtime = TieredRuntime::from_runtime(runtime, runtime_shutdown_timeout);
+        Self::from_parts(Arc::new(runtime), flush, store)
+    }
+
+    fn from_parts(
+        runtime: Arc<TieredRuntime>,
+        flush: FlushConfig,
+        store: TieredStoreConfig,
+    ) -> AofResult<Self> {
+        let TieredStoreConfig {
+            tier0,
+            tier1,
+            tier2,
+        } = store;
+        let tier0_cache = Tier0Cache::new(tier0);
+        let tier1_cache = Tier1Cache::new(runtime.handle(), tier1)?;
+        let tier2_manager = match tier2 {
+            Some(cfg) => Some(Tier2Manager::new(runtime.handle(), cfg)?),
+            None => None,
+        };
+        let coordinator = Arc::new(TieredCoordinator::new(
+            tier0_cache,
+            tier1_cache,
+            tier2_manager,
+        ));
+        let handle = Arc::new(AofManagerHandle::new(
+            runtime.clone(),
+            coordinator.clone(),
+            flush,
+        ));
+        let tiered_task = Self::spawn_tiered_service(&runtime, coordinator.clone());
+        Ok(Self {
+            runtime,
+            flush_config: flush,
+            coordinator,
+            handle,
+            tiered_task: Mutex::new(Some(tiered_task)),
+        })
+    }
+
+    fn spawn_tiered_service(
+        runtime: &Arc<TieredRuntime>,
+        coordinator: Arc<TieredCoordinator>,
+    ) -> JoinHandle<()> {
+        let shutdown = runtime.shutdown_token();
+        let activity = coordinator.activity_signal();
+        runtime
+            .handle()
+            .spawn(Self::run_tiered_service(coordinator, activity, shutdown))
+    }
+
+    async fn run_tiered_service(
+        coordinator: Arc<TieredCoordinator>,
+        activity: Arc<Notify>,
+        shutdown: CancellationToken,
+    ) {
+        let mut idle = false;
+        loop {
+            if idle {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = activity.notified() => {},
+                    _ = tokio::time::sleep(Duration::from_millis(TIERED_SERVICE_IDLE_BACKOFF_MS)) => {},
+                };
+            } else if shutdown.is_cancelled() {
+                break;
+            }
+
+            let outcome = tokio::select! {
+                _ = shutdown.cancelled() => None,
+                outcome = coordinator.poll() => Some(outcome),
+            };
+
+            let Some(outcome) = outcome else {
+                break;
+            };
+
+            if !outcome.stats.is_idle() {
+                trace!(
+                    drop_events = outcome.stats.drop_events,
+                    scheduled_evictions = outcome.stats.scheduled_evictions,
+                    activation_grants = outcome.stats.activation_grants,
+                    tier2_events = outcome.stats.tier2_events,
+                    hydrations = outcome.stats.hydrations,
+                    "tiered coordinator poll processed events",
+                );
+            }
+
+            idle = outcome.stats.is_idle();
+        }
+    }
+
+    pub fn runtime_handle(&self) -> Handle {
+        self.runtime.handle()
+    }
+
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.runtime.shutdown_token()
+    }
+
+    pub fn tiered(&self) -> Arc<TieredCoordinator> {
+        self.coordinator.clone()
+    }
+
+    pub fn handle(&self) -> Arc<AofManagerHandle> {
+        self.handle.clone()
+    }
+
+    pub fn flush_config(&self) -> &FlushConfig {
+        &self.flush_config
+    }
+}
+
+impl Drop for AofManager {
+    fn drop(&mut self) {
+        if let Some(handle) = self.tiered_task.lock().take() {
+            handle.abort();
+        }
+        self.runtime.shutdown();
+    }
+}
+
+pub struct AofManagerHandle {
+    runtime: Arc<TieredRuntime>,
+    coordinator: Arc<TieredCoordinator>,
+    flush_config: FlushConfig,
+}
+
+impl AofManagerHandle {
+    fn new(
+        runtime: Arc<TieredRuntime>,
+        coordinator: Arc<TieredCoordinator>,
+        flush_config: FlushConfig,
+    ) -> Self {
+        Self {
+            runtime,
+            coordinator,
+            flush_config,
+        }
+    }
+
+    pub fn runtime(&self) -> Arc<TieredRuntime> {
+        self.runtime.clone()
+    }
+
+    pub fn runtime_handle(&self) -> Handle {
+        self.runtime.handle()
+    }
+
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.runtime.shutdown_token()
+    }
+
+    pub fn tiered(&self) -> Arc<TieredCoordinator> {
+        self.coordinator.clone()
+    }
+
+    pub fn flush_config(&self) -> FlushConfig {
+        self.flush_config
+    }
+}
+
+#[cfg(test)]
+mod manager_tests {
+    use super::*;
+    use tokio::runtime::Builder;
+
+    #[test]
+    fn manager_initializes_with_default_store() {
+        let manager =
+            AofManager::with_config(AofManagerConfig::for_tests()).expect("create manager");
+        let tiered = manager.tiered();
+        let metrics = tiered.tier0().metrics();
+        assert_eq!(metrics.total_bytes, 0);
+        drop(tiered);
+    }
+
+    #[test]
+    fn manager_accepts_existing_runtime() {
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("build runtime");
+        let manager = AofManager::with_runtime(runtime, AofManagerConfig::for_tests())
+            .expect("create manager");
+        let _handle = manager.runtime_handle();
     }
 }
 
@@ -159,18 +502,25 @@ impl AppendState {
 }
 
 struct AofManagement {
-    catalog: Vec<Arc<Segment>>,
-    pending_finalize: VecDeque<Arc<Segment>>,
+    catalog: Vec<ResidentSegment>,
+    pending_finalize: VecDeque<ResidentSegment>,
     next_segment_index: u32,
-    flush_queue: VecDeque<Arc<Segment>>,
+    flush_queue: VecDeque<ResidentSegment>,
 }
 
 impl AofManagement {
+    fn resident_for(&self, segment: &Arc<Segment>) -> Option<ResidentSegment> {
+        self.catalog
+            .iter()
+            .find(|resident| Arc::ptr_eq(resident.segment(), segment))
+            .cloned()
+    }
+
     fn remove_pending(&mut self, segment: &Arc<Segment>) -> bool {
         if let Some(pos) = self
             .pending_finalize
             .iter()
-            .position(|pending| Arc::ptr_eq(pending, segment))
+            .position(|pending| Arc::ptr_eq(pending.segment(), segment))
         {
             self.pending_finalize.remove(pos);
             true
@@ -183,7 +533,7 @@ impl AofManagement {
         if let Some(pos) = self
             .flush_queue
             .iter()
-            .position(|queued| Arc::ptr_eq(queued, segment))
+            .position(|queued| Arc::ptr_eq(queued.segment(), segment))
         {
             self.flush_queue.remove(pos);
             true
@@ -216,7 +566,7 @@ pub struct SegmentStatusSnapshot {
 }
 
 impl SegmentStatusSnapshot {
-    fn from_segment(segment: &Arc<Segment>) -> Self {
+    fn from_segment(segment: &Segment) -> Self {
         Self {
             segment_id: segment.id(),
             base_offset: segment.base_offset(),
@@ -285,18 +635,19 @@ impl TailSignal {
         let _ = self.tx.send(state.clone());
     }
 
-    fn snapshot_pending(queue: &VecDeque<Arc<Segment>>) -> Vec<SegmentStatusSnapshot> {
+    fn snapshot_pending(queue: &VecDeque<ResidentSegment>) -> Vec<SegmentStatusSnapshot> {
         queue
             .iter()
-            .map(SegmentStatusSnapshot::from_segment)
+            .map(|seg| SegmentStatusSnapshot::from_segment(seg.segment().as_ref()))
             .collect()
     }
 }
 
 pub struct Aof {
-    rt: Arc<Runtime>,
+    manager: Arc<AofManagerHandle>,
     config: AofConfig,
     layout: Layout,
+    tier: TieredInstance,
     append: AppendState,
     management: Mutex<AofManagement>,
     metrics: Arc<FlushMetrics>,
@@ -305,17 +656,26 @@ pub struct Aof {
 }
 
 impl Aof {
-    pub fn new(rt: Arc<Runtime>, config: AofConfig) -> AofResult<Self> {
+    pub fn new(manager: Arc<AofManagerHandle>, config: AofConfig) -> AofResult<Self> {
         let normalized = config.normalized();
         let layout = Layout::new(&normalized);
         layout.ensure()?;
+        let instance_name = format!("aof:{}", layout.root_dir().display());
+        let tier = manager
+            .tiered()
+            .register_instance(instance_name, layout.clone(), None)?;
         let metrics = Arc::new(FlushMetrics::default());
         let append = AppendState::new(metrics.clone());
-        let flush = FlushManager::new(rt.clone(), append.unflushed_handle(), metrics.clone());
+        let flush = FlushManager::new(
+            manager.runtime(),
+            append.unflushed_handle(),
+            metrics.clone(),
+        );
         let instance = Self {
-            rt,
+            manager,
             config: normalized,
             layout,
+            tier,
             append,
             management: Mutex::new(AofManagement {
                 catalog: Vec::new(),
@@ -362,22 +722,43 @@ impl Aof {
         state
             .catalog
             .iter()
-            .map(SegmentStatusSnapshot::from_segment)
+            .map(|segment| SegmentStatusSnapshot::from_segment(segment.segment().as_ref()))
             .collect()
     }
 
     pub fn open_reader(&self, segment_id: SegmentId) -> AofResult<SegmentReader> {
-        let segment = {
+        if let Some(resident) = {
             let state = self.management.lock();
             state
                 .catalog
                 .iter()
                 .find(|segment| segment.id() == segment_id)
                 .cloned()
+        } {
+            return SegmentReader::new(resident);
         }
-        .ok_or(AofError::SegmentNotLoaded(segment_id))?;
 
-        SegmentReader::new(segment)
+        match self.tier.checkout_sealed_segment(segment_id)? {
+            SegmentCheckout::Ready(resident) => SegmentReader::new(resident),
+            SegmentCheckout::Pending(_waiter) => Err(AofError::WouldBlock),
+        }
+    }
+
+    pub async fn open_reader_async(&self, segment_id: SegmentId) -> AofResult<SegmentReader> {
+        if let Some(resident) = {
+            let state = self.management.lock();
+            state
+                .catalog
+                .iter()
+                .find(|segment| segment.id() == segment_id)
+                .cloned()
+        } {
+            return SegmentReader::new(resident);
+        }
+
+        let checkout = self.tier.checkout_sealed_segment(segment_id)?;
+        let resident = checkout.wait().await?;
+        SegmentReader::new(resident)
     }
 
     pub fn flush_metrics(&self) -> FlushMetricsSnapshot {
@@ -521,7 +902,7 @@ impl Aof {
             .append
             .tail
             .load_full()
-            .map(|seg| SegmentStatusSnapshot::from_segment(&seg));
+            .map(|seg| SegmentStatusSnapshot::from_segment(seg.as_ref()));
         self.tail_signal.replace(
             tail_snapshot,
             pending_snapshot,
@@ -553,7 +934,9 @@ impl Aof {
         let target = segment.record_end_offset(offset)?;
 
         self.schedule_flush(&segment)?;
-        self.rt.block_on(flush_state.wait_for(target));
+        self.manager
+            .runtime_handle()
+            .block_on(flush_state.wait_for(target));
 
         Ok(())
     }
@@ -566,15 +949,15 @@ impl Aof {
             .find(|segment| segment.id() == segment_id)
             .cloned()
         {
-            if state.remove_pending(&segment) {
-                state.remove_flush(&segment);
+            if state.remove_pending(segment.segment()) {
+                state.remove_flush(segment.segment());
                 let pending_snapshot = TailSignal::snapshot_pending(&state.pending_finalize);
                 drop(state);
                 let tail_snapshot = self
                     .append
                     .tail
                     .load_full()
-                    .map(|seg| SegmentStatusSnapshot::from_segment(&seg));
+                    .map(|seg| SegmentStatusSnapshot::from_segment(seg.as_ref()));
                 self.tail_signal.replace(
                     tail_snapshot,
                     pending_snapshot,
@@ -687,7 +1070,9 @@ impl Aof {
         {
             let mut state = self.management.lock();
             state.remove_flush(segment);
-            state.flush_queue.push_back(segment.clone());
+            if let Some(resident) = state.resident_for(segment) {
+                state.flush_queue.push_back(resident);
+            }
         }
 
         match self.flush.enqueue_segment(segment.clone()) {
@@ -723,7 +1108,7 @@ impl Aof {
             .catalog
             .iter()
             .find(|segment| segment.id() == segment_id)
-            .cloned()
+            .map(|segment| segment.segment().clone())
     }
 
     fn enforce_backpressure(&self, segment: &Arc<Segment>, target_logical: u32) -> AofResult<()> {
@@ -738,7 +1123,9 @@ impl Aof {
         self.metrics.incr_backpressure();
         self.schedule_flush(segment)?;
         let flush_state = segment.flush_state();
-        self.rt.block_on(flush_state.wait_for(target_logical));
+        self.manager
+            .runtime_handle()
+            .block_on(flush_state.wait_for(target_logical));
         Ok(())
     }
 
@@ -798,10 +1185,15 @@ impl Aof {
             path.as_path(),
         )?);
 
+        let resident = self.tier.admit_segment(
+            segment.clone(),
+            SegmentResidency::new(segment.current_size() as u64, ResidencyKind::Active),
+        )?;
+
         state.next_segment_index = segment_index.saturating_add(1);
-        state.catalog.push(segment.clone());
+        state.catalog.push(resident.clone());
         self.append.tail.store(Some(segment.clone()));
-        let tail_snapshot = SegmentStatusSnapshot::from_segment(&segment);
+        let tail_snapshot = SegmentStatusSnapshot::from_segment(segment.as_ref());
         let pending_snapshot = TailSignal::snapshot_pending(&state.pending_finalize);
         self.tail_signal.replace(
             Some(tail_snapshot),
@@ -826,12 +1218,14 @@ impl Aof {
             let pending_snapshot;
             {
                 let mut state = self.management.lock();
-                if !state
-                    .pending_finalize
-                    .iter()
-                    .any(|pending| Arc::ptr_eq(pending, segment))
-                {
-                    state.pending_finalize.push_back(segment.clone());
+                if let Some(resident) = state.resident_for(segment) {
+                    if !state
+                        .pending_finalize
+                        .iter()
+                        .any(|pending| Arc::ptr_eq(pending.segment(), segment))
+                    {
+                        state.pending_finalize.push_back(resident);
+                    }
                 }
                 pending_snapshot = TailSignal::snapshot_pending(&state.pending_finalize);
             }
@@ -840,7 +1234,7 @@ impl Aof {
                 .append
                 .tail
                 .load_full()
-                .map(|seg| SegmentStatusSnapshot::from_segment(&seg));
+                .map(|seg| SegmentStatusSnapshot::from_segment(seg.as_ref()));
             self.tail_signal.replace(
                 tail_snapshot,
                 pending_snapshot,
@@ -862,86 +1256,43 @@ impl Aof {
     }
 
     fn recover_existing_segments(&self) -> AofResult<()> {
-        let mut entries = Vec::new();
-        for entry in read_dir(self.layout.segments_dir()).map_err(AofError::from)? {
-            let entry = entry.map_err(AofError::from)?;
-            let path = entry.path();
-            if !entry.file_type().map_err(AofError::from)?.is_file() {
-                continue;
-            }
-            match path.extension().and_then(OsStr::to_str) {
-                Some(ext) if ext.eq_ignore_ascii_case(&SEGMENT_FILE_EXTENSION[1..]) => {}
-                _ => continue,
-            }
-            let name = SegmentFileName::parse(&path)?;
-            entries.push((name, path));
-        }
-
-        if entries.is_empty() {
+        let recovered = self.tier.recover_segments()?;
+        if recovered.is_empty() {
             return Ok(());
         }
 
-        entries.sort_by_key(|(name, _)| name.segment_id.as_u64());
-
-        let mut catalog = Vec::with_capacity(entries.len());
+        let mut catalog = Vec::with_capacity(recovered.len());
         let mut pending_finalize = VecDeque::new();
+        let mut flush_queue = VecDeque::new();
         let mut tail: Option<Arc<Segment>> = None;
         let mut next_offset = 0u64;
         let mut total_records = 0u64;
         let mut next_segment_index = 0u32;
         let mut unsealed_count = 0usize;
-        let mut flush_queue = VecDeque::new();
         let mut total_unflushed = 0u64;
 
-        for (name, path) in entries {
-            let mut scan = Segment::scan_tail(&path)?;
-            if scan.truncated {
-                Segment::truncate_segment(&path, &mut scan)?;
-            }
-
-            if scan.header.segment_index != name.segment_id.as_u32() {
-                return Err(AofError::Corruption(format!(
-                    "segment {} header index {} mismatches filename {}",
-                    path.display(),
-                    scan.header.segment_index,
-                    name.segment_id.as_u64()
-                )));
-            }
-
-            if scan.header.base_offset != name.base_offset {
-                return Err(AofError::Corruption(format!(
-                    "segment {} header base offset {} mismatches filename {}",
-                    path.display(),
-                    scan.header.base_offset,
-                    name.base_offset
-                )));
-            }
-
-            if scan.header.created_at != name.created_at {
-                return Err(AofError::Corruption(format!(
-                    "segment {} header timestamp {} mismatches filename {}",
-                    path.display(),
-                    scan.header.created_at,
-                    name.created_at
-                )));
-            }
-
-            let segment = Arc::new(Segment::from_recovered(&path, &scan)?);
-
-            let next_index = scan.header.segment_index.saturating_add(1);
+        for entry in recovered {
+            let resident = entry.resident().clone();
+            let segment = entry.segment().clone();
+            let segment_id = segment.id();
+            let next_index = segment_id.as_u32().saturating_add(1);
             if next_index > next_segment_index {
                 next_segment_index = next_index;
             }
 
-            let segment_end_offset = if let Some(footer) = &scan.footer {
-                footer.durable_bytes
-            } else {
-                scan.header.base_offset + scan.logical_size as u64
-            };
+            let segment_end_offset = segment
+                .base_offset()
+                .saturating_add(segment.durable_size() as u64);
             next_offset = segment_end_offset;
-            total_records = scan.header.base_record_count + scan.record_count;
+            total_records = segment
+                .base_record_count()
+                .saturating_add(segment.record_count());
 
-            if scan.footer.is_none() {
+            let logical = segment.current_size() as u64;
+            let durable = segment.durable_size() as u64;
+            total_unflushed = total_unflushed.saturating_add(logical.saturating_sub(durable));
+
+            if !segment.is_sealed() {
                 unsealed_count += 1;
                 if unsealed_count > 2 {
                     return Err(AofError::Corruption(format!(
@@ -950,21 +1301,20 @@ impl Aof {
                     )));
                 }
                 if tail.is_some() {
-                    pending_finalize.push_back(segment.clone());
-                    flush_queue.push_back(segment.clone());
+                    pending_finalize.push_back(resident.clone());
+                    flush_queue.push_back(resident.clone());
                 } else {
-                    flush_queue.push_back(segment.clone());
+                    flush_queue.push_back(resident.clone());
                     tail = Some(segment.clone());
                 }
             }
 
-            let logical = segment.current_size() as u64;
-            let durable_bytes = segment.durable_size() as u64;
-            total_unflushed = total_unflushed.saturating_add(logical.saturating_sub(durable_bytes));
-            catalog.push(segment);
+            catalog.push(resident);
         }
 
-        let tail_snapshot = tail.as_ref().map(SegmentStatusSnapshot::from_segment);
+        let tail_snapshot = tail
+            .as_ref()
+            .map(|segment| SegmentStatusSnapshot::from_segment(segment.as_ref()));
         let pending_snapshot = TailSignal::snapshot_pending(&pending_finalize);
         let event = if let Some(snapshot) = tail_snapshot.as_ref() {
             TailEvent::Activated(snapshot.segment_id)
@@ -974,7 +1324,7 @@ impl Aof {
             TailEvent::None
         };
 
-        let pending_for_flush: Vec<Arc<Segment>>;
+        let pending_for_flush: Vec<ResidentSegment>;
         {
             let mut state = self.management.lock();
             state.catalog = catalog;
@@ -985,7 +1335,6 @@ impl Aof {
         }
 
         self.append.set_unflushed(total_unflushed);
-
         self.append
             .next_offset
             .store(next_offset, Ordering::Release);
@@ -998,7 +1347,7 @@ impl Aof {
             .replace(tail_snapshot, pending_snapshot, event);
 
         for segment in pending_for_flush {
-            self.flush.enqueue_segment(segment)?;
+            self.flush.enqueue_segment(segment.segment().clone())?;
         }
 
         Ok(())
@@ -1074,7 +1423,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
-    use tokio::runtime::Runtime;
     use tokio::time::timeout;
 
     async fn wait_for_event(rx: &mut watch::Receiver<TailState>) -> TailState {
@@ -1094,16 +1442,22 @@ mod tests {
         cfg
     }
 
+    fn build_manager(config: AofManagerConfig) -> (AofManager, Arc<AofManagerHandle>) {
+        let manager = AofManager::with_config(config).expect("create manager");
+        let handle = manager.handle();
+        (manager, handle)
+    }
+
     #[test]
     fn ensure_active_segment_respects_pending_limit() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
         let mut cfg = AofConfig::default();
         cfg.root_dir = tmp.path().join("aof");
         cfg.segment_min_bytes = 64 * 1024;
         cfg.segment_max_bytes = 64 * 1024;
         cfg.segment_target_bytes = 64 * 1024;
-        let aof = Aof::new(rt.clone(), cfg).expect("aof");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, cfg).expect("aof");
 
         let mut state = aof.management.lock();
         let created_at = 0;
@@ -1112,13 +1466,15 @@ mod tests {
             .unwrap()
             .unwrap();
         aof.append.tail.store(None);
-        state.pending_finalize.push_back(seg1.clone());
+        let res1 = state.resident_for(&seg1).expect("resident seg1");
+        state.pending_finalize.push_back(res1);
         let seg2 = aof
             .ensure_segment_locked(&mut state, created_at)
             .unwrap()
             .unwrap();
         aof.append.tail.store(None);
-        state.pending_finalize.push_back(seg2.clone());
+        let res2 = state.resident_for(&seg2).expect("resident seg2");
+        state.pending_finalize.push_back(res2);
         drop(state);
 
         assert!(matches!(aof.try_get_writable_segment(), Ok(None)));
@@ -1129,14 +1485,14 @@ mod tests {
 
     #[test]
     fn seal_active_seals_tail_segment() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
         let mut cfg = AofConfig::default();
         cfg.root_dir = tmp.path().join("aof");
         cfg.segment_min_bytes = 4096;
         cfg.segment_max_bytes = 4096;
         cfg.segment_target_bytes = 4096;
-        let aof = Aof::new(rt.clone(), cfg).expect("aof");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, cfg).expect("aof");
 
         let segment = aof.try_get_writable_segment().expect("segment");
         let segment = segment.expect("initial segment");
@@ -1156,14 +1512,14 @@ mod tests {
 
     #[test]
     fn force_rollover_allocates_new_segment() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
         let mut cfg = AofConfig::default();
         cfg.root_dir = tmp.path().join("aof");
         cfg.segment_min_bytes = 4096;
         cfg.segment_max_bytes = 4096;
         cfg.segment_target_bytes = 4096;
-        let aof = Aof::new(rt.clone(), cfg).expect("aof");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, cfg).expect("aof");
 
         let initial = aof
             .try_get_writable_segment()
@@ -1192,10 +1548,10 @@ mod tests {
 
     #[test]
     fn recovery_reopens_existing_tail_segment() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
-        let aof = Aof::new(rt.clone(), test_config(tmp.path())).expect("initial");
+        let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
         aof.append_record(b"one").expect("append one");
         let sealed_id = aof.seal_active().expect("seal").expect("sealed");
         assert_eq!(sealed_id.as_u64(), 0);
@@ -1204,7 +1560,7 @@ mod tests {
         aof.append_record(b"two").expect("append two");
         drop(aof);
 
-        let recovered = Aof::new(rt.clone(), test_config(tmp.path())).expect("recover");
+        let recovered = Aof::new(handle.clone(), test_config(tmp.path())).expect("recover");
         let snapshot = recovered.catalog_snapshot();
         assert_eq!(snapshot.len(), 2);
         let tail_id = snapshot
@@ -1220,16 +1576,16 @@ mod tests {
 
     #[test]
     fn recovery_with_sealed_segments_allows_new_segment_creation() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         {
-            let aof = Aof::new(rt.clone(), test_config(tmp.path())).expect("initial");
+            let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
             aof.append_record(b"only").expect("append only");
             aof.seal_active().expect("seal").expect("sealed");
         }
 
-        let recovered = Aof::new(rt, test_config(tmp.path())).expect("recover");
+        let recovered = Aof::new(handle, test_config(tmp.path())).expect("recover");
         let snapshot = recovered.catalog_snapshot();
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot[0].sealed);
@@ -1242,11 +1598,11 @@ mod tests {
 
     #[test]
     fn recovery_truncates_partial_tail_segment() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         {
-            let aof = Aof::new(rt.clone(), test_config(tmp.path())).expect("initial");
+            let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
             let segment = aof
                 .try_get_writable_segment()
                 .expect("segment")
@@ -1270,7 +1626,7 @@ mod tests {
             file.write_all(&header).expect("write header");
         }
 
-        let recovered = Aof::new(rt, test_config(tmp.path())).expect("recover");
+        let recovered = Aof::new(handle, test_config(tmp.path())).expect("recover");
         let snapshot = recovered.catalog_snapshot();
         assert!(snapshot.iter().any(|entry| !entry.sealed));
         recovered
@@ -1280,15 +1636,15 @@ mod tests {
 
     #[test]
     fn recovery_seeds_flush_queue_for_unsealed_segments() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         {
-            let aof = Aof::new(rt.clone(), test_config(tmp.path())).expect("initial");
+            let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
             aof.append_record(b"queued").expect("append queued");
         }
 
-        let recovered = Aof::new(rt, test_config(tmp.path())).expect("recover");
+        let recovered = Aof::new(handle, test_config(tmp.path())).expect("recover");
         let state = recovered.management.lock();
         assert!(
             !state.flush_queue.is_empty(),
@@ -1297,9 +1653,9 @@ mod tests {
     }
     #[test]
     fn flush_metrics_tracks_backlog_bytes() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
-        let aof = Aof::new(rt.clone(), test_config(tmp.path())).expect("aof");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, test_config(tmp.path())).expect("aof");
 
         assert_eq!(aof.flush_metrics().backlog_bytes, 0);
 
@@ -1313,9 +1669,9 @@ mod tests {
 
     #[test]
     fn flush_until_blocks_until_durable() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
-        let aof = Aof::new(rt.clone(), test_config(tmp.path())).expect("aof");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, test_config(tmp.path())).expect("aof");
 
         let record_id = aof.append_record(b"flush-me").expect("append");
         let segment = aof
@@ -1330,13 +1686,13 @@ mod tests {
 
     #[test]
     fn flush_until_handles_flush_queue_backpressure() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
         let mut cfg = test_config(tmp.path());
         cfg.flush.flush_watermark_bytes = u64::MAX;
         cfg.flush.flush_interval_ms = 0;
         cfg.flush.max_unflushed_bytes = u64::MAX;
-        let aof = Aof::new(rt.clone(), cfg).expect("aof");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, cfg).expect("aof");
 
         let record_id = aof.append_record(b"fallback").expect("append");
         let segment = aof
@@ -1362,13 +1718,13 @@ mod tests {
 
     #[test]
     fn open_reader_exposes_sealed_segment() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
         let mut cfg = test_config(tmp.path());
         cfg.segment_min_bytes = 512;
         cfg.segment_max_bytes = 512;
         cfg.segment_target_bytes = 512;
-        let aof = Aof::new(rt.clone(), cfg).expect("aof");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, cfg).expect("aof");
         let tail_rx = aof.tail_events();
 
         let record_id = aof.append_record(b"reader payload").expect("append");
@@ -1407,20 +1763,20 @@ mod tests {
 
     #[test]
     fn flush_until_completes_after_recovery() {
-        let rt = Arc::new(Runtime::new().expect("runtime"));
         let tmp = TempDir::new().expect("tempdir");
         let mut cfg = test_config(tmp.path());
         cfg.flush.flush_watermark_bytes = 1;
         cfg.flush.flush_interval_ms = 0;
         cfg.flush.max_unflushed_bytes = u64::MAX;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         {
-            let aof = Aof::new(rt.clone(), cfg.clone()).expect("aof");
+            let aof = Aof::new(handle.clone(), cfg.clone()).expect("aof");
             aof.append_record(b"pre-restart").expect("append");
             aof.flush.shutdown_worker_for_tests();
         }
 
-        let recovered = Aof::new(rt.clone(), cfg).expect("recovered");
+        let recovered = Aof::new(handle, cfg).expect("recovered");
         let record_id = recovered
             .append_record(b"post-restart")
             .expect("append after restart");
@@ -1440,16 +1796,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn tail_follower_reports_sealed_segment() {
-        let runtime = Arc::new(Runtime::new().expect("runtime"));
-        let runtime_for_drop = runtime.clone();
         let tmp = TempDir::new().expect("tempdir");
 
         let mut cfg = test_config(tmp.path());
         cfg.segment_min_bytes = 512;
         cfg.segment_max_bytes = 512;
         cfg.segment_target_bytes = 512;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
-        let aof = Aof::new(runtime.clone(), cfg).expect("aof");
+        let aof = Aof::new(handle, cfg).expect("aof");
         let mut follower = aof.tail_follower();
 
         let record_id = aof.append_record(b"tail-follower").expect("append");
@@ -1481,25 +1836,19 @@ mod tests {
         drop(reader);
         drop(segment);
         drop(aof);
-        drop(runtime);
-
-        tokio::task::spawn_blocking(move || drop(runtime_for_drop))
-            .await
-            .expect("drop runtime");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn tail_notifications_follow_segment_lifecycle() {
-        let runtime = Arc::new(Runtime::new().expect("runtime"));
-        let runtime_for_drop = runtime.clone();
         let tmp = TempDir::new().expect("tempdir");
 
         let mut cfg = test_config(tmp.path());
         cfg.segment_min_bytes = 256;
         cfg.segment_max_bytes = 256;
         cfg.segment_target_bytes = 256;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
-        let aof = Aof::new(runtime.clone(), cfg).expect("aof");
+        let aof = Aof::new(handle, cfg).expect("aof");
         let mut rx = aof.tail_events();
 
         assert!(rx.borrow().tail.is_none());
@@ -1569,10 +1918,5 @@ mod tests {
         drop(next_segment);
         drop(initial_segment);
         drop(aof);
-        drop(runtime);
-
-        tokio::task::spawn_blocking(move || drop(runtime_for_drop))
-            .await
-            .expect("drop runtime");
     }
 }

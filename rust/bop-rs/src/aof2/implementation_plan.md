@@ -1,153 +1,74 @@
-﻿# AOF2 Implementation Plan
-
-## Scope and Objectives
-- Deliver the redesigned append-only file (AOF2) with manifest-free recovery, packed record identifiers, and lazy segment headers.
-- Maintain compatibility with the current async runtime expectations (Tokio, memmap2) while minimising shared mutable state.
-- Provide a staged path to production: foundation primitives, runtime functionality, durability guarantees, observability, and retention.
-- Enforce deterministic footer placement and segment-count invariants so recovery can trust on-disk layout even when the filesystem is slow.
-- Adapt segment sizing dynamically within a 64 MiB–1 GiB power-of-two window to match storage throughput while preserving rollover latency.
-
-## Milestones
-### Milestone 0 – Baseline (Completed)
-- [x] Configuration and identifier packing (`SegmentId`, `RecordId`, helpers).
-- [x] Error surface covering filesystem, recovery, and flush semantics.
-- [x] Filesystem scaffolding (`Layout`, directory helpers, segment file naming, temp guards).
-
-### Milestone 1 – Segment Primitives
-- [x] Finalise `Segment::append_record` edge cases (overflow checks, timestamp handling, CRC folding validation).
-- [x] Implement `Segment::seal` to flush, write the footer into the reserved tail slot, remap read-only, and flip status to `Finalized`.
-- [x] Introduce `SegmentFooter` encode/decode utilities with checksum validation and footer-at-end expectations.
-- [x] Provide recovery helpers: `Segment::load_header`, `Segment::scan_tail`, and a truncation routine for partial records.
-- [x] Ensure `SegmentData` can remap between read-write (active) and read-only (sealed) views while protecting the footer reservation.
-
-### Milestone 2 – AOF Runtime Pipeline
-- [x] Flesh out `Aof::new` to optionally open existing directories, validate configuration bounds, and trigger recovery.
-- [x] Implement append loop logic for rollover (`Segment::is_full`, active tail swap, preallocation pipeline) that respects the reserved footer space.
-- [x] Enforce the “two unfinalized segments” invariant before activating additional preallocated segments.
-- [x] Split hot-path append state from management state so the append fast path relies only on atomics.
-- [x] Provide `wait_for_writable_segment(timeout)` / `append_record_with_timeout` so callers can opt into bounded waits.
-- [x] Expose explicit APIs: `Aof::seal_active`, `Aof::force_rollover`, `Aof::flush_until(record_id)`.
-- [x] Track in-memory catalog of segments (ordered by `SegmentId`) with cumulative counters only—no manifest writes.
-- [x] Provide async-safe notification mechanism for tail changes (event `Notify` or channel broadcast).
-
-### Milestone 3 – Flush and Durability Coordination
-- [x] Define `AofManager` background thread structure and command queue types.
-- [x] Implement per-segment flush scheduling using `FlushConfig` thresholds and expose finalisation confirmation events.
-- [x] Ensure only one flush per segment runs concurrently and update `Segment::mark_durable` on completion.
-- [x] Add `Aof::flush(record_id)` waiting semantics backed by durable byte tracking.
-- [x] Integrate fsync/fdatasync calls with retry/backoff strategy.
-  - Cover transient errors (`EINTR`, `EAGAIN`, `EBUSY`, timeouts) with bounded exponential backoff and jitter before giving up.
-  - Surface fatal errors (`ENOSPC`, `EROFS`, integrity failures) with enough context for operators to take action and keep the backlog gauge accurate.
-  - Track retry/success/failure counts in `FlushMetrics` so observability can correlate delay with disk behaviour.
-- [x] Capture flush backlog snapshots into `FlushMetrics` so observability can expose latency vs. backlog correlations.
-  - Record the live `backlog_bytes` gauge after every append, recovery pass, and flush completion.
-
-### Milestone 4 – Recovery and Bootstrap
-- [x] Walk `segments/` at startup, parse filenames, and sort by `SegmentId`.
-- [x] Rebuild `next_segment_index`, `next_offset`, and `record_count` from headers, trusting all but the newest two segments.
-- [x] Scan the tail segment (and penultimate if required) to truncate corrupt bytes and recompute cumulative counters.
-- [x] Reopen the last active segment for appends, leaving others sealed and mapped read-only.
-- [x] Seed the flush backlog counter and manager queue from recovered durability markers so restarted nodes resume pending work.
-- [x] Provide unit/integration tests that model crash states (torn headers, partial payload writes, missing footers).
-
-### Milestone 5 – Reader APIs
-- [ ] Define synchronous reader over sealed segments that accepts `RecordId` (packed `{segment_index, segment_offset}`) and validates checksums.
-- [ ] Implement tail-following async reader that registers for notifications and resumes when new segments appear.
-- [ ] Add optional sparse index generation on seal to accelerate `seek(record_id)` for large segments.
-
-#### Execution Outline
-- Build a `reader` module with a `SegmentReader` struct that wraps sealed `Arc<Segment>` handles, decodes record headers via `Segment::record_end_offset`, and enforces CRC verification before exposing payloads.
-- Introduce an internal `RecordCursor` that advances by header-derived lengths and returns borrowed slices when the segment is sealed, falling back to owned buffers for the active tail.
-- Extend `Aof` with lightweight catalog accessors (`open_reader`, `segment_snapshot`) so readers discover sealed segments without racing the writer fast path.
-- Provide retry-aware helpers for the async tail follower that subscribe to `TailSignal`, wait for `TailEvent::Activated`, and bridge into the synchronous reader when segments finalize.
-
-#### Integration Points
-- Reuse `SegmentStatusSnapshot` to describe available data to readers and keep reader state aligned with the manager's pending-finalize queue.
-- Share the existing `FlushMetrics` backlog gauge to surface reader catch-up lag and expose hooks for eventual telemetry wiring.
-- Gate sparse-index generation behind a feature flag so it can evolve independently of the baseline reader work.
-
-#### Validation Strategy
-- Unit tests over `SegmentReader` exercising checksum failures, zero-copy slices, and `RecordId` boundary checks.
-- Integration tests that roll segments, seal them, and confirm tail followers resume reading without duplicating or skipping records.
-- Property and soak tests that iterate randomized record sizes to ensure cursor math never escapes the logical segment size.
-
-### Milestone 6 – Retention and Archival
-- [ ] Implement retention evaluator for `RetentionPolicy` variants (size-based, time-based, keep-all).
-- [ ] Add archival move/copy into `archive/`, ensuring atomic renames and fsync of parent directories.
-- [ ] Provide hooks so retention runs in background without blocking the writer, coordinated via `AofManager`.
-
-### Milestone 7 – Observability and Tooling
-- [ ] Instrument append, flush, seal, and recovery paths with `tracing` spans and metrics counters.
-- [ ] Expose metrics (e.g., via internal struct or optional feature) for append throughput, flush latency, and segment sizing decisions.
-- [ ] Create administrative helpers or CLI hooks to inspect segment state and trigger manual rollover.
-- [ ] Document operational runbooks (recovery steps, retention configuration, monitoring guidelines).
-
-## Near-Term Focus (Post-M4)
-1. Finish `QA4` by covering recovery-triggered `flush_until` completions now that queue-saturation coverage exists in the Rust harness.
-2. Capture recovery backlog reconciliation as deterministic fixtures to lock in tail validation guarantees before layering reader surfaces.
-3. Start `RD2a` by drafting the async tail follower that consumes `TailEvent` notifications and reuses the new reader path.
-4. Kick off `OB1` tracing/metrics wiring so the provisional exporter has downstream consumers ready.
-
-## Risk Tracking
-- Retry loops must never starve the flush queue; guard with max-attempt threshold and alerting via metrics.
-- Recovery walk relies on consistent segment naming—add sanity checks so unexpected files do not block startup.
-- Flush backlog seeding on restart introduces race risk with fresh appends; verify atomic ordering when merging recovered counters with live state.
-
-## Detailed Task List
-| Task ID | Area | Description | Deliverable | Status | Dependencies |
-|---------|------|-------------|-------------|--------|--------------|
-| CFG1    | Config  | Add `segment_min_bytes`/`segment_max_bytes` validation enforcing power-of-two bounds (64 MiB–1 GiB) and clamp `segment_target_bytes`. | `config.rs` updates + tests | done | Milestone 1 |
-| S1      | Segment | Write `SegmentFooter` struct with encode/decode/checksum helpers fixed to the tail slot. | `segment.rs` footer module + tests | done | Milestone 1 |
-| S2      | Segment | Implement `Segment::seal` with footer emission at `max_size - FOOTER_SIZE` and remap to read-only. | Updated `segment.rs`, unit tests | done | S1 |
-| S3      | Segment | Add tail scan + truncation helper for recovery. | `segment.rs` recovery API + tests | done | S1 |
-| S4      | Segment | Guard record writes so they never overlap the reserved footer region. | `segment.rs` bounds checks + tests | done | S1 |
-| R1      | Runtime | Expand `Aof::new` to detect existing segments and call recovery. | `mod.rs` updates + integration test | done | S1, S3 |
-| R2      | Runtime | Handle rollover path (`Segment::append_record` -> `SegmentFull`) while honouring footer reservation. | `mod.rs` append loop, tests | done | S2, S4 |
-| R3      | Runtime | Implement `Aof::seal_active` and state transitions. | `mod.rs` API + tests | done | R2 |
-| R4      | Runtime | Enforce the two-unfinalized invariant before activating additional segments. | `mod.rs`/manager coordination + tests | done | R2 |
-| R5      | Runtime | Implement dynamic segment size selection within configured bounds (heuristics + telemetry). | `mod.rs` sizing logic + tests | done | CFG1 |
-| R6      | Runtime | Split hot-path append state from management mutex so appends rely on atomics only. | `mod.rs` refactor + docs | done | R2 |
-| R7      | Runtime | Implement `wait_for_writable_segment(timeout)` and `append_record_with_timeout`. | `mod.rs` API + tests | done | R6 |
-| F1      | Flush | Define manager command enums, lock-free queues, and `SegmentFlushState` registry for concurrent streams. | `flush.rs`/`mod.rs` updates | done | R2 |
-| F2      | Flush | Implement flush scheduling that respects `FlushConfig`. | Manager + segment updates | done | F1 |
-| F3      | Flush | Provide `Aof::flush(record_id)` waiting semantics. | `mod.rs` API + tests | done | F2 |
-| F4      | Flush | Add retry/backoff wrapper around `fsync`/`fdatasync`, expose retry counters via `FlushMetrics`, and gate persistent failures behind structured errors. | `flush.rs` updates + tests | done | F1, F2 |
-| RC1     | Recovery | Walk filesystem, parse headers, rebuild counters. | `mod.rs` recovery integration + tests | done | S3 |
-| RC2     | Recovery | Tail verification with optional footer trust. | `segment.rs` recovery API + tests | done | RC1 |
-| RC3     | Recovery | Seed flush backlog/manager queues from recovered durability markers so restart resumes pending work. | `mod.rs` recovery integration + tests | done | RC1 |
-| RD1     | Reader | Implement sealed-segment reader API returning payload slices. | `reader.rs` updates + tests | todo | R2 |
-| RD2     | Reader | Async tail follower with packed id seek support. | `reader.rs` + integration tests | todo | RD1 |
-| RD1a    | Reader | Scaffold `reader.rs` with `SegmentReader` decoding record headers using existing segment helpers. | `reader.rs` skeleton + unit tests | done | RD1 |
-| RD1b    | Reader | Implement checksum enforcement and zero-copy payload borrowing for sealed segments. | `reader.rs` implementation + proptest coverage | done | RD1a |
-| RD1c    | Reader | Expose `Aof::open_reader` and hook reader catalog updates into `TailSignal`. | `mod.rs` updates + integration tests | done | RD1a |
-| RD2a    | Reader | Build async tail follower that streams sealed segments on `TailEvent` notifications and hands off to the active tail. | `reader.rs` async API + tests | in_progress | RD2 |
-| RT1     | Retention | Evaluate retention policy and queue archival actions. | `flush.rs` or new module + tests | todo | F1 |
-| RT2     | Retention | Move sealed segments into `archive/` atomically. | `fs.rs` helpers + tests | todo | RT1 |
-| OB0     | Observability | Surface `FlushMetricsSnapshot` retry/backlog counters via a provisional exporter struct for telemetry consumers. | `mod.rs` metrics adapter + docs | done | F4 |
-| OB1     | Observability | Add tracing spans/counters for key operations including dynamic sizing and finalization lag. | Instrumentation across modules | todo | R2, F2, R5 |
-| OB2     | Observability | Produce docs + sample metrics wiring. | Markdown docs | todo | OB1 |
-| QA1     | Testing | Build integration tests covering append/read, rollover, crash recovery, and two-unfinalized enforcement. | `tests/` additions | todo | Depends on Milestones 1–4 |
-| QA2     | Testing | Implement property-based tests for record/header parsing and footer placement. | `tests/` + proptest harness | todo | S1, RC2 |
-| QA3     | Testing | Add benchmark suite for append throughput and flush latency under varying segment sizes. | Criterion bench + scripts | todo | R2, F2, R5 |
-| QA4     | Testing | Expand `flush_until` tests to cover backlog saturation, recovery-triggered completion, and retry accounting (queue/restart coverage landed; retry accounting pending). | Integration tests + harness updates | in_progress | F3, F4, RC3 |
-| QA5     | Testing | Add reader integration tests covering sealed-segment reads, rollover handoff, and checksum mismatch handling. | `tests/` additions | todo | RD1c, RD2a |
-
-## Testing and Verification Strategy
-- Unit coverage: segment header/footer encode/decode, CRC folding, `RecordId` packing helpers, and reserved footer bounds enforcement.
-- Integration coverage: multi-segment append/read, recovery after simulated crash scenarios, flush durability guarantees, and confirmation that no more than two segments remain unfinalized.
-- Reader validation: sealed-segment iteration, tail follower handoff under rollover, and CRC mismatch detection for corrupted payloads.
-- Stress and soak: long-running append with periodic fsync to ensure counters stay consistent, verified via metrics that track segment sizing decisions and finalization lag.
-- Property-based validation: randomized payload and truncation to confirm recovery never exposes corrupt records.
-- Benchmarking: optional gated benchmarks to measure throughput with varying segment sizes and flush intervals.
-- Recovery regression harness: restart from persisted backlog snapshots to ensure flush manager convergence.
-- `flush_until` queue saturation tests: simulate synchronous fallback paths and confirm retry counters stay bounded.
-
-## Tooling and Documentation
-- Extend developer README with instructions for configuring storage directories and running the new tests.
-- Provide troubleshooting guide for recovery warnings, footer corruption, and finalization backpressure.
-- Capture operational defaults (segment size band, flush thresholds) in configuration docs once runtime stabilises.
-- Document expected telemetry outputs for backlog counters, retry rates, and segment rollover cadence.
+# AOF2 Async Tiered Integration Plan
 
 
+## Milestone 1 - Manager Foundations
+Establish the runtime and configuration scaffolding that will host the async tiered store.
+- [x] **CFG1**: Extend `AofManagerConfig` with Tier 0/1/2 sizing, eviction, and S3 client settings plus defaults mirroring legacy behaviour. (completed 2025-09-20, config now stores TieredStoreConfig defaults).
+- [x] **CFG2**: Introduce `TieredRuntime` wrapper that owns the Tokio runtime, exposes `Handle`, and supports deterministic shutdown (cancellation tokens, graceful join). (completed 2025-09-20, wrapper exposes handle + cancellation token).
+- [x] **CFG3**: Update `AofManager::with_config` to construct Tier 0 cache, Tier 1 store, Tier 2 client facade, and `TieredCoordinator`; ensure creation errors map to manager init errors. (completed 2025-09-20, manager builds tier scaffolding and propagates errors).
+- [x] **CFG4**: Provide lightweight builders for tests (ephemeral filesystem, in-memory S3 stub) and document in-code usage. (completed 2025-09-20, `AofManagerConfig::for_tests` helper available).
+- [x] **CFG5**: Add smoke tests validating manager startup/shutdown without opening streams (env gating ensures they run under `cargo test`). (completed 2025-09-20, `manager_tests` covers startup with stub tiers).
+
+## Milestone 2 – Coordinator Service Loop
+Wire the coordinator so residency requests flow through the manager runtime.
+- [x] **CO1**: Implement `TieredCoordinator::poll` futures for activation, eviction, upload, and hydration queues (see `store.md`). (completed 2025-09-20, poll now drains Tier-0/1/2 queues and emits stats)
+- [x] **CO2**: Add manager-owned service task (`service_tiered`) that repeatedly awaits `poll` and records metrics for each queue. (completed 2025-09-20, background loop drives polling with idle backoff)
+- [x] **CO3**: Expose sync/async wake hooks (Notify or wakers) so `WouldBlock` sites can register interest. (completed 2025-09-20, coordinator publishes activity and hydration `Notify` handles)
+- [x] **CO4**: Ensure shutdown cancels the poll loop, drains pending work gracefully, and surfaces errors through manager drop. (completed 2025-09-20, service task honors the manager cancellation token)
+- [x] **CO5**: Add instrumentation tests that simulate queue items and assert state transitions (e.g., Tier 0 eviction -> Tier 1 compression). (completed 2025-09-20, gated async test exercises drop-to-compression flow when `tiered-store` is enabled)
+
+## Milestone 3 – Aof Construction and Lifecycle
+Adapt `Aof` to depend on the manager/tiered store.
+- [x] **AO1**: Change `Aof::new` signature to accept an `Arc<AofManagerHandle>` and retrieve tier handles plus runtime references. (completed 2025-09-21, Aof now builds via manager handle and callers/tests updated)
+- [x] **AO2**: Refactor internal catalog structures to store `ResidentSegment` handles instead of raw paths. (completed 2025-09-21, catalog/pending/flush queues now retain tier-owned ResidentSegment handles)
+- [x] **AO3**: Introduce `TieredInstance` (per-stream view) that mediates between catalog and coordinator. (completed 2025-09-22, TieredInstance now owns Tier 0 admissions, updates Tier 1 residency, and wakes the coordinator on evictions.)
+- [ ] **AO4**: Update recovery/bootstrap to request residency through `TieredInstance` rather than touching the filesystem directly.
+- [ ] **AO5**: Port unit tests/integration tests to construct `Aof` via the manager (adjust helpers accordingly).
+
+## Milestone 4 – Append Path Integration
+Keep synchronous append semantics while delegating capacity decisions to the tiered store.
+- [ ] **AP1**: Replace direct Tier 0 file handling with `AdmissionGuard` obtained from Tier 0 cache; return `WouldBlock` when admission fails.
+- [ ] **AP2**: Ensure sealing/rollover requests enqueue work on the coordinator and emit `WouldBlock` until acknowledged.
+- [ ] **AP3**: Implement `append_record_async` that loops on the sync API and awaits coordinator notifications between retries.
+- [ ] **AP4**: Rework flush scheduling to interact with tier metadata (durability markers stored alongside residency state).
+- [ ] **AP5**: Extend metrics to capture Tier 0 admission latency and `WouldBlock` frequency.
+
+## Milestone 5 – Read Path and Hydration
+Support synchronous readers with `WouldBlock` plus async helpers that await hydration.
+- [ ] **RD1**: Update `AofReader` to fetch segments through `TieredInstance`, returning `WouldBlock` while hydration/promotions run.
+- [ ] **RD2**: Provide `next_record_async` that awaits hydration futures and resumes iteration seamlessly.
+- [ ] **RD3**: Maintain reader-side caches of residency hints to avoid redundant promotions.
+- [ ] **RD4**: Add tests covering Tier 1 miss -> hydration -> read resume, including concurrent readers.
+- [ ] **RD5**: Document reader API changes and guidance for handling `WouldBlock` in downstream services.
+
+## Milestone 6 – Recovery and Operation Log
+Ensure startup replay and replicated actions respect the tiered architecture.
+- [ ] **RC1**: Persist catalog snapshots that reference the tiered operation log watermark.
+- [ ] **RC2**: Implement startup replay that rebuilds Tier 0/1 manifests, reconciles Tier 2 objects, and schedules hydrations before enabling append.
+- [ ] **RC3**: Integrate replicated operation log application into coordinator so followers converge on residency decisions.
+- [ ] **RC4**: Handle partial failures (e.g., missing Tier 1 artifact) by queuing downloads from Tier 2 and flagging segments `NeedsRecovery` until satisfied.
+- [ ] **RC5**: Add integration tests simulating crash/restart with pending uploads and partially applied log entries.
+
+## Milestone 7 – Observability, Tooling, and Docs
+Round out developer/operator experience.
+- [ ] **OBS1**: Wire metrics for queue depths, hydration latency, upload retries, and residency state counts.
+- [ ] **OBS2**: Emit structured logs for major tier events (promotion, eviction, upload, hydration failures).
+- [ ] **OBS3**: Provide admin/debug endpoints or CLI tooling to dump residency maps per stream.
+- [ ] **OBS4**: Update developer docs (`design.md`, `store.md`, samples) to reflect new manager requirements and API pairs.
+- [ ] **OBS5**: Author operator runbook covering configuration knobs, scaling guidance, and troubleshooting `WouldBlock` hot spots.
+
+## Milestone 8 – Validation and Rollout
+Prove correctness and plan adoption.
+- [ ] **VAL1**: Extend existing test harness to run under Tokio, covering append/read under eviction, Tier 2 outages, and recovery scenarios.
+- [ ] **VAL2**: Add chaos/failure injection tests (disk full, S3 throttling, forced coordinator restart) ensuring APIs surface actionable errors.
+- [ ] **VAL3**: Benchmark sync vs async append/read throughput to confirm back-pressure behaves as expected.
+- [ ] **VAL4**: Document rollout steps (feature flagging, staged deployment, telemetry checks) and align with release process.
+- [ ] **VAL5**: Define exit criteria for legacy non-tiered code paths and plan clean-up.
+
+## Cross-cutting tasks
+- [ ] **CC1**: Establish coding guidelines for pairing sync/async APIs (`WouldBlock` contract, naming, documentation notes).
+- [ ] **CC2**: Ensure all new futures are cancel-safe and runtime handles are not held across await points that could block shutdown.
+- [ ] **CC3**: Audit error enums and map new failure types (Tier 1 compression failure, Tier 2 upload failure, hydration timeout) to actionable diagnostics.
+- [ ] **CC4**: Keep this plan in sync with implementation progress; include PR references when checking off tasks.
 
 

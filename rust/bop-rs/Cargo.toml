@@ -11,6 +11,8 @@ default = []
 alloc-stats = []
 # Optionally enable UDP uSockets bindings/wrappers
 usockets-udp = []
+# Build the experimental tiered segment store implementation
+tiered-store = []
 
 [dependencies]
 # Core dependencies
@@ -56,6 +58,8 @@ tokio = { version = "1", features = [
     "signal"
 ] }
 
+tokio-util = "0.7"
+
 # TLS/HTTP stack
 hyper = { version = "1.4", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
@@ -76,11 +80,13 @@ bop-sys = { path = "../bop-sys", optional = false }
 # aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
 # aws-sdk-s3 = "1.106.0"
 
+tracing = "0.1"
+async-trait = "0.1"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
 proptest = "1.0"
-# async-trait = "0.1"
 
 [[bench]]
 name = "aof_benchmarks"

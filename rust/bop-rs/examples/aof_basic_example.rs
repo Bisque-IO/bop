@@ -1,18 +1,25 @@
 //! Basic AOF usage example
 //!
-//! This example demonstrates:
-//! - Creating an AOF instance directly
-//! - Writing entries and flushing
-//! - Basic functionality without complex features
+//! Disabled when the `tiered-store` feature is active because the legacy AOF API
+//! is no longer compiled in that configuration.
 
+#[cfg(feature = "tiered-store")]
+fn main() {
+    eprintln!("aof_basic_example is disabled when the `tiered-store` feature is enabled");
+}
+
+#[cfg(not(feature = "tiered-store"))]
 use std::sync::Arc;
+#[cfg(not(feature = "tiered-store"))]
 use tempfile::tempdir;
 
+#[cfg(not(feature = "tiered-store"))]
 use bop_rs::aof::{
     AofResult, AsyncFileSystem, FilesystemArchiveStorage, FlushStrategy, aof_config,
     create_aof_with_config,
 };
 
+#[cfg(not(feature = "tiered-store"))]
 #[tokio::main]
 async fn main() -> AofResult<()> {
     println!("🚀 AOF Basic Example - Creating, Writing, and Flushing");

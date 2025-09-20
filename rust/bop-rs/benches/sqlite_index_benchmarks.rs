@@ -1,3 +1,5 @@
+#![cfg(not(feature = "tiered-store"))]
+
 //! Benchmark comparisons between SqliteSegmentIndex and MdbxSegmentIndex
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};

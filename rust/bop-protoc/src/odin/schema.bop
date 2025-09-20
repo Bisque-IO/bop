@@ -1,0 +1,86 @@
+import "core:common"
+import "core:products"
+import "core:orders"
+
+ID :: i64
+Order_Id :: ID
+
+Order_Status :: enum u8 {
+    Open    = 1
+    Closed  = 2
+}
+
+enum OrderStatus : u8 {
+
+}
+
+Order :: struct {
+    id:         i64
+    uid:        string
+    status:     Order_Status
+    address:    common.Address
+}
+
+Order @2 {
+    Order
+    line_map    Map<ID, String>
+}
+
+Order @3 {
+    id:         i64
+    uid:        string
+    status:     Order_Status
+}
+
+Order_Table :: table {
+    id:      i64                [json=id,i]
+    uid:     string             [json=uid,u]
+    status:  Order_Status
+    address: common.Address
+}
+
+create_order :: action {
+    request {
+        client_id string
+    }
+    request @2 {
+
+    }
+    response {
+
+    }
+}
+
+[[
+    Some information
+    about it
+]]
+allocate_order :: queue {
+    request = Order_Id
+    response {
+
+    }
+}
+
+"""
+This is some information about
+the import_orders http handler
+"""
+import_orders :: http {
+    method = POST
+    request {
+
+    }
+    response {
+
+    }
+}
+
+Order_Shipped :: notice {
+    id      Order_Id
+    date    datetime
+}
+
+Order_Watcher :: daemon {
+    
+}
