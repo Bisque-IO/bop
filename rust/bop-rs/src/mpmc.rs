@@ -14,56 +14,6 @@
 //! - **Bulk operations**: Efficient batch enqueue/dequeue operations
 //! - **Blocking variant**: Optional blocking operations with timeout support
 //! - **Memory efficient**: Zero-copy operations where possible
-//!
-//! ## Usage
-//!
-//! ### Basic Non-blocking Queue
-//!
-//! ```rust,no_run
-//! use bop_rs::mpmc::MpmcQueue;
-//!
-//! let queue = MpmcQueue::new()?;
-//!
-//! // Producer thread
-//! if queue.try_enqueue(42) {
-//!     println!("Enqueued successfully");
-//! }
-//!
-//! // Consumer thread
-//! if let Some(item) = queue.try_dequeue() {
-//!     println!("Dequeued: {}", item);
-//! }
-//! ```
-//!
-//! ### Token-based Optimization
-//!
-//! ```rust,no_run
-//! use bop_rs::mpmc::{MpmcQueue, ProducerToken, ConsumerToken};
-//!
-//! let queue = MpmcQueue::new()?;
-//! let producer_token = queue.create_producer_token()?;
-//! let consumer_token = queue.create_consumer_token()?;
-//!
-//! // More efficient operations with tokens
-//! producer_token.try_enqueue(42)?;
-//! if let Some(item) = consumer_token.try_dequeue()? {
-//!     println!("Got: {}", item);
-//! }
-//! ```
-//!
-//! ### Blocking Queue with Timeouts
-//!
-//! ```rust,no_run
-//! use bop_rs::mpmc::BlockingMpmcQueue;
-//! use std::time::Duration;
-//!
-//! let queue = BlockingMpmcQueue::new()?;
-//!
-//! // Blocks until item is available or timeout expires
-//! if let Some(item) = queue.dequeue_wait(Duration::from_millis(1000))? {
-//!     println!("Got item within timeout: {}", item);
-//! }
-//! ```
 
 use bop_sys::*;
 use std::marker::PhantomData;

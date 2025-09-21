@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -6,18 +6,18 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "tiered-store")]
 use crate::aof2::store::{
-    ResidencyKind, ResidentSegment, SegmentCheckout, SegmentResidency, Tier0Cache,
-    Tier0CacheConfig, Tier1Cache, Tier1Config, Tier2Config, Tier2Manager, TieredCoordinator,
-    TieredInstance,
+    AdmissionGuard, InstanceId, ResidencyKind, ResidentSegment, RolloverSignal, SegmentCheckout,
+    SegmentResidency, Tier0Cache, Tier0CacheConfig, Tier1Cache, Tier1Config, Tier2Config,
+    Tier2Manager, TieredCoordinator, TieredCoordinatorNotifiers, TieredInstance,
 };
 use arc_swap::ArcSwapOption;
 use chrono::Utc;
 use parking_lot::Mutex;
 #[cfg(not(feature = "tiered-store"))]
 use store_stub::{
-    ResidencyKind, ResidentSegment, SegmentCheckout, SegmentResidency, Tier0Cache,
-    Tier0CacheConfig, Tier1Cache, Tier1Config, Tier2Config, Tier2Manager, TieredCoordinator,
-    TieredInstance,
+    AdmissionGuard, InstanceId, ResidencyKind, ResidentSegment, RolloverSignal, SegmentCheckout,
+    SegmentResidency, Tier0Cache, Tier0CacheConfig, Tier1Cache, Tier1Config, Tier2Config,
+    Tier2Manager, TieredCoordinator, TieredCoordinatorNotifiers, TieredInstance,
 };
 use tokio::{
     runtime::{Builder, Handle, Runtime},
@@ -103,7 +103,7 @@ impl FlushMetricsExporter {
     }
 }
 
-use error::{AofError, AofResult};
+use error::{AofError, AofResult, BackpressureKind};
 use flush::{FlushManager, FlushMetrics, FlushMetricsSnapshot, flush_with_retry};
 use segment::{Segment, SegmentAppendResult};
 
@@ -452,7 +452,7 @@ mod manager_tests {
 }
 
 struct AppendState {
-    tail: ArcSwapOption<Segment>,
+    tail: ArcSwapOption<AdmissionGuard>,
     next_offset: AtomicU64,
     record_count: AtomicU64,
     unflushed_bytes: Arc<AtomicU64>,
@@ -506,6 +506,13 @@ struct AofManagement {
     pending_finalize: VecDeque<ResidentSegment>,
     next_segment_index: u32,
     flush_queue: VecDeque<ResidentSegment>,
+    rollovers: HashMap<SegmentId, RolloverAwaiter>,
+}
+
+#[derive(Debug)]
+enum RolloverAwaiter {
+    Pending(Arc<RolloverSignal>),
+    Ready,
 }
 
 impl AofManagement {
@@ -648,6 +655,10 @@ pub struct Aof {
     config: AofConfig,
     layout: Layout,
     tier: TieredInstance,
+    instance_id: InstanceId,
+    notifiers: Arc<TieredCoordinatorNotifiers>,
+    admission_notify: Arc<Notify>,
+    rollover_notify: Arc<Notify>,
     append: AppendState,
     management: Mutex<AofManagement>,
     metrics: Arc<FlushMetrics>,
@@ -664,6 +675,10 @@ impl Aof {
         let tier = manager
             .tiered()
             .register_instance(instance_name, layout.clone(), None)?;
+        let instance_id = tier.instance_id();
+        let notifiers = tier.notifiers();
+        let admission_notify = notifiers.admission(instance_id);
+        let rollover_notify = notifiers.rollover(instance_id);
         let metrics = Arc::new(FlushMetrics::default());
         let append = AppendState::new(metrics.clone());
         let flush = FlushManager::new(
@@ -676,12 +691,17 @@ impl Aof {
             config: normalized,
             layout,
             tier,
+            instance_id,
+            notifiers,
+            admission_notify,
+            rollover_notify,
             append,
             management: Mutex::new(AofManagement {
                 catalog: Vec::new(),
                 pending_finalize: VecDeque::new(),
                 next_segment_index: 0,
                 flush_queue: VecDeque::new(),
+                rollovers: HashMap::new(),
             }),
             metrics,
             flush,
@@ -740,7 +760,9 @@ impl Aof {
 
         match self.tier.checkout_sealed_segment(segment_id)? {
             SegmentCheckout::Ready(resident) => SegmentReader::new(resident),
-            SegmentCheckout::Pending(_waiter) => Err(AofError::WouldBlock),
+            SegmentCheckout::Pending(_waiter) => {
+                Err(AofError::would_block(BackpressureKind::Hydration))
+            }
         }
     }
 
@@ -785,12 +807,12 @@ impl Aof {
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
         let timestamp_u64 = if timestamp < 0 { 0 } else { timestamp as u64 };
 
-        let segment = match self.try_get_writable_segment()? {
-            Some(segment) => segment,
-            None => return Err(AofError::WouldBlock),
+        let guard = match self.try_get_writable_segment()? {
+            Some(guard) => guard,
+            None => return Err(AofError::would_block(BackpressureKind::Admission)),
         };
 
-        self.append_with_segment(payload, timestamp_u64, segment)
+        self.append_with_guard(payload, timestamp_u64, guard)
     }
 
     pub fn append_record_with_timeout(
@@ -809,35 +831,99 @@ impl Aof {
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
         let timestamp_u64 = if timestamp < 0 { 0 } else { timestamp as u64 };
 
-        let mut segment = self.wait_for_writable_segment(timeout)?;
+        let mut guard = self.wait_for_writable_segment(timeout)?;
         let start = Instant::now();
 
         loop {
-            match self.append_once(payload, timestamp_u64, &segment)? {
+            match self.append_once(payload, timestamp_u64, &guard)? {
                 AppendOutcome::Completed(id, full) => {
                     if full {
-                        self.handle_segment_full(&segment)?;
+                        self.handle_segment_full(guard.segment())?;
                     }
                     return Ok(id);
                 }
                 AppendOutcome::SegmentFull => {
-                    self.handle_segment_full(&segment)?;
+                    self.handle_segment_full(guard.segment())?;
                     let remaining = timeout
                         .checked_sub(start.elapsed())
-                        .ok_or(AofError::WouldBlock)?;
-                    segment = self.wait_for_writable_segment(remaining)?;
+                        .ok_or_else(|| AofError::would_block(BackpressureKind::Admission))?;
+                    guard = self.wait_for_writable_segment(remaining)?;
                 }
             }
         }
     }
 
-    pub fn wait_for_writable_segment(&self, timeout: Duration) -> AofResult<Arc<Segment>> {
-        if let Some(segment) = self.current_tail() {
-            return Ok(segment);
+    pub async fn append_record_async(&self, payload: &[u8]) -> AofResult<RecordId> {
+        let shutdown = self.manager.shutdown_token();
+        loop {
+            match self.append_record(payload) {
+                Ok(id) => return Ok(id),
+                Err(AofError::WouldBlock(kind)) => match kind {
+                    BackpressureKind::Admission => {
+                        if self.has_pending_rollover() {
+                            self.await_rollover(&shutdown).await?;
+                        }
+                        self.await_admission(&shutdown).await?;
+                    }
+                    BackpressureKind::Rollover => {
+                        self.await_rollover(&shutdown).await?;
+                    }
+                    other => return Err(AofError::WouldBlock(other)),
+                },
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn await_admission(&self, shutdown: &CancellationToken) -> AofResult<()> {
+        loop {
+            if self.current_tail().is_some() {
+                return Ok(());
+            }
+            if let Some(guard) = self.try_get_writable_segment()? {
+                drop(guard);
+                return Ok(());
+            }
+            tokio::select! {
+                _ = self.admission_notify.notified() => {},
+                _ = shutdown.cancelled() => {
+                    return Err(AofError::would_block(BackpressureKind::Admission));
+                }
+            }
+        }
+    }
+
+    async fn await_rollover(&self, shutdown: &CancellationToken) -> AofResult<()> {
+        loop {
+            if let Some((segment_id, signal)) = self.pending_rollover_signal() {
+                match signal.wait(shutdown).await {
+                    Ok(()) => {
+                        self.mark_rollover_ready(segment_id);
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        self.remove_rollover_entry(segment_id);
+                        return Err(err);
+                    }
+                }
+            }
+
+            tokio::select! {
+                _ = self.rollover_notify.notified() => {},
+                _ = shutdown.cancelled() => {
+                    return Err(AofError::would_block(BackpressureKind::Rollover));
+                }
+            }
+        }
+    }
+
+    pub fn wait_for_writable_segment(&self, timeout: Duration) -> AofResult<AdmissionGuard> {
+        if let Some(guard) = self.current_tail() {
+            return Ok(guard);
         }
 
         if timeout.is_zero() {
-            return Err(AofError::WouldBlock);
+            return Err(AofError::would_block(BackpressureKind::Admission));
         }
 
         let deadline = Instant::now() + timeout;
@@ -845,23 +931,22 @@ impl Aof {
         let sleep_step = Duration::from_millis(1);
 
         loop {
-            if let Some(segment) = self.current_tail() {
-                return Ok(segment);
+            if let Some(guard) = self.current_tail() {
+                return Ok(guard);
             }
 
             let now = Instant::now();
 
             let remaining = match deadline.checked_duration_since(now) {
                 Some(rem) if !rem.is_zero() => rem,
-
-                _ => return Err(AofError::WouldBlock),
+                _ => return Err(AofError::would_block(BackpressureKind::Admission)),
             };
 
             if let Some(mut state) = self.management.try_lock() {
-                if let Some(segment) =
+                if let Some(guard) =
                     self.ensure_segment_locked(&mut state, current_timestamp_nanos())?
                 {
-                    return Ok(segment);
+                    return Ok(guard);
                 }
             }
 
@@ -870,20 +955,40 @@ impl Aof {
     }
 
     pub fn seal_active(&self) -> AofResult<Option<SegmentId>> {
-        let segment = match self.current_tail() {
-            Some(segment) => segment,
-            None => return Ok(None),
+        if let Some(segment_id) = self.take_ready_rollover() {
+            return Ok(Some(segment_id));
+        }
+
+        let guard = match self.current_tail() {
+            Some(guard) => guard,
+            None => {
+                if let Some(segment_id) = self.take_ready_rollover() {
+                    return Ok(Some(segment_id));
+                }
+                if let Some(segment_id) = self.poll_pending_rollovers()? {
+                    return Ok(Some(segment_id));
+                }
+                return Ok(None);
+            }
         };
+        let segment = guard.segment();
+        let segment_id = segment.id();
 
         if segment.is_sealed() {
-            return Ok(Some(segment.id()));
+            self.queue_rollover(segment)?;
+            if self.is_rollover_ack_ready(segment_id)? {
+                self.remove_ready_rollover(segment_id);
+                return Ok(Some(segment_id));
+            }
+            return Err(AofError::would_block(BackpressureKind::Rollover));
         }
 
         let previous = self.append.tail.swap(None);
         if let Some(prev) = previous {
-            if !Arc::ptr_eq(&prev, &segment) {
+            if !Arc::ptr_eq(prev.segment(), segment) {
                 self.append.tail.store(Some(prev));
-                return Err(AofError::WouldBlock);
+                self.notifiers.notify_admission(self.instance_id);
+                return Err(AofError::would_block(BackpressureKind::Admission));
             }
         }
 
@@ -892,32 +997,38 @@ impl Aof {
             self.append.sub_unflushed(delta as u64);
         }
         segment.seal(current_timestamp_nanos())?;
+        guard.mark_sealed();
 
         let mut state = self.management.lock();
-        state.remove_pending(&segment);
-        state.remove_flush(&segment);
+        state.remove_pending(segment);
+        state.remove_flush(segment);
         let pending_snapshot = TailSignal::snapshot_pending(&state.pending_finalize);
         drop(state);
         let tail_snapshot = self
             .append
             .tail
             .load_full()
-            .map(|seg| SegmentStatusSnapshot::from_segment(seg.as_ref()));
+            .map(|guard| SegmentStatusSnapshot::from_segment(guard.segment().as_ref()));
         self.tail_signal.replace(
             tail_snapshot,
             pending_snapshot,
-            TailEvent::Sealed(segment.id()),
+            TailEvent::Sealed(segment_id),
         );
-
-        Ok(Some(segment.id()))
+        self.queue_rollover(segment)?;
+        if self.is_rollover_ack_ready(segment_id)? {
+            self.remove_ready_rollover(segment_id);
+            Ok(Some(segment_id))
+        } else {
+            Err(AofError::would_block(BackpressureKind::Rollover))
+        }
     }
 
     pub fn force_rollover(&self) -> AofResult<Arc<Segment>> {
         let _ = self.seal_active()?;
         let mut state = self.management.lock();
         match self.ensure_segment_locked(&mut state, current_timestamp_nanos())? {
-            Some(segment) => Ok(segment),
-            None => Err(AofError::WouldBlock),
+            Some(guard) => Ok(guard.segment().clone()),
+            None => Err(AofError::would_block(BackpressureKind::Admission)),
         }
     }
 
@@ -932,6 +1043,11 @@ impl Aof {
             .segment_offset_for(record_id)
             .ok_or_else(|| AofError::RecordNotFound(record_id))?;
         let target = segment.record_end_offset(offset)?;
+
+        if flush_state.durable_bytes() >= target {
+            self.metrics.incr_sync_flush();
+            return Ok(());
+        }
 
         self.schedule_flush(&segment)?;
         self.manager
@@ -951,18 +1067,23 @@ impl Aof {
         {
             if state.remove_pending(segment.segment()) {
                 state.remove_flush(segment.segment());
+                let removed_rollover = state.rollovers.remove(&segment_id).is_some();
                 let pending_snapshot = TailSignal::snapshot_pending(&state.pending_finalize);
                 drop(state);
+                if removed_rollover {
+                    self.notifiers.remove_rollover(self.instance_id, segment_id);
+                }
                 let tail_snapshot = self
                     .append
                     .tail
                     .load_full()
-                    .map(|seg| SegmentStatusSnapshot::from_segment(seg.as_ref()));
+                    .map(|guard| SegmentStatusSnapshot::from_segment(guard.segment().as_ref()));
                 self.tail_signal.replace(
                     tail_snapshot,
                     pending_snapshot,
                     TailEvent::Sealed(segment_id),
                 );
+                self.notifiers.notify_admission(self.instance_id);
                 return Ok(());
             }
         }
@@ -972,25 +1093,25 @@ impl Aof {
         )))
     }
 
-    fn append_with_segment(
+    fn append_with_guard(
         &self,
         payload: &[u8],
         timestamp: u64,
-        mut segment: Arc<Segment>,
+        mut guard: AdmissionGuard,
     ) -> AofResult<RecordId> {
         loop {
-            match self.append_once(payload, timestamp, &segment)? {
+            match self.append_once(payload, timestamp, &guard)? {
                 AppendOutcome::Completed(id, full) => {
                     if full {
-                        self.handle_segment_full(&segment)?;
+                        self.handle_segment_full(guard.segment())?;
                     }
                     return Ok(id);
                 }
                 AppendOutcome::SegmentFull => {
-                    self.handle_segment_full(&segment)?;
-                    segment = match self.try_get_writable_segment()? {
+                    self.handle_segment_full(guard.segment())?;
+                    guard = match self.try_get_writable_segment()? {
                         Some(next) => next,
-                        None => return Err(AofError::WouldBlock),
+                        None => return Err(AofError::would_block(BackpressureKind::Admission)),
                     };
                 }
             }
@@ -1001,8 +1122,9 @@ impl Aof {
         &self,
         payload: &[u8],
         timestamp: u64,
-        segment: &Arc<Segment>,
+        guard: &AdmissionGuard,
     ) -> AofResult<AppendOutcome> {
+        let segment = guard.segment();
         let previous_offset = self.append.next_offset.load(Ordering::Acquire);
         match segment.append_record(payload, timestamp) {
             Ok(result) => {
@@ -1012,6 +1134,7 @@ impl Aof {
                 self.append.record_count.fetch_add(1, Ordering::AcqRel);
                 let appended_bytes = result.last_offset.saturating_sub(previous_offset);
                 self.append.add_unflushed(appended_bytes);
+                guard.record_append(result.logical_size);
                 let record_id = RecordId::from_parts(segment.id().as_u32(), result.segment_offset);
                 self.maybe_schedule_flush(segment, &result)?;
                 self.enforce_backpressure(segment, result.logical_size)?;
@@ -1129,9 +1252,9 @@ impl Aof {
         Ok(())
     }
 
-    fn try_get_writable_segment(&self) -> AofResult<Option<Arc<Segment>>> {
-        if let Some(segment) = self.current_tail() {
-            return Ok(Some(segment));
+    fn try_get_writable_segment(&self) -> AofResult<Option<AdmissionGuard>> {
+        if let Some(guard) = self.current_tail() {
+            return Ok(Some(guard));
         }
 
         if let Some(mut state) = self.management.try_lock() {
@@ -1142,13 +1265,50 @@ impl Aof {
         Ok(None)
     }
 
-    fn current_tail(&self) -> Option<Arc<Segment>> {
-        if let Some(segment) = self.append.tail.load_full() {
-            if segment.is_sealed() {
+    fn has_pending_rollover(&self) -> bool {
+        let state = self.management.lock();
+        state
+            .rollovers
+            .values()
+            .any(|awaiter| matches!(awaiter, RolloverAwaiter::Pending(_)))
+    }
+
+    fn pending_rollover_signal(&self) -> Option<(SegmentId, Arc<RolloverSignal>)> {
+        let state = self.management.lock();
+        state
+            .rollovers
+            .iter()
+            .find_map(|(segment_id, awaiter)| match awaiter {
+                RolloverAwaiter::Pending(signal) => Some((*segment_id, Arc::clone(signal))),
+                RolloverAwaiter::Ready => None,
+            })
+    }
+
+    fn mark_rollover_ready(&self, segment_id: SegmentId) {
+        let mut state = self.management.lock();
+        if let Some(entry) = state.rollovers.get_mut(&segment_id) {
+            if let RolloverAwaiter::Pending(signal) = entry {
+                if signal.is_ready() {
+                    *entry = RolloverAwaiter::Ready;
+                }
+            }
+        }
+    }
+
+    fn remove_rollover_entry(&self, segment_id: SegmentId) {
+        let mut state = self.management.lock();
+        if state.rollovers.remove(&segment_id).is_some() {
+            self.notifiers.remove_rollover(self.instance_id, segment_id);
+        }
+    }
+
+    fn current_tail(&self) -> Option<AdmissionGuard> {
+        if let Some(guard) = self.append.tail.load_full() {
+            if guard.segment().is_sealed() {
                 self.append.tail.store(None);
                 None
             } else {
-                Some(segment)
+                Some(guard.as_ref().clone())
             }
         } else {
             None
@@ -1159,9 +1319,17 @@ impl Aof {
         &self,
         state: &mut AofManagement,
         created_at: i64,
-    ) -> AofResult<Option<Arc<Segment>>> {
-        if let Some(segment) = self.current_tail() {
-            return Ok(Some(segment));
+    ) -> AofResult<Option<AdmissionGuard>> {
+        if let Some(guard) = self.current_tail() {
+            return Ok(Some(guard));
+        }
+
+        if state
+            .pending_finalize
+            .iter()
+            .any(|resident| !resident.segment().is_sealed())
+        {
+            return Ok(None);
         }
 
         if state.pending_finalize.len() >= 2 {
@@ -1189,26 +1357,132 @@ impl Aof {
             segment.clone(),
             SegmentResidency::new(segment.current_size() as u64, ResidencyKind::Active),
         )?;
+        let guard = self.tier.admission_guard(&resident);
 
         state.next_segment_index = segment_index.saturating_add(1);
-        state.catalog.push(resident.clone());
-        self.append.tail.store(Some(segment.clone()));
-        let tail_snapshot = SegmentStatusSnapshot::from_segment(segment.as_ref());
+        state.catalog.push(resident);
+        self.append.tail.store(Some(Arc::new(guard.clone())));
+        self.notifiers.notify_admission(self.instance_id);
+        let tail_snapshot = SegmentStatusSnapshot::from_segment(guard.segment().as_ref());
         let pending_snapshot = TailSignal::snapshot_pending(&state.pending_finalize);
         self.tail_signal.replace(
             Some(tail_snapshot),
             pending_snapshot,
-            TailEvent::Activated(segment.id()),
+            TailEvent::Activated(guard.segment().id()),
         );
-        Ok(Some(segment))
+        Ok(Some(guard))
+    }
+
+    fn queue_rollover(&self, segment: &Arc<Segment>) -> AofResult<()> {
+        let mut state = self.management.lock();
+        let segment_id = segment.id();
+        if state.rollovers.contains_key(&segment_id) {
+            return Ok(());
+        }
+        let resident = state
+            .resident_for(segment)
+            .ok_or_else(|| {
+                AofError::InvalidState(format!(
+                    "segment {} missing from catalog during rollover",
+                    segment_id.as_u64()
+                ))
+            })?
+            .clone();
+        let receiver = self.tier.request_rollover(resident)?;
+        let signal = self
+            .notifiers
+            .register_rollover(self.instance_id, segment_id);
+        let notifiers = Arc::clone(&self.notifiers);
+        let instance_id = self.instance_id;
+        let segment_tag = segment_id.as_u64();
+        self.manager.runtime_handle().spawn(async move {
+            let result = match receiver.await {
+                Ok(res) => res,
+                Err(_) => Err(AofError::rollover_failed(format!(
+                    "rollover ack channel closed for segment {}",
+                    segment_tag
+                ))),
+            };
+            notifiers.complete_rollover(instance_id, segment_id, result);
+        });
+        state
+            .rollovers
+            .insert(segment_id, RolloverAwaiter::Pending(signal));
+        Ok(())
+    }
+
+    fn is_rollover_ack_ready(&self, segment_id: SegmentId) -> AofResult<bool> {
+        let mut state = self.management.lock();
+        let Some(entry) = state.rollovers.get_mut(&segment_id) else {
+            return Ok(true);
+        };
+        match entry {
+            RolloverAwaiter::Ready => Ok(true),
+            RolloverAwaiter::Pending(signal) => {
+                if let Some(result) = signal.result() {
+                    match result {
+                        Ok(()) => {
+                            *entry = RolloverAwaiter::Ready;
+                            Ok(true)
+                        }
+                        Err(err) => {
+                            state.rollovers.remove(&segment_id);
+                            Err(AofError::rollover_failed(err))
+                        }
+                    }
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    fn remove_ready_rollover(&self, segment_id: SegmentId) {
+        let mut state = self.management.lock();
+        if matches!(state.rollovers.get(&segment_id), Some(RolloverAwaiter::Ready)) {
+            state.rollovers.remove(&segment_id);
+            self.notifiers.remove_rollover(self.instance_id, segment_id);
+        }
+    }
+
+    fn take_ready_rollover(&self) -> Option<SegmentId> {
+        let mut state = self.management.lock();
+        let ready_id = state
+            .rollovers
+            .iter()
+            .find_map(|(id, awaiter)| matches!(awaiter, RolloverAwaiter::Ready).then_some(*id));
+        if let Some(id) = ready_id {
+            state.rollovers.remove(&id);
+            self.notifiers.remove_rollover(self.instance_id, id);
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    fn poll_pending_rollovers(&self) -> AofResult<Option<SegmentId>> {
+        let ids: Vec<_> = {
+            let state = self.management.lock();
+            state.rollovers.keys().copied().collect()
+        };
+
+        for segment_id in ids {
+            if self.is_rollover_ack_ready(segment_id)? {
+                self.remove_ready_rollover(segment_id);
+                return Ok(Some(segment_id));
+            }
+        }
+
+        Ok(None)
     }
 
     fn handle_segment_full(&self, segment: &Arc<Segment>) -> AofResult<()> {
         let previous = self.append.tail.swap(None);
         let enqueue = match previous {
-            Some(prev) if Arc::ptr_eq(&prev, segment) => true,
+            Some(prev) if Arc::ptr_eq(prev.segment(), segment) => true,
             Some(prev) => {
                 self.append.tail.store(Some(prev));
+                self.notifiers.notify_admission(self.instance_id);
                 false
             }
             None => true,
@@ -1234,7 +1508,7 @@ impl Aof {
                 .append
                 .tail
                 .load_full()
-                .map(|seg| SegmentStatusSnapshot::from_segment(seg.as_ref()));
+                .map(|guard| SegmentStatusSnapshot::from_segment(guard.segment().as_ref()));
             self.tail_signal.replace(
                 tail_snapshot,
                 pending_snapshot,
@@ -1242,6 +1516,9 @@ impl Aof {
             );
         }
 
+        if segment.is_sealed() {
+            self.queue_rollover(segment)?;
+        }
         Ok(())
     }
 
@@ -1312,9 +1589,16 @@ impl Aof {
             catalog.push(resident);
         }
 
-        let tail_snapshot = tail
+        let tail_guard_arc = tail.as_ref().and_then(|segment| {
+            catalog
+                .iter()
+                .find(|resident| Arc::ptr_eq(resident.segment(), segment))
+                .map(|resident| Arc::new(self.tier.admission_guard(resident)))
+        });
+
+        let tail_snapshot = tail_guard_arc
             .as_ref()
-            .map(|segment| SegmentStatusSnapshot::from_segment(segment.as_ref()));
+            .map(|guard| SegmentStatusSnapshot::from_segment(guard.segment().as_ref()));
         let pending_snapshot = TailSignal::snapshot_pending(&pending_finalize);
         let event = if let Some(snapshot) = tail_snapshot.as_ref() {
             TailEvent::Activated(snapshot.segment_id)
@@ -1331,6 +1615,7 @@ impl Aof {
             state.pending_finalize = pending_finalize;
             state.next_segment_index = next_segment_index;
             state.flush_queue = flush_queue;
+            state.rollovers.clear();
             pending_for_flush = state.flush_queue.iter().cloned().collect();
         }
 
@@ -1341,7 +1626,10 @@ impl Aof {
         self.append
             .record_count
             .store(total_records, Ordering::Release);
-        self.append.tail.store(tail);
+        self.append.tail.store(tail_guard_arc.clone());
+        if tail_guard_arc.is_some() {
+            self.notifiers.notify_admission(self.instance_id);
+        }
 
         self.tail_signal
             .replace(tail_snapshot, pending_snapshot, event);
@@ -1368,6 +1656,7 @@ enum AppendOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aof2::error::{AofError, BackpressureKind};
     use std::thread;
 
     #[test]
@@ -1448,6 +1737,48 @@ mod tests {
         (manager, handle)
     }
 
+    async fn drain_rollover_async(manager: &AofManager) {
+        manager.tiered().poll().await;
+    }
+
+    fn drain_rollover(manager: &AofManager) {
+        manager
+            .runtime_handle()
+            .block_on(drain_rollover_async(manager));
+    }
+
+    async fn seal_active_until_ready_async(
+        aof: &Aof,
+        manager: &AofManager,
+    ) -> AofResult<Option<SegmentId>> {
+        loop {
+            match aof.seal_active() {
+                Ok(Some(id)) => return Ok(Some(id)),
+                Ok(None) if cfg!(feature = "tiered-store") => {
+                    if let Some(id) = aof.poll_pending_rollovers()? {
+                        return Ok(Some(id));
+                    }
+                    drain_rollover_async(manager).await;
+                }
+                Ok(None) => return Ok(None),
+                Err(AofError::WouldBlock(BackpressureKind::Rollover)) => {
+                    drain_rollover_async(manager).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn seal_active_until_ready(aof: &Aof, manager: &AofManager) -> AofResult<Option<SegmentId>> {
+        if cfg!(feature = "tiered-store") {
+            manager
+                .runtime_handle()
+                .block_on(seal_active_until_ready_async(aof, manager))
+        } else {
+            aof.seal_active()
+        }
+    }
+
     #[test]
     fn ensure_active_segment_respects_pending_limit() {
         let tmp = TempDir::new().expect("tempdir");
@@ -1461,21 +1792,25 @@ mod tests {
 
         let mut state = aof.management.lock();
         let created_at = 0;
-        let seg1 = aof
+        let guard1 = aof
             .ensure_segment_locked(&mut state, created_at)
             .unwrap()
             .unwrap();
+        let seg1 = guard1.segment().clone();
         aof.append.tail.store(None);
         let res1 = state.resident_for(&seg1).expect("resident seg1");
         state.pending_finalize.push_back(res1);
-        let seg2 = aof
+        let guard2 = aof
             .ensure_segment_locked(&mut state, created_at)
             .unwrap()
             .unwrap();
+        let seg2 = guard2.segment().clone();
         aof.append.tail.store(None);
         let res2 = state.resident_for(&seg2).expect("resident seg2");
         state.pending_finalize.push_back(res2);
         drop(state);
+        drop(guard1);
+        drop(guard2);
 
         assert!(matches!(aof.try_get_writable_segment(), Ok(None)));
 
@@ -1491,16 +1826,20 @@ mod tests {
         cfg.segment_min_bytes = 4096;
         cfg.segment_max_bytes = 4096;
         cfg.segment_target_bytes = 4096;
-        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
 
-        let segment = aof.try_get_writable_segment().expect("segment");
-        let segment = segment.expect("initial segment");
+        let guard = aof.try_get_writable_segment().expect("segment");
+        let guard = guard.expect("initial guard");
+        let segment = guard.segment().clone();
+        drop(guard);
 
         aof.append_record(b"payload").expect("append");
 
-        let sealed_id = aof.seal_active().expect("seal");
-        assert_eq!(sealed_id, Some(segment.id()));
+        let sealed_id = seal_active_until_ready(&aof, &manager)
+            .expect("seal")
+            .expect("segment sealed");
+        assert_eq!(sealed_id, segment.id());
         assert!(segment.is_sealed());
 
         let snapshot = aof.catalog_snapshot();
@@ -1508,6 +1847,8 @@ mod tests {
         let entry = &snapshot[0];
         assert_eq!(entry.segment_id, segment.id());
         assert!(entry.sealed);
+
+        drop(manager);
     }
 
     #[test]
@@ -1518,16 +1859,35 @@ mod tests {
         cfg.segment_min_bytes = 4096;
         cfg.segment_max_bytes = 4096;
         cfg.segment_target_bytes = 4096;
-        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
 
-        let initial = aof
+        let initial_guard = aof
             .try_get_writable_segment()
             .expect("segment")
-            .expect("initial");
+            .expect("initial guard");
+        let initial = initial_guard.segment().clone();
+        drop(initial_guard);
         aof.append_record(b"payload").expect("append");
 
-        let next = aof.force_rollover().expect("rollover");
+        let next = if cfg!(feature = "tiered-store") {
+            match aof.force_rollover() {
+                Err(AofError::WouldBlock(kind)) => {
+                    assert_eq!(kind, BackpressureKind::Rollover);
+                }
+                Ok(_) => panic!("expected rollover backpressure, got success"),
+                Err(other) => panic!("unexpected error: {other:?}"),
+            }
+
+            let coordinator = manager.tiered();
+            let _ = manager
+                .runtime_handle()
+                .block_on(async { coordinator.poll().await });
+
+            aof.force_rollover().expect("rollover acked")
+        } else {
+            aof.force_rollover().expect("rollover")
+        };
         assert_ne!(initial.id().as_u64(), next.id().as_u64());
         assert!(initial.is_sealed());
         assert!(!next.is_sealed());
@@ -1544,16 +1904,243 @@ mod tests {
                 .iter()
                 .any(|entry| entry.segment_id == next.id() && !entry.sealed)
         );
+
+        drop(manager);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seal_active_requires_rollover_ack() {
+        if !cfg!(feature = "tiered-store") {
+            return;
+        }
+        let tmp = TempDir::new().expect("tempdir");
+        let mut cfg = AofConfig::default();
+        cfg.root_dir = tmp.path().join("aof");
+        cfg.segment_min_bytes = 4096;
+        cfg.segment_max_bytes = 4096;
+        cfg.segment_target_bytes = 4096;
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let coordinator = manager.tiered();
+        let aof = Aof::new(handle, cfg).expect("aof");
+
+        aof.append_record(b"payload").expect("append");
+        let err = aof
+            .seal_active()
+            .expect_err("seal should apply rollover backpressure");
+        assert!(matches!(
+            err,
+            AofError::WouldBlock(kind) if kind == BackpressureKind::Rollover
+        ));
+
+        let outcome = coordinator.poll().await;
+        assert_eq!(outcome.stats.rollovers, 1);
+
+        let sealed_id = seal_active_until_ready_async(&aof, &manager)
+            .await
+            .expect("seal after ack")
+            .expect("sealed");
+        assert_eq!(sealed_id.as_u64(), 0);
+
+        drop(manager);
+    }
+
+    #[test]
+    fn append_surfaces_admission_would_block_until_guard_released() {
+        let tmp = TempDir::new().expect("tempdir");
+
+        let mut cfg = AofConfig::default();
+        cfg.root_dir = tmp.path().join("aof");
+        cfg.segment_min_bytes = 128;
+        cfg.segment_max_bytes = 128;
+        cfg.segment_target_bytes = 128;
+
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, cfg).expect("aof");
+        aof.flush.shutdown_worker_for_tests();
+
+        let first_guard = aof
+            .try_get_writable_segment()
+            .expect("initial guard result")
+            .expect("initial guard");
+        let first_segment = first_guard.segment().clone();
+        drop(first_guard);
+        aof.handle_segment_full(&first_segment)
+            .expect("mark first segment full");
+
+        let second_guard = aof
+            .try_get_writable_segment()
+            .expect("second guard result")
+            .expect("second guard");
+        let second_segment = second_guard.segment().clone();
+        drop(second_guard);
+        aof.handle_segment_full(&second_segment)
+            .expect("mark second segment full");
+
+        match aof.append_record(b"payload") {
+            Err(AofError::WouldBlock(kind)) => {
+                assert_eq!(kind, BackpressureKind::Admission);
+            }
+            Err(err) => panic!("unexpected append failure: {err:?}"),
+            Ok(record) => panic!(
+                "expected admission would block but append succeeded with {:?}",
+                record
+            ),
+        }
+
+        for segment in [&first_segment, &second_segment] {
+            aof.segment_finalized(segment.id())
+                .expect("segment finalized");
+        }
+
+        let record_id = aof
+            .append_record(b"tail-release")
+            .expect("append after releasing admission guard");
+        assert_eq!(record_id.segment_index() as u64, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn append_record_async_waits_for_admission_release() {
+        use std::time::Duration;
+        use tokio::time::sleep;
+
+        let tmp = TempDir::new().expect("tempdir");
+
+        let mut cfg = AofConfig::default();
+        cfg.root_dir = tmp.path().join("aof");
+        cfg.segment_min_bytes = 128;
+        cfg.segment_max_bytes = 128;
+        cfg.segment_target_bytes = 128;
+
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, cfg).expect("aof");
+        aof.flush.shutdown_worker_for_tests();
+
+        let mut state = aof.management.lock();
+        let created_at = current_timestamp_nanos();
+        let guard1 = aof
+            .ensure_segment_locked(&mut state, created_at)
+            .expect("segment")
+            .expect("guard1");
+        let seg1 = guard1.segment().clone();
+        aof.append.tail.store(None);
+        let res1 = state.resident_for(&seg1).expect("resident seg1");
+        state.pending_finalize.push_back(res1);
+
+        let guard2 = aof
+            .ensure_segment_locked(&mut state, created_at)
+            .expect("segment")
+            .expect("guard2");
+        let seg2 = guard2.segment().clone();
+        aof.append.tail.store(None);
+        let res2 = state.resident_for(&seg2).expect("resident seg2");
+        state.pending_finalize.push_back(res2);
+        drop(state);
+        drop(guard1);
+        drop(guard2);
+
+        let payload = b"tail-release".to_vec();
+        let append_future = aof.append_record_async(&payload);
+        tokio::pin!(append_future);
+        tokio::select! {
+            res = &mut append_future => panic!("append completed early: {res:?}"),
+            _ = sleep(Duration::from_millis(20)) => {}
+        }
+
+        aof.segment_finalized(seg1.id()).expect("segment finalized");
+
+        let record_id = append_future
+            .await
+            .expect("append after releasing admission guard");
+        assert_eq!(record_id.segment_index() as u64, seg2.id().as_u64());
+
+        aof.segment_finalized(seg2.id()).expect("segment finalized");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn append_record_async_waits_for_rollover_ack() {
+        use tokio::time::sleep;
+
+        if !cfg!(feature = "tiered-store") {
+            return;
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        let mut cfg = AofConfig::default();
+        cfg.root_dir = tmp.path().join("aof");
+        cfg.segment_min_bytes = 256;
+        cfg.segment_max_bytes = 256;
+        cfg.segment_target_bytes = 256;
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, cfg).expect("aof");
+        aof.flush.shutdown_worker_for_tests();
+
+        let first_guard = aof
+            .try_get_writable_segment()
+            .expect("first guard result")
+            .expect("first guard");
+        let first_segment = first_guard.segment().clone();
+        drop(first_guard);
+        aof.handle_segment_full(&first_segment)
+            .expect("mark first segment full");
+
+        let second_guard = aof
+            .try_get_writable_segment()
+            .expect("second guard result")
+            .expect("second guard");
+        let second_segment = second_guard.segment().clone();
+        drop(second_guard);
+        aof.handle_segment_full(&second_segment)
+            .expect("mark second segment full");
+
+        for segment in [&first_segment, &second_segment] {
+            let delta = segment.mark_durable(segment.current_size());
+            if delta > 0 {
+                aof.append.sub_unflushed(delta as u64);
+            }
+            if !segment.is_sealed() {
+                let _ = segment.seal(current_timestamp_nanos());
+            }
+        }
+
+        let payload = b"after-rollover".to_vec();
+        #[allow(unused_mut)]
+        let append_future = aof.append_record_async(&payload);
+        tokio::pin!(append_future);
+        tokio::select! {
+            res = &mut append_future => panic!("append completed early: {res:?}"),
+            _ = sleep(Duration::from_millis(20)) => {}
+        }
+
+        for segment in [&first_segment, &second_segment] {
+            let delta = segment.mark_durable(segment.current_size());
+            if delta > 0 {
+                aof.append.sub_unflushed(delta as u64);
+            }
+            if !segment.is_sealed() {
+                let _ = segment.seal(current_timestamp_nanos());
+            }
+            aof.segment_finalized(segment.id())
+                .expect("segment finalized");
+            aof.notifiers
+                .complete_rollover(aof.instance_id, segment.id(), Ok(()));
+        }
+
+        let record_id = append_future.await.expect("append after rollover ack");
+        assert_eq!(record_id.segment_index() as u64, 2);
+
+        drop(manager);
     }
 
     #[test]
     fn recovery_reopens_existing_tail_segment() {
         let tmp = TempDir::new().expect("tempdir");
-        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
         aof.append_record(b"one").expect("append one");
-        let sealed_id = aof.seal_active().expect("seal").expect("sealed");
+        let sealed_id = seal_active_until_ready(&aof, &manager)
+            .expect("seal")
+            .expect("sealed");
         assert_eq!(sealed_id.as_u64(), 0);
         let tail = aof.force_rollover().expect("rollover");
         assert_eq!(tail.id().as_u64(), 1);
@@ -1572,17 +2159,21 @@ mod tests {
 
         let rid = recovered.append_record(b"after").expect("append after");
         assert_eq!(rid.segment_index(), tail_id.as_u32());
+
+        drop(manager);
     }
 
     #[test]
     fn recovery_with_sealed_segments_allows_new_segment_creation() {
         let tmp = TempDir::new().expect("tempdir");
-        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         {
             let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
             aof.append_record(b"only").expect("append only");
-            aof.seal_active().expect("seal").expect("sealed");
+            seal_active_until_ready(&aof, &manager)
+                .expect("seal")
+                .expect("sealed");
         }
 
         let recovered = Aof::new(handle, test_config(tmp.path())).expect("recover");
@@ -1594,6 +2185,8 @@ mod tests {
         let snapshot_after = recovered.catalog_snapshot();
         assert_eq!(snapshot_after.len(), 2);
         assert!(snapshot_after.iter().any(|entry| !entry.sealed));
+
+        drop(manager);
     }
 
     #[test]
@@ -1603,10 +2196,12 @@ mod tests {
 
         {
             let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
-            let segment = aof
+            let tail_guard = aof
                 .try_get_writable_segment()
                 .expect("segment")
                 .expect("tail");
+            let segment = tail_guard.segment().clone();
+            drop(tail_guard);
             aof.append_record(b"good").expect("append good");
 
             let next_offset = segment.current_size();
@@ -1720,9 +2315,9 @@ mod tests {
     fn open_reader_exposes_sealed_segment() {
         let tmp = TempDir::new().expect("tempdir");
         let mut cfg = test_config(tmp.path());
-        cfg.segment_min_bytes = 512;
-        cfg.segment_max_bytes = 512;
-        cfg.segment_target_bytes = 512;
+        cfg.segment_min_bytes = 128;
+        cfg.segment_max_bytes = 128;
+        cfg.segment_target_bytes = 128;
         let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
         let tail_rx = aof.tail_events();
@@ -1790,7 +2385,12 @@ mod tests {
         let after = recovered.flush_metrics();
 
         assert_eq!(segment.durable_size(), segment.current_size());
-        assert!(after.asynchronous_flushes >= before.asynchronous_flushes + 1);
+        let flush_progress = after.asynchronous_flushes > before.asynchronous_flushes
+            || after.synchronous_flushes > before.synchronous_flushes;
+        assert!(
+            flush_progress,
+            "expected recovery to run at least one flush"
+        );
         assert_eq!(after.backlog_bytes, 0);
     }
 
@@ -1799,9 +2399,9 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
 
         let mut cfg = test_config(tmp.path());
-        cfg.segment_min_bytes = 512;
-        cfg.segment_max_bytes = 512;
-        cfg.segment_target_bytes = 512;
+        cfg.segment_min_bytes = 128;
+        cfg.segment_max_bytes = 128;
+        cfg.segment_target_bytes = 128;
         let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         let aof = Aof::new(handle, cfg).expect("aof");
@@ -1853,10 +2453,12 @@ mod tests {
 
         assert!(rx.borrow().tail.is_none());
 
-        let initial_segment = aof
+        let initial_guard = aof
             .try_get_writable_segment()
             .expect("segment")
-            .expect("initial segment");
+            .expect("initial guard");
+        let initial_segment = initial_guard.segment().clone();
+        drop(initial_guard);
 
         let activated = wait_for_event(&mut rx).await;
         match activated.last_event {
@@ -1898,10 +2500,12 @@ mod tests {
         }
         assert!(sealed.tail.is_none());
 
-        let next_segment = aof
+        let next_guard = aof
             .try_get_writable_segment()
             .expect("segment")
-            .expect("next segment");
+            .expect("next guard");
+        let next_segment = next_guard.segment().clone();
+        drop(next_guard);
 
         let next = wait_for_event(&mut rx).await;
         match next.last_event {

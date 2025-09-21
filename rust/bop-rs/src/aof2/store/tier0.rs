@@ -3,7 +3,7 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Weak;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 
 use parking_lot::Mutex;
 use tokio::task::spawn_blocking;
@@ -289,6 +289,10 @@ impl Tier0Instance {
     pub fn checkout_segment(&self, segment_id: SegmentId) -> Option<ResidentSegment> {
         self.inner.checkout_resident(self.instance_id, segment_id)
     }
+
+    pub fn admission_guard(&self, resident: ResidentSegment) -> AdmissionGuard {
+        AdmissionGuard::new(self.clone(), resident)
+    }
 }
 
 #[derive(Clone)]
@@ -308,6 +312,80 @@ impl ResidentSegment {
 
     pub fn segment(&self) -> &Arc<Segment> {
         &self.inner.segment
+    }
+}
+
+#[derive(Clone)]
+pub struct AdmissionGuard {
+    inner: Arc<AdmissionGuardInner>,
+}
+
+struct AdmissionGuardInner {
+    tier0: Tier0Instance,
+    resident: ResidentSegment,
+    bytes: AtomicU64,
+    kind: AtomicU8,
+}
+
+impl AdmissionGuard {
+    pub(crate) fn new(tier0: Tier0Instance, resident: ResidentSegment) -> Self {
+        let segment = resident.segment().clone();
+        let initial_bytes = segment.current_size() as u64;
+        let initial_kind = if segment.is_sealed() {
+            ResidencyKind::Sealed
+        } else {
+            ResidencyKind::Active
+        };
+        Self {
+            inner: Arc::new(AdmissionGuardInner {
+                tier0,
+                resident,
+                bytes: AtomicU64::new(initial_bytes),
+                kind: AtomicU8::new(encode_kind(initial_kind)),
+            }),
+        }
+    }
+
+    pub fn segment(&self) -> &Arc<Segment> {
+        self.inner.resident.segment()
+    }
+
+    pub fn resident(&self) -> ResidentSegment {
+        self.inner.resident.clone()
+    }
+
+    pub fn record_append(&self, logical_size: u32) {
+        self.update_residency(SegmentResidency::new(
+            logical_size as u64,
+            ResidencyKind::Active,
+        ));
+    }
+
+    pub fn mark_sealed(&self) {
+        let bytes = self.segment().current_size() as u64;
+        self.update_residency(SegmentResidency::new(bytes, ResidencyKind::Sealed));
+    }
+
+    pub fn update_residency(&self, residency: SegmentResidency) {
+        let new_kind = encode_kind(residency.kind);
+        let prev_kind = self.inner.kind.swap(new_kind, AtomicOrdering::AcqRel);
+        let prev_bytes = self
+            .inner
+            .bytes
+            .swap(residency.bytes, AtomicOrdering::AcqRel);
+        if prev_kind == new_kind && prev_bytes == residency.bytes {
+            return;
+        }
+        self.inner
+            .tier0
+            .update_residency(self.segment().id(), residency);
+    }
+}
+
+fn encode_kind(kind: ResidencyKind) -> u8 {
+    match kind {
+        ResidencyKind::Active => 0,
+        ResidencyKind::Sealed => 1,
     }
 }
 

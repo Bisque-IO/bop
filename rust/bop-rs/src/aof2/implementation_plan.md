@@ -1,5 +1,10 @@
 # AOF2 Async Tiered Integration Plan
 
+## Next Up
+- Implement **AP3** (`append_record_async`) so the sync backpressure loop has an async companion.
+- Finish **RD5** reader documentation and move into **RC1**/**RC2** recovery milestones once the docs are merged.
+- Prep recovery design notes so RC1/RC2 can start once docs land (catalog snapshot format, Tier 2 reconciliation checklist).
+
 
 ## Milestone 1 - Manager Foundations
 Establish the runtime and configuration scaffolding that will host the async tiered store.
@@ -22,24 +27,41 @@ Adapt `Aof` to depend on the manager/tiered store.
 - [x] **AO1**: Change `Aof::new` signature to accept an `Arc<AofManagerHandle>` and retrieve tier handles plus runtime references. (completed 2025-09-21, Aof now builds via manager handle and callers/tests updated)
 - [x] **AO2**: Refactor internal catalog structures to store `ResidentSegment` handles instead of raw paths. (completed 2025-09-21, catalog/pending/flush queues now retain tier-owned ResidentSegment handles)
 - [x] **AO3**: Introduce `TieredInstance` (per-stream view) that mediates between catalog and coordinator. (completed 2025-09-22, TieredInstance now owns Tier 0 admissions, updates Tier 1 residency, and wakes the coordinator on evictions.)
-- [ ] **AO4**: Update recovery/bootstrap to request residency through `TieredInstance` rather than touching the filesystem directly.
-- [ ] **AO5**: Port unit tests/integration tests to construct `Aof` via the manager (adjust helpers accordingly).
+- [x] **AO4**: Update recovery/bootstrap to request residency through `TieredInstance` rather than touching the filesystem directly. (completed 2025-09-24, recovery walks TieredInstance::recover_segments and rehydrates via tiered checkout)
+- [x] **AO5**: Port unit tests/integration tests to construct `Aof` via the manager (completed 2025-09-25, shared `TestManager` harness now builds `Aof` instances through `AofManager` across unit and reader tests).
 
 ## Milestone 4 – Append Path Integration
 Keep synchronous append semantics while delegating capacity decisions to the tiered store.
 - [ ] **AP1**: Replace direct Tier 0 file handling with `AdmissionGuard` obtained from Tier 0 cache; return `WouldBlock` when admission fails.
-- [ ] **AP2**: Ensure sealing/rollover requests enqueue work on the coordinator and emit `WouldBlock` until acknowledged.
+    - [x] Promote `AdmissionGuard` in `store/tier0.rs` so it encapsulates segment slot state, flush budget, and drop-driven release semantics.
+    - [x] Update `Aof::append_record` and supporting helpers in `flush.rs` to acquire the guard before touching Tier 0 writers and translate guard acquisition failures into `AofError::WouldBlock(BackpressureKind::Admission)`.
+    - [x] Add targeted coverage under `aof2::tests` that exhausts Tier 0 capacity, asserts the sync API surfaces `WouldBlock`, and verifies coordinator wake-ups when the guard drops. (aof2::tests::append_surfaces_admission_would_block_until_guard_released)
+    - [x] Refresh the append path section in `store.md` with an example that creates the guard, handles `WouldBlock`, and defers to `append_record_async` for retry loops.
+- [x] **AP2**: Ensure sealing/rollover requests enqueue work on the coordinator and emit `WouldBlock` until acknowledged. (completed 2025-09-28, rollover queue now defers ack until Tier1 compression + Tier2 upload scheduling succeed)
+    - [x] Introduce a `CoordinatorCommand::Rollover { stream_id, resident, ack }` variant (oneshot sender) and have `TieredInstance::request_rollover` push it onto the rollover queue, surfacing a future tied to the ack.
+    - [x] Update the coordinator loop to drain the new command, stage Tier 1 metadata + Tier 2 upload intents, and fulfil or error the ack; capture failure paths as `AofError::RolloverFailed` with telemetry counters.
+    - [x] Teach `Aof::seal_current_segment` (and the flush scheduler) to poll the ack opportunistically; when the queue back-pressures or the ack is pending, surface `WouldBlock(BackpressureKind::Rollover)` and let the async helper await coordinator notifications.
+    - [x] Back the change with an async regression test under `aof2::tests` that fakes a slow coordinator, ensuring the sync API returns `WouldBlock` and the async API resumes once the ack arrives. (`aof2::tests::seal_active_requires_rollover_ack`)
+    - [x] Documented the rollover handshake in `design_next.md` (state machine, async retry loop) and `store.md` (event sequencing, notifier usage); linked both sections here.
 - [ ] **AP3**: Implement `append_record_async` that loops on the sync API and awaits coordinator notifications between retries.
+    - [ ] Capture the async retry state machine (`BackpressureKind` -> notifier mapping) in `design_next.md` to keep reviewers aligned.
+    - [ ] Implement `Aof::append_record_async` in `mod.rs`, reusing the sync helper inside a loop that awaits admission and rollover notifies.
+    - [ ] Add async regression tests under `aof2::tests` covering admission exhaustion and rollover ack delays via the new helper.
+    - [ ] Refresh `store.md` examples to show when to call the async helper versus retrying manually.
 - [ ] **AP4**: Rework flush scheduling to interact with tier metadata (durability markers stored alongside residency state).
 - [ ] **AP5**: Extend metrics to capture Tier 0 admission latency and `WouldBlock` frequency.
 
 ## Milestone 5 – Read Path and Hydration
 Support synchronous readers with `WouldBlock` plus async helpers that await hydration.
-- [ ] **RD1**: Update `AofReader` to fetch segments through `TieredInstance`, returning `WouldBlock` while hydration/promotions run.
-- [ ] **RD2**: Provide `next_record_async` that awaits hydration futures and resumes iteration seamlessly.
-- [ ] **RD3**: Maintain reader-side caches of residency hints to avoid redundant promotions.
-- [ ] **RD4**: Add tests covering Tier 1 miss -> hydration -> read resume, including concurrent readers.
+- [x] **RD1**: Update `AofReader` to fetch segments through `TieredInstance`, returning `WouldBlock` while hydration/promotions run. (completed 2025-09-24, reader uses tier checkout + sealed stream awaits hydration)
+- [x] **RD2**: Provide `next_record_async` that awaits hydration futures and resumes iteration seamlessly. (completed 2025-09-24, async sealed stream bridges WouldBlock via tier await)
+- [x] **RD3**: Maintain reader-side caches of residency hints to avoid redundant promotions. (completed 2025-09-26, residency hint cache integrated into Aof with unit coverage in aof2::tests::residency_hint_cache_tracks_pending_segments).
+- [x] **RD4**: Add tests covering Tier 1 miss -> hydration -> read resume, including concurrent readers. (completed 2025-09-26, async regression test aof2::tests::tier1_hydration_recovers_segment_on_read_miss exercises Tier1 miss hydration with parallel readers.)
 - [ ] **RD5**: Document reader API changes and guidance for handling `WouldBlock` in downstream services.
+    - [ ] Once the reader docs land, circulate an RC1/RC2 kickoff checklist and update dependencies here before starting implementation.
+    - [ ] Author `docs/aof2_read_path.md` with sections covering sync vs async flows, handling `BackpressureKind::Hydration`/`Rollover`, sample retry loops, and integration advice for gRPC + HTTP surfaces.
+    - [ ] Cross-link the new doc from `design_next.md` (reader flow diagrams) and `store.md` (hydration/notification details), adding "See also" callouts that explain when to delegate to async helpers.
+    - [ ] Provide a migration note in `progress.md` that links to the reader guidance, highlights behavioural differences from legacy AOF, and enumerates follow-up tasks for downstream services.
 
 ## Milestone 6 – Recovery and Operation Log
 Ensure startup replay and replicated actions respect the tiered architecture.

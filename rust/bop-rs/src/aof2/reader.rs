@@ -6,7 +6,7 @@ use tokio::{pin, select, sync::watch};
 use super::{
     Aof, ResidentSegment, SegmentStatusSnapshot, TailEvent, TailState,
     config::{RecordId, SegmentId},
-    error::{AofError, AofResult},
+    error::{AofError, AofResult, BackpressureKind},
     segment::{SEGMENT_HEADER_SIZE, Segment},
 };
 
@@ -282,7 +282,7 @@ impl<'a> SealedSegmentStream<'a> {
             match self.pop_sealed_cursor() {
                 Ok(Some(cursor)) => return Ok(Some(StreamSegment::Sealed(cursor))),
                 Ok(None) => {}
-                Err(AofError::WouldBlock) => {
+                Err(AofError::WouldBlock(BackpressureKind::Hydration)) => {
                     let segment_id = match self.sealed_queue.front().copied() {
                         Some(id) => id,
                         None => continue,
@@ -338,7 +338,9 @@ impl<'a> SealedSegmentStream<'a> {
         while let Some(&segment_id) = self.sealed_queue.front() {
             let reader = match self.aof.open_reader(segment_id) {
                 Ok(reader) => reader,
-                Err(AofError::WouldBlock) => return Err(AofError::WouldBlock),
+                Err(AofError::WouldBlock(BackpressureKind::Hydration)) => {
+                    return Err(AofError::would_block(BackpressureKind::Hydration));
+                }
                 Err(err) => return Err(err),
             };
             self.sealed_queue.pop_front();
@@ -638,6 +640,7 @@ fn fold_crc64(value: u64) -> u32 {
 mod tests {
     use super::*;
     use crate::aof2::config::{AofConfig, SegmentId};
+    use crate::aof2::error::{AofError, BackpressureKind};
     use crate::aof2::{Aof, AofManager, AofManagerConfig, AofManagerHandle, TailEvent};
     use chrono::Utc;
     use std::fs::OpenOptions;
@@ -827,6 +830,22 @@ mod tests {
         cfg
     }
 
+    async fn seal_active_with_ack(aof: &Aof, manager: &AofManager) -> AofResult<Option<SegmentId>> {
+        if !cfg!(feature = "tiered-store") {
+            return aof.seal_active();
+        }
+        loop {
+            match aof.seal_active() {
+                Ok(result @ Some(_)) => return Ok(result),
+                Ok(result @ None) => return Ok(result),
+                Err(AofError::WouldBlock(BackpressureKind::Rollover)) => {
+                    manager.tiered().poll().await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     #[test]
     fn segment_cursor_iterates_records_in_order() {
         let tmp = TempDir::new().expect("tempdir");
@@ -902,11 +921,13 @@ mod tests {
     async fn sealed_segment_stream_replays_existing_segments() {
         let tmp = TempDir::new().expect("tempdir");
         let cfg = stream_test_config(tmp.path());
-        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
 
         let record_id = aof.append_record(b"sealed-stream").expect("append");
-        aof.seal_active().expect("seal active");
+        seal_active_with_ack(&aof, &manager)
+            .await
+            .expect("seal active");
 
         let mut stream = SealedSegmentStream::new(&aof).expect("stream");
         let segment = stream
@@ -923,18 +944,22 @@ mod tests {
         assert!(cursor.next().expect("end").is_none());
 
         drop(aof);
+        drop(manager);
     }
 
+    #[tokio::test(flavor = "current_thread")]
     async fn sealed_segment_stream_receives_future_segments() {
         let tmp = TempDir::new().expect("tempdir");
         let cfg = stream_test_config(tmp.path());
-        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
 
         let mut stream = SealedSegmentStream::new(&aof).expect("stream");
 
         let record_id = aof.append_record(b"future").expect("append");
-        aof.seal_active().expect("seal active");
+        seal_active_with_ack(&aof, &manager)
+            .await
+            .expect("seal active");
 
         let segment = stream
             .next_segment()
@@ -950,18 +975,21 @@ mod tests {
         assert!(cursor.next().expect("end").is_none());
 
         drop(aof);
+        drop(manager);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn sealed_segment_stream_resumes_after_record() {
         let tmp = TempDir::new().expect("tempdir");
         let cfg = stream_test_config(tmp.path());
-        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
 
         let first = aof.append_record(b"first").expect("append first");
         let second = aof.append_record(b"second").expect("append second");
-        aof.seal_active().expect("seal active");
+        seal_active_with_ack(&aof, &manager)
+            .await
+            .expect("seal active");
 
         let mut stream = SealedSegmentStream::with_start_from(&aof, Some(first)).expect("stream");
         let segment = stream
@@ -979,6 +1007,7 @@ mod tests {
         assert!(cursor.next().expect("end").is_none());
 
         drop(aof);
+        drop(manager);
     }
     #[tokio::test(flavor = "current_thread")]
     async fn sealed_segment_stream_replays_multiple_sealed_segments() {
@@ -987,15 +1016,19 @@ mod tests {
         cfg.segment_min_bytes = 512;
         cfg.segment_max_bytes = 512;
         cfg.segment_target_bytes = 512;
-        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         let aof = Aof::new(handle, cfg).expect("aof");
 
         let first = aof.append_record(b"sealed-0").expect("append first");
-        aof.seal_active().expect("seal first");
+        seal_active_with_ack(&aof, &manager)
+            .await
+            .expect("seal first");
 
         let second = aof.append_record(b"sealed-1").expect("append second");
-        aof.seal_active().expect("seal second");
+        seal_active_with_ack(&aof, &manager)
+            .await
+            .expect("seal second");
 
         let mut stream = SealedSegmentStream::new(&aof).expect("stream");
 
@@ -1028,23 +1061,28 @@ mod tests {
         assert!(second_cursor.next().expect("end").is_none());
 
         drop(aof);
+        drop(manager);
     }
-    #[test]
-    fn open_reader_discovers_sealed_segments_across_rollover() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn open_reader_discovers_sealed_segments_across_rollover() {
         let tmp = TempDir::new().expect("tempdir");
         let mut cfg = stream_test_config(tmp.path());
         cfg.segment_min_bytes = 512;
         cfg.segment_max_bytes = 512;
         cfg.segment_target_bytes = 512;
-        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         let aof = Aof::new(handle, cfg).expect("aof");
 
         let first = aof.append_record(b"sealed-0").expect("append first");
-        aof.seal_active().expect("seal first");
+        seal_active_with_ack(&aof, &manager)
+            .await
+            .expect("seal first");
 
         let second = aof.append_record(b"sealed-1").expect("append second");
-        aof.seal_active().expect("seal second");
+        seal_active_with_ack(&aof, &manager)
+            .await
+            .expect("seal second");
 
         let first_reader = aof
             .open_reader(SegmentId::new(first.segment_index() as u64))
@@ -1057,6 +1095,9 @@ mod tests {
             .expect("second reader");
         let second_record = second_reader.read_record(second).expect("second record");
         assert_eq!(second_record.payload(), b"sealed-1");
+
+        drop(aof);
+        drop(manager);
     }
 
     #[tokio::test(flavor = "current_thread")]

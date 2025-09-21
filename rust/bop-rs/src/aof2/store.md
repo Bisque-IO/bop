@@ -37,6 +37,32 @@ Concurrency
 - Appends and reads operate only on Tier 0 objects.
 - Background workers consult Tier 0 metadata for eviction candidates and to honour admission priorities.
 
+- Writers obtain an `AdmissionGuard` before mutating a segment. The guard records appended bytes, transitions segments to `Sealed` when they roll over, and dropping it releases Tier 0 residency so blocked admissions can proceed.
+
+```rust
+loop {
+    match aof.append_record(payload) {
+        Ok(record_id) => break record_id,
+        Err(AofError::WouldBlock(BackpressureKind::Admission)) => {
+            // Defer to the async helper so the coordinator can wake us.
+            append_record_async(payload).await?;
+        }
+        Err(err) => return Err(err),
+    }
+}
+```
+
+### Append Path and Handshake
+1. The writer acquires an `AdmissionGuard` and appends until a rollover rule triggers (`segment_target_bytes`, flush pressure, or coordinator directive).
+2. `Aof::seal_current_segment` calls `TieredInstance::request_rollover`, enqueueing a `CoordinatorCommand::Rollover { stream_id, resident, ack }`. The command captures a oneshot used by both sync and async paths.
+3. While the command is in flight, `append_record` and `seal_current_segment` surface `AofError::WouldBlock(BackpressureKind::Rollover)`. The async helper awaits the shared rollover notifier before retrying.
+4. The coordinator reserves Tier 1 space, stages compression/upload jobs, and fulfils the ack when metadata is durable. Errors complete the ack with `AofError::RolloverFailed`.
+5. On ack success the next segment activates, admission waiters are woken, and Tier 1/Tier 2 jobs proceed in the background.
+
+`TieredCoordinatorNotifiers` exposes admission and rollover `Notify` handles. `append_record_async` (tracked under [AP3](implementation_plan.md#milestone-4--append-path-integration)) loops on the sync API, awaiting these notifiers between attempts so the retry path stays cancel-safe.
+
+See [`design_next.md`](design_next.md#111-rollover-handshake-ap2) for the higher-level state machine and how downstream services should handle the `WouldBlock` contract.
+
 ---
 
 ## Tier 1 - Warm Cache and Compression Layer

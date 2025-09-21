@@ -1,4 +1,4 @@
-﻿# Asynchronous Segmented AOF (AOF2) Design
+# Asynchronous Segmented AOF (AOF2) Design
 
 ## 1. Goals and Non-Goals
 - Deliver a high-throughput append-only log with predictable latency under heavy write pressure.
@@ -113,14 +113,14 @@
 ## 5. Concurrency and Synchronization
 - Append threads interact solely with lock-free hot-path state: atomics hold the active tail pointer, `next_offset`, logical record count, and backpressure gauges. `Segment::append_record` never touches the management mutex.
 - Management tasks (pending finalisations, preallocated segments, recovery metadata) live behind a separate async-aware mutex. Background workers operate on this lock without affecting append throughput.
-- `wait_for_writable_segment(timeout)` bridges the two domains. It first checks the atomic tail; only if no writable handle exists does it briefly acquire the management lock to trigger allocation or wait for a flush. When the timeout expires it returns `AofError::WouldBlock` instead of blocking the caller.
+- `wait_for_writable_segment(timeout)` bridges the two domains. It first checks the atomic tail; only if no writable handle exists does it briefly acquire the management lock to trigger allocation or wait for a flush. When the timeout expires it returns `AofError::WouldBlock(BackpressureKind::Admission)` instead of blocking the caller.
 - Backpressure bookkeeping is entirely atomic. Exceeding thresholds flips a flag that causes `append_record` to fail fast with `WouldBlock`, leaving higher layers to decide when to retry or wait.
 - Manager commands run on dedicated threads, working directly with `SegmentFlushState` handles so fsync and allocation latency never block appenders.
 - Readers continue to share `Arc<Segment>` handles; finalized segments are mapped read-only so random access requires no coordination with the writer.
 
 ## 6. Append Pipeline
 1. `Aof::append_record(payload)` validates the payload and reads the current tail atomically.
-2. If no writable tail exists, it returns `AofError::WouldBlock`; callers that need blocking semantics invoke `wait_for_writable_segment(timeout)` to drive allocation or wait within the provided deadline.
+2. If no writable tail exists, it returns `AofError::WouldBlock(BackpressureKind::Admission)`; callers that need blocking semantics invoke `wait_for_writable_segment(timeout)` to drive allocation or wait within the provided deadline.
 3. Once a writable segment handle is available, the append loop writes through `Segment::append_record`, which updates atomics but never touches the management mutex.
 4. `RecordId` values are synthesised from the segment index and returned offset and handed back immediately.
 5. When a segment reports `is_full`, the handle enqueues its `SegmentFlushState` for the manager and clears the hot tail pointer; the management lock is touched only during this enqueue.
@@ -156,6 +156,24 @@
 5. Recreate the active segment map/set entirely from these headers. No manifest replay or auxiliary metadata files are necessary.
 
 ## 11. Flow Control and Backpressure
+### 11.1 Rollover Handshake (AP2)
+- **Active**: the writer holds an `AdmissionGuard` and appends freely. When the flush path decides to seal (size, time, or durability budget), it transitions to `RolloverRequested`.
+- **RolloverRequested**: `TieredInstance::request_rollover` enqueues a `CoordinatorCommand::Rollover` carrying a oneshot ack. The sync API immediately returns `WouldBlock(BackpressureKind::Rollover)` until the ack fires.
+- **CoordinatorProcessing**: the coordinator drains the command, reserves Tier 1 capacity, schedules compression, and stages Tier 2 upload intents. Failures map to `AofError::RolloverFailed` and complete the ack with an error.
+- **AckReady**: once Tier 1 metadata is durable and upload work accepted, the coordinator fulfils the ack. `Aof::seal_current_segment` observes the ready signal, promotes the next segment, and wakes admission waiters.
+- **PostAckCleanup**: dropping the final `AdmissionGuard` releases Tier 0 residency, allowing queued writers to proceed. Tier 1/Tier 2 workers execute the staged jobs asynchronously.
+
+`Aof::seal_current_segment` polls the ack without blocking the executor. The synchronous path surfaces `WouldBlock` until the ack is resolved, while `append_record_async` awaits the shared notifier before retrying. See [`store.md`](store.md#append-path-and-handshake) for event sequencing and [`implementation_plan.md`](implementation_plan.md#milestone-4--append-path-integration) for outstanding tasks.
+
+### 11.2 Async Append Retry Loop (AP3)
+The async helper is defined in `Aof::append_record_async` (planned under AP3):
+- Attempt `append_record` in a loop.
+- On `WouldBlock(Admission)`, await the Tier 0 admission notifier published by the coordinator.
+- On `WouldBlock(Rollover)`, await the rollover notifier tied to the in-flight ack.
+- Propagate other errors immediately.
+
+This retry state machine stays cancel-safe by checking the manager cancellation token between awaits. Writers that do not want to block synchronously should call the async helper directly.
+
 - `FlushConfig::max_unflushed_bytes` limits acknowledged-but-not-durable data; exceeding it blocks new appends until a flush completes.
 - The manager monitors outstanding flush jobs and can throttle or seal the tail early if the writer outruns I/O.
 - The two-unfinalized rule provides natural pressure when the filesystem is slow: new segments will not activate until the oldest pending footer is durable.

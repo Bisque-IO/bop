@@ -1,6 +1,29 @@
-use std::fmt::Display;
+use std::fmt::{Display, Formatter};
 
 use super::config::{RecordId, SegmentId};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackpressureKind {
+    Admission,
+    Rollover,
+    Hydration,
+    Flush,
+    Tail,
+    Unknown,
+}
+
+impl Display for BackpressureKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackpressureKind::Admission => write!(f, "admission"),
+            BackpressureKind::Rollover => write!(f, "rollover"),
+            BackpressureKind::Hydration => write!(f, "hydration"),
+            BackpressureKind::Flush => write!(f, "flush"),
+            BackpressureKind::Tail => write!(f, "tail"),
+            BackpressureKind::Unknown => write!(f, "unknown"),
+        }
+    }
+}
 
 /// A specialized error type for AOF operations.
 #[non_exhaustive]
@@ -51,6 +74,9 @@ pub enum AofError {
     /// Segment is full and cannot accept more data.
     #[error("segment full: {0}")]
     SegmentFull(u64),
+    /// Rollover coordination failed.
+    #[error("rollover failed: {0}")]
+    RolloverFailed(String),
     /// Segment not loaded.
     #[error("segment not loaded: {0}")]
     SegmentNotLoaded(SegmentId),
@@ -61,8 +87,8 @@ pub enum AofError {
     #[error("instance not found: {0}")]
     InstanceNotFound(u64),
     /// Operation would block (e.g., append when no active segment ready).
-    #[error("would block")]
-    WouldBlock,
+    #[error("would block: {0}")]
+    WouldBlock(BackpressureKind),
     /// Backpressure - system overloaded.
     #[error("backpressure")]
     Backpressure,
@@ -78,6 +104,11 @@ pub enum AofError {
 }
 
 impl AofError {
+    /// Create a would-block error annotated with the given backpressure kind.
+    pub fn would_block(kind: BackpressureKind) -> Self {
+        Self::WouldBlock(kind)
+    }
+
     /// Create an invalid configuration error from a displayable value.
     pub fn invalid_config<T>(msg: T) -> Self
     where
@@ -92,6 +123,14 @@ impl AofError {
         T: Display,
     {
         Self::InternalError(msg.to_string())
+    }
+
+    /// Create a rollover failure error from a displayable value.
+    pub fn rollover_failed<T>(msg: T) -> Self
+    where
+        T: Display,
+    {
+        Self::RolloverFailed(msg.to_string())
     }
 
     /// Create an opaque error from a displayable value.

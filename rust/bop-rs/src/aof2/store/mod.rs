@@ -3,11 +3,12 @@
 pub mod tier0;
 pub mod tier1;
 pub mod tier2;
+pub mod notifiers;
 
 pub use tier0::{
-    ActivationGrant, ActivationOutcome, ActivationReason, ActivationRequest, InstanceId,
-    PendingActivationSnapshot, ResidencyKind, ResidentSegment, SegmentResidency, Tier0Cache,
-    Tier0CacheConfig, Tier0DropEvent, Tier0Eviction, Tier0Instance, Tier0Metrics,
+    ActivationGrant, ActivationOutcome, ActivationReason, ActivationRequest, AdmissionGuard,
+    InstanceId, PendingActivationSnapshot, ResidencyKind, ResidentSegment, SegmentResidency,
+    Tier0Cache, Tier0CacheConfig, Tier0DropEvent, Tier0Eviction, Tier0Instance, Tier0Metrics,
     Tier0MetricsSnapshot,
 };
 pub use tier1::{
@@ -19,19 +20,20 @@ pub use tier2::{
     Tier2Config, Tier2DeleteRequest, Tier2Event, Tier2FetchRequest, Tier2Handle, Tier2Manager,
     Tier2Metadata, Tier2Metrics, Tier2MetricsSnapshot, Tier2UploadDescriptor,
 };
+pub use notifiers::{RolloverSignal, TieredCoordinatorNotifiers};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::fs::read_dir;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 use tracing::{trace, warn};
 
 use crate::aof2::config::SegmentId;
-use crate::aof2::error::{AofError, AofResult};
+use crate::aof2::error::{AofError, AofResult, BackpressureKind};
 use crate::aof2::fs::{Layout, SEGMENT_FILE_EXTENSION, SegmentFileName};
 use crate::aof2::segment::Segment;
 
@@ -359,6 +361,10 @@ impl TieredInstance {
         self.inner.admit_segment(segment, residency)
     }
 
+    pub fn admission_guard(&self, resident: &ResidentSegment) -> AdmissionGuard {
+        self.inner.tier0.admission_guard(resident.clone())
+    }
+
     pub fn recover_segments(&self) -> AofResult<Vec<RecoveredSegment>> {
         self.inner.recover_segments()
     }
@@ -374,9 +380,23 @@ impl TieredInstance {
         }
     }
 
+    pub fn request_rollover(
+        &self,
+        resident: ResidentSegment,
+    ) -> AofResult<oneshot::Receiver<AofResult<()>>> {
+        self.inner
+            .coordinator
+            .enqueue_rollover(self.instance_id(), resident)
+    }
+
     pub fn hydration_signal(&self) -> Arc<Notify> {
         self.inner.coordinator.hydration_signal()
     }
+
+    pub fn notifiers(&self) -> Arc<TieredCoordinatorNotifiers> {
+        self.inner.coordinator.notifiers()
+    }
+
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -386,6 +406,7 @@ pub struct TieredPollStats {
     pub activation_grants: usize,
     pub tier2_events: usize,
     pub hydrations: usize,
+    pub rollovers: usize,
 }
 
 impl TieredPollStats {
@@ -395,6 +416,7 @@ impl TieredPollStats {
             + self.activation_grants
             + self.tier2_events
             + self.hydrations
+            + self.rollovers
     }
 
     pub fn is_idle(&self) -> bool {
@@ -412,6 +434,16 @@ pub struct TieredPollOutcome {
     pub hydrations: Vec<HydrationOutcome>,
 }
 
+const COORDINATOR_COMMAND_CAPACITY: usize = 1024;
+
+enum CoordinatorCommand {
+    Rollover {
+        instance_id: InstanceId,
+        resident: ResidentSegment,
+        ack: oneshot::Sender<AofResult<()>>,
+    },
+}
+
 pub struct TieredCoordinator {
     tier0: Tier0Cache,
     tier1: Tier1Cache,
@@ -419,6 +451,8 @@ pub struct TieredCoordinator {
     activity: Arc<Notify>,
     hydration: Arc<Notify>,
     instances: Mutex<HashMap<InstanceId, Weak<TieredInstanceInner>>>,
+    commands: Mutex<VecDeque<CoordinatorCommand>>,
+    notifiers: Arc<TieredCoordinatorNotifiers>,
 }
 
 impl TieredCoordinator {
@@ -426,6 +460,7 @@ impl TieredCoordinator {
         if let Some(manager) = &tier2 {
             tier1.attach_tier2(manager.handle());
         }
+        let notifiers = Arc::new(TieredCoordinatorNotifiers::new());
         Self {
             tier0,
             tier1,
@@ -433,6 +468,8 @@ impl TieredCoordinator {
             activity: Arc::new(Notify::new()),
             hydration: Arc::new(Notify::new()),
             instances: Mutex::new(HashMap::new()),
+            commands: Mutex::new(VecDeque::new()),
+            notifiers,
         }
     }
 
@@ -448,6 +485,10 @@ impl TieredCoordinator {
         self.tier2.as_ref()
     }
 
+    pub fn notifiers(&self) -> Arc<TieredCoordinatorNotifiers> {
+        self.notifiers.clone()
+    }
+
     pub fn activity_signal(&self) -> Arc<Notify> {
         self.activity.clone()
     }
@@ -458,6 +499,26 @@ impl TieredCoordinator {
 
     pub fn signal_activity(&self) {
         self.activity.notify_one();
+    }
+
+    pub fn enqueue_rollover(
+        &self,
+        instance_id: InstanceId,
+        resident: ResidentSegment,
+    ) -> AofResult<oneshot::Receiver<AofResult<()>>> {
+        let (ack, rx) = oneshot::channel();
+        let mut commands = self.commands.lock();
+        if commands.len() >= COORDINATOR_COMMAND_CAPACITY {
+            return Err(AofError::would_block(BackpressureKind::Rollover));
+        }
+        commands.push_back(CoordinatorCommand::Rollover {
+            instance_id,
+            resident,
+            ack,
+        });
+        drop(commands);
+        self.activity.notify_one();
+        Ok(rx)
     }
 
     pub fn register_instance(
@@ -478,6 +539,7 @@ impl TieredCoordinator {
             tier1_instance,
             tier2_handle,
         );
+        self.notifiers.register_instance(inner.instance_id());
         self.instances
             .lock()
             .insert(inner.instance_id(), Arc::downgrade(&inner));
@@ -486,6 +548,7 @@ impl TieredCoordinator {
 
     fn unregister_instance(&self, instance_id: InstanceId) {
         self.instances.lock().remove(&instance_id);
+        self.notifiers.unregister_instance(instance_id);
     }
 
     fn dispatch_hydrations(&self, outcomes: &[HydrationOutcome]) {
@@ -509,10 +572,79 @@ impl TieredCoordinator {
         }
     }
 
+    fn drain_commands(&self) -> Vec<CoordinatorCommand> {
+        let mut commands = self.commands.lock();
+        commands.drain(..).collect()
+    }
+
+    fn process_rollover(
+        &self,
+        instance_id: InstanceId,
+        resident: ResidentSegment,
+        ack: oneshot::Sender<AofResult<()>>,
+    ) -> AofResult<()> {
+        let inner = {
+            let mut instances = self.instances.lock();
+            match instances.get(&instance_id).and_then(Weak::upgrade) {
+                Some(inner) => inner,
+                None => {
+                    instances.remove(&instance_id);
+                    let err = AofError::InstanceNotFound(instance_id.get());
+                    let _ = ack.send(Err(err));
+                    return Ok(());
+                }
+            }
+        };
+
+        let segment = resident.segment().clone();
+        if !segment.is_sealed() {
+            let message = format!(
+                "rollover requested for unsealed segment {}",
+                segment.id().as_u64()
+            );
+            let err = AofError::InvalidState(message);
+            let _ = ack.send(Err(err));
+            return Ok(());
+        }
+
+        if let Err(err) = inner
+            .tier1
+            .schedule_compression_with_ack(segment, Some(ack))
+        {
+            warn!(
+                instance = instance_id.get(),
+                "failed to enqueue compression for rollover: {err}"
+            );
+        }
+        Ok(())
+    }
+
     pub async fn poll(&self) -> TieredPollOutcome {
         let mut stats = TieredPollStats::default();
         let mut hydrations = Vec::new();
         let mut signaled_activity = false;
+
+        let commands = self.drain_commands();
+        if !commands.is_empty() {
+            stats.rollovers = commands.len();
+            signaled_activity = true;
+        }
+        for command in commands {
+            match command {
+                CoordinatorCommand::Rollover {
+                    instance_id,
+                    resident,
+                    ack,
+                } => {
+                    if let Err(err) = self.process_rollover(instance_id, resident, ack) {
+                        warn!(
+                            instance = instance_id.get(),
+                            "rollover processing error: {err}"
+                        );
+                    }
+                }
+            }
+        }
 
         let evictions = self.tier0.drain_scheduled_evictions_async().await;
         if !evictions.is_empty() {
@@ -606,7 +738,9 @@ mod tests {
         let instance_id = tiered_instance.instance_id();
 
         let segment_id = SegmentId::new(1);
-        let created_at = Utc::now().timestamp_nanos();
+        let created_at = Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
         let segment_path = layout.segment_file_path(segment_id, 0, created_at);
         let segment =
             Segment::create_active(segment_id, 0, 0, created_at, 1024 * 1024, &segment_path)
@@ -654,3 +788,6 @@ mod tests {
         drop(segment);
     }
 }
+
+
+

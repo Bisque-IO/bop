@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use tokio::runtime::Handle;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::{JoinHandle, spawn_blocking};
 use tokio::time::sleep as tokio_sleep;
 use tracing::{debug, trace, warn};
@@ -29,7 +29,7 @@ use crate::aof2::segment::{
 use super::tier0::{ActivationGrant, InstanceId, Tier0DropEvent};
 use super::tier2::{
     Tier2DeleteComplete, Tier2DeleteRequest, Tier2Event, Tier2FetchRequest, Tier2Handle,
-    Tier2Metadata, Tier2UploadComplete,
+    Tier2Metadata, Tier2UploadComplete, Tier2UploadDescriptor,
 };
 
 fn current_epoch_ms() -> u64 {
@@ -399,7 +399,10 @@ impl Tier1Cache {
                     );
                     continue;
                 }
-                if let Err(err) = self.inner.enqueue_compression(event.instance_id, segment) {
+                if let Err(err) = self
+                    .inner
+                    .enqueue_compression(event.instance_id, segment, None)
+                {
                     warn!(
                         instance = event.instance_id.get(),
                         segment = event.segment_id.as_u64(),
@@ -458,7 +461,16 @@ impl Tier1Instance {
     }
 
     pub fn schedule_compression(&self, segment: Arc<Segment>) -> AofResult<()> {
-        self.inner.enqueue_compression(self.instance_id, segment)
+        self.schedule_compression_with_ack(segment, None)
+    }
+
+    pub fn schedule_compression_with_ack(
+        &self,
+        segment: Arc<Segment>,
+        ack: Option<oneshot::Sender<AofResult<()>>>,
+    ) -> AofResult<()> {
+        self.inner
+            .enqueue_compression(self.instance_id, segment, ack)
     }
 
     pub fn update_residency(
@@ -483,10 +495,10 @@ impl Tier1Instance {
     }
 }
 
-#[derive(Clone)]
 struct CompressionJob {
     instance_id: InstanceId,
     segment: Arc<Segment>,
+    ack: Option<oneshot::Sender<AofResult<()>>>,
 }
 
 #[derive(Debug)]
@@ -551,25 +563,38 @@ impl Tier1Inner {
         self: &Arc<Self>,
         instance_id: InstanceId,
         segment: Arc<Segment>,
+        ack: Option<oneshot::Sender<AofResult<()>>>,
     ) -> AofResult<()> {
         if !segment.is_sealed() {
-            return Err(AofError::InvalidState(
-                "cannot compress unsealed segment".to_string(),
-            ));
+            let message = "cannot compress unsealed segment".to_string();
+            if let Some(tx) = ack {
+                let _ = tx.send(Err(AofError::InvalidState(message.clone())));
+            }
+            return Err(AofError::InvalidState(message));
         }
         if !self.instances.lock().contains_key(&instance_id) {
-            return Err(AofError::InvalidState(format!(
-                "Tier1 instance {:?} not registered",
-                instance_id.get()
-            )));
+            let message = format!("Tier1 instance {:?} not registered", instance_id.get());
+            if let Some(tx) = ack {
+                let _ = tx.send(Err(AofError::InvalidState(message.clone())));
+            }
+            return Err(AofError::InvalidState(message));
         }
         let job = CompressionJob {
             instance_id,
             segment,
+            ack,
         };
-        self.compression_tx
-            .send(CompressionCommand::Compress(job))
-            .map_err(|err| AofError::Other(err.to_string()))
+        match self.compression_tx.send(CompressionCommand::Compress(job)) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if let CompressionCommand::Compress(job) = err.0 {
+                    if let Some(tx) = job.ack {
+                        let _ = tx.send(Err(AofError::other("compression queue closed")));
+                    }
+                }
+                Err(AofError::other("failed to enqueue compression job"))
+            }
+        }
     }
 
     fn attach_tier2(&self, handle: Tier2Handle) {
@@ -647,50 +672,67 @@ impl Tier1Inner {
         Ok(())
     }
 
-    async fn process_compression_job(self: Arc<Self>, job: CompressionJob) {
+    async fn process_compression_job(self: Arc<Self>, mut job: CompressionJob) {
         let max_attempts = self.config.max_retries.max(1);
         let mut attempt = 0;
-        loop {
+        let instance_id = job.instance_id;
+        let segment = job.segment.clone();
+
+        let final_result = loop {
             let inner = Arc::clone(&self);
-            let job_clone = job.clone();
-            let result =
-                spawn_blocking(move || inner.run_compression_job_blocking(job_clone)).await;
+            let segment_clone = segment.clone();
+            let result = spawn_blocking(move || {
+                inner.run_compression_job_blocking(instance_id, &segment_clone)
+            })
+            .await;
+
             match result {
-                Ok(Ok(())) => break,
+                Ok(Ok(())) => break Ok(()),
                 Ok(Err(err)) => {
                     attempt += 1;
                     if attempt >= max_attempts {
                         self.metrics.incr_compression_failures();
                         warn!(
-                            instance = job.instance_id.get(),
-                            segment = job.segment.id().as_u64(),
+                            instance = instance_id.get(),
+                            segment = segment.id().as_u64(),
                             "compression job failed: {err}"
                         );
-                        break;
+                        break Err(err);
                     }
                     tokio_sleep(self.config.retry_backoff * attempt as u32).await;
                 }
                 Err(join_err) => {
                     self.metrics.incr_compression_failures();
                     warn!(
-                        instance = job.instance_id.get(),
-                        segment = job.segment.id().as_u64(),
+                        instance = instance_id.get(),
+                        segment = segment.id().as_u64(),
                         "compression job panicked: {join_err}"
                     );
-                    break;
+                    break Err(AofError::other(format!(
+                        "compression task panicked: {join_err}"
+                    )));
                 }
             }
+        };
+
+        if let Some(ack) = job.ack.take() {
+            let _ = ack.send(final_result);
         }
     }
 
-    fn run_compression_job_blocking(&self, job: CompressionJob) -> AofResult<()> {
-        let entry = self.compress_segment_blocking(&job)?;
-        self.finish_compression(job.instance_id, entry)?;
+    fn run_compression_job_blocking(
+        &self,
+        instance_id: InstanceId,
+        segment: &Arc<Segment>,
+    ) -> AofResult<()> {
+        let entry = self.compress_segment_blocking(instance_id, segment)?;
+        self.finish_compression(instance_id, entry)?;
         Ok(())
     }
 
     fn finish_compression(&self, instance_id: InstanceId, entry: ManifestEntry) -> AofResult<()> {
-        let (evicted, stored_bytes) = {
+        let tier2_handle = self.tier2();
+        let (evicted, stored_bytes, upload_descriptor) = {
             let mut instances = self.instances.lock();
             let state = instances.get_mut(&instance_id).ok_or_else(|| {
                 AofError::InvalidState(format!(
@@ -698,13 +740,30 @@ impl Tier1Inner {
                     instance_id.get()
                 ))
             })?;
+            let warm_path = state.layout.warm_dir().join(&entry.compressed_path);
+            let descriptor = tier2_handle.as_ref().map(|_| Tier2UploadDescriptor {
+                instance_id,
+                segment_id: entry.segment_id,
+                warm_path,
+                sealed_at: entry.sealed_at,
+                base_offset: entry.base_offset,
+                base_record_count: entry.base_record_count,
+                checksum: entry.checksum,
+                compressed_bytes: entry.compressed_bytes,
+                original_bytes: entry.original_bytes,
+            });
             let evicted = state.insert_entry(entry, self.config.max_bytes)?;
             let stored_bytes = state.used_bytes();
-            (evicted, stored_bytes)
+            (evicted, stored_bytes, descriptor)
         };
         self.metrics.set_stored_bytes(stored_bytes);
 
-        if let Some(tier2) = self.tier2() {
+        if let Some(tier2) = tier2_handle {
+            if let Some(descriptor) = upload_descriptor {
+                tier2
+                    .schedule_upload(descriptor)
+                    .map_err(AofError::rollover_failed)?;
+            }
             for evicted_entry in evicted {
                 if let Some(metadata) = evicted_entry.tier2 {
                     let request = Tier2DeleteRequest {
@@ -726,22 +785,25 @@ impl Tier1Inner {
         Ok(())
     }
 
-    fn compress_segment_blocking(&self, job: &CompressionJob) -> AofResult<ManifestEntry> {
-        let footer = read_segment_footer(&job.segment)?;
+    fn compress_segment_blocking(
+        &self,
+        instance_id: InstanceId,
+        segment: &Arc<Segment>,
+    ) -> AofResult<ManifestEntry> {
+        let footer = read_segment_footer(segment)?;
         let layout = {
             let instances = self.instances.lock();
-            let state = instances.get(&job.instance_id).ok_or_else(|| {
+            let state = instances.get(&instance_id).ok_or_else(|| {
                 AofError::InvalidState(format!(
                     "Tier1 instance {:?} not registered",
-                    job.instance_id.get()
+                    instance_id.get()
                 ))
             })?;
             state.layout.clone()
         };
 
         let sealed_at = footer.sealed_at;
-        let warm_path =
-            layout.warm_file_path(job.segment.id(), job.segment.base_offset(), sealed_at);
+        let warm_path = layout.warm_file_path(segment.id(), segment.base_offset(), sealed_at);
         if warm_path.exists() {
             fs::remove_file(&warm_path).map_err(AofError::from)?;
         }
@@ -754,7 +816,7 @@ impl Tier1Inner {
             .to_string();
         let temp = NamedTempFile::new_in(layout.warm_dir()).map_err(AofError::from)?;
         {
-            let mut source = File::open(job.segment.path()).map_err(AofError::from)?;
+            let mut source = File::open(segment.path()).map_err(AofError::from)?;
             let mut encoder = ZstdEncoder::new(temp.as_file(), self.config.compression_level)
                 .map_err(|err| AofError::CompressionError(err.to_string()))?;
             encoder
@@ -770,16 +832,16 @@ impl Tier1Inner {
         temp.persist(&warm_path)
             .map_err(|err| AofError::from(err.error))?;
 
-        let offset_index = build_offset_index(&job.segment)?;
+        let offset_index = build_offset_index(segment)?;
 
         Ok(ManifestEntry {
-            segment_id: job.segment.id(),
-            base_offset: job.segment.base_offset(),
-            base_record_count: job.segment.base_record_count(),
-            created_at: job.segment.created_at(),
+            segment_id: segment.id(),
+            base_offset: segment.base_offset(),
+            base_record_count: segment.base_record_count(),
+            created_at: segment.created_at(),
             sealed_at,
             checksum: footer.checksum,
-            original_bytes: job.segment.current_size() as u64,
+            original_bytes: segment.current_size() as u64,
             compressed_bytes: metadata.len(),
             compressed_path: warm_file_name,
             dictionary: None,
@@ -1100,6 +1162,12 @@ mod tests {
     use crate::aof2::config::{AofConfig, FlushConfig};
     use crate::aof2::store::tier0::ActivationReason;
     use crate::aof2::store::tier0::{Tier0Cache, Tier0CacheConfig};
+    use crate::aof2::store::tier2::{
+        GetObjectRequest, GetObjectResult, HeadObjectResult, PutObjectRequest, PutObjectResult,
+        Tier2Client, Tier2Config, Tier2Manager,
+    };
+    use async_trait::async_trait;
+    use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
 
     fn build_layout(dir: &TempDir) -> Layout {
@@ -1129,6 +1197,50 @@ mod tests {
         assert_eq!(segment.durable_size(), append.logical_size);
         segment.seal(now as i64).expect("seal segment");
         Arc::new(segment)
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingTier2Client {
+        uploads: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl RecordingTier2Client {
+        fn upload_count(&self) -> usize {
+            self.uploads.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl Tier2Client for RecordingTier2Client {
+        async fn put_object(&self, request: PutObjectRequest) -> AofResult<PutObjectResult> {
+            let size = tokio::fs::metadata(&request.source)
+                .await
+                .map_err(AofError::from)?
+                .len();
+            self.uploads.lock().unwrap().push(request.key.clone());
+            Ok(PutObjectResult {
+                etag: Some("mock-etag".to_string()),
+                size,
+            })
+        }
+
+        async fn get_object(&self, _request: GetObjectRequest) -> AofResult<GetObjectResult> {
+            Err(AofError::InvalidState(
+                "recording tier2 client does not support get_object".to_string(),
+            ))
+        }
+
+        async fn delete_object(&self, _bucket: &str, _key: &str) -> AofResult<()> {
+            Ok(())
+        }
+
+        async fn head_object(
+            &self,
+            _bucket: &str,
+            _key: &str,
+        ) -> AofResult<Option<HeadObjectResult>> {
+            Ok(None)
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1234,6 +1346,40 @@ mod tests {
             entry.residency,
             Tier1ResidencyState::ResidentInTier0 | Tier1ResidencyState::StagedForTier0
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compression_schedules_tier2_upload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = build_layout(&dir);
+        let tier0 = Tier0Cache::new(Tier0CacheConfig::new(1024 * 1024, 1024 * 1024));
+        let tier0_instance = tier0.register_instance("tier2", None);
+        let config = Tier1Config::new(10 * 1024 * 1024).with_worker_threads(1);
+        let tier1 =
+            Tier1Cache::new(tokio::runtime::Handle::current(), config).expect("tier1 cache");
+
+        let client = RecordingTier2Client::default();
+        let tier2_manager = Tier2Manager::with_client(
+            tokio::runtime::Handle::current(),
+            Tier2Config::default(),
+            Arc::new(client.clone()),
+        )
+        .expect("tier2 manager");
+        tier1.attach_tier2(tier2_manager.handle());
+
+        let tier1_instance = tier1
+            .register_instance(tier0_instance.instance_id(), layout.clone())
+            .expect("register tier1 instance");
+
+        let segment = create_sealed_segment(&layout, 7, b"tier2 upload");
+        tier1_instance
+            .schedule_compression(segment.clone())
+            .expect("schedule compression");
+
+        wait_for(|| client.upload_count() >= 1).await;
+
+        drop(segment);
+        drop(tier2_manager);
     }
 
     async fn wait_for(mut predicate: impl FnMut() -> bool) {

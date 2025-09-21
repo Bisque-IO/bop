@@ -1,13 +1,18 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
+use tokio_util::sync::CancellationToken;
+
+use parking_lot::Mutex;
 
 use crate::aof2::config::SegmentId;
-use crate::aof2::error::{AofError, AofResult};
+use crate::aof2::error::{AofError, AofResult, BackpressureKind};
 use crate::aof2::fs::{Layout, SEGMENT_FILE_EXTENSION, SegmentFileName};
 use crate::aof2::segment::Segment;
 
@@ -145,6 +150,38 @@ impl ResidentSegment {
     }
 }
 
+#[cfg(test)]
+impl ResidentSegment {
+    pub(crate) fn new_for_tests(segment: Arc<Segment>) -> Self {
+        Self { segment }
+    }
+}
+
+#[derive(Clone)]
+pub struct AdmissionGuard {
+    resident: ResidentSegment,
+}
+
+impl AdmissionGuard {
+    pub(crate) fn new(resident: ResidentSegment) -> Self {
+        Self { resident }
+    }
+
+    pub fn segment(&self) -> &Arc<Segment> {
+        self.resident.segment()
+    }
+
+    pub fn resident(&self) -> ResidentSegment {
+        self.resident.clone()
+    }
+
+    pub fn record_append(&self, _logical_size: u32) {}
+
+    pub fn mark_sealed(&self) {}
+
+    pub fn update_residency(&self, _residency: SegmentResidency) {}
+}
+
 impl std::ops::Deref for ResidentSegment {
     type Target = Segment;
 
@@ -233,6 +270,10 @@ impl Tier0Instance {
 
     pub fn checkout_segment(&self, _segment_id: SegmentId) -> Option<ResidentSegment> {
         None
+    }
+
+    pub fn admission_guard(&self, resident: ResidentSegment) -> AdmissionGuard {
+        AdmissionGuard::new(resident)
     }
 }
 
@@ -385,7 +426,18 @@ impl Tier1Instance {
         self.instance_id
     }
 
-    pub fn schedule_compression(&self, _segment: Arc<Segment>) -> AofResult<()> {
+    pub fn schedule_compression(&self, segment: Arc<Segment>) -> AofResult<()> {
+        self.schedule_compression_with_ack(segment, None)
+    }
+
+    pub fn schedule_compression_with_ack(
+        &self,
+        _segment: Arc<Segment>,
+        ack: Option<oneshot::Sender<AofResult<()>>>,
+    ) -> AofResult<()> {
+        if let Some(tx) = ack {
+            let _ = tx.send(Ok(()));
+        }
         Ok(())
     }
 
@@ -535,19 +587,201 @@ pub struct TieredPollStats {
     pub activation_grants: usize,
     pub tier2_events: usize,
     pub hydrations: usize,
+    pub rollovers: usize,
+}
+
+const ROLLOVER_PENDING: u8 = 0;
+const ROLLOVER_SUCCESS: u8 = 1;
+const ROLLOVER_FAILED: u8 = 2;
+
+#[derive(Debug)]
+pub struct RolloverSignal {
+    state: AtomicU8,
+    result: Mutex<Option<Result<(), String>>>,
+    notify: Notify,
+}
+
+impl RolloverSignal {
+    pub fn new() -> Self {
+        Self {
+            state: AtomicU8::new(ROLLOVER_PENDING),
+            result: Mutex::new(None),
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn complete(&self, result: AofResult<()>) {
+        let success = result.is_ok();
+        let stored = match result {
+            Ok(()) => Ok(()),
+            Err(err) => Err(err.to_string()),
+        };
+        *self.result.lock() = Some(stored);
+        let state = if success {
+            ROLLOVER_SUCCESS
+        } else {
+            ROLLOVER_FAILED
+        };
+        self.state.store(state, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.state.load(Ordering::Acquire) != ROLLOVER_PENDING
+    }
+
+    pub fn result(&self) -> Option<Result<(), String>> {
+        self.result.lock().as_ref().cloned()
+    }
+
+    pub async fn wait(&self, shutdown: &CancellationToken) -> AofResult<()> {
+        loop {
+            if let Some(result) = self.result() {
+                return result.map_err(AofError::rollover_failed);
+            }
+            tokio::select! {
+                _ = self.notify.notified() => {},
+                _ = shutdown.cancelled() => {
+                    return Err(AofError::would_block(BackpressureKind::Rollover));
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct InstanceNotifiers {
+    admission: Arc<Notify>,
+    rollover: Arc<Notify>,
+    signals: Mutex<HashMap<SegmentId, Arc<RolloverSignal>>>,
+}
+
+impl InstanceNotifiers {
+    fn new() -> Self {
+        Self {
+            admission: Arc::new(Notify::new()),
+            rollover: Arc::new(Notify::new()),
+            signals: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn insert_signal(&self, segment_id: SegmentId, signal: Arc<RolloverSignal>) {
+        self.signals.lock().insert(segment_id, signal);
+    }
+
+    fn signal(&self, segment_id: SegmentId) -> Option<Arc<RolloverSignal>> {
+        self.signals.lock().get(&segment_id).cloned()
+    }
+
+    fn remove_signal(&self, segment_id: &SegmentId) {
+        self.signals.lock().remove(segment_id);
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct TieredCoordinatorNotifiers {
+    instances: Mutex<HashMap<InstanceId, Arc<InstanceNotifiers>>>,
+}
+
+impl TieredCoordinatorNotifiers {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_instance(&self, instance_id: InstanceId) {
+        let mut instances = self.instances.lock();
+        instances
+            .entry(instance_id)
+            .or_insert_with(|| Arc::new(InstanceNotifiers::new()));
+    }
+
+    pub fn unregister_instance(&self, instance_id: InstanceId) {
+        self.instances.lock().remove(&instance_id);
+    }
+
+    fn ensure_instance(&self, instance_id: InstanceId) -> Arc<InstanceNotifiers> {
+        let mut instances = self.instances.lock();
+        Arc::clone(
+            instances
+                .entry(instance_id)
+                .or_insert_with(|| Arc::new(InstanceNotifiers::new())),
+        )
+    }
+
+    fn get_instance(&self, instance_id: InstanceId) -> Option<Arc<InstanceNotifiers>> {
+        let instances = self.instances.lock();
+        instances.get(&instance_id).cloned()
+    }
+
+    pub fn admission(&self, instance_id: InstanceId) -> Arc<Notify> {
+        self.ensure_instance(instance_id).admission.clone()
+    }
+
+    pub fn notify_admission(&self, instance_id: InstanceId) {
+        if let Some(instance) = self.get_instance(instance_id) {
+            instance.admission.notify_waiters();
+        }
+    }
+
+    pub fn register_rollover(
+        &self,
+        instance_id: InstanceId,
+        segment_id: SegmentId,
+    ) -> Arc<RolloverSignal> {
+        let instance = self.ensure_instance(instance_id);
+        let signal = Arc::new(RolloverSignal::new());
+        instance.insert_signal(segment_id, Arc::clone(&signal));
+        instance.rollover.notify_waiters();
+        signal
+    }
+
+    pub fn complete_rollover(
+        &self,
+        instance_id: InstanceId,
+        segment_id: SegmentId,
+        result: AofResult<()>,
+    ) {
+        if let Some(instance) = self.get_instance(instance_id) {
+            if let Some(signal) = instance.signal(segment_id) {
+                signal.complete(result);
+                instance.rollover.notify_waiters();
+            }
+        }
+    }
+
+    pub fn remove_rollover(&self, instance_id: InstanceId, segment_id: SegmentId) {
+        if let Some(instance) = self.get_instance(instance_id) {
+            instance.remove_signal(&segment_id);
+        }
+    }
+
+    pub fn rollover(&self, instance_id: InstanceId) -> Arc<Notify> {
+        self.ensure_instance(instance_id).rollover.clone()
+    }
+
+    pub fn notify_rollover(&self, instance_id: InstanceId) {
+        if let Some(instance) = self.get_instance(instance_id) {
+            instance.rollover.notify_waiters();
+        }
+    }
 }
 
 impl TieredPollStats {
     pub fn total_activity(&self) -> usize {
-        0
+        self.drop_events
+            + self.scheduled_evictions
+            + self.activation_grants
+            + self.tier2_events
+            + self.hydrations
+            + self.rollovers
     }
 
     pub fn is_idle(&self) -> bool {
-        true
+        self.total_activity() == 0
     }
 
     pub fn had_hydrations(&self) -> bool {
-        false
+        self.hydrations > 0
     }
 }
 
@@ -621,6 +855,10 @@ impl TieredInstance {
         residency: SegmentResidency,
     ) -> AofResult<ResidentSegment> {
         Ok(self.tier0.admit_segment(segment, residency).0)
+    }
+
+    pub fn admission_guard(&self, resident: &ResidentSegment) -> AdmissionGuard {
+        AdmissionGuard::new(resident.clone())
     }
 
     pub fn recover_segments(&self) -> AofResult<Vec<RecoveredSegment>> {
@@ -699,8 +937,22 @@ impl TieredInstance {
         }
     }
 
+    pub fn request_rollover(
+        &self,
+        resident: ResidentSegment,
+    ) -> AofResult<oneshot::Receiver<AofResult<()>>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(Ok(()));
+        let _ = resident;
+        Ok(rx)
+    }
+
     pub fn hydration_signal(&self) -> Arc<Notify> {
         self.coordinator.hydration_signal()
+    }
+
+    pub fn notifiers(&self) -> Arc<TieredCoordinatorNotifiers> {
+        self.coordinator.notifiers()
     }
 }
 pub struct TieredCoordinator {
@@ -709,16 +961,19 @@ pub struct TieredCoordinator {
     tier2: Option<Tier2Manager>,
     activity: Arc<Notify>,
     hydration: Arc<Notify>,
+    notifiers: Arc<TieredCoordinatorNotifiers>,
 }
 
 impl TieredCoordinator {
     pub fn new(tier0: Tier0Cache, tier1: Tier1Cache, tier2: Option<Tier2Manager>) -> Self {
+        let notifiers = Arc::new(TieredCoordinatorNotifiers::new());
         Self {
             tier0,
             tier1,
             tier2,
             activity: Arc::new(Notify::new()),
             hydration: Arc::new(Notify::new()),
+            notifiers,
         }
     }
 
@@ -744,6 +999,10 @@ impl TieredCoordinator {
 
     pub fn signal_activity(&self) {
         self.activity.notify_one();
+    }
+
+    pub fn notifiers(&self) -> Arc<TieredCoordinatorNotifiers> {
+        self.notifiers.clone()
     }
 
     pub fn register_instance(
