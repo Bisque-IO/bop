@@ -38,12 +38,17 @@ fn main() {
     }
 
     // Treat header as C++ when requested, or on Windows by default (MS headers often include C++ headers)
-    if env::var_os("BOP_CPP").is_some() || target_os == "windows" {
-        clang_args.push("-x".into());
-        clang_args.push("c++".into());
-        // Default to C++23 to match the project
-        clang_args.push("-std=c++23".into());
-    }
+    // if env::var_os("BOP_CPP").is_some() || target_os == "windows" {
+    //     clang_args.push("-x".into());
+    //     clang_args.push("c++".into());
+    //     // Default to C++23 to match the project
+    //     clang_args.push("-std=c++23".into());
+    // }
+
+    clang_args.push("-x".into());
+    clang_args.push("c++".into());
+    // Default to C++23 to match the project
+    clang_args.push("-std=c++23".into());
 
     // Always generate bindings for bop-sys
     let mut builder = bindgen::Builder::default()
@@ -200,6 +205,8 @@ fn main() {
         } else if (wants_gnu && have_a) || (!wants_msvc && have_a) {
             // GNU style uses libbop.a with -lbop
             println!("cargo:rustc-link-lib=static=bop");
+            // Link C++ standard library since libbop.a contains C++ code
+            println!("cargo:rustc-link-lib=stdc++");
             // Also link common static deps if present
             let deps = [
                 ("wolfssl", "libwolfssl.a"),

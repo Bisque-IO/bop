@@ -4,17 +4,44 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::TieredRuntime;
 use super::config::SegmentId;
 use super::error::{AofError, AofResult};
 use super::segment::Segment;
+use super::{InstanceId, ResidentSegment, TieredRuntime};
 use crossbeam::channel::{Receiver, Sender, TrySendError, unbounded};
 use tokio::sync::Notify;
 use tracing::{debug, warn};
 
 pub enum FlushCommand {
-    RegisterSegment { segment: Arc<Segment> },
+    RegisterSegment { request: FlushRequest },
     Shutdown,
+}
+
+#[derive(Clone)]
+pub struct FlushRequest {
+    instance_id: InstanceId,
+    resident: ResidentSegment,
+}
+
+impl FlushRequest {
+    pub fn new(instance_id: InstanceId, resident: ResidentSegment) -> Self {
+        Self {
+            instance_id,
+            resident,
+        }
+    }
+
+    pub fn instance_id(&self) -> InstanceId {
+        self.instance_id
+    }
+
+    pub fn resident(&self) -> &ResidentSegment {
+        &self.resident
+    }
+
+    pub fn segment(&self) -> &Arc<Segment> {
+        self.resident.segment()
+    }
 }
 
 pub struct SegmentFlushState {
@@ -305,9 +332,9 @@ impl FlushManager {
         manager
     }
 
-    pub fn enqueue_segment(&self, segment: Arc<Segment>) -> AofResult<()> {
+    pub fn enqueue_segment(&self, request: FlushRequest) -> AofResult<()> {
         self.command_tx
-            .try_send(FlushCommand::RegisterSegment { segment })
+            .try_send(FlushCommand::RegisterSegment { request })
             .map_err(|err| match err {
                 TrySendError::Full(_) | TrySendError::Disconnected(_) => AofError::Backpressure,
             })
@@ -335,11 +362,11 @@ impl FlushManager {
     ) {
         while let Ok(cmd) = rx.recv() {
             match cmd {
-                FlushCommand::RegisterSegment { segment } => {
-                    if let Err(err) = Self::flush_segment(&segment, &total_unflushed, &metrics) {
+                FlushCommand::RegisterSegment { request } => {
+                    if let Err(err) = Self::flush_segment(&request, &total_unflushed, &metrics) {
                         eprintln!(
                             "flush manager failed for segment {}: {}",
-                            segment.id().as_u64(),
+                            request.segment().id().as_u64(),
                             err
                         );
                     }
@@ -350,10 +377,11 @@ impl FlushManager {
     }
 
     fn flush_segment(
-        segment: &Arc<Segment>,
+        request: &FlushRequest,
         total_unflushed: &Arc<AtomicU64>,
         metrics: &Arc<FlushMetrics>,
     ) -> AofResult<()> {
+        let segment = request.segment();
         let flush_state = segment.flush_state();
         if flush_state.requested_bytes() <= flush_state.durable_bytes() {
             let snapshot = total_unflushed.load(Ordering::Acquire);

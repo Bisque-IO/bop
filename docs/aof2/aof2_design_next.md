@@ -130,6 +130,7 @@
 ## 7. Flush and Durability
 - Each segment exposes a `SegmentFlushState` describing its durability goal and providing async notifiers. The `AofManager` polls these states concurrently without touching the append lock.
 - `FlushConfig` thresholds still determine when to enqueue a flush, but enqueues happen via lock-free command queues so appenders never contend with background work.
+- `FlushManager::enqueue_segment` accepts a `FlushRequest` bundling `ResidentSegment` and `InstanceId` (`rust/bop-rs/src/aof2/flush.rs:30`), giving the worker the context it needs to persist tier metadata as soon as `Segment::mark_durable` advances.
 - Sealing consumes a flush-state handle: once durable bytes reach the logical size, `Segment::seal` writes the footer, marks the state finalized, and the manager moves on to the next segment.
 - `Aof::flush(record_id)` (future work) will map the record to its `SegmentFlushState` and await its notifier instead of blocking on a global mutex.
 
@@ -163,7 +164,7 @@
 - **AckReady**: once Tier 1 metadata is durable and upload work accepted, the coordinator fulfils the ack. `Aof::seal_current_segment` observes the ready signal, promotes the next segment, and wakes admission waiters.
 - **PostAckCleanup**: dropping the final `AdmissionGuard` releases Tier 0 residency, allowing queued writers to proceed. Tier 1/Tier 2 workers execute the staged jobs asynchronously.
 
-`Aof::seal_current_segment` polls the ack without blocking the executor. The synchronous path surfaces `WouldBlock` until the ack is resolved, while `append_record_async` awaits the shared notifier before retrying. See [`store.md`](store.md#append-path-and-handshake) for event sequencing and [`implementation_plan.md`](implementation_plan.md#milestone-4--append-path-integration) for outstanding tasks.
+`Aof::seal_current_segment` polls the ack without blocking the executor. The synchronous path surfaces `WouldBlock` until the ack is resolved, while `append_record_async` awaits the shared notifier before retrying. See [`aof2_store.md`](aof2_store.md#append-path-and-handshake) for event sequencing and [`aof2_implementation_plan.md`](aof2_implementation_plan.md#milestone-4--append-path-integration) for outstanding tasks.
 
 ### 11.2 Async Append Retry Loop (AP3)
 The async helper is defined in `Aof::append_record_async` (planned under AP3):
@@ -173,6 +174,17 @@ The async helper is defined in `Aof::append_record_async` (planned under AP3):
 - Propagate other errors immediately.
 
 This retry state machine stays cancel-safe by checking the manager cancellation token between awaits. Writers that do not want to block synchronously should call the async helper directly.
+
+**Notifier matrix.** The helper maps each `BackpressureKind` surfaced by `append_record` to a specific coordinator signal so wakeups align with the tiered store's state transitions:
+
+| WouldBlock kind | Wait primitive | Resume condition |
+| --- | --- | --- |
+| `Admission` | `TieredCoordinatorNotifiers::admission(instance_id)` | A writable tail exists again (new segment activated, flush freed capacity, or rollover completed). The helper checks for a pending rollover before awaiting admission so it does not race past the ack that activates the new tail. |
+| `Rollover` | `TieredCoordinatorNotifiers::rollover(instance_id)` + per-segment `RolloverSignal` | The coordinator resolves the rollover ack (success or error). On success the helper clears the pending entry so subsequent admission waits can observe the promoted tail. |
+| `Flush` | _Not yet wired_ | Future work will attach a durability notifier so callers can await completion instead of spinning. Until then the helper bubbles the error. |
+| `Hydration`, `Tail`, `Unknown` | _None_ | These indicate a higher-level coordination issue (reader hydration, tail followers, etc.) and are returned immediately for the caller to route appropriately. |
+
+The explicit mapping documents the steady-state expectations for reviewers: admission pressure resolves through Tier 0 capacity signals, rollover pressure resolves through the coordinator ack, and all other cases bubble for now. The async helper continues to watch the manager cancellation token inside each await, ensuring shutdown propagates as `WouldBlock(kind)` with the original context.
 
 - `FlushConfig::max_unflushed_bytes` limits acknowledged-but-not-durable data; exceeding it blocks new appends until a flush completes.
 - The manager monitors outstanding flush jobs and can throttle or seal the tail early if the writer outruns I/O.

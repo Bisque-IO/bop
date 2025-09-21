@@ -24,7 +24,9 @@
       "Bash(tree:*)",
       "Bash(RUST_BACKTRACE=1 cargo test --test aof_integration_tests test_aof_restart_and_recovery)",
       "Read(/usr/bin/**)",
-      "Read(/usr/**)"
+      "Read(/usr/**)",
+      "Bash(for:*)",
+      "Bash(done)"
     ],
     "deny": [],
     "ask": []

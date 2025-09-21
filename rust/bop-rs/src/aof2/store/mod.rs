@@ -1,10 +1,13 @@
 // Tiered segment store modules
 
+pub mod notifiers;
 pub mod tier0;
 pub mod tier1;
 pub mod tier2;
-pub mod notifiers;
-
+pub use crate::aof2::manifest::{
+    ChunkHandle, ManifestLogReader, ManifestLogWriter, ManifestLogWriterConfig, ManifestRecord,
+    ManifestRecordIter, ManifestRecordPayload, RecordType, SealedChunkHandle,
+};
 pub use tier0::{
     ActivationGrant, ActivationOutcome, ActivationReason, ActivationRequest, AdmissionGuard,
     InstanceId, PendingActivationSnapshot, ResidencyKind, ResidentSegment, SegmentResidency,
@@ -16,11 +19,11 @@ pub use tier1::{
     Tier1MetricsSnapshot, Tier1ResidencyState,
 };
 
+pub use notifiers::{RolloverSignal, TieredCoordinatorNotifiers};
 pub use tier2::{
     Tier2Config, Tier2DeleteRequest, Tier2Event, Tier2FetchRequest, Tier2Handle, Tier2Manager,
     Tier2Metadata, Tier2Metrics, Tier2MetricsSnapshot, Tier2UploadDescriptor,
 };
-pub use notifiers::{RolloverSignal, TieredCoordinatorNotifiers};
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
@@ -396,7 +399,6 @@ impl TieredInstance {
     pub fn notifiers(&self) -> Arc<TieredCoordinatorNotifiers> {
         self.inner.coordinator.notifiers()
     }
-
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -703,7 +705,7 @@ impl TieredCoordinator {
     }
 }
 
-#[cfg(all(test, feature = "tiered-store"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::aof2::SegmentId;
@@ -788,6 +790,3 @@ mod tests {
         drop(segment);
     }
 }
-
-
-

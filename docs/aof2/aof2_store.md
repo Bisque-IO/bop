@@ -8,6 +8,8 @@ This document outlines a tiered storage system for AOF2 segments. The goals are 
 
 Only the current Raft master performs archival, compaction, or cross-tier mutations. All other nodes consume a replicated log of these operations to stay in sync.
 
+For the manifest log binary format, chunk lifecycle, and replay pipeline see `aof2_manifest_log.md`.
+
 ---
 
 ## Tier 0 - Hot Cache
@@ -38,18 +40,25 @@ Concurrency
 - Background workers consult Tier 0 metadata for eviction candidates and to honour admission priorities.
 
 - Writers obtain an `AdmissionGuard` before mutating a segment. The guard records appended bytes, transitions segments to `Sealed` when they roll over, and dropping it releases Tier 0 residency so blocked admissions can proceed.
+- Writers choose between the synchronous and asynchronous APIs based on their execution model:
+  - **Synchronous callers** (dedicated threads, Raft FSMs) loop on `append_record` or `append_record_with_timeout`, sleeping/backing off between attempts and propagating `WouldBlock` to upstream flow control when deadlines expire.
+  - **Async callers** use `append_record_async`, which interprets the backpressure kinds, awaits the coordinator notifiers, and resumes when admission or rollover clears.
 
 ```rust
+// Sync surface (e.g., Raft leader loop)
 loop {
     match aof.append_record(payload) {
         Ok(record_id) => break record_id,
-        Err(AofError::WouldBlock(BackpressureKind::Admission)) => {
-            // Defer to the async helper so the coordinator can wake us.
-            append_record_async(payload).await?;
+        Err(AofError::WouldBlock(kind)) => {
+            metrics::incr_backpressure(kind);
+            std::thread::sleep(retry_backoff(kind));
         }
         Err(err) => return Err(err),
     }
 }
+
+// Async surface (Tokio task)
+let record_id = aof.append_record_async(payload).await?;
 ```
 
 ### Append Path and Handshake
@@ -59,9 +68,9 @@ loop {
 4. The coordinator reserves Tier 1 space, stages compression/upload jobs, and fulfils the ack when metadata is durable. Errors complete the ack with `AofError::RolloverFailed`.
 5. On ack success the next segment activates, admission waiters are woken, and Tier 1/Tier 2 jobs proceed in the background.
 
-`TieredCoordinatorNotifiers` exposes admission and rollover `Notify` handles. `append_record_async` (tracked under [AP3](implementation_plan.md#milestone-4--append-path-integration)) loops on the sync API, awaiting these notifiers between attempts so the retry path stays cancel-safe.
+`TieredCoordinatorNotifiers` exposes admission and rollover `Notify` handles. `append_record_async` (tracked under [AP3](aof2_implementation_plan.md#milestone-4--append-path-integration)) loops on the sync API, awaiting these notifiers between attempts so the retry path stays cancel-safe.
 
-See [`design_next.md`](design_next.md#111-rollover-handshake-ap2) for the higher-level state machine and how downstream services should handle the `WouldBlock` contract.
+See [`aof2_design_next.md`](aof2_design_next.md#111-rollover-handshake-ap2) for the higher-level state machine and how downstream services should handle the `WouldBlock` contract.
 
 ---
 
@@ -317,4 +326,7 @@ Delivering these milestones incrementally ensures the tiered store evolves from 
 - [ ] Pass tier handles through Aof::new/TieredInstance and ensure orderly shutdown.
 - [ ] Update APIs/tests to await async tier operations; migrate affected tests to Tokio.
 - [ ] Refresh documentation/examples describing async tier integration.
+
+
+
 

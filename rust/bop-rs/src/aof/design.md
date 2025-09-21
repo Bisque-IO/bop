@@ -48,7 +48,7 @@ Async helpers live close to the synchronous wrappers so they can share throttlin
 - Provides condition variables/futures for sync APIs to wait on (`tier0_ready`, `hydration_complete`).
 
 ### Tier caches
-Refer to `store.md` for full details; at a high level:
+Refer to `docs/aof2/aof2_store.md` for full details; at a high level:
 
 - **Tier 0 (hot mmap)**: only location where appends occur. Keeps active writer segment plus recently accessed sealed segments. Exposes `AdmissionGuard` objects used by `Aof` append path. Evicts through an async queue when space exhausted.
 - **Tier 1 (warm compressed)**: stores sealed segments as seekable Zstd. Handles compression, hydration back to Tier 0, and staging for remote uploads. Maintains manifest of checksums, offsets, residency state.
@@ -125,4 +125,4 @@ Async readers await hydration futures; they can also opt into streaming decompre
 ## Migration and compatibility
 - Existing callers using synchronous APIs keep working, but must handle `WouldBlock` in more scenarios.
 - Async integration requires updating constructors to receive `AofManager` references; helpers ease transition in tests by providing in-process runtimes.
-- Documentation in `store.md` and `/docs` cross-references this design; implementation plan (see `implementation_plan.md`) tracks rollout progress and must be updated as tasks complete.
+- Documentation in `docs/aof2/aof2_store.md` and `/docs` cross-references this design; implementation plan (see `docs/aof2/aof2_implementation_plan.md`) tracks rollout progress and must be updated as tasks complete.

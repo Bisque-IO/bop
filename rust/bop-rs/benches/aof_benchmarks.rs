@@ -1,5 +1,3 @@
-#![cfg(not(feature = "tiered-store"))]
-
 use std::path::Path;
 
 use bop_rs::aof2::{Aof, AofConfig, AofManager, AofManagerConfig, FlushConfig};

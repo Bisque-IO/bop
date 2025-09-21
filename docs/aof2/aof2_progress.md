@@ -19,6 +19,6 @@ The worker drains a lock-free command queue, guarantees one in-flight flush per 
 `SegmentReader` now verifies record checksums, reuses `Segment::read_record_slice` to borrow payloads zero-copy from sealed segments, and exposes `SegmentRecord` helpers that return offsets, payload slices, and timestamps together. The existing `RecordBounds` helper continues to surface header-plus-payload spans so follow-on reader work can compose without re-parsing headers. Fresh unit tests cover happy-path reads and checksum mismatches to keep the borrow guarantees honest, `Aof::open_reader` ties the tail notifications into the reader path so sealed segments are discoverable without racing the writer, and a lightweight `TailFollower` helper wraps `watch::Receiver<TailState>` so async consumers can react to tail lifecycle events without holding the catalog lock.
 
 ## Next Steps
-- Carry `RD2a` forward by streaming sealed-segment handles through the new `TailFollower`.
-- Extend `QA4` with start/stop fixtures once the cross-language harness unblocks.
-- Kick off `OB1` tracing/metrics wiring so the exporter feeds real telemetry sinks.
+- Stand up the manifest log chunk writer/reader scaffolding (MAN1) so Tier 0 events land in the new binary log.
+- Lock in record schemas with encode/decode plus chunk rotation unit tests before wiring chunks into Tier 1.
+- Document the Tier 1 dual-write rollout plan (MAN2) including feature flags, migration tooling, and cutover metrics.

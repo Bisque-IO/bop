@@ -831,9 +831,6 @@ mod tests {
     }
 
     async fn seal_active_with_ack(aof: &Aof, manager: &AofManager) -> AofResult<Option<SegmentId>> {
-        if !cfg!(feature = "tiered-store") {
-            return aof.seal_active();
-        }
         loop {
             match aof.seal_active() {
                 Ok(result @ Some(_)) => return Ok(result),
