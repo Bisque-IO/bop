@@ -392,3 +392,29 @@ mod tests {
         assert_eq!(packed, RecordId::new(((7u64) << 32) | 4096));
     }
 }
+
+pub fn aof2_manifest_log_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("AOF2_MANIFEST_LOG_ENABLED")
+            .ok()
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false)
+    })
+}
+
+pub fn aof2_manifest_log_only() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("AOF2_MANIFEST_LOG_ONLY")
+            .ok()
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false)
+    })
+}

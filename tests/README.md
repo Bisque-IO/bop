@@ -397,3 +397,37 @@ When adding new tests:
 ## License
 
 This test suite is licensed under the Apache License, Version 2.0.
+## AOF2 Manifest Log Tests
+
+### MAN1/MAN3 crash-mid-commit replay
+
+1. Enable the manifest log path before running the test:
+   - Set `AOF2_MANIFEST_LOG=1` (or toggle `aof2_manifest_log_enabled` in `AofManagerConfig`) so Tier 1 writes go to the append-only log.
+   - Execute `cargo test manifest_crash_mid_commit -- --nocapture` to reproduce the crash/trim/replay sequence end to end.
+2. Verify metrics once the test completes:
+   - `aof_manifest_replay_chunk_lag_seconds` should remain below 5 seconds; the updated test snapshots this via `ManifestReplayMetrics`.
+   - `aof_manifest_replay_journal_lag_bytes` must equal the trimmed tail (expect the single uncommitted record to report its byte count).
+   - Run with `RUST_LOG=info` if you need to capture metric deltas in the console output for manual comparison.
+3. Collect the generated artifacts for inspection:
+   - Trimmed chunk: `<tmp>/000000000000000042/000000000000000000.mlog` (the test stream id is 42; replace `<tmp>` with your OS temp dir).
+   - Journal snapshot before trim is available if you copy the same file prior to `set_len`; compare committed vs actual length for manual audits.
+   - Record both metrics above alongside the artifact, plus the boolean indicating whether Tier 2 delete was queued.
+4. Cross-check the behaviour against `docs/aof2_manifest_log.md` (crash semantics) and the replay section in `docs/aof2/aof2_store.md`.
+5. If parity issues appear, disable the manifest log feature flag to fall back to the legacy JSON manifest while you investigate, then re-run the test to confirm metrics reset to zero.
+
+
+### MAN2 log-only replay
+
+1. Enable the manifest log (`AOF2_MANIFEST_LOG_ENABLED=1`) and turn on log-only mode (`AOF2_MANIFEST_LOG_ONLY=1`) before running validation.
+2. Execute `cargo test manifest_log_only_replay_bootstrap -- --nocapture` to exercise Tier1 bootstrap from log snapshots, residency updates, and Tier2 promotions.
+3. Confirm the test output reports trimmed journal bytes, and inspect the replay metrics/Grafana panels to ensure chunk lag stays <5s.
+4. To revert, clear `AOF2_MANIFEST_LOG_ONLY`, rerun the test, and verify the warm manifest JSON is repopulated alongside the log snapshots.
+
+### MAN3 Tier2 retry flow
+
+1. Keep the manifest log enabled (`AOF2_MANIFEST_LOG_ENABLED=1`); no other flags are required because the test drives Tier1 in mixed JSON/log mode.
+2. Run `cargo test manifest_tier2_retry_flow -- --nocapture` to simulate a flaky Tier2 upload/delete cycle. The harness injects a single failure for each operation and waits for Tier1 to hydrate from the manifest log before verifying recovery.
+3. Verify the output shows at least two upload/delete attempts (the `FlakyTier2Client` prints the counts) and that `manifest_snapshot` no longer contains the original segment after eviction.
+4. For manual inspection, point `ManifestInspector::inspect_stream` at the temp manifest directory printed by the test; you should see the newest compression entry plus replay snapshots for the surviving segment.
+5. Cross-reference the retry behaviour with `docs/aof2/aof2_store.md` (Tier2 operations) and `docs/aof2_manifest_log.md` (failure semantics) if additional debugging is required.
+

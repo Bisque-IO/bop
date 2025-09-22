@@ -72,6 +72,13 @@ let record_id = aof.append_record_async(payload).await?;
 
 See [`aof2_design_next.md`](aof2_design_next.md#111-rollover-handshake-ap2) for the higher-level state machine and how downstream services should handle the `WouldBlock` contract.
 
+### Durability Cursor and Admission Metrics
+
+- Each `TieredInstance` maintains a durability cursor that records the highest requested flush offset and the bytes proven durable per segment.
+- The cursor remains in-memory and is reseeded from recovered segment scans whenever the flush worker advances progress, so restart rebuilds pending flush state without writing metadata to disk.
+- Recovery hydrates the cursor before rebuilding the catalog so background hydrations and readers observe the correct durability watermark.
+- Admission metrics record the latency to acquire an `AdmissionGuard` and the frequency of `WouldBlock` events per backpressure kind. Snapshots are available via `AofManagerHandle::admission_metrics()` for integration with dashboards.
+
 ---
 
 ## Tier 1 - Warm Cache and Compression Layer
@@ -101,6 +108,13 @@ Promotion and demotion flow
 1. Tier 0 -> Tier 1: triggered by eviction or scheduled rollover. The segment is flushed, sealed, converted to Zstd, and the mmap file is either removed or truncated.
 2. Tier 1 -> Tier 0: on cache miss or explicit prefetch, Tier 1 decompresses the segment into a new mmap file, validates checksums, and inserts it into the activation queue.
 3. Tier 1 -> Tier 2: only executed on the master. The compressed payload is uploaded to S3, and the artifact is marked as durable in Tier 2. Local retention policy decides whether to keep a copy.
+
+### Manifest Replay Mode
+
+- Set `tier1_manifest_log_only` in `AofManagerConfig` (or export `AOF2_MANIFEST_LOG_ONLY=1`) once log/JSON parity is validated.
+- In log-only mode Tier 1 skips JSON persistence, writes a `Tier1Snapshot` record after every change, and boots by replaying the latest snapshot while trimming uncommitted bytes.
+- Replay latency and trim behaviour are surfaced via `ManifestReplayMetrics`; operators can watch `aof_manifest_replay_chunk_lag_seconds` and `aof_manifest_replay_journal_lag_bytes` to confirm recovery stays inside SLA.
+- Roll back by clearing the flag/env var, restoring JSON persistence, and rerunning `cargo test manifest_crash_mid_commit -- --nocapture` to verify state matches before re-enabling the flag.
 
 ---
 
@@ -147,7 +161,14 @@ Failure handling
 
 - Because uploads are idempotent and keyed by SegmentId, replaying an UploadToTier2 record is safe.
 - Followers ignore mutations they cannot execute, such as S3 deletions, but mark the intent to allow retries once the master role returns.
+
 - On leadership transfer, the new master scans the log for in-flight operations and completes or rolls them forward.
+
+### Tier2 retry diagnostics
+
+- Run `cargo test manifest_tier2_retry_flow -- --nocapture` to rehearse the flaky upload/delete path; the harness logs the retry counts and ensures Tier1 snapshots converge after eviction.
+- Use `ManifestInspector::inspect_stream` (see `rust/bop-rs/src/aof2/manifest/inspect.rs`) against the test output directory to confirm the most recent compression entry and surviving segments.
+- For a step-by-step operator checklist, refer to the MAN3 entry in `tests/README.md` and the failure semantics described in `docs/aof2_manifest_log.md`.
 
 ---
 
@@ -326,6 +347,8 @@ Delivering these milestones incrementally ensures the tiered store evolves from 
 - [ ] Pass tier handles through Aof::new/TieredInstance and ensure orderly shutdown.
 - [ ] Update APIs/tests to await async tier operations; migrate affected tests to Tokio.
 - [ ] Refresh documentation/examples describing async tier integration.
+
+
 
 
 

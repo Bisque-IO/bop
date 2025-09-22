@@ -1,11 +1,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
-use std::fs::{self, File};
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crc64fast_nvme::Digest;
 use futures::future::join_all;
@@ -19,9 +20,14 @@ use tokio::time::sleep as tokio_sleep;
 use tracing::{debug, trace, warn};
 use zstd::stream::{read::Decoder as ZstdDecoder, write::Encoder as ZstdEncoder};
 
-use crate::aof2::config::SegmentId;
+use crate::aof2::config::{SegmentId, aof2_manifest_log_enabled, aof2_manifest_log_only};
 use crate::aof2::error::{AofError, AofResult};
 use crate::aof2::fs::Layout;
+use crate::aof2::manifest::{
+    CHUNK_HEADER_LEN, ChunkHeader, ManifestLogReader, ManifestLogWriter, ManifestLogWriterConfig,
+    ManifestRecordPayload,
+};
+use crate::aof2::metrics::manifest_replay::{ManifestReplayMetrics, ManifestReplaySnapshot};
 use crate::aof2::segment::{
     RECORD_HEADER_SIZE, SEGMENT_FOOTER_SIZE, SEGMENT_HEADER_SIZE, Segment, SegmentFooter,
 };
@@ -39,23 +45,33 @@ fn current_epoch_ms() -> u64 {
         .unwrap_or_default()
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Tier1Config {
     pub max_bytes: u64,
     pub worker_threads: usize,
     pub compression_level: i32,
     pub max_retries: u32,
     pub retry_backoff: Duration,
+    pub manifest_log: ManifestLogWriterConfig,
+    pub manifest_log_only: bool,
 }
 
 impl Tier1Config {
     pub fn new(max_bytes: u64) -> Self {
+        let mut manifest_log = ManifestLogWriterConfig::default();
+        manifest_log.enabled = aof2_manifest_log_enabled();
+        let manifest_log_only = aof2_manifest_log_only();
+        if manifest_log_only {
+            manifest_log.enabled = true;
+        }
         Self {
             max_bytes,
             worker_threads: 2,
             compression_level: 3,
             max_retries: 3,
             retry_backoff: Duration::from_millis(50),
+            manifest_log,
+            manifest_log_only,
         }
     }
 
@@ -72,6 +88,24 @@ impl Tier1Config {
     pub fn with_retry_policy(mut self, max_retries: u32, backoff: Duration) -> Self {
         self.max_retries = max_retries.max(1);
         self.retry_backoff = backoff;
+        self
+    }
+
+    pub fn with_manifest_log_config(mut self, mut config: ManifestLogWriterConfig) -> Self {
+        config.enabled = config.enabled && config.chunk_capacity_bytes > 0;
+        self.manifest_log = config;
+        self
+    }
+
+    pub fn with_manifest_log_only(mut self, enabled: bool) -> Self {
+        self.manifest_log_only = enabled;
+        if enabled {
+            self.manifest_log.enabled = true;
+        }
+        self
+    }
+    pub fn with_manifest_log_enabled(mut self, enabled: bool) -> Self {
+        self.manifest_log.enabled = enabled;
         self
     }
 }
@@ -168,16 +202,18 @@ impl ManifestEntry {
 struct Tier1Manifest {
     path: PathBuf,
     entries: HashMap<SegmentId, ManifestEntry>,
+    persist_json: bool,
 }
 
 impl Tier1Manifest {
-    fn load(path: PathBuf) -> AofResult<Self> {
+    fn load(path: PathBuf, persist_json: bool) -> AofResult<Self> {
         if path.exists() {
             let data = fs::read(&path).map_err(AofError::from)?;
             if data.is_empty() {
                 return Ok(Self {
                     path,
                     entries: HashMap::new(),
+                    persist_json,
                 });
             }
             let entries: Vec<ManifestEntry> = serde_json::from_slice(&data)
@@ -186,28 +222,37 @@ impl Tier1Manifest {
                 .into_iter()
                 .map(|entry| (entry.segment_id, entry))
                 .collect();
-            Ok(Self { path, entries: map })
+            Ok(Self {
+                path,
+                entries: map,
+                persist_json,
+            })
         } else {
             Ok(Self {
                 path,
                 entries: HashMap::new(),
+                persist_json,
             })
         }
     }
 
-    fn save(&self) -> AofResult<()> {
-        let temp =
-            NamedTempFile::new_in(self.path.parent().ok_or_else(|| {
-                AofError::Io(io::Error::new(io::ErrorKind::Other, "missing parent"))
-            })?)
-            .map_err(AofError::from)?;
+    fn save(&self) -> AofResult<Vec<u8>> {
         let entries: Vec<&ManifestEntry> = self.entries.values().collect();
-        serde_json::to_writer_pretty(temp.as_file(), &entries)
+        let json = serde_json::to_vec_pretty(&entries)
             .map_err(|err| AofError::Serialization(err.to_string()))?;
+        if !self.persist_json {
+            return Ok(json);
+        }
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| AofError::Io(io::Error::new(io::ErrorKind::Other, "missing parent")))?;
+        let temp = NamedTempFile::new_in(parent).map_err(AofError::from)?;
+        temp.as_file().write_all(&json).map_err(AofError::from)?;
         temp.as_file().sync_all().map_err(AofError::from)?;
         temp.persist(&self.path)
             .map_err(|err| AofError::from(err.error))?;
-        Ok(())
+        Ok(json)
     }
 
     fn get(&self, segment_id: SegmentId) -> Option<&ManifestEntry> {
@@ -229,33 +274,228 @@ impl Tier1Manifest {
     fn all(&self) -> impl Iterator<Item = &ManifestEntry> {
         self.entries.values()
     }
+
+    fn replace_entries(&mut self, entries: Vec<ManifestEntry>) {
+        self.entries = entries
+            .into_iter()
+            .map(|entry| (entry.segment_id, entry))
+            .collect();
+    }
 }
 
-#[derive(Debug)]
+struct TrimResult {
+    trimmed_bytes: u64,
+    chunk_count: usize,
+}
+
 struct Tier1InstanceState {
+    instance_id: InstanceId,
     layout: Layout,
     manifest: Tier1Manifest,
+    manifest_log: Option<ManifestLogWriter>,
+    manifest_log_only: bool,
     used_bytes: u64,
     lru: VecDeque<SegmentId>,
+    replay_metrics: Arc<ManifestReplayMetrics>,
 }
 
 impl Tier1InstanceState {
-    fn new(layout: Layout) -> AofResult<Self> {
+    fn new(instance_id: InstanceId, layout: Layout, config: &Tier1Config) -> AofResult<Self> {
+        let persist_json = !config.manifest_log_only;
         let manifest_path = layout.warm_dir().join("manifest.json");
-        let manifest = Tier1Manifest::load(manifest_path)?;
-        let used_bytes = manifest.all().map(|entry| entry.compressed_bytes).sum();
-        let mut lru = VecDeque::new();
-        let mut entries: Vec<_> = manifest.all().collect();
-        entries.sort_by_key(|entry| entry.last_access_epoch_ms);
-        for entry in entries {
-            lru.push_back(entry.segment_id);
+        let mut manifest = Tier1Manifest::load(manifest_path, persist_json)?;
+        let replay_metrics = Arc::new(ManifestReplayMetrics::new());
+        if config.manifest_log.enabled {
+            if let Some(entries) =
+                Self::replay_manifest_from_log(&layout, instance_id, replay_metrics.as_ref())?
+            {
+                manifest.replace_entries(entries);
+            }
         }
+        let used_bytes: u64 = manifest
+            .entries
+            .values()
+            .map(|entry| entry.compressed_bytes)
+            .sum();
+        let mut order: Vec<_> = manifest
+            .entries
+            .values()
+            .map(|entry| (entry.last_access_epoch_ms, entry.segment_id))
+            .collect();
+        order.sort_by_key(|(timestamp, _)| *timestamp);
+        let mut lru = VecDeque::new();
+        for (_, segment_id) in order {
+            lru.push_back(segment_id);
+        }
+        let manifest_log = if config.manifest_log.enabled {
+            let mut writer_config = config.manifest_log.clone();
+            writer_config.enabled = true;
+            let writer = ManifestLogWriter::new(
+                layout.manifest_dir().to_path_buf(),
+                instance_id.get(),
+                writer_config,
+            )?;
+            Some(writer)
+        } else {
+            None
+        };
         Ok(Self {
+            instance_id,
             layout,
             manifest,
+            manifest_log,
+            manifest_log_only: config.manifest_log_only,
             used_bytes,
             lru,
+            replay_metrics,
         })
+    }
+
+    fn persist_manifest(&mut self) -> AofResult<()> {
+        let snapshot = self.manifest.save()?;
+        self.log_manifest_snapshot(&snapshot);
+        Ok(())
+    }
+
+    fn log_manifest_snapshot(&mut self, snapshot: &[u8]) {
+        if let Some(writer) = self.manifest_log.as_mut() {
+            if let Err(err) = writer.append_now(
+                SegmentId::new(0),
+                0,
+                ManifestRecordPayload::Tier1Snapshot {
+                    json: snapshot.to_vec(),
+                },
+            ) {
+                warn!(
+                    instance = self.instance_id.get(),
+                    "manifest snapshot append failed: {err}"
+                );
+                return;
+            }
+            if let Err(err) = writer.commit() {
+                warn!(
+                    instance = self.instance_id.get(),
+                    "manifest snapshot commit failed: {err}"
+                );
+            }
+        }
+    }
+
+    fn replay_manifest_from_log(
+        layout: &Layout,
+        instance_id: InstanceId,
+        metrics: &ManifestReplayMetrics,
+    ) -> AofResult<Option<Vec<ManifestEntry>>> {
+        let start = Instant::now();
+        let trim = Self::trim_manifest_chunks(layout, instance_id)?;
+        metrics.record_journal_lag_bytes(trim.trimmed_bytes);
+        metrics.record_chunk_count(trim.chunk_count);
+        let reader =
+            match ManifestLogReader::open(layout.manifest_dir().to_path_buf(), instance_id.get()) {
+                Ok(reader) => reader,
+                Err(err) => {
+                    metrics.incr_corruption();
+                    return Err(err);
+                }
+            };
+        let mut snapshot = None;
+        for record in reader.iter() {
+            match record {
+                Ok(record) => {
+                    if let ManifestRecordPayload::Tier1Snapshot { json } = record.payload {
+                        snapshot = Some(json);
+                    }
+                }
+                Err(err) => {
+                    metrics.incr_corruption();
+                    return Err(err);
+                }
+            }
+        }
+        let elapsed = start.elapsed();
+        metrics.record_chunk_lag(elapsed);
+        if elapsed > Duration::from_millis(500) {
+            trace!(
+                instance = instance_id.get(),
+                duration_ms = elapsed.as_millis(),
+                trimmed_bytes = trim.trimmed_bytes,
+                chunk_count = trim.chunk_count,
+                "slow manifest replay"
+            );
+        }
+        if let Some(json) = snapshot {
+            let entries: Vec<ManifestEntry> = serde_json::from_slice(&json)
+                .map_err(|err| AofError::Serialization(err.to_string()))?;
+            return Ok(Some(entries));
+        }
+        Ok(None)
+    }
+
+    fn trim_manifest_chunks(layout: &Layout, instance_id: InstanceId) -> AofResult<TrimResult> {
+        let stream_dir = layout
+            .manifest_dir()
+            .join(format!("{id:020}", id = instance_id.get()));
+        if !stream_dir.exists() {
+            return Ok(TrimResult {
+                trimmed_bytes: 0,
+                chunk_count: 0,
+            });
+        }
+        let mut trimmed = 0u64;
+        let mut chunk_count = 0usize;
+        for entry in fs::read_dir(&stream_dir).map_err(AofError::from)? {
+            let entry = entry.map_err(AofError::from)?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("mlog") {
+                continue;
+            }
+            chunk_count += 1;
+            let mut file = File::open(&path).map_err(AofError::from)?;
+            let mut header_bytes = vec![0u8; CHUNK_HEADER_LEN];
+            file.read_exact(&mut header_bytes).map_err(AofError::from)?;
+            let header = ChunkHeader::read_from(&header_bytes)?;
+            let file_len = file.metadata().map_err(AofError::from)?.len();
+            let committed_len = header.committed_len as u64;
+            if file_len > committed_len {
+                drop(file);
+                let trim = OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .map_err(AofError::from)?;
+                trim.set_len(committed_len).map_err(AofError::from)?;
+                trim.sync_data().map_err(AofError::from)?;
+                trimmed += file_len - committed_len;
+            }
+        }
+        Ok(TrimResult {
+            trimmed_bytes: trimmed,
+            chunk_count,
+        })
+    }
+
+    fn log_manifest_record(
+        &mut self,
+        segment_id: SegmentId,
+        logical_offset: u64,
+        payload: ManifestRecordPayload,
+    ) {
+        if let Some(writer) = self.manifest_log.as_mut() {
+            if let Err(err) = writer.append_now(segment_id, logical_offset, payload) {
+                warn!(
+                    instance = self.instance_id.get(),
+                    segment = segment_id.as_u64(),
+                    "manifest log append failed: {err}"
+                );
+                return;
+            }
+            if let Err(err) = writer.commit() {
+                warn!(
+                    instance = self.instance_id.get(),
+                    segment = segment_id.as_u64(),
+                    "manifest log commit failed: {err}"
+                );
+            }
+        }
     }
 
     fn touch(&mut self, segment_id: SegmentId) {
@@ -293,7 +533,24 @@ impl Tier1InstanceState {
                 break;
             }
         }
-        self.manifest.save()?;
+        self.persist_manifest()?;
+        self.log_manifest_record(
+            entry.segment_id,
+            entry.base_offset,
+            ManifestRecordPayload::CompressionDone {
+                compressed_bytes: entry.compressed_bytes,
+                dictionary_id: 0,
+            },
+        );
+        for evicted_entry in &evicted {
+            self.log_manifest_record(
+                evicted_entry.segment_id,
+                evicted_entry.base_offset,
+                ManifestRecordPayload::LocalEvicted {
+                    reclaimed_bytes: evicted_entry.compressed_bytes,
+                },
+            );
+        }
         Ok(evicted)
     }
 
@@ -303,10 +560,31 @@ impl Tier1InstanceState {
         residency: Tier1ResidencyState,
     ) -> AofResult<()> {
         if let Some(entry) = self.manifest.get_mut(segment_id) {
-            entry.residency = residency;
-            entry.touch();
+            let (base_offset, payload) = {
+                entry.residency = residency;
+                entry.touch();
+                let base_offset = entry.base_offset;
+                let original_bytes = entry.original_bytes;
+                let payload = match residency {
+                    Tier1ResidencyState::ResidentInTier0 => {
+                        Some(ManifestRecordPayload::HydrationDone {
+                            resident_bytes: original_bytes,
+                        })
+                    }
+                    Tier1ResidencyState::StagedForTier0 => {
+                        Some(ManifestRecordPayload::LocalEvicted {
+                            reclaimed_bytes: original_bytes,
+                        })
+                    }
+                    Tier1ResidencyState::UploadedToTier2 => None,
+                };
+                (base_offset, payload)
+            };
             self.touch(segment_id);
-            self.manifest.save()?;
+            self.persist_manifest()?;
+            if let Some(payload) = payload {
+                self.log_manifest_record(segment_id, base_offset, payload);
+            }
         }
         Ok(())
     }
@@ -319,7 +597,16 @@ impl Tier1InstanceState {
             if let Err(err) = fs::remove_file(&path) {
                 warn!(path = %path.display(), "failed to remove warm file: {err}");
             }
-            let _ = self.manifest.save();
+            let base_offset = entry.base_offset;
+            let reclaimed_bytes = entry.compressed_bytes;
+            if let Err(err) = self.persist_manifest() {
+                warn!("manifest persist failed: {err}");
+            }
+            self.log_manifest_record(
+                segment_id,
+                base_offset,
+                ManifestRecordPayload::LocalEvicted { reclaimed_bytes },
+            );
             Some(entry)
         } else {
             None
@@ -328,6 +615,18 @@ impl Tier1InstanceState {
 
     fn used_bytes(&self) -> u64 {
         self.used_bytes
+    }
+}
+
+impl fmt::Debug for Tier1InstanceState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tier1InstanceState")
+            .field("instance_id", &self.instance_id)
+            .field("layout", &self.layout)
+            .field("manifest", &self.manifest)
+            .field("used_bytes", &self.used_bytes)
+            .field("lru_len", &self.lru.len())
+            .finish()
     }
 }
 
@@ -486,6 +785,10 @@ impl Tier1Instance {
         self.inner.manifest_entry(self.instance_id, segment_id)
     }
 
+    pub fn manifest_replay_metrics(&self) -> AofResult<ManifestReplaySnapshot> {
+        self.inner.manifest_replay_metrics(self.instance_id)
+    }
+
     pub fn hydrate_segment_blocking(
         &self,
         segment_id: SegmentId,
@@ -553,7 +856,7 @@ impl Tier1Inner {
     fn register_instance(&self, instance_id: InstanceId, layout: Layout) -> AofResult<()> {
         let mut instances = self.instances.lock();
         if !instances.contains_key(&instance_id) {
-            let state = Tier1InstanceState::new(layout)?;
+            let state = Tier1InstanceState::new(instance_id, layout, &self.config)?;
             instances.insert(instance_id, state);
         }
         Ok(())
@@ -647,11 +950,24 @@ impl Tier1Inner {
             ))
         })?;
         if let Some(entry) = state.manifest.get_mut(info.segment_id) {
-            entry.tier2 = Some(info.metadata.clone());
-            entry.residency = Tier1ResidencyState::UploadedToTier2;
-            entry.touch();
+            let (base_offset, tier2_meta) = {
+                entry.tier2 = Some(info.metadata.clone());
+                entry.residency = Tier1ResidencyState::UploadedToTier2;
+                entry.touch();
+                (entry.base_offset, entry.tier2.clone())
+            };
             state.touch(info.segment_id);
-            state.manifest.save()?;
+            state.persist_manifest()?;
+            if let Some(metadata) = tier2_meta {
+                state.log_manifest_record(
+                    info.segment_id,
+                    base_offset,
+                    ManifestRecordPayload::UploadDone {
+                        key: metadata.object_key,
+                        etag: metadata.etag,
+                    },
+                );
+            }
         }
         Ok(())
     }
@@ -664,10 +980,22 @@ impl Tier1Inner {
                 info.instance_id.get()
             ))
         })?;
-        if let Some(entry) = state.manifest.get_mut(info.segment_id) {
+        let base_offset = if let Some(entry) = state.manifest.get_mut(info.segment_id) {
             entry.tier2 = None;
             entry.touch();
-            state.manifest.save()?;
+            Some(entry.base_offset)
+        } else {
+            None
+        };
+        if let Some(base_offset) = base_offset {
+            state.persist_manifest()?;
+            state.log_manifest_record(
+                info.segment_id,
+                base_offset,
+                ManifestRecordPayload::Tier2Deleted {
+                    key: info.object_key.clone(),
+                },
+            );
         }
         Ok(())
     }
@@ -764,12 +1092,13 @@ impl Tier1Inner {
                     .schedule_upload(descriptor)
                     .map_err(AofError::rollover_failed)?;
             }
-            for evicted_entry in evicted {
-                if let Some(metadata) = evicted_entry.tier2 {
+            for evicted_entry in &evicted {
+                if let Some(metadata) = &evicted_entry.tier2 {
+                    let key = metadata.object_key.clone();
                     let request = Tier2DeleteRequest {
                         instance_id,
                         segment_id: evicted_entry.segment_id,
-                        object_key: metadata.object_key,
+                        object_key: key.clone(),
                     };
                     if let Err(err) = tier2.schedule_delete(request) {
                         warn!(
@@ -777,6 +1106,15 @@ impl Tier1Inner {
                             segment = evicted_entry.segment_id.as_u64(),
                             "failed to schedule tier2 delete for evicted warm entry: {err}"
                         );
+                    } else {
+                        let mut instances = self.instances.lock();
+                        if let Some(state) = instances.get_mut(&instance_id) {
+                            state.log_manifest_record(
+                                evicted_entry.segment_id,
+                                evicted_entry.base_offset,
+                                ManifestRecordPayload::Tier2DeleteQueued { key },
+                            );
+                        }
                     }
                 }
             }
@@ -1003,7 +1341,7 @@ impl Tier1Inner {
                 if let Some(manifest_entry) = state.manifest.get_mut(segment_id) {
                     *manifest_entry = entry.clone();
                 }
-                state.manifest.save()?;
+                state.persist_manifest()?;
             }
         }
 
@@ -1049,6 +1387,20 @@ impl Tier1Inner {
             ))
         })?;
         Ok(state.manifest.get(segment_id).cloned())
+    }
+
+    fn manifest_replay_metrics(
+        &self,
+        instance_id: InstanceId,
+    ) -> AofResult<ManifestReplaySnapshot> {
+        let instances = self.instances.lock();
+        let state = instances.get(&instance_id).ok_or_else(|| {
+            AofError::InvalidState(format!(
+                "Tier1 instance {:?} not registered",
+                instance_id.get()
+            ))
+        })?;
+        Ok(state.replay_metrics.snapshot())
     }
 
     fn manifest_snapshot(&self, instance_id: InstanceId) -> AofResult<Vec<ManifestEntry>> {
@@ -1160,11 +1512,13 @@ fn fold_crc64(value: u64) -> u32 {
 mod tests {
     use super::*;
     use crate::aof2::config::{AofConfig, FlushConfig};
+    use crate::aof2::error::AofResult;
+    use crate::aof2::manifest::{ManifestLogReader, ManifestRecordPayload};
     use crate::aof2::store::tier0::ActivationReason;
     use crate::aof2::store::tier0::{Tier0Cache, Tier0CacheConfig};
     use crate::aof2::store::tier2::{
         GetObjectRequest, GetObjectResult, HeadObjectResult, PutObjectRequest, PutObjectResult,
-        Tier2Client, Tier2Config, Tier2Manager,
+        Tier2Client, Tier2Config, Tier2Event, Tier2Manager, Tier2Metadata, Tier2UploadComplete,
     };
     use async_trait::async_trait;
     use std::sync::Mutex as StdMutex;
@@ -1180,6 +1534,80 @@ mod tests {
         let layout = Layout::new(&config);
         layout.ensure().expect("layout ensure");
         layout
+    }
+
+    fn seed_manifest_log(
+        layout: &Layout,
+        instance_id: InstanceId,
+        manifest_cfg: &ManifestLogWriterConfig,
+    ) -> (Vec<ManifestEntry>, usize) {
+        let mut entries = Vec::new();
+        for (idx, base_offset) in [(1u64, 0u64), (2u64, 128u64)] {
+            let segment_id = SegmentId::new(idx);
+            let sealed_at = 1_000 + idx as i64;
+            let warm_path = layout.warm_file_path(segment_id, base_offset, sealed_at);
+            std::fs::write(&warm_path, format!("segment-{idx}")).expect("write warm file");
+            let compressed_path = warm_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("warm file name")
+                .to_string();
+            let entry = ManifestEntry {
+                segment_id,
+                base_offset,
+                base_record_count: 64,
+                created_at: 500 + idx as i64,
+                sealed_at,
+                checksum: 0xDEAD ^ idx as u32,
+                original_bytes: 2048,
+                compressed_bytes: std::fs::metadata(&warm_path).expect("warm metadata").len(),
+                compressed_path,
+                dictionary: None,
+                offset_index: vec![0, 128, 256],
+                residency: Tier1ResidencyState::StagedForTier0,
+                tier2: None,
+                last_access_epoch_ms: 10_000 + idx * 10,
+            };
+            entries.push(entry);
+        }
+
+        let snapshot = serde_json::to_vec(&entries).expect("snapshot encode");
+        let mut writer_cfg = manifest_cfg.clone();
+        writer_cfg.enabled = true;
+        let mut writer = ManifestLogWriter::new(
+            layout.manifest_dir().to_path_buf(),
+            instance_id.get(),
+            writer_cfg,
+        )
+        .expect("manifest writer");
+        writer
+            .append_now(
+                SegmentId::new(0),
+                0,
+                ManifestRecordPayload::Tier1Snapshot { json: snapshot },
+            )
+            .expect("append snapshot");
+        writer.commit().expect("commit snapshot");
+        drop(writer);
+
+        let stream_dir = layout
+            .manifest_dir()
+            .join(format!("{id:020}", id = instance_id.get()));
+        let chunk_path = std::fs::read_dir(&stream_dir)
+            .expect("stream manifest dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("mlog"))
+            .expect("manifest chunk");
+        let dangling = b"dangling";
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&chunk_path)
+            .expect("open chunk for append");
+        file.write_all(dangling).expect("append dangling bytes");
+        file.sync_data().expect("sync dangling");
+
+        (entries, dangling.len())
     }
 
     fn create_sealed_segment(layout: &Layout, id: u64, payload: &[u8]) -> Arc<Segment> {
@@ -1243,6 +1671,178 @@ mod tests {
         }
     }
 
+    #[test]
+    fn manifest_log_replay_detects_corruption() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = build_layout(&dir);
+        let instance_id = InstanceId::new(99);
+
+        let mut cfg = ManifestLogWriterConfig::default();
+        cfg.enabled = true;
+        let mut writer = ManifestLogWriter::new(
+            layout.manifest_dir().to_path_buf(),
+            instance_id.get(),
+            cfg.clone(),
+        )
+        .expect("writer");
+        writer
+            .append_now(
+                SegmentId::new(1),
+                0,
+                ManifestRecordPayload::CompressionDone {
+                    compressed_bytes: 256,
+                    dictionary_id: 0,
+                },
+            )
+            .expect("append record");
+        writer.commit().expect("commit record");
+        drop(writer);
+
+        let chunk_dir = layout
+            .manifest_dir()
+            .join(format!("{id:020}", id = instance_id.get()));
+        let chunk_path = std::fs::read_dir(&chunk_dir)
+            .expect("read manifest dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("mlog"))
+            .expect("manifest chunk");
+
+        let mut header_buf = [0u8; CHUNK_HEADER_LEN];
+        let mut header_file = File::open(&chunk_path).expect("open chunk");
+        header_file
+            .read_exact(&mut header_buf)
+            .expect("read chunk header");
+        let header = ChunkHeader::read_from(&header_buf).expect("decode header");
+        drop(header_file);
+
+        let mut corrupt = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&chunk_path)
+            .expect("open chunk for corruption");
+        let seek_pos = (header.committed_len as u64).saturating_sub(1);
+        corrupt
+            .seek(SeekFrom::Start(seek_pos))
+            .expect("seek to tail");
+        let mut byte = [0u8];
+        corrupt.read_exact(&mut byte).expect("read tail byte");
+        byte[0] ^= 0xFF;
+        corrupt
+            .seek(SeekFrom::Start(seek_pos))
+            .expect("seek to tail for write");
+        corrupt.write_all(&byte).expect("write corrupt byte");
+        corrupt.sync_data().expect("sync corrupt chunk");
+        drop(corrupt);
+
+        let metrics = ManifestReplayMetrics::new();
+        let result = Tier1InstanceState::replay_manifest_from_log(&layout, instance_id, &metrics);
+        assert!(matches!(result, Err(AofError::Corruption(_))));
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.chunk_count, 1);
+        assert_eq!(snapshot.corruption_events, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_log_only_replay_bootstrap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = build_layout(&dir);
+        let instance_id = InstanceId::new(42);
+
+        let mut config = Tier1Config::new(10 * 1024 * 1024)
+            .with_worker_threads(1)
+            .with_manifest_log_enabled(true)
+            .with_manifest_log_only(true);
+        config.manifest_log.chunk_capacity_bytes = 128 * 1024;
+
+        let (entries, dangling_bytes) =
+            seed_manifest_log(&layout, instance_id, &config.manifest_log);
+        let expected_entry = entries[0].clone();
+
+        let tier1 = Tier1Cache::new(tokio::runtime::Handle::current(), config.clone())
+            .expect("tier1 cache");
+        let instance = tier1
+            .register_instance(instance_id, layout.clone())
+            .expect("register instance");
+
+        assert!(
+            !layout.warm_dir().join("manifest.json").exists(),
+            "json manifest should not be written in log-only mode"
+        );
+
+        let restored = instance
+            .manifest_entry(expected_entry.segment_id)
+            .expect("manifest entry")
+            .expect("entry present");
+        assert_eq!(restored.compressed_path, expected_entry.compressed_path);
+        assert_eq!(restored.base_offset, expected_entry.base_offset);
+
+        let metrics = instance
+            .manifest_replay_metrics()
+            .expect("replay metrics snapshot");
+        assert!(metrics.chunk_lag_seconds >= 0.0);
+        assert!(metrics.journal_lag_bytes >= dangling_bytes as u64);
+
+        let chunk_dir = layout
+            .manifest_dir()
+            .join(format!("{id:020}", id = instance_id.get()));
+        let chunk_path = std::fs::read_dir(&chunk_dir)
+            .expect("stream manifest dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("mlog"))
+            .expect("manifest chunk after replay");
+        let mut header_bytes = vec![0u8; CHUNK_HEADER_LEN];
+        let mut chunk_file = File::open(&chunk_path).expect("open chunk");
+        chunk_file
+            .read_exact(&mut header_bytes)
+            .expect("read chunk header");
+        let header = ChunkHeader::read_from(&header_bytes).expect("decode header");
+        let file_len = chunk_file.metadata().expect("chunk metadata").len();
+        assert_eq!(file_len, header.committed_len as u64);
+
+        instance
+            .update_residency(
+                expected_entry.segment_id,
+                Tier1ResidencyState::ResidentInTier0,
+            )
+            .expect("update residency");
+        let hydrated = instance
+            .manifest_entry(expected_entry.segment_id)
+            .expect("manifest entry")
+            .expect("entry present");
+        assert!(matches!(
+            hydrated.residency,
+            Tier1ResidencyState::ResidentInTier0
+        ));
+
+        let tier2_meta = Tier2Metadata::new(
+            "tier2/tests/object".to_string(),
+            Some("etag-123".to_string()),
+            hydrated.original_bytes,
+        );
+        tier1.handle_tier2_events(vec![Tier2Event::UploadCompleted(Tier2UploadComplete {
+            instance_id,
+            segment_id: hydrated.segment_id,
+            metadata: tier2_meta.clone(),
+            base_offset: hydrated.base_offset,
+            base_record_count: hydrated.base_record_count,
+            checksum: hydrated.checksum,
+        })]);
+
+        let promoted = instance
+            .manifest_entry(hydrated.segment_id)
+            .expect("manifest entry")
+            .expect("entry present");
+        assert!(matches!(
+            promoted.residency,
+            Tier1ResidencyState::UploadedToTier2
+        ));
+        let tier2 = promoted.tier2.expect("tier2 metadata");
+        assert_eq!(tier2.object_key, tier2_meta.object_key);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn compression_pipeline_persists_manifest() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1285,6 +1885,119 @@ mod tests {
 
         let warm_file = layout.warm_dir().join(&entry.compressed_path);
         assert!(warm_file.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_log_disabled_is_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = build_layout(&dir);
+        let tier0 = Tier0Cache::new(Tier0CacheConfig::new(1024 * 1024, 1024 * 1024));
+        let tier0_instance = tier0.register_instance("disabled", None);
+        let config = Tier1Config::new(10 * 1024 * 1024)
+            .with_worker_threads(1)
+            .with_manifest_log_enabled(false);
+        let tier1 =
+            Tier1Cache::new(tokio::runtime::Handle::current(), config).expect("tier1 cache");
+        let tier1_instance = tier1
+            .register_instance(tier0_instance.instance_id(), layout.clone())
+            .expect("register tier1 instance");
+
+        let segment = create_sealed_segment(&layout, 11, b"disabled");
+        tier1_instance
+            .schedule_compression(segment.clone())
+            .expect("schedule compression");
+
+        wait_for(|| {
+            tier1
+                .manifest_snapshot(tier0_instance.instance_id())
+                .map(|entries| entries.len() == 1)
+                .unwrap_or(false)
+        })
+        .await;
+
+        drop(segment);
+
+        let reader = ManifestLogReader::open(
+            layout.manifest_dir().to_path_buf(),
+            tier0_instance.instance_id().get(),
+        )
+        .expect("open manifest log");
+        let records = reader
+            .iter()
+            .collect::<AofResult<Vec<_>>>()
+            .expect("collect manifest records");
+        assert!(records.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_log_records_compression_done() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = build_layout(&dir);
+        let tier0 = Tier0Cache::new(Tier0CacheConfig::new(1024 * 1024, 1024 * 1024));
+        let tier0_instance = tier0.register_instance("enabled", None);
+        let config = Tier1Config::new(10 * 1024 * 1024)
+            .with_worker_threads(1)
+            .with_manifest_log_enabled(true);
+        let tier1 =
+            Tier1Cache::new(tokio::runtime::Handle::current(), config).expect("tier1 cache");
+        let tier1_instance = tier1
+            .register_instance(tier0_instance.instance_id(), layout.clone())
+            .expect("register tier1 instance");
+
+        let segment = create_sealed_segment(&layout, 12, b"enabled");
+        let segment_id = segment.id();
+        let base_offset = segment.base_offset();
+        tier1_instance
+            .schedule_compression(segment.clone())
+            .expect("schedule compression");
+
+        wait_for(|| {
+            tier1
+                .manifest_snapshot(tier0_instance.instance_id())
+                .ok()
+                .and_then(|entries| {
+                    entries
+                        .into_iter()
+                        .find(|entry| entry.segment_id == segment_id)
+                })
+                .is_some()
+        })
+        .await;
+
+        let compressed_bytes_expect = tier1
+            .manifest_snapshot(tier0_instance.instance_id())
+            .expect("manifest snapshot")
+            .into_iter()
+            .find(|entry| entry.segment_id == segment_id)
+            .map(|entry| entry.compressed_bytes)
+            .expect("entry present");
+
+        drop(segment);
+
+        let reader = ManifestLogReader::open(
+            layout.manifest_dir().to_path_buf(),
+            tier0_instance.instance_id().get(),
+        )
+        .expect("open manifest log");
+        let records = reader
+            .iter()
+            .collect::<AofResult<Vec<_>>>()
+            .expect("collect manifest records");
+        assert!(
+            !records.is_empty(),
+            "expected manifest records to be written"
+        );
+        let compression_done = records
+            .iter()
+            .find_map(|record| match &record.payload {
+                ManifestRecordPayload::CompressionDone {
+                    compressed_bytes, ..
+                } => Some((record.logical_offset, *compressed_bytes)),
+                _ => None,
+            })
+            .expect("compression done record present");
+        assert_eq!(compression_done.0, base_offset);
+        assert_eq!(compression_done.1, compressed_bytes_expect);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -57,7 +57,7 @@ fn main() {
         // Keep layout stable and avoid deriving Copy on opaque types
         .layout_tests(false)
         .derive_default(true)
-        .generate_comments(true)
+        .generate_comments(false)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
     // Apply default allowlist for BOP API prefixes

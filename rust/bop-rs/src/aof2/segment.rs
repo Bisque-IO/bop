@@ -385,6 +385,7 @@ impl Segment {
             is_full,
         })
     }
+    
     pub fn seal(&self, sealed_at: i64) -> AofResult<SegmentFooter> {
         if self
             .sealed
@@ -554,6 +555,13 @@ impl Segment {
                 Err(observed) => current = observed,
             }
         }
+    }
+
+    pub fn restore_durability(&self, requested_bytes: u32, durable_bytes: u32) {
+        let capped_requested = requested_bytes.min(self.usable_limit());
+        let capped_durable = durable_bytes.min(capped_requested);
+        self.flush_state.restore(capped_requested, capped_durable);
+        self.durable_size.store(capped_durable, Ordering::Release);
     }
 
     pub fn segment_offset_for(&self, record_id: RecordId) -> Option<u32> {
@@ -1273,7 +1281,7 @@ mod tests {
 
     proptest! {
         #[test]
-    fn record_end_offset_matches_payload_lengths(payloads in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..64), 1..16)) {
+        fn record_end_offset_matches_payload_lengths(payloads in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..64), 1..16)) {
             let total: usize = payloads.iter().map(|p| p.len()).sum();
             prop_assume!(total as u32 <= 1024);
 
@@ -1436,6 +1444,7 @@ mod tests {
             prop_assert!(SegmentFooter::decode(&buf).is_none());
         }
     }
+
     fn scan_tail_without_footer() {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("segment.seg");

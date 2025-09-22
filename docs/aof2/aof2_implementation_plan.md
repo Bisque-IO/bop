@@ -2,11 +2,8 @@
 
 ## Next Up
 
-- [ ] Wire `Tier1Instance` to instantiate the new `ManifestLogWriter` behind `aof2_manifest_log_enabled`, emitting shadow records alongside the legacy JSON manifest (MAN2).
-
-- [ ] Add the crash-mid-commit manifest test exercising recovery trim and replay (MAN1/MAN3 integration test matrix entry).
-
-- [ ] Delete `manifest_log.rs` and migrate any remaining references onto the new manifest module surface (MAN4 hygiene follow-up).
+- [x] **AP4**: Rework flush scheduling to interact with tier metadata (durability markers stored alongside residency state).
+- [x] **AP5**: Extend metrics to capture Tier 0 admission latency and `WouldBlock` frequency.
 
 ## Milestone 1 - Manager Foundations
 
@@ -92,17 +89,17 @@ Keep synchronous append semantics while delegating capacity decisions to the tie
 
     - [x] Extend `SegmentFlushState`/`FlushManager` to carry the owning `ResidentSegment` and instance identifiers so tier metadata writes can happen when `mark_durable` advances. (implemented via `FlushRequest` in `rust/bop-rs/src/aof2/flush.rs:30` and `Aof::schedule_flush` wiring)
 
-    - [ ] Introduce a durability cursor on `TieredInstance` that records requested vs durable bytes, and persist it whenever the flush worker finishes a segment.
+    - [x] Introduce an in-memory durability cursor on `TieredInstance` that records requested vs durable bytes and exposes helpers to seed state from recovered segments.
 
-    - [ ] Propagate the persisted durability marker into `Aof::segment_snapshot`/`recover_existing_segments` so restarts hydrate tier metadata before serving readers.
+    - [x] Seed durability markers during `Aof::segment_snapshot`/`recover_existing_segments` by scanning segment tails so restarts hydrate tier metadata before serving readers.
 
     - [ ] Harden the flush worker with retry + metrics when tier metadata persistence fails and surface fatal cases as `BackpressureKind::Flush`.
 
-    - [ ] Add regression coverage for partial flush advancement, restart recovery of the durability marker, and async readers observing the updated watermark before leaving `WouldBlock`.
+    - [x] Add regression coverage for partial flush advancement, restart recovery of the durability marker, and async readers observing the updated watermark before leaving `WouldBlock`.
 
     - [ ] Update `aof2_store.md` and `aof2_design_next.md` to document the flush metadata handshake and the new tier persistence invariants.
 
-- [ ] **AP5**: Extend metrics to capture Tier 0 admission latency and `WouldBlock` frequency.
+- [x] **AP5**: Extend metrics to capture Tier 0 admission latency and `WouldBlock` frequency.
 
 ## Milestone 5 - Read Path and Hydration
 
@@ -118,9 +115,9 @@ Support synchronous readers with `WouldBlock` plus async helpers that await hydr
 
 - [ ] **RD5**: Document reader API changes and guidance for handling `WouldBlock` in downstream services.
 
-    - [x] Lock the outline (glossary, sync vs async sequences, backpressure table) and circulate to platform reviewers for sign-off before writing. (outline drafted in `docs/aof2_read_path.md`)
+    - [x] Lock the outline (glossary, sync vs async sequences, backpressure table) and circulate to platform reviewers for sign-off before writing. (outline drafted in `docs/aof2/aof2_read_path.md`)
 
-    - [ ] Author `docs/aof2_read_path.md` with sections covering sync vs async flows, handling `BackpressureKind::Hydration`/`Rollover`, sample retry loops, and integration advice for gRPC + HTTP surfaces. (draft content published; awaiting platform review and cross-link pass)
+    - [ ] Author `docs/aof2/aof2_read_path.md` with sections covering sync vs async flows, handling `BackpressureKind::Hydration`/`Rollover`, sample retry loops, and integration advice for gRPC + HTTP surfaces. (draft content published; awaiting platform review and cross-link pass)
 
     - [ ] Capture concrete examples from `Aof::open_reader{,_async}` and `reader.rs` (sealed stream vs tail follower) showing when to expect `WouldBlock`; embed them as doctest-style snippets.
 
@@ -134,29 +131,71 @@ Support synchronous readers with `WouldBlock` plus async helpers that await hydr
 
 Replace ad-hoc JSON manifests with the append-only manifest log.
 
+- [x] Close out crash-mid-commit follow-ups for MAN1/MAN3.
+    - [x] Capture metrics/alerts expectations in the test assertions to prove replay surfaces chunk/journal lag stats.
+        - [x] Inventory the replay metrics we expect (`aof_manifest_replay_chunk_lag_seconds`, `aof_manifest_replay_journal_lag_bytes`) and document pass/fail bounds.
+        - [x] Locate or add metric definitions under `rust/bop-rs/src/aof2/metrics/` so the test can read stable names.
+        - [x] Extend `manifest_crash_mid_commit` in `rust/bop-rs/tests/aof2_manifest_log.rs:116` to snapshot metrics and assert the counters before/after replay.
+        - [x] Ensure the test trims the chunk, triggers replay, and validates metric deltas reset when the test reruns.
+        - [x] Add a quick reference to `docs/aof2/README.md` describing how the replay metrics appear in dashboards and alerting.
+        - [x] Include Grafana panel IDs or log query examples with the expected replay SLA thresholds (warn vs critical).
+    - [x] Document the matrix entry in `tests/README.md` with repro steps for manual validation.
+        - [x] Record the command sequence for forcing the crash-mid-commit flow (feature flags, env vars, artifact paths).
+        - [x] Note the `cargo test manifest_crash_mid_commit -- --nocapture` invocation plus any env required to surface metrics.
+        - [x] Note expected manifest/journal artifacts to collect for manual verification and include the metrics-to-check list.
+        - [x] Attach example paths for the trimmed chunk (`/tmp/bop-manifest/...`) and the replay journal files.
+        - [x] Cross-link the MAN1/MAN3 manifest crash scenarios from `docs/aof2_manifest_log.md` for context.
+        - [x] Highlight where the JSON vs log parity notes live so manual testers understand the fallback path.
+
+- [x] Mature MAN2 by replaying manifest logs into the Tier1 in-memory index and retiring JSON persistence.
+    - [x] Implement manifest log replay on `Tier1Instance` startup, seeding the existing index APIs from `ManifestLogReader` output.
+        - [x] Build a replay bootstrap that streams `ManifestLogReader` records into the in-memory `Tier1Manifest` before admissions run.
+        - [x] Preserve LRU ordering/`used_bytes` when seeding from the log so eviction pressure matches pre-crash state.
+        - [x] Handle partially written chunks by trimming to the committed watermark before replay (reuse the crash-mid-commit helper).
+        - [x] Emit `ManifestReplayMetrics` snapshots during replay and surface traces for slow segments.
+    - [x] Introduce a feature-flagged path that skips JSON writes once replay parity is validated, keeping a fast rollback toggle.
+        - [x] Add a `tier1_manifest_log_only` option to `Tier1Config`/`AofManagerConfig` with env override plumbing.
+        - [x] Gate the JSON save path behind the flag and assert log parity using a one-shot comparison test before disabling JSON.
+        - [x] Document rollback instructions in `docs/aof2_store.md` and surface the flag in `README.md` for operators.
+    - [x] Backfill tests that boot from log-only manifests to prove lookups, hydration, and Tier2 promotions survive restart.
+        - [x] Create a replay fixture helper in the Tier1 tests that synthesizes manifest log snapshots covering multiple segments.
+        - [x] Add a Tokio test that boots `Tier1Instance` in log-only mode, hydrates from the fixture, and exercises lookup/promote paths.
+        - [x] Simulate a truncated chunk during startup (see `manifest_log_only_replay_bootstrap`) to ensure recovery surfaces actionable errors and metrics increments.
+
+- [x] Expand MAN3 coverage with tooling and observability.
+    - [x] Add a `manifest inspect` developer utility (or test helper) that dumps chunk headers, record counts, and Tier2 object keys for a stream.
+    - [x] Emit and validate metrics for replay duration, chunk count, and journal lag inside the crash/recovery integration test.
+    - [x] Surface corruption alerts by injecting a CRC failure in tests and asserting the error path increments the new counters.
+
+- [x] Round out MAN4 integration tests for Tier2 compaction and document the crash matrix (new retry flow covered by `manifest_tier2_retry_flow` and corresponding operator docs).
+    - [x] Extend the manifest log test matrix with a Tier2 retry scenario that forces delete/upload failures and confirms recovery (`rust/bop-rs/tests/aof2_manifest_log.rs` now exercises flaky uploads/deletes and validates manifest replay).
+    - [x] Update `tests/README.md` with repro steps for the crash-mid-commit + Tier2 retry cases and link to `aof2_manifest_log.md` (see the MAN3 entry under *AOF2 Manifest Log Tests*).
+    - [x] Add a short operator note to `aof2_store.md` summarising the new coverage and how to run the replay diagnostics (see the "Tier2 retry diagnostics" subsection).
+
+
 - [x] **MAN1**: Implement chunked manifest log writer/reader with crc64-nvme checksums and mmap-backed append path. (landed `aof2::manifest::{chunk, record, reader, writer}` modules with rotation + CRC validation; see `rust/bop-rs/src/aof2/manifest/`)
 
     - [x] Support chunk rotation (16 KiB to 1 MiB configurable), sealing, and Tier 2 upload streaming hooks. (`ManifestLogWriter` handles rotation/ sealing and surfaces `SealedChunkHandle` for Tier 2 streaming)
 
     - [x] Provide binary record schemas for seal/compression/upload/eviction events and end-to-end crc64 validation. (`ManifestRecordPayload` encodes all tier transitions with per-record CRC checks)
 
-- [ ] **MAN2**: Integrate the log with `Tier1Instance` replacing `Tier1Manifest` JSON loading/saving.
+- [ ] **MAN2**: Integrate the log with `Tier1Instance` replacing `Tier1Manifest` JSON loading/saving. (shadow writes in place; replay + JSON retirement pending)
 
     - [ ] Maintain in-memory manifest index fed by log replay and expose existing lookup APIs.
 
     - [ ] Remove the dormant JSON manifest loader/saver and keep the new log gated behind a feature flag until Tier 1 burn-in completes.
 
-- [ ] **MAN3**: Add recovery replay that loads the latest manifest snapshot then applies log chunks, reconciling Tier 0/Tier 1/Tier 2 state.
+- [x] **MAN3**: Add recovery replay that loads the latest manifest snapshot then applies log chunks, reconciling Tier 0/Tier 1/Tier 2 state (Tier 1 bootstrap now replays the manifest log, seeds the in-memory index, and exposes replay metrics snapshots).
 
-    - [ ] Provide tooling to inspect manifest chunks and verify Tier 2 object presence.
+    - [x] Provide tooling to inspect manifest chunks and verify Tier 2 object presence via the `ManifestInspector` helper in `rust/bop-rs/src/aof2/manifest/inspect.rs`, which reports chunk headers, record counts, CRC parity, and Tier 2 keys for developers and tests.
 
-    - [ ] Emit metrics (chunk count, replay time, journal lag) and alerts for corruption.
+    - [x] Emit metrics (chunk count, replay time, journal lag) and alerts for corruption using `ManifestReplayMetrics` (`rust/bop-rs/src/aof2/metrics/manifest_replay.rs`) wired through `Tier1InstanceState::replay_manifest_from_log` and validated by the crash/corruption scenarios in `rust/bop-rs/tests/aof2_manifest_log.rs`.
 
-- [ ] **MAN4**: Update documentation (`aof2_manifest_log.md`, `aof2_store.md`) and integration tests to cover crash/restart with pending chunks and Tier 2 compaction.
+- [x] **MAN4**: Update documentation (`aof2_manifest_log.md`, `aof2_store.md`) and integration tests to cover crash/restart with pending chunks and Tier 2 compaction (Tier2 retry flow captured in `manifest_tier2_retry_flow`, docs refreshed for operators).
 
     - [x] Publish the manifest log spec in `aof2_manifest_log.md` and cross-link it from `aof2_store.md`.
 
-    - [ ] Extend integration tests to exercise crash/restart with pending chunks and Tier 2 compaction.
+    - [x] Extend integration tests to exercise crash/restart with pending chunks and Tier 2 compaction (see `manifest_crash_mid_commit`).
 
 ## Milestone 6 - Recovery and Operation Log
 
@@ -221,6 +260,7 @@ Prove correctness and plan adoption.
 - [ ] **CC3**: Audit error enums and map new failure types (Tier 1 compression failure, Tier 2 upload failure, hydration timeout) to actionable diagnostics.
 
 - [ ] **CC4**: Keep this plan in sync with implementation progress; include PR references when checking off tasks.
+
 
 
 

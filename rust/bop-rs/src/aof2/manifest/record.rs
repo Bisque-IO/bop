@@ -27,6 +27,7 @@ pub enum RecordType {
     LocalEvicted = 13,
     SnapshotMarker = 14,
     CustomEvent = 15,
+    Tier1Snapshot = 16,
 }
 
 impl TryFrom<u16> for RecordType {
@@ -50,6 +51,7 @@ impl TryFrom<u16> for RecordType {
             13 => RecordType::LocalEvicted,
             14 => RecordType::SnapshotMarker,
             15 => RecordType::CustomEvent,
+            16 => RecordType::Tier1Snapshot,
             _ => {
                 return Err(AofError::Corruption(format!(
                     "unknown manifest record type: {value}"
@@ -117,6 +119,9 @@ pub enum ManifestRecordPayload {
         schema_id: u32,
         blob: Vec<u8>,
     },
+    Tier1Snapshot {
+        json: Vec<u8>,
+    },
 }
 
 impl ManifestRecordPayload {
@@ -138,6 +143,7 @@ impl ManifestRecordPayload {
             ManifestRecordPayload::LocalEvicted { .. } => RecordType::LocalEvicted,
             ManifestRecordPayload::SnapshotMarker { .. } => RecordType::SnapshotMarker,
             ManifestRecordPayload::CustomEvent { .. } => RecordType::CustomEvent,
+            ManifestRecordPayload::Tier1Snapshot { .. } => RecordType::Tier1Snapshot,
         }
     }
 
@@ -214,6 +220,11 @@ impl ManifestRecordPayload {
                 ensure_short_len(blob.len(), "custom event blob")?;
                 buf.write_u16::<LittleEndian>(blob.len() as u16)?;
                 buf.extend_from_slice(blob);
+            }
+            ManifestRecordPayload::Tier1Snapshot { json } => {
+                ensure_long_len(json.len(), "tier1 snapshot")?;
+                buf.write_u32::<LittleEndian>(json.len() as u32)?;
+                buf.extend_from_slice(json);
             }
         }
         Ok(buf)
@@ -322,6 +333,13 @@ impl ManifestRecordPayload {
                 cursor.read_exact(&mut blob)?;
                 ManifestRecordPayload::CustomEvent { schema_id, blob }
             }
+            RecordType::Tier1Snapshot => {
+                let len = cursor.read_u32::<LittleEndian>()? as usize;
+                ensure_remaining(payload, cursor.position(), len)?;
+                let mut json = vec![0u8; len];
+                cursor.read_exact(&mut json)?;
+                ManifestRecordPayload::Tier1Snapshot { json }
+            }
         };
 
         ensure_consumed(payload, cursor.position())?;
@@ -422,18 +440,27 @@ impl ManifestRecordHeader {
     }
 }
 
-fn ensure_short_len(len: usize, label: &str) -> AofResult<u16> {
+fn ensure_long_len(len: usize, label: &str) -> AofResult<()> {
+    if len > u32::MAX as usize {
+        return Err(AofError::invalid_config(format!(
+            "{label} length exceeds u32::MAX ({len})"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_short_len(len: usize, label: &str) -> AofResult<()> {
     if len > u16::MAX as usize {
         return Err(AofError::invalid_config(format!(
             "{label} length exceeds u16::MAX ({len})"
         )));
     }
-    Ok(len as u16)
+    Ok(())
 }
 
 fn write_short_blob(buf: &mut Vec<u8>, bytes: &[u8]) -> AofResult<()> {
-    let len = ensure_short_len(bytes.len(), "blob")?;
-    buf.write_u16::<LittleEndian>(len)?;
+    ensure_short_len(bytes.len(), "blob")?;
+    buf.write_u16::<LittleEndian>(bytes.len() as u16)?;
     buf.extend_from_slice(bytes);
     Ok(())
 }

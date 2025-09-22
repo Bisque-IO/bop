@@ -8,6 +8,7 @@ use super::config::SegmentId;
 use super::error::{AofError, AofResult};
 use super::segment::Segment;
 use super::{InstanceId, ResidentSegment, TieredRuntime};
+use crate::aof2::store::DurabilityCursor;
 use crossbeam::channel::{Receiver, Sender, TrySendError, unbounded};
 use tokio::sync::Notify;
 use tracing::{debug, warn};
@@ -20,19 +21,29 @@ pub enum FlushCommand {
 #[derive(Clone)]
 pub struct FlushRequest {
     instance_id: InstanceId,
+    durability: Arc<DurabilityCursor>,
     resident: ResidentSegment,
 }
 
 impl FlushRequest {
-    pub fn new(instance_id: InstanceId, resident: ResidentSegment) -> Self {
+    pub fn new(
+        instance_id: InstanceId,
+        durability: Arc<DurabilityCursor>,
+        resident: ResidentSegment,
+    ) -> Self {
         Self {
             instance_id,
+            durability,
             resident,
         }
     }
 
     pub fn instance_id(&self) -> InstanceId {
         self.instance_id
+    }
+
+    pub fn durability(&self) -> Arc<DurabilityCursor> {
+        self.durability.clone()
     }
 
     pub fn resident(&self) -> &ResidentSegment {
@@ -124,6 +135,15 @@ impl SegmentFlushState {
 
     pub fn finish_flush(&self) {
         self.in_flight.store(false, Ordering::Release);
+    }
+
+    pub fn restore(&self, requested: u32, durable: u32) {
+        let capped = durable.min(requested);
+        self.requested_bytes.store(requested, Ordering::Release);
+        self.durable_bytes.store(capped, Ordering::Release);
+        self.in_flight.store(false, Ordering::Release);
+        self.last_flush_millis
+            .store(now_millis(), Ordering::Release);
     }
 
     pub fn last_flush_millis(&self) -> u64 {
@@ -390,12 +410,16 @@ impl FlushManager {
             return Ok(());
         }
 
+        let target_bytes = flush_state.requested_bytes();
         let result = flush_with_retry(segment, metrics);
+        let durability = request.durability();
         let mut backlog_snapshot = total_unflushed.load(Ordering::Acquire);
         let outcome = match result {
             Ok(()) => {
-                let logical = segment.current_size();
-                let delta = segment.mark_durable(logical);
+                let requested_after = flush_state.requested_bytes();
+                let durable_bytes = target_bytes.min(requested_after);
+                durability.record_flush(segment.id(), requested_after, durable_bytes);
+                let delta = segment.mark_durable(durable_bytes);
                 backlog_snapshot = if delta > 0 {
                     total_unflushed
                         .fetch_sub(delta as u64, Ordering::AcqRel)

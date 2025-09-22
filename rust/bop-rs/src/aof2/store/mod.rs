@@ -1,5 +1,6 @@
 // Tiered segment store modules
 
+mod durability;
 pub mod notifiers;
 pub mod tier0;
 pub mod tier1;
@@ -19,6 +20,7 @@ pub use tier1::{
     Tier1MetricsSnapshot, Tier1ResidencyState,
 };
 
+pub use durability::{DurabilityCursor, DurabilityEntry};
 pub use notifiers::{RolloverSignal, TieredCoordinatorNotifiers};
 pub use tier2::{
     Tier2Config, Tier2DeleteRequest, Tier2Event, Tier2FetchRequest, Tier2Handle, Tier2Manager,
@@ -30,6 +32,7 @@ use std::ffi::OsStr;
 use std::fs::read_dir;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::{Notify, oneshot};
@@ -38,6 +41,7 @@ use tracing::{trace, warn};
 use crate::aof2::config::SegmentId;
 use crate::aof2::error::{AofError, AofResult, BackpressureKind};
 use crate::aof2::fs::{Layout, SEGMENT_FILE_EXTENSION, SegmentFileName};
+use crate::aof2::metrics::admission::{AdmissionMetrics, AdmissionMetricsSnapshot};
 use crate::aof2::segment::Segment;
 
 #[derive(Clone)]
@@ -98,6 +102,7 @@ struct TieredInstanceInner {
     tier0: Tier0Instance,
     tier1: Tier1Instance,
     tier2: Option<Tier2Handle>,
+    durability: Arc<DurabilityCursor>,
     waiters: Mutex<HashMap<SegmentId, Vec<Arc<Notify>>>>,
 }
 
@@ -108,15 +113,18 @@ impl TieredInstanceInner {
         tier0: Tier0Instance,
         tier1: Tier1Instance,
         tier2: Option<Tier2Handle>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+    ) -> AofResult<Arc<Self>> {
+        let instance_id = tier0.instance_id();
+        let durability = Arc::new(DurabilityCursor::new(instance_id));
+        Ok(Arc::new(Self {
             coordinator,
             layout,
             tier0,
             tier1,
             tier2,
+            durability,
             waiters: Mutex::new(HashMap::new()),
-        })
+        }))
     }
 
     fn instance_id(&self) -> InstanceId {
@@ -129,6 +137,8 @@ impl TieredInstanceInner {
         residency: SegmentResidency,
     ) -> AofResult<ResidentSegment> {
         let (resident, evictions) = self.tier0.admit_segment(segment.clone(), residency);
+        self.durability
+            .record_request(segment.id(), segment.current_size());
         self.tier1
             .update_residency(segment.id(), Tier1ResidencyState::ResidentInTier0)?;
         self.handle_tier0_evictions(&evictions);
@@ -195,6 +205,8 @@ impl TieredInstanceInner {
             Segment::truncate_segment(&path, &mut scan)?;
         }
         let segment = Arc::new(Segment::from_recovered(&path, &scan)?);
+        self.durability
+            .seed_entry(segment.id(), segment.current_size(), segment.durable_size());
         let residency_kind = if segment.is_sealed() {
             ResidencyKind::Sealed
         } else {
@@ -272,6 +284,8 @@ impl TieredInstanceInner {
             Segment::truncate_segment(&outcome.path, &mut scan)?;
         }
         let segment = Arc::new(Segment::from_recovered(&outcome.path, &scan)?);
+        self.durability
+            .seed_entry(segment.id(), segment.current_size(), segment.durable_size());
         let residency = SegmentResidency::new(segment.current_size() as u64, ResidencyKind::Sealed);
         let resident = self.admit_segment(segment, residency)?;
         self.notify_waiters(outcome.segment_id);
@@ -305,6 +319,11 @@ impl TieredInstanceInner {
                 Segment::truncate_segment(&path, &mut scan)?;
             }
             let segment = Arc::new(Segment::from_recovered(&path, &scan)?);
+            self.durability.seed_entry(
+                segment.id(),
+                segment.current_size(),
+                segment.durable_size(),
+            );
             let residency_kind = if segment.is_sealed() {
                 ResidencyKind::Sealed
             } else {
@@ -338,6 +357,14 @@ impl TieredInstanceInner {
             warn!("failed to admit hydrated segment: {err}");
         }
     }
+
+    fn record_admission_latency(&self, latency: Duration) {
+        self.coordinator.record_admission_latency(latency);
+    }
+
+    fn record_would_block(&self, kind: BackpressureKind) {
+        self.coordinator.record_would_block(kind);
+    }
 }
 
 impl Drop for TieredInstanceInner {
@@ -366,6 +393,40 @@ impl TieredInstance {
 
     pub fn admission_guard(&self, resident: &ResidentSegment) -> AdmissionGuard {
         self.inner.tier0.admission_guard(resident.clone())
+    }
+
+    pub(crate) fn durability_handle(&self) -> Arc<DurabilityCursor> {
+        self.inner.durability.clone()
+    }
+
+    pub(crate) fn record_durability_request(&self, segment_id: SegmentId, requested_bytes: u32) {
+        self.inner
+            .durability
+            .record_request(segment_id, requested_bytes);
+    }
+
+    pub(crate) fn record_durability_flush(
+        &self,
+        segment_id: SegmentId,
+        requested_bytes: u32,
+        durable_bytes: u32,
+    ) {
+        self.inner
+            .durability
+            .record_flush(segment_id, requested_bytes, durable_bytes);
+    }
+
+    pub(crate) fn record_admission_latency(&self, latency: Duration) {
+        self.inner.record_admission_latency(latency);
+    }
+
+    pub(crate) fn record_would_block(&self, kind: BackpressureKind) {
+        self.inner.record_would_block(kind);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn durability_snapshot(&self) -> Vec<(SegmentId, DurabilityEntry)> {
+        self.inner.durability.snapshot()
     }
 
     pub fn recover_segments(&self) -> AofResult<Vec<RecoveredSegment>> {
@@ -454,6 +515,7 @@ pub struct TieredCoordinator {
     hydration: Arc<Notify>,
     instances: Mutex<HashMap<InstanceId, Weak<TieredInstanceInner>>>,
     commands: Mutex<VecDeque<CoordinatorCommand>>,
+    admission_metrics: AdmissionMetrics,
     notifiers: Arc<TieredCoordinatorNotifiers>,
 }
 
@@ -471,6 +533,7 @@ impl TieredCoordinator {
             hydration: Arc::new(Notify::new()),
             instances: Mutex::new(HashMap::new()),
             commands: Mutex::new(VecDeque::new()),
+            admission_metrics: AdmissionMetrics::default(),
             notifiers,
         }
     }
@@ -489,6 +552,18 @@ impl TieredCoordinator {
 
     pub fn notifiers(&self) -> Arc<TieredCoordinatorNotifiers> {
         self.notifiers.clone()
+    }
+
+    pub fn admission_metrics(&self) -> AdmissionMetricsSnapshot {
+        self.admission_metrics.snapshot()
+    }
+
+    pub fn record_admission_latency(&self, latency: Duration) {
+        self.admission_metrics.record_latency(latency);
+    }
+
+    pub fn record_would_block(&self, kind: BackpressureKind) {
+        self.admission_metrics.incr_would_block(kind);
     }
 
     pub fn activity_signal(&self) -> Arc<Notify> {
@@ -540,7 +615,7 @@ impl TieredCoordinator {
             tier0_instance,
             tier1_instance,
             tier2_handle,
-        );
+        )?;
         self.notifiers.register_instance(inner.instance_id());
         self.instances
             .lock()

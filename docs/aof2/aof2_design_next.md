@@ -192,8 +192,8 @@ The explicit mapping documents the steady-state expectations for reviewers: admi
 - Retention hooks ensure archival moves happen off the hot path so they do not interfere with the writer.
 
 ## 12. Observability and Telemetry
-- Counters: bytes appended, durable bytes, record count, flush operations, segment rollovers, recovery duration.
-- Histograms: append latency, flush latency, bytes per segment.
+- Counters: bytes appended, durable bytes, record count, flush operations, segment rollovers, recovery duration, and `would_block_*` frequency per `BackpressureKind`.
+- Histograms: append latency, flush latency, bytes per segment, and admission latency (exposed via `AdmissionMetrics`).
 - Structured events: checksum mismatch, recovery truncation, footer write failure.
 - Integrate with `tracing` to surround append, flush, and seal operations.
 
@@ -232,8 +232,8 @@ The explicit mapping documents the steady-state expectations for reviewers: admi
    - Walk headers plus the tail segment to rebuild cumulative counters and truncate partial records.
 7. **Reader API** *(pending)*  
    - Implement synchronous/asynchronous readers that derive offsets from `RecordId` and follow the sealing notifications.
-8. **Flush coordination** *(pending)*  
-   - Background flush manager with single in-flight semantics per segment and durability tracking hooked into `FlushConfig`.
+8. **Flush coordination** *(in progress)*  
+   - Background flush manager with single in-flight semantics per segment, durability tracking hooked into `FlushConfig`, and an in-memory durability cursor seeded from recovered segment scans so restart observes the correct watermark without writing metadata to disk.
 9. **Retention and archival hooks** *(pending)*  
    - Policies for migrating sealed segments into `archive/`, pruning old data, and (eventually) packaging cold segments.
 10. **Observability and tooling** *(pending)*  

@@ -13,6 +13,7 @@ pub struct Layout {
     root: PathBuf,
     segments: PathBuf,
     warm: PathBuf,
+    manifest: PathBuf,
     archive: PathBuf,
 }
 
@@ -91,11 +92,13 @@ impl Layout {
         let root = config.root_dir.clone();
         let segments = root.join("segments");
         let warm = root.join("warm");
+        let manifest = root.join("manifest");
         let archive = root.join("archive");
         Self {
             root,
             segments,
             warm,
+            manifest,
             archive,
         }
     }
@@ -104,6 +107,7 @@ impl Layout {
         self.create_dir(&self.root)?;
         self.create_dir(&self.segments)?;
         self.create_dir(&self.warm)?;
+        self.create_dir(&self.manifest)?;
         self.create_dir(&self.archive)?;
         let _ = fsync_dir(&self.root);
         Ok(())
@@ -119,6 +123,10 @@ impl Layout {
 
     pub fn warm_dir(&self) -> &Path {
         &self.warm
+    }
+
+    pub fn manifest_dir(&self) -> &Path {
+        &self.manifest
     }
 
     pub fn archive_dir(&self) -> &Path {
@@ -250,6 +258,13 @@ impl TempFileGuard {
         let parent = dst
             .parent()
             .ok_or_else(|| AofError::invalid_config("destination path missing parent"))?;
+        if dst.exists() {
+            if let Err(err) = fs::remove_file(dst) {
+                if err.kind() != io::ErrorKind::NotFound {
+                    return Err(AofError::from(err));
+                }
+            }
+        }
         match temp.persist(dst) {
             Ok(file) => {
                 file.sync_all().map_err(AofError::from)?;
