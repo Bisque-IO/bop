@@ -1,3 +1,8 @@
+//! Manifest subsystem for per-segment metadata and inspection.
+//!
+//! This module coordinates reading/writing of per-segment manifests and exposes
+//! helpers to inspect and replay metadata for recovery. It is primarily used by
+//! the tier1 cache and not typically required by application code.
 mod chunk;
 mod inspect;
 mod reader;

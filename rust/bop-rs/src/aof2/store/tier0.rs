@@ -1,3 +1,4 @@
+//! Tier0: admission queue and residency tracking for active segments.
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::ops::Deref;

@@ -1,3 +1,4 @@
+//! Fixed-size chunk representation used by the manifest log.
 use byteorder::{ByteOrder, LittleEndian};
 use crc64fast_nvme::Digest;
 

@@ -1,3 +1,10 @@
+//! Segment file layout and mutation APIs.
+//!
+//! `Segment` represents a memory-mapped append-only file with a fixed maximum
+//! size and reserved header/footer regions. Records are appended with a small
+//! header that includes length, checksum and timestamp. Finalization writes a
+//! footer with a checksum over the payloads and transitions the mapping to
+//! read-only.
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -24,12 +31,14 @@ const SEGMENT_MAGIC: u32 = 0x414F_4632; // "AOF2"
 const SEGMENT_VERSION: u16 = 1;
 const SEGMENT_FOOTER_MAGIC: u32 = 0x464F_4F54; // "FOOT"
 
+/// Segment lifecycle status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SegmentStatus {
     Active,
     Finalized,
 }
 
+/// Result of a successful record append.
 #[derive(Debug, Clone, Copy)]
 pub struct SegmentAppendResult {
     pub segment_offset: u32,
@@ -50,6 +59,7 @@ pub(crate) struct SegmentRecordSlice<'a> {
     pub total_len: u32,
 }
 
+/// Decoded header metadata for a segment file.
 #[derive(Debug, Clone)]
 pub struct SegmentHeaderInfo {
     pub segment_index: u32,
@@ -60,6 +70,7 @@ pub struct SegmentHeaderInfo {
     pub base_timestamp: u64,
 }
 
+/// Summary of a scanned segment including last record and checksum.
 #[derive(Debug, Clone)]
 pub struct SegmentScan {
     pub header: SegmentHeaderInfo,
@@ -72,6 +83,7 @@ pub struct SegmentScan {
     pub truncated: bool,
 }
 
+/// Memory-mapped append-only segment with durability tracking.
 pub struct Segment {
     index: u32,
     base_offset: u64,
@@ -94,6 +106,7 @@ pub struct Segment {
 }
 
 impl Segment {
+    /// Creates a new writable segment of at most `max_bytes` at `path`.
     pub fn create_active(
         segment_id: SegmentId,
         base_offset: u64,
@@ -173,6 +186,7 @@ impl Segment {
         self.data.path()
     }
 
+    /// Loads header metadata from an existing segment file.
     pub fn load_header(path: &Path) -> AofResult<SegmentHeaderInfo> {
         let mut buf = [0u8; SEGMENT_HEADER_SIZE as usize];
         let mut file = File::open(path).map_err(AofError::from)?;
@@ -183,6 +197,7 @@ impl Segment {
         Ok(header.into())
     }
 
+    /// Reconstructs a `Segment` from a previously scanned tail.
     pub fn from_recovered(path: &Path, scan: &SegmentScan) -> AofResult<Self> {
         let header = &scan.header;
         if scan.logical_size > header.max_size {
@@ -240,6 +255,7 @@ impl Segment {
         })
     }
 
+    /// Scans an on-disk segment to determine logical size and integrity.
     pub fn scan_tail(path: &Path) -> AofResult<SegmentScan> {
         let file = File::open(path).map_err(AofError::from)?;
         let mmap = unsafe { Mmap::map(&file).map_err(AofError::from)? };
@@ -321,6 +337,7 @@ impl Segment {
         self.max_size - SEGMENT_FOOTER_SIZE
     }
 
+    /// Appends a record payload with a timestamp.
     pub fn append_record(&self, payload: &[u8], timestamp: u64) -> AofResult<SegmentAppendResult> {
         if self.is_sealed() {
             return Err(AofError::InvalidState(
@@ -386,6 +403,7 @@ impl Segment {
         })
     }
     
+    /// Seals the segment, writing a footer and making it read-only.
     pub fn seal(&self, sealed_at: i64) -> AofResult<SegmentFooter> {
         if self
             .sealed
@@ -499,6 +517,7 @@ impl Segment {
         Ok(fold_crc64(digest.sum64()))
     }
 
+    /// Zeroes out trailing bytes and removes the footer from a partially written segment.
     pub fn truncate_segment(path: &Path, scan: &mut SegmentScan) -> AofResult<()> {
         let logical = scan.logical_size as usize;
         let usable_limit = (scan.header.max_size - SEGMENT_FOOTER_SIZE) as usize;
@@ -557,6 +576,7 @@ impl Segment {
         }
     }
 
+    /// Restores the flush cursor after recovery.
     pub fn restore_durability(&self, requested_bytes: u32, durable_bytes: u32) {
         let capped_requested = requested_bytes.min(self.usable_limit());
         let capped_durable = durable_bytes.min(capped_requested);
@@ -577,6 +597,7 @@ impl Segment {
             .store(attempts, Ordering::Release);
     }
 
+    /// Computes the end offset for a record starting at `segment_offset`.
     pub fn record_end_offset(&self, segment_offset: u32) -> AofResult<u32> {
         if segment_offset < SEGMENT_HEADER_SIZE {
             return Err(AofError::CorruptedRecord(

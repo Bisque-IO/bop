@@ -1,7 +1,9 @@
+//! Error and result types for AOF2 operations.
 use std::fmt::{Display, Formatter};
 
 use super::config::{RecordId, SegmentId};
 
+/// Classification of backpressure reasons surfaced to callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackpressureKind {
     Admission,

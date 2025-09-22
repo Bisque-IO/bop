@@ -1,3 +1,28 @@
+//! Read APIs for sealed and active segments.
+//!
+//! This module exposes:
+//! - `SegmentReader`: a read-only view over a sealed segment
+//! - `SegmentCursor`: an iterator-style cursor for sealed segments
+//! - `ActiveSegmentCursor`: a bounded cursor over the durable frontier of the active tail
+//! - `TailFollower` and `SealedSegmentStream` for consuming the log in order
+//!
+//! Example: iterate all records in a sealed segment
+//! ```rust,no_run
+//! # use bop_rs::aof2::{Aof, AofManager, AofManagerConfig};
+//! # use bop_rs::aof2::config::{AofConfig, SegmentId};
+//! # let manager = AofManager::with_config(AofManagerConfig::default()).unwrap();
+//! # let handle = manager.handle();
+//! # let aof = Aof::new(handle, AofConfig::default()).unwrap();
+//! # let rid = aof.append_record(b"hello").unwrap();
+//! # let _ = aof.flush_until(rid);
+//! let seg_id = SegmentId::new(rid.segment_index() as u64);
+//! if let Ok(reader) = aof.open_reader(seg_id) {
+//!     let mut cursor = bop_rs::aof2::reader::SegmentCursor::new(reader);
+//!     while let Some(rec) = cursor.next().unwrap() {
+//!         println!("ts={} bytes={}", rec.timestamp(), rec.payload().len());
+//!     }
+//! }
+//! ```
 use std::{collections::VecDeque, fmt, sync::Arc};
 
 use crc64fast_nvme::Digest;
@@ -50,6 +75,7 @@ pub struct SegmentReader {
     logical_end: u32,
 }
 
+/// A record returned by a reader or cursor.
 #[derive(Debug)]
 pub struct SegmentRecord<'a> {
     record_id: RecordId,
@@ -81,12 +107,14 @@ pub struct SegmentCursor {
     next_offset: u32,
 }
 
+/// Follows tail state updates and exposes change-driven methods.
 #[derive(Debug)]
 pub struct TailFollower {
     rx: watch::Receiver<TailState>,
     last_version: u64,
 }
 
+/// Async stream-like helper that yields sealed segments then bridges into the active tail.
 pub struct SealedSegmentStream<'a> {
     aof: &'a Aof,
     follower: TailFollower,
@@ -94,6 +122,7 @@ pub struct SealedSegmentStream<'a> {
     resume_from: Option<RecordId>,
 }
 
+/// Bounded cursor over the durable frontier of an active segment.
 pub struct ActiveSegmentCursor {
     segment: Arc<Segment>,
     next_offset: u32,

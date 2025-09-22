@@ -1,3 +1,4 @@
+//! Manifest record encodings and helpers.
 use std::io::{Cursor, Read};
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};

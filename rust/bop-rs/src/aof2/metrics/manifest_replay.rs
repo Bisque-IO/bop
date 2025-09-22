@@ -1,3 +1,4 @@
+//! Metrics related to manifest replay during recovery.
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 

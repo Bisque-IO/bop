@@ -1,3 +1,4 @@
+//! Reading side of the manifest log and on-disk metadata.
 use std::fs::{self, File};
 use std::path::PathBuf;
 

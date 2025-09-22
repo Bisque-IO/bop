@@ -1,3 +1,21 @@
+//! Configuration types and identifiers for AOF2.
+//!
+//! These types define record and segment identifiers and all tuning knobs used by
+//! the `Aof` instance and its background services.
+//!
+//! Example: customize flush watermark and segment sizing
+//! ```rust
+//! use bop_rs::aof2::config::{AofConfig, FlushConfig, Compression, RetentionPolicy};
+//! let mut cfg = AofConfig::default();
+//! cfg.flush = FlushConfig { flush_watermark_bytes: 4 * 1024 * 1024, flush_interval_ms: 10, max_unflushed_bytes: 64 * 1024 * 1024 };
+//! cfg.segment_min_bytes = 2 * 1024 * 1024;
+//! cfg.segment_max_bytes = 256 * 1024 * 1024;
+//! cfg.segment_target_bytes = 16 * 1024 * 1024;
+//! cfg.compression = Compression::Zstd;
+//! cfg.retention = RetentionPolicy::KeepAll;
+//! let normalized = cfg.normalized();
+//! assert!(normalized.segment_min_bytes.is_power_of_two());
+//! ```
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 use std::path::PathBuf;

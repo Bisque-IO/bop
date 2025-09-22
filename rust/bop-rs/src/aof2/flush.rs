@@ -1,3 +1,7 @@
+//! Background flush scheduling and durability tracking.
+//!
+//! This module implements watermark/interval/backpressure-triggered flushes
+//! and exposes a `FlushManager` that coordinates async flush jobs.
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

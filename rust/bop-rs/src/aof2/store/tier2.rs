@@ -1,3 +1,4 @@
+//! Tier2: optional remote object store backing for sealed segments.
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
