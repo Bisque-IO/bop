@@ -1,3 +1,4 @@
+//! Helpers to inspect and summarize manifest state for debugging and tools.
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;

@@ -1,3 +1,4 @@
+//! Internal notification channels for admission and rollover events.
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};

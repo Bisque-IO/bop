@@ -1,3 +1,64 @@
+//! Append-only file (AOF2) storage engine with tiered caching, background flush,
+//! and sealed-segment readers.
+//!
+//! This module provides the high-level APIs to:
+//!
+//! - configure and start an `AofManager` runtime
+//! - create an `Aof` instance bound to a filesystem layout
+//! - append records with backpressure and durability control
+//! - follow tail lifecycle events and read sealed segments
+//!
+//! Quick start
+//!
+//! ```rust no_run
+//! use bop_rs::aof2::{Aof, AofManager, AofManagerConfig};
+//! use bop_rs::aof2::config::{AofConfig, SegmentId};
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Start the background runtime and caches
+//!     let manager = AofManager::with_config(AofManagerConfig::default())?;
+//!     let handle = manager.handle();
+//!
+//!     // Configure the on-disk layout for this AOF instance
+//!     let mut cfg = AofConfig::default();
+//!     cfg.root_dir = std::path::PathBuf::from("/tmp/aof2-demo");
+//!
+//!     let aof = Aof::new(handle, cfg)?;
+//!
+//!     // Append a record and wait until it is durable
+//!     let rid = aof.append_record(b"hello world")?;
+//!     aof.flush_until(rid)?;
+//!
+//!     // Open a reader for the sealed segment that contains the record
+//!     let seg_id = SegmentId::new(rid.segment_index() as u64);
+//!     if let Ok(reader) = aof.open_reader(seg_id) {
+//!         let rec = reader.read_record(rid)?;
+//!         assert_eq!(rec.payload(), b"hello world");
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Async append example (waits for admission/rollover when necessary):
+//!
+//! ```rust no_run
+//! use bop_rs::aof2::{Aof, AofManager, AofManagerConfig};
+//! use bop_rs::aof2::config::AofConfig;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let manager = AofManager::with_config(AofManagerConfig::default())?;
+//!     let handle = manager.handle();
+//!
+//!     let mut cfg = AofConfig::default();
+//!     cfg.root_dir = std::path::PathBuf::from("/tmp/aof2-demo");
+//!     let aof = Aof::new(handle, cfg)?;
+//!
+//!     let _rid = aof.append_record_async(b"payload").await?;
+//!     Ok(())
+//! }
+//! ```
 #[cfg(test)]
 use crate::aof2::store::DurabilityEntry;
 use std::collections::{HashMap, VecDeque};
@@ -48,34 +109,44 @@ pub use metrics::manifest_replay::{
 };
 pub use reader::{RecordBounds, SegmentReader, SegmentRecord, TailFollower};
 
+/// A single metric sample emitted by [`FlushMetricsExporter`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlushMetricSample {
     pub name: &'static str,
     pub value: u64,
 }
 
+/// Helper to export flush-related metrics as name/value pairs.
+///
+/// Retrieve the snapshot via [`Aof::flush_metrics`] or from an external
+/// metrics registry, then iterate or emit the samples.
 #[derive(Debug, Clone, Copy)]
 pub struct FlushMetricsExporter {
     snapshot: FlushMetricsSnapshot,
 }
 
 impl FlushMetricsExporter {
+    /// Creates a new exporter from a snapshot.
     pub fn new(snapshot: FlushMetricsSnapshot) -> Self {
         Self { snapshot }
     }
 
+    /// Total retry attempts across asynchronous flush operations.
     pub fn retry_attempts(&self) -> u64 {
         self.snapshot.retry_attempts
     }
 
+    /// Total retry failures across asynchronous flush operations.
     pub fn retry_failures(&self) -> u64 {
         self.snapshot.retry_failures
     }
 
+    /// Current backlog of logical-but-not-yet-durable bytes across all segments.
     pub fn backlog_bytes(&self) -> u64 {
         self.snapshot.backlog_bytes
     }
 
+    /// Returns an iterator over the fixed set of metric samples.
     pub fn samples(&self) -> impl Iterator<Item = FlushMetricSample> {
         const METRIC_NAMES: [(&str, fn(&FlushMetricsSnapshot) -> u64); 3] = [
             ("aof_flush_retry_attempts_total", |s| s.retry_attempts),
@@ -90,6 +161,7 @@ impl FlushMetricsExporter {
             })
     }
 
+    /// Emits all samples into the provided writer function.
     pub fn emit<F>(&self, mut writer: F)
     where
         F: FnMut(FlushMetricSample),
@@ -110,6 +182,7 @@ const DEFAULT_TIER1_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
 const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 const TIERED_SERVICE_IDLE_BACKOFF_MS: u64 = 10;
 
+/// Configuration for the in-memory tiered store used by AOF2.
 #[derive(Debug, Clone)]
 pub struct TieredStoreConfig {
     pub tier0: Tier0CacheConfig,
@@ -130,6 +203,7 @@ impl Default for TieredStoreConfig {
     }
 }
 
+/// High-level configuration for the AOF manager runtime and storage tiers.
 #[derive(Debug, Clone)]
 pub struct AofManagerConfig {
     pub runtime_worker_threads: Option<usize>,
@@ -229,6 +303,11 @@ impl Drop for TieredRuntime {
     }
 }
 
+/// Bootstrapper that owns the background runtime and tiered caches.
+///
+/// Construct with [`AofManager::with_config`] or
+/// [`AofManager::with_runtime`], then create per-instance [`Aof`] handles
+/// with [`Aof::new`].
 pub struct AofManager {
     runtime: Arc<TieredRuntime>,
     flush_config: FlushConfig,
@@ -238,6 +317,7 @@ pub struct AofManager {
 }
 
 impl AofManager {
+    /// Creates a manager with a self-managed Tokio runtime.
     pub fn with_config(config: AofManagerConfig) -> AofResult<Self> {
         let AofManagerConfig {
             runtime_worker_threads,
@@ -250,6 +330,7 @@ impl AofManager {
         Self::from_parts(Arc::new(runtime), flush, store)
     }
 
+    /// Creates a manager using the provided Tokio runtime.
     pub fn with_runtime(runtime: Runtime, config: AofManagerConfig) -> AofResult<Self> {
         let AofManagerConfig {
             runtime_worker_threads: _,
@@ -350,22 +431,27 @@ impl AofManager {
         }
     }
 
+    /// Returns the Tokio handle used for background tasks.
     pub fn runtime_handle(&self) -> Handle {
         self.runtime.handle()
     }
 
+    /// Shutdown token signalled during manager drop.
     pub fn shutdown_token(&self) -> CancellationToken {
         self.runtime.shutdown_token()
     }
 
+    /// Access to the tiered store coordinator.
     pub fn tiered(&self) -> Arc<TieredCoordinator> {
         self.coordinator.clone()
     }
 
+    /// Lightweight handle suitable for sharing with `Aof` instances.
     pub fn handle(&self) -> Arc<AofManagerHandle> {
         self.handle.clone()
     }
 
+    /// Returns the flush configuration used by newly created `Aof` instances.
     pub fn flush_config(&self) -> &FlushConfig {
         &self.flush_config
     }
@@ -380,6 +466,7 @@ impl Drop for AofManager {
     }
 }
 
+/// Shared handle to interact with the manager's runtime and coordinator.
 pub struct AofManagerHandle {
     runtime: Arc<TieredRuntime>,
     coordinator: Arc<TieredCoordinator>,
@@ -399,26 +486,32 @@ impl AofManagerHandle {
         }
     }
 
+    /// Returns the underlying runtime container.
     pub fn runtime(&self) -> Arc<TieredRuntime> {
         self.runtime.clone()
     }
 
+    /// Returns the Tokio handle for scheduling asynchronous work.
     pub fn runtime_handle(&self) -> Handle {
         self.runtime.handle()
     }
 
+    /// Shutdown token signalled during manager drop.
     pub fn shutdown_token(&self) -> CancellationToken {
         self.runtime.shutdown_token()
     }
 
+    /// Access to the tiered store coordinator.
     pub fn tiered(&self) -> Arc<TieredCoordinator> {
         self.coordinator.clone()
     }
 
+    /// Returns the flush configuration used by new `Aof` instances.
     pub fn flush_config(&self) -> FlushConfig {
         self.flush_config
     }
 
+    /// Snapshot of admission backpressure metrics.
     pub fn admission_metrics(&self) -> AdmissionMetricsSnapshot {
         self.coordinator.admission_metrics()
     }
@@ -551,6 +644,7 @@ impl AofManagement {
     }
 }
 
+/// Summary of a segment's presence in the in-memory catalog.
 #[derive(Debug, Clone)]
 pub struct SegmentCatalogEntry {
     pub segment_id: SegmentId,
@@ -561,6 +655,7 @@ pub struct SegmentCatalogEntry {
     pub record_count: u64,
 }
 
+/// Snapshot of a segment's status for UI/monitoring.
 #[derive(Debug, Clone)]
 pub struct SegmentStatusSnapshot {
     pub segment_id: SegmentId,
@@ -588,6 +683,7 @@ impl SegmentStatusSnapshot {
     }
 }
 
+/// Tail lifecycle events corresponding to append/rollover activities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TailEvent {
     None,
@@ -602,6 +698,7 @@ impl Default for TailEvent {
     }
 }
 
+/// Aggregate state of the current tail and queued segments.
 #[derive(Debug, Clone, Default)]
 pub struct TailState {
     pub version: u64,
@@ -651,6 +748,11 @@ impl TailSignal {
     }
 }
 
+/// Primary append-only log interface.
+///
+/// Create with [`Aof::new`], then append data via [`Aof::append_record`]
+/// or [`Aof::append_record_async`]. Use [`Aof::flush_until`] to wait for
+/// durability and [`Aof::open_reader`] to read sealed segments.
 pub struct Aof {
     manager: Arc<AofManagerHandle>,
     config: AofConfig,
@@ -668,6 +770,10 @@ pub struct Aof {
 }
 
 impl Aof {
+    /// Constructs a new AOF instance bound to the configured filesystem layout.
+    ///
+    /// This will create the directory structure if it does not exist and
+    /// attempt to recover any existing segments.
     pub fn new(manager: Arc<AofManagerHandle>, config: AofConfig) -> AofResult<Self> {
         let normalized = config.normalized();
         let layout = Layout::new(&normalized);
@@ -714,14 +820,17 @@ impl Aof {
         Ok(instance)
     }
 
+    /// Returns the normalized configuration for this instance.
     pub fn config(&self) -> &AofConfig {
         &self.config
     }
 
+    /// Returns the on-disk layout accessor.
     pub fn layout(&self) -> &Layout {
         &self.layout
     }
 
+    /// Returns a snapshot of the in-memory segment catalog.
     pub fn catalog_snapshot(&self) -> Vec<SegmentCatalogEntry> {
         let state = self.management.lock();
         state
@@ -738,6 +847,7 @@ impl Aof {
             .collect()
     }
 
+    /// Returns a detailed snapshot of segments including durable progress.
     pub fn segment_snapshot(&self) -> Vec<SegmentStatusSnapshot> {
         let state = self.management.lock();
         state
@@ -752,6 +862,7 @@ impl Aof {
         self.tier.durability_snapshot()
     }
 
+    /// Opens a read-only view over a sealed segment.
     pub fn open_reader(&self, segment_id: SegmentId) -> AofResult<SegmentReader> {
         if let Some(resident) = {
             let state = self.management.lock();
@@ -773,6 +884,7 @@ impl Aof {
         }
     }
 
+    /// Asynchronously opens a read-only view over a sealed segment, waiting for hydration if required.
     pub async fn open_reader_async(&self, segment_id: SegmentId) -> AofResult<SegmentReader> {
         if let Some(resident) = {
             let state = self.management.lock();
@@ -790,18 +902,35 @@ impl Aof {
         SegmentReader::new(resident)
     }
 
+    /// Returns a snapshot of flush-related metrics for this instance.
     pub fn flush_metrics(&self) -> FlushMetricsSnapshot {
         self.metrics.snapshot()
     }
 
+    /// Subscribes to tail lifecycle events.
     pub fn tail_events(&self) -> watch::Receiver<TailState> {
         self.tail_signal.subscribe()
     }
 
+    /// Returns a convenience wrapper around `tail_events` to iterate changes.
     pub fn tail_follower(&self) -> TailFollower {
         TailFollower::new(self.tail_signal.subscribe())
     }
 
+    /// Appends a single record to the active segment.
+    ///
+    /// Returns `WouldBlock(Admission)` if no writable segment is currently available.
+    ///
+    /// Example:
+    /// ```rust no_run
+    /// # use bop_rs::aof2::{Aof, AofManager, AofManagerConfig};
+    /// # use bop_rs::aof2::config::AofConfig;
+    /// # let manager = AofManager::with_config(AofManagerConfig::default()).unwrap();
+    /// # let handle = manager.handle();
+    /// # let aof = Aof::new(handle, AofConfig::default()).unwrap();
+    /// let rid = aof.append_record(b"hello")?;
+    /// # Ok::<(), bop_rs::aof2::error::AofError>(())
+    /// ```
     pub fn append_record(&self, payload: &[u8]) -> AofResult<RecordId> {
         if payload.is_empty() {
             return Err(AofError::InvalidState(
@@ -825,6 +954,7 @@ impl Aof {
         self.append_with_guard(payload, timestamp_u64, guard)
     }
 
+    /// Appends a record, waiting up to `timeout` for a writable segment.
     pub fn append_record_with_timeout(
         &self,
         payload: &[u8],
@@ -866,6 +996,7 @@ impl Aof {
         }
     }
 
+    /// Asynchronously appends a record, awaiting admission/rollover as needed.
     pub async fn append_record_async(&self, payload: &[u8]) -> AofResult<RecordId> {
         let shutdown = self.manager.shutdown_token();
         loop {
@@ -932,6 +1063,7 @@ impl Aof {
         }
     }
 
+    /// Waits for a writable segment up to the provided timeout.
     pub fn wait_for_writable_segment(&self, timeout: Duration) -> AofResult<AdmissionGuard> {
         if let Some(guard) = self.current_tail() {
             return Ok(guard);
@@ -973,6 +1105,7 @@ impl Aof {
         }
     }
 
+    /// Attempts to seal the active segment; returns `WouldBlock(Rollover)` until rollover is acked.
     pub fn seal_active(&self) -> AofResult<Option<SegmentId>> {
         if let Some(segment_id) = self.take_ready_rollover() {
             return Ok(Some(segment_id));
@@ -1045,6 +1178,7 @@ impl Aof {
         }
     }
 
+    /// Forces creation of a new active segment once the current one is sealed and acknowledged.
     pub fn force_rollover(&self) -> AofResult<Arc<Segment>> {
         let _ = self.seal_active()?;
         let mut state = self.management.lock();
@@ -1057,6 +1191,7 @@ impl Aof {
         }
     }
 
+    /// Blocks until the segment containing `record_id` is durable through its end offset.
     pub fn flush_until(&self, record_id: RecordId) -> AofResult<()> {
         let segment_id = SegmentId::new(record_id.segment_index() as u64);
         let segment = self
@@ -1082,6 +1217,9 @@ impl Aof {
         Ok(())
     }
 
+    /// Marks a segment as finalized and updates tail state.
+    ///
+    /// This is advanced usage; typical callers do not need to invoke this directly.
     pub fn segment_finalized(&self, segment_id: SegmentId) -> AofResult<()> {
         let mut state = self.management.lock();
         if let Some(segment) = state

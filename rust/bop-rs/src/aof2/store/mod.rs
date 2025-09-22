@@ -1,3 +1,12 @@
+//! Tiered in-memory store that backs the AOF2 write path.
+//!
+//! The tiered store is composed of:
+//! - Tier0: admission/activation queue and eviction
+//! - Tier1: compressed resident segments and manifest
+//! - Tier2: optional remote object store integration
+//!
+//! Most applications interact with this via `AofManager`/`Aof` and do not need
+//! to use these types directly.
 // Tiered segment store modules
 
 mod durability;

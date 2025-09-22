@@ -1,3 +1,4 @@
+//! Writing side of the manifest log.
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};

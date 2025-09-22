@@ -1,3 +1,4 @@
+//! Tier1: resident segment cache, compression, and manifest integration.
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::fmt;

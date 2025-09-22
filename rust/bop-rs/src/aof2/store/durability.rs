@@ -1,3 +1,4 @@
+//! Volatile durability cursor tracking per-segment flush progress.
 use std::collections::HashMap;
 
 use parking_lot::Mutex;

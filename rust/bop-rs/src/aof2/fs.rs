@@ -1,3 +1,7 @@
+//! Filesystem utilities for AOF2 layout and file operations.
+//!
+//! Contains directory layout helpers, filename conventions, and fsync helpers
+//! used by segments and durability trackers.
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
