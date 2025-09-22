@@ -72,10 +72,19 @@ let record_id = aof.append_record_async(payload).await?;
 
 See [`aof2_design_next.md`](aof2_design_next.md#111-rollover-handshake-ap2) for the higher-level state machine and how downstream services should handle the `WouldBlock` contract.
 
+### Metadata & Recovery Hooks
+- Each segment carries an `ext_id`. `set_current_ext_id` seeds the active segment, the value is stamped into the segment header, every record header, the footer, and the manifest entry written at seal time.
+- `Segment::seal` flushes the durable byte boundary, coordinator watermark, checksum, and flush failure bit to the footer. Once the fsync succeeds, `Layout::store_current_sealed_pointer` rewrites `segments/current.sealed` atomically to point at the new footer.
+- Recovery loads the pointer first; if the referenced segment exists the footer is trusted and restart overhead is limited to the active tail. Missing or stale pointers emit warnings and fall back to scanning the directory.
+- Tests covering these paths live in `aof2::segment`, `aof2::fs`, and the integration scenarios added under `aof2::tests`.
+
 ### Durability Cursor and Admission Metrics
 
 - Each `TieredInstance` maintains a durability cursor that records the highest requested flush offset and the bytes proven durable per segment.
 - The cursor remains in-memory and is reseeded from recovered segment scans whenever the flush worker advances progress, so restart rebuilds pending flush state without writing metadata to disk.
+- Flush workers update the cursor after every successful `mark_durable` and, if retries are exhausted, set a shared failure flag that surfaces `WouldBlock(BackpressureKind::Flush)` until a subsequent flush clears it. Operators can monitor `FlushMetricsSnapshot::flush_failures` to trace when backpressure is active.
+- Flush workers update the cursor after every successful  and, if retries are exhausted, set a shared failure flag that surfaces  until a subsequent flush clears it. Operators can monitor  to trace when backpressure is active.
+- Flush workers update the cursor after every successful  and, if retries are exhausted, set a shared failure flag that surfaces  until a subsequent flush clears it. Operators can monitor  to trace when backpressure is active.
 - Recovery hydrates the cursor before rebuilding the catalog so background hydrations and readers observe the correct durability watermark.
 - Admission metrics record the latency to acquire an `AdmissionGuard` and the frequency of `WouldBlock` events per backpressure kind. Snapshots are available via `AofManagerHandle::admission_metrics()` for integration with dashboards.
 
@@ -347,7 +356,6 @@ Delivering these milestones incrementally ensures the tiered store evolves from 
 - [ ] Pass tier handles through Aof::new/TieredInstance and ensure orderly shutdown.
 - [ ] Update APIs/tests to await async tier operations; migrate affected tests to Tokio.
 - [ ] Refresh documentation/examples describing async tier integration.
-
 
 
 

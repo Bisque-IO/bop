@@ -5,13 +5,13 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::config::SegmentId;
-use super::error::{AofError, AofResult};
+use super::error::{AofError, AofResult, BackpressureKind};
 use super::segment::Segment;
 use super::{InstanceId, ResidentSegment, TieredRuntime};
-use crate::aof2::store::DurabilityCursor;
+use crate::aof2::store::{DurabilityCursor, TieredInstance};
 use crossbeam::channel::{Receiver, Sender, TrySendError, unbounded};
 use tokio::sync::Notify;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 pub enum FlushCommand {
     RegisterSegment { request: FlushRequest },
@@ -21,6 +21,7 @@ pub enum FlushCommand {
 #[derive(Clone)]
 pub struct FlushRequest {
     instance_id: InstanceId,
+    tier: TieredInstance,
     durability: Arc<DurabilityCursor>,
     resident: ResidentSegment,
 }
@@ -28,11 +29,13 @@ pub struct FlushRequest {
 impl FlushRequest {
     pub fn new(
         instance_id: InstanceId,
+        tier: TieredInstance,
         durability: Arc<DurabilityCursor>,
         resident: ResidentSegment,
     ) -> Self {
         Self {
             instance_id,
+            tier,
             durability,
             resident,
         }
@@ -52,6 +55,10 @@ impl FlushRequest {
 
     pub fn segment(&self) -> &Arc<Segment> {
         self.resident.segment()
+    }
+
+    pub fn record_flush_failure(&self) {
+        self.tier.record_would_block(BackpressureKind::Flush);
     }
 }
 
@@ -182,6 +189,7 @@ pub struct FlushMetricsSnapshot {
     pub asynchronous_flushes: u64,
     pub retry_attempts: u64,
     pub retry_failures: u64,
+    pub flush_failures: u64,
     pub backlog_bytes: u64,
 }
 
@@ -194,6 +202,7 @@ pub struct FlushMetrics {
     asynchronous_flushes: AtomicU64,
     retry_attempts: AtomicU64,
     retry_failures: AtomicU64,
+    flush_failures: AtomicU64,
     backlog_bytes: AtomicU64,
 }
 
@@ -233,6 +242,12 @@ impl FlushMetrics {
     pub fn incr_retry_failure(&self) {
         self.retry_failures.fetch_add(1, Ordering::Relaxed);
     }
+
+    #[inline]
+    pub fn incr_flush_failure(&self) {
+        self.flush_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
     #[inline]
     pub fn record_backlog(&self, bytes: u64) {
         self.backlog_bytes.store(bytes, Ordering::Relaxed);
@@ -247,6 +262,7 @@ impl FlushMetrics {
             asynchronous_flushes: self.asynchronous_flushes.load(Ordering::Relaxed),
             retry_attempts: self.retry_attempts.load(Ordering::Relaxed),
             retry_failures: self.retry_failures.load(Ordering::Relaxed),
+            flush_failures: self.flush_failures.load(Ordering::Relaxed),
             backlog_bytes: self.backlog_bytes.load(Ordering::Relaxed),
         }
     }
@@ -333,6 +349,7 @@ pub struct FlushManager {
     command_tx: Sender<FlushCommand>,
     total_unflushed: Arc<AtomicU64>,
     metrics: Arc<FlushMetrics>,
+    flush_failed: Arc<AtomicBool>,
 }
 
 impl FlushManager {
@@ -340,6 +357,7 @@ impl FlushManager {
         runtime: Arc<TieredRuntime>,
         total_unflushed: Arc<AtomicU64>,
         metrics: Arc<FlushMetrics>,
+        flush_failed: Arc<AtomicBool>,
     ) -> Arc<Self> {
         let (tx, rx) = unbounded();
         let manager = Arc::new(Self {
@@ -347,8 +365,9 @@ impl FlushManager {
             command_tx: tx,
             total_unflushed: total_unflushed.clone(),
             metrics: metrics.clone(),
+            flush_failed: flush_failed.clone(),
         });
-        Self::spawn_worker(rx, total_unflushed, metrics);
+        Self::spawn_worker(rx, total_unflushed, metrics, flush_failed);
         manager
     }
 
@@ -369,25 +388,30 @@ impl FlushManager {
         rx: Receiver<FlushCommand>,
         total_unflushed: Arc<AtomicU64>,
         metrics: Arc<FlushMetrics>,
+        flush_failed: Arc<AtomicBool>,
     ) {
         let _ = thread::Builder::new()
             .name("aof-flush".to_string())
-            .spawn(move || Self::worker_loop(rx, total_unflushed, metrics));
+            .spawn(move || Self::worker_loop(rx, total_unflushed, metrics, flush_failed));
     }
 
     fn worker_loop(
         rx: Receiver<FlushCommand>,
         total_unflushed: Arc<AtomicU64>,
         metrics: Arc<FlushMetrics>,
+        flush_failed: Arc<AtomicBool>,
     ) {
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 FlushCommand::RegisterSegment { request } => {
-                    if let Err(err) = Self::flush_segment(&request, &total_unflushed, &metrics) {
-                        eprintln!(
-                            "flush manager failed for segment {}: {}",
-                            request.segment().id().as_u64(),
-                            err
+                    if let Err(err) =
+                        Self::flush_segment(&request, &total_unflushed, &metrics, &flush_failed)
+                    {
+                        error!(
+                            instance = request.instance_id().get(),
+                            segment = request.segment().id().as_u64(),
+                            error = %err,
+                            "flush manager failed to persist segment"
                         );
                     }
                 }
@@ -400,6 +424,7 @@ impl FlushManager {
         request: &FlushRequest,
         total_unflushed: &Arc<AtomicU64>,
         metrics: &Arc<FlushMetrics>,
+        flush_failed: &Arc<AtomicBool>,
     ) -> AofResult<()> {
         let segment = request.segment();
         let flush_state = segment.flush_state();
@@ -414,7 +439,7 @@ impl FlushManager {
         let result = flush_with_retry(segment, metrics);
         let durability = request.durability();
         let mut backlog_snapshot = total_unflushed.load(Ordering::Acquire);
-        let outcome = match result {
+        let result = match result {
             Ok(()) => {
                 let requested_after = flush_state.requested_bytes();
                 let durable_bytes = target_bytes.min(requested_after);
@@ -428,13 +453,19 @@ impl FlushManager {
                     backlog_snapshot
                 };
                 metrics.incr_async_flush();
+                flush_failed.store(false, Ordering::Release);
                 Ok(())
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                metrics.incr_flush_failure();
+                request.record_flush_failure();
+                flush_failed.store(true, Ordering::Release);
+                Err(err)
+            }
         };
         flush_state.finish_flush();
         metrics.record_backlog(backlog_snapshot);
-        outcome
+        result
     }
 }
 

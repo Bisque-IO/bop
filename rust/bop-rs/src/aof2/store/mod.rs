@@ -29,8 +29,9 @@ pub use tier2::{
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
-use std::fs::read_dir;
-use std::path::PathBuf;
+use std::fs::{File, read_dir};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -42,7 +43,24 @@ use crate::aof2::config::SegmentId;
 use crate::aof2::error::{AofError, AofResult, BackpressureKind};
 use crate::aof2::fs::{Layout, SEGMENT_FILE_EXTENSION, SegmentFileName};
 use crate::aof2::metrics::admission::{AdmissionMetrics, AdmissionMetricsSnapshot};
-use crate::aof2::segment::Segment;
+use crate::aof2::segment::{
+    SEGMENT_FOOTER_SIZE, Segment, SegmentFooter, SegmentHeaderInfo, SegmentScan,
+};
+
+fn read_segment_footer_from_path(
+    path: &Path,
+    header: &SegmentHeaderInfo,
+) -> AofResult<Option<SegmentFooter>> {
+    if header.max_size < SEGMENT_FOOTER_SIZE {
+        return Ok(None);
+    }
+    let mut file = File::open(path).map_err(AofError::from)?;
+    let offset = (header.max_size - SEGMENT_FOOTER_SIZE) as u64;
+    file.seek(SeekFrom::Start(offset)).map_err(AofError::from)?;
+    let mut buf = [0u8; SEGMENT_FOOTER_SIZE as usize];
+    file.read_exact(&mut buf).map_err(AofError::from)?;
+    Ok(SegmentFooter::decode(&buf))
+}
 
 #[derive(Clone)]
 pub struct RecoveredSegment {
@@ -293,6 +311,17 @@ impl TieredInstanceInner {
     }
 
     fn recover_segments(self: &Arc<Self>) -> AofResult<Vec<RecoveredSegment>> {
+        let pointer = match self.layout.load_current_sealed_pointer() {
+            Ok(pointer) => pointer,
+            Err(err) => {
+                warn!(
+                    path = %self.layout.current_sealed_pointer_path().display(),
+                    "failed to load current.sealed pointer: {err}"
+                );
+                None
+            }
+        };
+        let trusted_cutoff = pointer.as_ref().map(|ptr| ptr.segment_id.as_u64());
         let mut entries = Vec::new();
         for entry in read_dir(self.layout.segments_dir()).map_err(AofError::from)? {
             let entry = entry.map_err(AofError::from)?;
@@ -313,12 +342,56 @@ impl TieredInstanceInner {
         entries.sort_by_key(|(name, _)| name.segment_id.as_u64());
 
         let mut recovered = Vec::with_capacity(entries.len());
-        for (_name, path) in entries {
-            let mut scan = Segment::scan_tail(&path)?;
+        for (name, path) in entries {
+            let use_trusted_footer =
+                trusted_cutoff.map_or(false, |cutoff| name.segment_id.as_u64() <= cutoff);
+            let mut scan = if use_trusted_footer {
+                match Segment::load_header(&path).and_then(|header| {
+                    read_segment_footer_from_path(&path, &header).map(|footer| (header, footer))
+                }) {
+                    Ok((header, Some(footer))) => {
+                        match SegmentScan::from_trusted_footer(header, footer) {
+                            Ok(scan) => scan,
+                            Err(err) => {
+                                warn!(
+                                    path = %path.display(),
+                                    segment = name.segment_id.as_u64(),
+                                    "trusted footer validation failed: {err}"
+                                );
+                                Segment::scan_tail(&path)?
+                            }
+                        }
+                    }
+                    Ok((_header, None)) => Segment::scan_tail(&path)?,
+                    Err(err) => {
+                        warn!(
+                            path = %path.display(),
+                            segment = name.segment_id.as_u64(),
+                            "failed to load segment header/footer: {err}"
+                        );
+                        Segment::scan_tail(&path)?
+                    }
+                }
+            } else {
+                Segment::scan_tail(&path)?
+            };
             if scan.truncated {
                 Segment::truncate_segment(&path, &mut scan)?;
             }
             let segment = Arc::new(Segment::from_recovered(&path, &scan)?);
+            if let (Some(pointer), Some(footer)) = (pointer.as_ref(), scan.footer.as_ref()) {
+                if pointer.segment_id == segment.id()
+                    && footer.durable_bytes != pointer.durable_bytes
+                {
+                    warn!(
+                        path = %path.display(),
+                        segment = pointer.segment_id.as_u64(),
+                        pointer_durable = pointer.durable_bytes,
+                        footer_durable = footer.durable_bytes,
+                        "durable bytes mismatch between pointer and footer"
+                    );
+                }
+            }
             self.durability.seed_entry(
                 segment.id(),
                 segment.current_size(),
@@ -825,7 +898,7 @@ mod tests {
         segment.append_record(b"payload", 1).expect("append record");
         let size = segment.current_size();
         let _ = segment.mark_durable(size);
-        segment.seal(created_at).expect("seal");
+        segment.seal(created_at, 0, false).expect("seal");
         let segment = Arc::new(segment);
 
         let resident = tiered_instance

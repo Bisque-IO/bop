@@ -28,11 +28,11 @@
   archive/
     <segment_id>_<sealed_at>.seg   # optional, retention dependent
 ```
-- `Layout::ensure` creates `segments/` and `archive/` under the configured root and fsyncs the directories.
-- `segments/` holds the active tail and all finalized segments. Files end with `.seg`; temporary files created while sealing or replacing a segment live beside their target before being atomically renamed.
+- `Layout::ensure` creates `segments/`, `archive/`, and `manifest/` under the configured root and fsyncs the directories.
+- `segments/` holds the active tail and all finalized segments. Files end with `.seg`; temporary files created while sealing or replacing a segment live beside their target before being atomically renamed. The directory also hosts `current.sealed`, an atomic pointer updated after each successful seal so recovery can jump directly to the latest durable segment.
 - `archive/` is empty unless retention moves sealed segments out of the hot set.
-- Preallocation chooses a power-of-two size between 64 MiB and 1 GiB for each segment. The runtime may slide within this window to keep pace with the filesystem.
-- There is no manifest, metadata log, or side-band index in the new design; segments alone describe durable state.
+- `manifest/` stores the MAN1 chunked manifest log used by Tier1/Tier2 residency. Each chunk records seal/compression/upload events and survives crash recovery alongside the enriched headers/footers.
+- Preallocation chooses a power-of-two size between 64 MiB and 1 GiB for each segment. The runtime may slide within this window to keep pace with the filesystem while respecting Tier 0 budget.
 
 ### 3.2 Segment Naming and IDs
 - `SegmentId` is a monotonically increasing `u64` assigned by the runtime; the high-level manager keeps the next id in memory.
@@ -55,7 +55,7 @@
 ```
 - Segments are preallocated to `segment_max_bytes` but start zero-initialized.
 - `Segment::create_active` maps the file and defers writing the header until the first append supplies the initial timestamp.
-- The append path treats `[SEGMENT_HEADER_SIZE, max_size - FOOTER_SIZE)` as writable record space so the reserved footer slot remains untouched.
+- The append path treats `[SEGMENT_HEADER_SIZE, max_size - SEGMENT_FOOTER_SIZE)` as writable record space so the reserved footer slot remains untouched.
 
 **Header (64 bytes)**
 - magic `0x414F4632` (`"AOF2"`)
@@ -67,22 +67,28 @@
 - max_size `u32`
 - created_at `i64` (UTC nanoseconds)
 - base_timestamp `u64` (timestamp of the first record appended to this segment; zero until known)
-- remaining bytes reserved and zeroed
+- ext_id `u64` (external cohort identifier propagated from the runtime; defaults to zero)
+- the remaining bytes are reserved and zeroed so future schema bumps stay binary compatible
 - The header is written once via `Segment::ensure_header_written` immediately before writing the first record.
 
 **Record entry**
 - 4 bytes length (`u32`, payload only)
 - 4 bytes checksum (`u32`, CRC64-NVME folded into 32 bits by XOR upper/lower halves)
 - 8 bytes timestamp (`u64` nanoseconds)
+- 8 bytes ext_id (`u64`; zero when the upstream log is anonymous)
 - payload bytes
 - There is no stored record id. The offset returned by `Segment::append_record` combined with the owning `segment_index` recreates the id.
 
-**Footer (64 bytes)**
-- Occupies the final 64 bytes of the preallocated file (`max_size - 64 .. max_size`), keeping its location deterministic for recovery.
+**Footer (96 bytes)**
+- Occupies the final `SEGMENT_FOOTER_SIZE` bytes of the preallocated file, keeping its location deterministic for recovery.
 - Written when `Segment::seal` completes flushing the file; the append path reserves the tail so record payloads never overlap the footer slot.
-- Contains magic `0x464F4F54` (`"FOOT"`), `segment_index`, `last_record_id` (packed), `record_count`, `durable_bytes`, `last_timestamp`, a checksum of the written region, and `sealed_at`.
-- Because the footer sits at a known offset, recovery can mmap the last 64 bytes and validate status without scanning the full payload.
+- Fields: magic `0x464F4F54` (`"FOOT"`), version, `segment_index`, `base_record_count`, `record_count`, `durable_bytes`, `last_record_id` (packed), `last_timestamp`, `sealed_at`, payload checksum, `ext_id`, `coordinator_watermark`, and a single-byte `flush_failure` flag.
+- Because the footer sits at a known offset, recovery can mmap the last 96 bytes and validate status without scanning the full payload. Footer enrichment means the runtime no longer needs an external durability snapshot to rebuild catalog state.
 - If the footer is missing or corrupted, the runtime treats the segment as the tail candidate and falls back to a header-guided scan.
+
+**Current sealed pointer**
+- `segments/current.sealed` stores `{segment_id, durable_bytes, coordinator_watermark}` for the latest acknowledged seal.
+- The pointer file is updated atomically via a temp-file + rename sequence once the footer and fsync succeed, giving restart a constant-time jump to the live sealed tail.
 
 ## 4. Core Components
 ### 4.1 `AofManager`
@@ -150,11 +156,24 @@
 - Optional sparse indexes can still be introduced later, but the packed ids mean cold reads already know which segment to open.
 
 ## 10. Startup and Recovery
-1. Enumerate `segments/`, filter for `.seg`, and parse each filename into `(segment_id, base_offset, created_at)`. Sort primarily by `segment_id`.
-2. For every segment except the newest two, read the 64-byte header, validate the magic/version, and trust the stored cumulative counters to rebuild `next_segment_index`, `next_offset`, and `record_count`.
-3. Inspect the tail (and penultimate segment if the tail lacks a footer) by scanning record headers: verify lengths and checksums, truncate trailing garbage, and compute the durable size.
-4. If a footer is present, trust its counts; otherwise derive them from the scan. Update the in-memory state accordingly and mark the tail as active.
-5. Recreate the active segment map/set entirely from these headers. No manifest replay or auxiliary metadata files are necessary.
+1. Load `segments/current.sealed`. When present, the pointer seeds the latest sealed segment id, durable byte offset, and coordinator watermark. The value is trusted only if the referenced segment still exists; otherwise recovery logs a warning and falls back to discovery.
+2. Enumerate `segments/*.seg` in lexical order. For each sealed segment, read the 64-byte header and 96-byte footer to rebuild base offsets, record counts, ext_id, watermark, and flush-failure state without consulting auxiliary metadata.
+3. Inspect the active tail (and the penultimate segment if the tail lacks a footer) by scanning record headers: verify lengths and checksums, truncate trailing garbage, and compute the live durable size. Tail inspection also seeds the backlog gauge used by the flush manager.
+4. Rehydrate the in-memory catalog, pending finalize queue, and durability cursors directly from the collected header/footer data. The highest coordinator watermark observed in the pointer/footer set is written back into the runtime metadata so the append path persists it on the next seal.
+5. Replay manifest log chunks (Tier1/Tier2 residency) and upstream operation-log entries starting at `coordinator_watermark + 1` to catch up the warm tiers.
+
+### 10.1 Segment Metadata Enrichment (RC1)
+- Segment headers gain an `ext_id` field so every record inherits a cohort identifier without consulting external metadata.
+- Record headers mirror the field so replication layers (e.g. Raft) can tag individual entries.
+- Segment footers capture durable bytes, record count, coordinator watermark, and the flush-failure flag when sealing.
+
+### 10.2 Atomic Sealed-Segment Pointer (RC2)
+- Maintain a `current.sealed` pointer (symlink or small binary blob) that records the latest sealed segment index and watermark.
+- Writers update the pointer via `TempFileGuard` + rename after each successful seal so recovery can discover global counters without scanning every segment.
+
+### 10.3 Manifest Alignment (RC3)
+- Manifest entries for sealed segments include the same ext_id and coordinator watermark, keeping Tier1/Tier2 replay aligned with on-disk headers.
+- Replay prefers the header/footer data and uses manifest deltas exclusively for warm/cold residency.
 
 ## 11. Flow Control and Backpressure
 ### 11.1 Rollover Handshake (AP2)
@@ -234,6 +253,7 @@ The explicit mapping documents the steady-state expectations for reviewers: admi
    - Implement synchronous/asynchronous readers that derive offsets from `RecordId` and follow the sealing notifications.
 8. **Flush coordination** *(in progress)*  
    - Background flush manager with single in-flight semantics per segment, durability tracking hooked into `FlushConfig`, and an in-memory durability cursor seeded from recovered segment scans so restart observes the correct watermark without writing metadata to disk.
+   - Flush backpressure now toggles a shared failure flag when the worker exhausts retries, surfacing `WouldBlock(BackpressureKind::Flush)` to producers until a successful flush clears it. The flag feeds the new `FlushMetricsSnapshot::flush_failures` counter for alerting.
 9. **Retention and archival hooks** *(pending)*  
    - Policies for migrating sealed segments into `archive/`, pruning old data, and (eventually) packaging cold segments.
 10. **Observability and tooling** *(pending)*  

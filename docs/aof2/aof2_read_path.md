@@ -4,6 +4,7 @@
 - Documents how `Aof::open_reader` and `Aof::open_reader_async` traverse the tiered store and where `WouldBlock` propagates.
 - Complements the state machines in `aof2_design_next.md` and the hydration/notification details in `aof2_store.md`.
 - Intended for service owners building on the new reader APIs ahead of recovery milestones.
+- Recovery now follows the pointer-first workflow described in `aof2_catalog_snapshots.md`: the reader catalog is rebuilt from headers/footers after consulting `segments/current.sealed`, so sealed segments become available before the manifest replay finishes.
 
 ## Glossary
 - **ResidentSegment** - reference-counted handle returned by `TieredInstance`; provides access to the memory map and shared `SegmentFlushState`.
@@ -27,7 +28,7 @@
 - `AofError::NotFound` - the catalog and tiers could not locate the requested segment; treat as unrecoverable.
 - `AofError::WouldBlock(BackpressureKind::Hydration)` - wait for hydration notifier or escalate to async helper.
 - `AofError::WouldBlock(BackpressureKind::Rollover)` - resume when the rollover notifier signals completion.
-- `AofError::WouldBlock(BackpressureKind::Flush)` - indicates the durable watermark lags. Drive a flush or await the future notifier (AP4 work in progress).
+- `AofError::WouldBlock(BackpressureKind::Flush)` - the flush worker exhausted retries and raised the shared failure flag. Wait for `FlushMetricsSnapshot::flush_failures` to return to zero or call `flush_until` on the stalled record to clear it before retrying.
 
 ## Async Read Flow
 1. `Aof::open_reader_async(segment_id)` follows the same steps but awaits hydration (`rust/bop-rs/src/aof2/mod.rs:769`).
@@ -121,11 +122,14 @@ pub async fn tail_stream(mut stream: SealedSegmentStream<'_>) -> AofResult<()> {
 - `reader.rs` exposes counters for hydration retries and tail catches; wire them into your telemetry sink.
 - Trace spans wrap hydration waits and sealed stream transitions, making it easy to visualise reader stalls.
 - Monitor `FlushMetricsSnapshot::scheduled_backpressure` to correlate reader stalls with outstanding writer flushes.
+- Monitor `FlushMetricsSnapshot::flush_failures` alongside the flag on the append path; a non-zero value means writers are blocked on durability and readers should expect `WouldBlock(BackpressureKind::Flush)` until the queue drains.
 
 ## Migration Notes
 - Legacy callers that expected blocking IO must add retry loops or switch to the async helpers.
 - Integration tests should exercise both the happy path and `WouldBlock` returns to verify client behaviour.
 - Document the new retry contract in downstream service READMEs so operators know how to tune backoff windows.
+- Ensure restart flows wait for the pointer/bootstrap step to complete before issuing read traffic. Once `current.sealed` is processed the sealed catalog is immediately available; manifest replay simply restores Tier1/Tier2 residency.
+- Feed real coordinator watermarks and external segment ids into `Aof::metadata_handle()` (or the manager-level handle) so readers observe the upstream position after restart rather than the test literals used during bring-up.
 
 ## Review Checklist
 - [ ] Glossary terms align with the append/read diagrams in `aof2_design_next.md`.

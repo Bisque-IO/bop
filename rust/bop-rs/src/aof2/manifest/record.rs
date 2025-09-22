@@ -70,6 +70,9 @@ pub enum ManifestRecordPayload {
     SealSegment {
         durable_bytes: u64,
         segment_crc64: u64,
+        ext_id: u64,
+        coordinator_watermark: u64,
+        flush_failure: bool,
     },
     CompressionStarted {
         job_id: u32,
@@ -157,9 +160,15 @@ impl ManifestRecordPayload {
             ManifestRecordPayload::SealSegment {
                 durable_bytes,
                 segment_crc64,
+                ext_id,
+                coordinator_watermark,
+                flush_failure,
             } => {
                 buf.write_u64::<LittleEndian>(*durable_bytes)?;
                 buf.write_u64::<LittleEndian>(*segment_crc64)?;
+                buf.write_u64::<LittleEndian>(*ext_id)?;
+                buf.write_u64::<LittleEndian>(*coordinator_watermark)?;
+                buf.write_u8(if *flush_failure { 1 } else { 0 })?;
             }
             ManifestRecordPayload::CompressionStarted { job_id } => {
                 buf.write_u32::<LittleEndian>(*job_id)?;
@@ -241,9 +250,15 @@ impl ManifestRecordPayload {
             RecordType::SealSegment => {
                 let durable_bytes = cursor.read_u64::<LittleEndian>()?;
                 let segment_crc64 = cursor.read_u64::<LittleEndian>()?;
+                let ext_id = cursor.read_u64::<LittleEndian>()?;
+                let coordinator_watermark = cursor.read_u64::<LittleEndian>()?;
+                let flush_failure = cursor.read_u8()? != 0;
                 ManifestRecordPayload::SealSegment {
                     durable_bytes,
                     segment_crc64,
+                    ext_id,
+                    coordinator_watermark,
+                    flush_failure,
                 }
             }
             RecordType::CompressionStarted => {

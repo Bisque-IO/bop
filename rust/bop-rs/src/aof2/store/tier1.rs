@@ -177,6 +177,12 @@ pub struct ManifestEntry {
     pub created_at: i64,
     pub sealed_at: i64,
     pub checksum: u32,
+    #[serde(default)]
+    pub ext_id: u64,
+    #[serde(default)]
+    pub coordinator_watermark: u64,
+    #[serde(default)]
+    pub flush_failure: bool,
     pub original_bytes: u64,
     pub compressed_bytes: u64,
     pub compressed_path: String,
@@ -1053,12 +1059,17 @@ impl Tier1Inner {
         instance_id: InstanceId,
         segment: &Arc<Segment>,
     ) -> AofResult<()> {
-        let entry = self.compress_segment_blocking(instance_id, segment)?;
-        self.finish_compression(instance_id, entry)?;
+        let (entry, footer) = self.compress_segment_blocking(instance_id, segment)?;
+        self.finish_compression(instance_id, entry, footer)?;
         Ok(())
     }
 
-    fn finish_compression(&self, instance_id: InstanceId, entry: ManifestEntry) -> AofResult<()> {
+    fn finish_compression(
+        &self,
+        instance_id: InstanceId,
+        entry: ManifestEntry,
+        footer: SegmentFooter,
+    ) -> AofResult<()> {
         let tier2_handle = self.tier2();
         let (evicted, stored_bytes, upload_descriptor) = {
             let mut instances = self.instances.lock();
@@ -1080,6 +1091,17 @@ impl Tier1Inner {
                 compressed_bytes: entry.compressed_bytes,
                 original_bytes: entry.original_bytes,
             });
+            state.log_manifest_record(
+                entry.segment_id,
+                entry.base_offset,
+                ManifestRecordPayload::SealSegment {
+                    durable_bytes: footer.durable_bytes,
+                    segment_crc64: footer.checksum as u64,
+                    ext_id: entry.ext_id,
+                    coordinator_watermark: entry.coordinator_watermark,
+                    flush_failure: entry.flush_failure,
+                },
+            );
             let evicted = state.insert_entry(entry, self.config.max_bytes)?;
             let stored_bytes = state.used_bytes();
             (evicted, stored_bytes, descriptor)
@@ -1127,7 +1149,7 @@ impl Tier1Inner {
         &self,
         instance_id: InstanceId,
         segment: &Arc<Segment>,
-    ) -> AofResult<ManifestEntry> {
+    ) -> AofResult<(ManifestEntry, SegmentFooter)> {
         let footer = read_segment_footer(segment)?;
         let layout = {
             let instances = self.instances.lock();
@@ -1172,22 +1194,28 @@ impl Tier1Inner {
 
         let offset_index = build_offset_index(segment)?;
 
-        Ok(ManifestEntry {
-            segment_id: segment.id(),
-            base_offset: segment.base_offset(),
-            base_record_count: segment.base_record_count(),
-            created_at: segment.created_at(),
-            sealed_at,
-            checksum: footer.checksum,
-            original_bytes: segment.current_size() as u64,
-            compressed_bytes: metadata.len(),
-            compressed_path: warm_file_name,
-            dictionary: None,
-            offset_index,
-            residency: Tier1ResidencyState::StagedForTier0,
-            tier2: None,
-            last_access_epoch_ms: current_epoch_ms(),
-        })
+        Ok((
+            ManifestEntry {
+                segment_id: segment.id(),
+                base_offset: segment.base_offset(),
+                base_record_count: segment.base_record_count(),
+                created_at: segment.created_at(),
+                sealed_at,
+                checksum: footer.checksum,
+                ext_id: footer.ext_id,
+                coordinator_watermark: footer.coordinator_watermark,
+                flush_failure: footer.flush_failure,
+                original_bytes: segment.current_size() as u64,
+                compressed_bytes: metadata.len(),
+                compressed_path: warm_file_name,
+                dictionary: None,
+                offset_index,
+                residency: Tier1ResidencyState::StagedForTier0,
+                tier2: None,
+                last_access_epoch_ms: current_epoch_ms(),
+            },
+            footer,
+        ))
     }
 
     async fn process_hydration_requests_async(
@@ -1559,6 +1587,9 @@ mod tests {
                 created_at: 500 + idx as i64,
                 sealed_at,
                 checksum: 0xDEAD ^ idx as u32,
+                ext_id: 0,
+                coordinator_watermark: 0,
+                flush_failure: false,
                 original_bytes: 2048,
                 compressed_bytes: std::fs::metadata(&warm_path).expect("warm metadata").len(),
                 compressed_path,
@@ -1623,7 +1654,7 @@ mod tests {
         flush_state.finish_flush();
         segment.mark_durable(append.logical_size);
         assert_eq!(segment.durable_size(), append.logical_size);
-        segment.seal(now as i64).expect("seal segment");
+        segment.seal(now as i64, 0, false).expect("seal segment");
         Arc::new(segment)
     }
 

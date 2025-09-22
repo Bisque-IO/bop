@@ -18,10 +18,10 @@ use super::flush::SegmentFlushState;
 use super::fs::create_fixed_size_file;
 
 pub(crate) const SEGMENT_HEADER_SIZE: u32 = 64;
-pub(crate) const SEGMENT_FOOTER_SIZE: u32 = 64;
-pub(crate) const RECORD_HEADER_SIZE: u32 = 16;
+pub(crate) const SEGMENT_FOOTER_SIZE: u32 = 96;
+pub(crate) const RECORD_HEADER_SIZE: u32 = 24;
 const SEGMENT_MAGIC: u32 = 0x414F_4632; // "AOF2"
-const SEGMENT_VERSION: u16 = 1;
+const SEGMENT_VERSION: u16 = 2;
 const SEGMENT_FOOTER_MAGIC: u32 = 0x464F_4F54; // "FOOT"
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +42,7 @@ pub(crate) struct RecordHeader {
     pub length: u32,
     pub checksum: u32,
     pub timestamp: u64,
+    pub ext_id: u64,
 }
 
 pub(crate) struct SegmentRecordSlice<'a> {
@@ -58,6 +59,7 @@ pub struct SegmentHeaderInfo {
     pub max_size: u32,
     pub created_at: i64,
     pub base_timestamp: u64,
+    pub ext_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -72,12 +74,47 @@ pub struct SegmentScan {
     pub truncated: bool,
 }
 
+impl SegmentScan {
+    pub fn from_trusted_footer(
+        header: SegmentHeaderInfo,
+        footer: SegmentFooter,
+    ) -> AofResult<Self> {
+        let relative_size = footer
+            .durable_bytes
+            .checked_sub(header.base_offset)
+            .ok_or_else(|| {
+                AofError::Corruption(format!(
+                    "footer durable_bytes precedes base_offset for segment {}",
+                    header.segment_index
+                ))
+            })?;
+        if relative_size > header.max_size as u64 {
+            return Err(AofError::Corruption(format!(
+                "footer durable_bytes {} exceeds segment max_size {} for segment {}",
+                footer.durable_bytes, header.max_size, header.segment_index
+            )));
+        }
+        let logical_size = relative_size as u32;
+        Ok(SegmentScan {
+            header,
+            footer: Some(footer),
+            record_count: footer.record_count,
+            last_record_id: footer.last_record_id,
+            last_timestamp: footer.last_timestamp,
+            logical_size,
+            checksum: footer.checksum,
+            truncated: false,
+        })
+    }
+}
+
 pub struct Segment {
     index: u32,
     base_offset: u64,
     base_record_count: u64,
     max_size: u32,
     created_at: i64,
+    ext_id: AtomicU64,
 
     header_written: AtomicBool,
     sealed: AtomicBool,
@@ -124,6 +161,7 @@ impl Segment {
             base_record_count,
             max_size,
             created_at,
+            ext_id: AtomicU64::new(0),
             header_written: AtomicBool::new(false),
             sealed: AtomicBool::new(false),
             record_count: AtomicU32::new(0),
@@ -226,6 +264,7 @@ impl Segment {
             base_record_count: header.base_record_count,
             max_size: header.max_size,
             created_at: header.created_at,
+            ext_id: AtomicU64::new(header.ext_id),
             header_written: AtomicBool::new(true),
             sealed: AtomicBool::new(!writable),
             record_count: AtomicU32::new(scan.record_count as u32),
@@ -361,6 +400,8 @@ impl Segment {
         let checksum = fold_crc64(digest.sum64());
         header[4..8].copy_from_slice(&checksum.to_le_bytes());
         header[8..16].copy_from_slice(&timestamp.to_le_bytes());
+        let record_ext_id = self.ext_id.load(Ordering::Acquire);
+        header[16..24].copy_from_slice(&record_ext_id.to_le_bytes());
 
         let write_offset = offset as usize;
         self.data.write_bytes(write_offset, &header)?;
@@ -385,8 +426,13 @@ impl Segment {
             is_full,
         })
     }
-    
-    pub fn seal(&self, sealed_at: i64) -> AofResult<SegmentFooter> {
+
+    pub fn seal(
+        &self,
+        sealed_at: i64,
+        coordinator_watermark: u64,
+        flush_failure: bool,
+    ) -> AofResult<SegmentFooter> {
         if self
             .sealed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -429,6 +475,9 @@ impl Segment {
                 last_timestamp,
                 sealed_at,
                 checksum,
+                ext_id: self.ext_id.load(Ordering::Acquire),
+                coordinator_watermark,
+                flush_failure,
             };
 
             let mut buf = [0u8; SEGMENT_FOOTER_SIZE as usize];
@@ -447,6 +496,20 @@ impl Segment {
         result
     }
 
+    pub fn set_ext_id(&self, ext_id: u64) -> AofResult<()> {
+        if self.header_written.load(Ordering::Acquire) {
+            let current = self.ext_id.load(Ordering::Acquire);
+            if current != ext_id {
+                return Err(AofError::InvalidState(
+                    "cannot change segment ext_id after header written".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        self.ext_id.store(ext_id, Ordering::Release);
+        Ok(())
+    }
+
     pub fn is_sealed(&self) -> bool {
         self.sealed.load(Ordering::Acquire)
     }
@@ -461,6 +524,10 @@ impl Segment {
 
     pub fn record_count(&self) -> u64 {
         self.record_count.load(Ordering::Acquire) as u64
+    }
+
+    pub fn ext_id(&self) -> u64 {
+        self.ext_id.load(Ordering::Acquire)
     }
 
     fn compute_payload_checksum(&self, limit: usize) -> AofResult<u32> {
@@ -648,6 +715,11 @@ impl Segment {
                 .try_into()
                 .map_err(|_| AofError::CorruptedRecord("record timestamp corrupt".to_string()))?,
         );
+        let ext_id = u64::from_le_bytes(
+            header_bytes[16..24]
+                .try_into()
+                .map_err(|_| AofError::CorruptedRecord("record ext id corrupt".to_string()))?,
+        );
 
         let total_len = RECORD_HEADER_SIZE
             .checked_add(length)
@@ -672,6 +744,7 @@ impl Segment {
                 length,
                 checksum,
                 timestamp,
+                ext_id,
             },
             payload,
             total_len,
@@ -697,6 +770,7 @@ impl Segment {
             max_size: self.max_size,
             created_at: self.created_at,
             base_timestamp: self.last_timestamp.load(Ordering::Acquire),
+            ext_id: self.ext_id.load(Ordering::Acquire),
         };
 
         let mut buf = [0u8; SEGMENT_HEADER_SIZE as usize];
@@ -741,6 +815,7 @@ struct SegmentHeader {
     max_size: u32,
     created_at: i64,
     base_timestamp: u64,
+    ext_id: u64,
 }
 
 impl SegmentHeader {
@@ -756,6 +831,7 @@ impl SegmentHeader {
         buf[28..32].copy_from_slice(&self.max_size.to_le_bytes());
         buf[32..40].copy_from_slice(&self.created_at.to_le_bytes());
         buf[40..48].copy_from_slice(&self.base_timestamp.to_le_bytes());
+        buf[48..56].copy_from_slice(&self.ext_id.to_le_bytes());
     }
 
     fn decode(buf: &[u8]) -> Option<Self> {
@@ -781,6 +857,7 @@ impl SegmentHeader {
             max_size: u32::from_le_bytes(buf[28..32].try_into().ok()?),
             created_at: i64::from_le_bytes(buf[32..40].try_into().ok()?),
             base_timestamp: u64::from_le_bytes(buf[40..48].try_into().ok()?),
+            ext_id: u64::from_le_bytes(buf[48..56].try_into().ok()?),
         })
     }
 }
@@ -794,6 +871,7 @@ impl From<SegmentHeader> for SegmentHeaderInfo {
             max_size: value.max_size,
             created_at: value.created_at,
             base_timestamp: value.base_timestamp,
+            ext_id: value.ext_id,
         }
     }
 }
@@ -808,6 +886,9 @@ pub struct SegmentFooter {
     pub last_timestamp: u64,
     pub sealed_at: i64,
     pub checksum: u32,
+    pub ext_id: u64,
+    pub coordinator_watermark: u64,
+    pub flush_failure: bool,
 }
 
 impl SegmentFooter {
@@ -824,6 +905,9 @@ impl SegmentFooter {
         buf[44..52].copy_from_slice(&self.last_timestamp.to_le_bytes());
         buf[52..60].copy_from_slice(&self.sealed_at.to_le_bytes());
         buf[60..64].copy_from_slice(&self.checksum.to_le_bytes());
+        buf[64..72].copy_from_slice(&self.ext_id.to_le_bytes());
+        buf[72..80].copy_from_slice(&self.coordinator_watermark.to_le_bytes());
+        buf[80] = if self.flush_failure { 1 } else { 0 };
     }
 
     pub fn decode(buf: &[u8]) -> Option<Self> {
@@ -846,6 +930,9 @@ impl SegmentFooter {
         let last_timestamp = u64::from_le_bytes(buf[44..52].try_into().ok()?);
         let sealed_at = i64::from_le_bytes(buf[52..60].try_into().ok()?);
         let checksum = u32::from_le_bytes(buf[60..64].try_into().ok()?);
+        let ext_id = u64::from_le_bytes(buf[64..72].try_into().ok()?);
+        let coordinator_watermark = u64::from_le_bytes(buf[72..80].try_into().ok()?);
+        let flush_failure = matches!(buf.get(80), Some(&1));
         Some(SegmentFooter {
             segment_index,
             base_record_count,
@@ -855,6 +942,9 @@ impl SegmentFooter {
             last_timestamp,
             sealed_at,
             checksum,
+            ext_id,
+            coordinator_watermark,
+            flush_failure,
         })
     }
 }
@@ -1277,6 +1367,7 @@ mod tests {
         assert_eq!(info.base_offset, 0);
         assert_eq!(info.created_at, 77);
         assert_eq!(info.base_timestamp, 123);
+        assert_eq!(info.ext_id, 0);
     }
 
     proptest! {
@@ -1326,6 +1417,7 @@ mod tests {
             max_size_seed in any::<u32>(),
             created_at in any::<i64>(),
             base_timestamp in any::<u64>(),
+            ext_id in any::<u64>(),
         ) {
             let max_size = arbitrary_max_size(max_size_seed);
             let header = SegmentHeader {
@@ -1335,6 +1427,7 @@ mod tests {
                 max_size,
                 created_at,
                 base_timestamp,
+                ext_id,
             };
 
             let mut buf = [0u8; SEGMENT_HEADER_SIZE as usize];
@@ -1347,6 +1440,7 @@ mod tests {
             prop_assert_eq!(decoded.max_size, header.max_size);
             prop_assert_eq!(decoded.created_at, header.created_at);
             prop_assert_eq!(decoded.base_timestamp, header.base_timestamp);
+            prop_assert_eq!(decoded.ext_id, header.ext_id);
         }
 
         #[test]
@@ -1357,6 +1451,7 @@ mod tests {
             max_size_seed in any::<u32>(),
             created_at in any::<i64>(),
             base_timestamp in any::<u64>(),
+            ext_id in any::<u64>(),
             flip_index in 0usize..4,
         ) {
             let max_size = arbitrary_max_size(max_size_seed);
@@ -1367,6 +1462,7 @@ mod tests {
                 max_size,
                 created_at,
                 base_timestamp,
+                ext_id,
             };
 
             let mut buf = [0u8; SEGMENT_HEADER_SIZE as usize];
@@ -1386,6 +1482,9 @@ mod tests {
             last_timestamp in any::<u64>(),
             sealed_at in any::<i64>(),
             checksum in any::<u32>(),
+            ext_id in any::<u64>(),
+            coordinator_watermark in any::<u64>(),
+            flush_failure in any::<bool>(),
         ) {
             let record_count = base_record_count.saturating_add(record_delta);
             let footer = SegmentFooter {
@@ -1397,6 +1496,9 @@ mod tests {
                 last_timestamp,
                 sealed_at,
                 checksum,
+                ext_id,
+                coordinator_watermark,
+                flush_failure,
             };
 
             let mut buf = [0u8; SEGMENT_FOOTER_SIZE as usize];
@@ -1411,6 +1513,9 @@ mod tests {
             prop_assert_eq!(decoded.last_timestamp, footer.last_timestamp);
             prop_assert_eq!(decoded.sealed_at, footer.sealed_at);
             prop_assert_eq!(decoded.checksum, footer.checksum);
+            prop_assert_eq!(decoded.ext_id, footer.ext_id);
+            prop_assert_eq!(decoded.coordinator_watermark, footer.coordinator_watermark);
+            prop_assert_eq!(decoded.flush_failure, footer.flush_failure);
         }
 
         #[test]
@@ -1423,6 +1528,9 @@ mod tests {
             last_timestamp in any::<u64>(),
             sealed_at in any::<i64>(),
             checksum in any::<u32>(),
+            ext_id in any::<u64>(),
+            coordinator_watermark in any::<u64>(),
+            flush_failure in any::<bool>(),
             flip_index in 0usize..4,
         ) {
             let record_count = base_record_count.saturating_add(record_delta);
@@ -1435,6 +1543,9 @@ mod tests {
                 last_timestamp,
                 sealed_at,
                 checksum,
+                ext_id,
+                coordinator_watermark,
+                flush_failure,
             };
 
             let mut buf = [0u8; SEGMENT_FOOTER_SIZE as usize];
@@ -1442,6 +1553,104 @@ mod tests {
             buf[flip_index] ^= 0xFF;
 
             prop_assert!(SegmentFooter::decode(&buf).is_none());
+        }
+    }
+
+    #[test]
+    fn trusted_footer_scan_uses_footer_metadata() {
+        let header = SegmentHeaderInfo {
+            segment_index: 11,
+            base_record_count: 4,
+            base_offset: 2_048,
+            max_size: 4_096,
+            created_at: 99,
+            base_timestamp: 1_234,
+            ext_id: 42,
+        };
+        let footer = SegmentFooter {
+            segment_index: 11,
+            base_record_count: 4,
+            record_count: 8,
+            durable_bytes: 2_560,
+            last_record_id: RecordId::from_parts(11, SEGMENT_HEADER_SIZE),
+            last_timestamp: 9_876,
+            sealed_at: 777,
+            checksum: 0xDEAD_BEEF,
+            ext_id: 42,
+            coordinator_watermark: 123,
+            flush_failure: false,
+        };
+        let scan = SegmentScan::from_trusted_footer(header.clone(), footer).expect("scan");
+        assert_eq!(scan.logical_size, 512);
+        assert_eq!(scan.record_count, 8);
+        assert_eq!(scan.last_timestamp, 9_876);
+        assert_eq!(scan.footer.unwrap().coordinator_watermark, 123);
+        assert!(!scan.truncated);
+        assert_eq!(scan.header.segment_index, 11);
+        assert_eq!(scan.header.ext_id, 42);
+    }
+
+    #[test]
+    fn trusted_footer_rejects_durable_before_base_offset() {
+        let header = SegmentHeaderInfo {
+            segment_index: 3,
+            base_record_count: 0,
+            base_offset: 2_048,
+            max_size: 4_096,
+            created_at: 0,
+            base_timestamp: 0,
+            ext_id: 0,
+        };
+        let footer = SegmentFooter {
+            segment_index: 3,
+            base_record_count: 0,
+            record_count: 0,
+            durable_bytes: 1_024,
+            last_record_id: RecordId::from_parts(3, SEGMENT_HEADER_SIZE),
+            last_timestamp: 0,
+            sealed_at: 0,
+            checksum: 0,
+            ext_id: 0,
+            coordinator_watermark: 0,
+            flush_failure: false,
+        };
+        let err = SegmentScan::from_trusted_footer(header, footer)
+            .expect_err("durable before base offset");
+        match err {
+            AofError::Corruption(msg) => assert!(msg.contains("precedes")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trusted_footer_rejects_durable_beyond_segment() {
+        let header = SegmentHeaderInfo {
+            segment_index: 4,
+            base_record_count: 10,
+            base_offset: 0,
+            max_size: 2_048,
+            created_at: 0,
+            base_timestamp: 0,
+            ext_id: 0,
+        };
+        let footer = SegmentFooter {
+            segment_index: 4,
+            base_record_count: 10,
+            record_count: 10,
+            durable_bytes: 10_000,
+            last_record_id: RecordId::from_parts(4, SEGMENT_HEADER_SIZE),
+            last_timestamp: 0,
+            sealed_at: 0,
+            checksum: 0,
+            ext_id: 0,
+            coordinator_watermark: 0,
+            flush_failure: false,
+        };
+        let err =
+            SegmentScan::from_trusted_footer(header, footer).expect_err("durable beyond segment");
+        match err {
+            AofError::Corruption(msg) => assert!(msg.contains("exceeds")),
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 
@@ -1483,7 +1692,7 @@ mod tests {
         let size = segment.current_size();
         let _ = segment.mark_durable(size);
 
-        let footer = segment.seal(456).expect("seal");
+        let footer = segment.seal(456, 0, false).expect("seal");
 
         let scan = Segment::scan_tail(&path).expect("scan");
         let scanned_footer = scan.footer.expect("footer");
@@ -1516,7 +1725,7 @@ mod tests {
 
         let before_ptr = segment.data.data.load(Ordering::Acquire);
 
-        segment.seal(999).expect("seal segment");
+        segment.seal(999, 0, false).expect("seal segment");
         let after_ptr = segment.data.data.load(Ordering::Acquire);
         assert_eq!(
             before_ptr, after_ptr,
@@ -1539,5 +1748,61 @@ mod tests {
             .remap_read_only()
             .expect("remap back to read-only");
         assert!(!segment.data.is_writable());
+    }
+
+    #[test]
+    fn set_ext_id_persists_to_header_and_footer() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("segment.seg");
+        let mut cfg = AofConfig::default();
+        cfg.segment_min_bytes = 2048;
+        cfg.segment_max_bytes = 2048;
+        cfg.segment_target_bytes = 2048;
+        let segment =
+            Segment::create_active(SegmentId::new(5), 0, 0, 0, cfg.segment_max_bytes, &path)
+                .expect("create segment");
+        segment.set_ext_id(42).expect("set ext id");
+
+        segment.append_record(b"payload", 1).expect("append record");
+        let _ = segment.mark_durable(segment.current_size());
+        let footer = segment.seal(123, 7, true).expect("seal with ext id");
+        assert_eq!(footer.ext_id, 42);
+        assert_eq!(footer.coordinator_watermark, 7);
+        assert!(footer.flush_failure);
+
+        let reloaded = Segment::load_header(&path).expect("header");
+        assert_eq!(reloaded.ext_id, 42);
+
+        let mut file = File::open(&path).expect("open segment");
+        let mut header_buf = [0u8; RECORD_HEADER_SIZE as usize];
+        file.seek(SeekFrom::Start(SEGMENT_HEADER_SIZE as u64))
+            .expect("seek record header");
+        file.read_exact(&mut header_buf)
+            .expect("read record header");
+        let mut ext_bytes = [0u8; 8];
+        ext_bytes.copy_from_slice(&header_buf[16..24]);
+        assert_eq!(u64::from_le_bytes(ext_bytes), 42);
+    }
+
+    #[test]
+    fn set_ext_id_after_header_written_errors() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("segment.seg");
+        let mut cfg = AofConfig::default();
+        cfg.segment_min_bytes = 2048;
+        cfg.segment_max_bytes = 2048;
+        cfg.segment_target_bytes = 2048;
+        let segment =
+            Segment::create_active(SegmentId::new(6), 0, 0, 0, cfg.segment_max_bytes, &path)
+                .expect("create segment");
+
+        segment.append_record(b"payload", 1).expect("append record");
+        let err = segment.set_ext_id(99).expect_err("set ext id too late");
+        match err {
+            AofError::InvalidState(message) => {
+                assert!(message.contains("header"), "unexpected message: {message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

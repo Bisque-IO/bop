@@ -83,7 +83,7 @@ fn create_sealed_segment(layout: &Layout, id: u64, payload: &[u8]) -> Arc<Segmen
     flush_state.mark_durable(append.logical_size);
     flush_state.finish_flush();
     segment.mark_durable(append.logical_size);
-    segment.seal(now as i64).expect("seal segment");
+    segment.seal(now as i64, 0, false).expect("seal segment");
     Arc::new(segment)
 }
 
@@ -223,6 +223,9 @@ async fn manifest_rotation_boundaries() {
         ManifestRecordPayload::SealSegment {
             durable_bytes: 1024,
             segment_crc64: 0xAABBCCDDu64,
+            ext_id: 77,
+            coordinator_watermark: 555,
+            flush_failure: false,
         },
     );
     writer.append(&seal_record).expect("append seal");
@@ -265,9 +268,15 @@ async fn manifest_rotation_boundaries() {
         ManifestRecordPayload::SealSegment {
             durable_bytes,
             segment_crc64,
+            ext_id,
+            coordinator_watermark,
+            flush_failure,
         } => {
             assert_eq!(*durable_bytes, 1024);
             assert_eq!(*segment_crc64, 0xAABBCCDDu64);
+            assert_eq!(*ext_id, 77);
+            assert_eq!(*coordinator_watermark, 555);
+            assert!(!*flush_failure);
         }
         other => panic!("unexpected second payload: {other:?}"),
     }

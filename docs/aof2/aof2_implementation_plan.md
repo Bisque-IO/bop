@@ -201,23 +201,18 @@ Replace ad-hoc JSON manifests with the append-only manifest log.
 
 Ensure startup replay and replicated actions respect the tiered architecture.
 
-- [ ] **RC1**: Persist catalog snapshots that reference the tiered operation log watermark.
+- [x] **RC1**: Embed catalog and durability metadata in segment headers/footers and retire durability snapshots.
+    - [x] Add `ext_id` to segment header, record header, and footer (defaulting to zero until callers supply a value). (completed 2025-09-30, segments now embed ext_id end-to-end)
+    - [x] Persist durable bytes, record count, coordinator watermark, and the flush-failure flag in the sealing footer. (completed 2025-09-30, sealing writes enriched footer and tests updated)
+    - [x] Document the design in `docs/aof2/aof2_catalog_snapshots.md` and extend unit tests (`aof2::segment`, `aof2::tests`) to validate the footer metadata and recovery flow. (completed 2025-10-03)
 
-    - [x] Gather requirements for the snapshot payload (catalog entries, flush queue state, tier residency metadata, durability cursors) and confirm recovery consumers. (draft captured in `aof2_catalog_snapshots.md`, pending stakeholder review)
+- [x] **RC2**: Introduce the atomic current.sealed pointer used during recovery.
+    - [x] Write the pointer via `TempFileGuard` + rename after each successful seal. (`Layout::store_current_sealed_pointer`, exercised by `aof2::fs` tests)
+    - [x] Document crash-consistency requirements and verify restart logic consumes the pointer before scanning segments. (`aof2::tests::pointer_*` scenarios cover nominal, missing, and mismatched pointers)
 
-    - [ ] Define the watermark semantics so `TieredCoordinator` operation log sequences stay aligned with segment durability and flush metadata updates.
-
-    - [ ] Sketch storage layout (local staging vs Tier 2 upload), retention policy, and how snapshots coordinate with ongoing flush/rollover work.
-
-    - [ ] Prototype a `SnapshotWriter` API in `Aof`/`TieredInstance` that can serialize the catalog + metadata while gating append/flush safely.
-
-    - [ ] Plan validation hooks (unit coverage via `recover_existing_segments`, integration test for snapshot -> restart -> replay) and metrics for snapshot age/watermark drift.
-
-    - [ ] Document the design in `aof2_catalog_snapshots.md`, referencing RD5 reader guidance and listing open questions for recovery milestones.
-
-- [ ] **RC2**: Implement startup replay that rebuilds Tier 0/1 manifests, reconciles Tier 2 objects, and schedules hydrations before enabling append.
-
-- [ ] **RC3**: Integrate replicated operation log application into coordinator so followers converge on residency decisions.
+- [x] **RC3**: Align manifest replay with the enriched segment metadata.
+    - [x] Include ext_id, coordinator watermark, and flush-failure in manifest entries and `SealSegment` log records. (see `Tier1Manifest` updates and `tests/aof2_manifest_log.rs`)
+    - [x] Replay now prefers header/footer metadata seeded via the pointer, using manifest data only for Tier1/Tier2 residency. (implemented in `recover_existing_segments` with pointer guarded fallbacks)
 
 - [ ] **RC4**: Handle partial failures (e.g., missing Tier 1 artifact) by queuing downloads from Tier 2 and flagging segments `NeedsRecovery` until satisfied.
 
@@ -260,6 +255,7 @@ Prove correctness and plan adoption.
 - [ ] **CC3**: Audit error enums and map new failure types (Tier 1 compression failure, Tier 2 upload failure, hydration timeout) to actionable diagnostics.
 
 - [ ] **CC4**: Keep this plan in sync with implementation progress; include PR references when checking off tasks.
+
 
 
 

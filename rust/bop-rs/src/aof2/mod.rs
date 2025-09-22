@@ -2,7 +2,7 @@
 use crate::aof2::store::DurabilityEntry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::trace;
+use tracing::{trace, warn};
 
 pub mod config;
 pub mod error;
@@ -48,6 +48,8 @@ pub use metrics::manifest_replay::{
 };
 pub use reader::{RecordBounds, SegmentReader, SegmentRecord, TailFollower};
 
+use self::fs::CurrentSealedPointer;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlushMetricSample {
     pub name: &'static str,
@@ -72,14 +74,19 @@ impl FlushMetricsExporter {
         self.snapshot.retry_failures
     }
 
+    pub fn flush_failures(&self) -> u64 {
+        self.snapshot.flush_failures
+    }
+
     pub fn backlog_bytes(&self) -> u64 {
         self.snapshot.backlog_bytes
     }
 
     pub fn samples(&self) -> impl Iterator<Item = FlushMetricSample> {
-        const METRIC_NAMES: [(&str, fn(&FlushMetricsSnapshot) -> u64); 3] = [
+        const METRIC_NAMES: [(&str, fn(&FlushMetricsSnapshot) -> u64); 4] = [
             ("aof_flush_retry_attempts_total", |s| s.retry_attempts),
             ("aof_flush_retry_failures_total", |s| s.retry_failures),
+            ("aof_flush_failures_total", |s| s.flush_failures),
             ("aof_flush_backlog_bytes", |s| s.backlog_bytes),
         ];
         METRIC_NAMES
@@ -102,7 +109,7 @@ impl FlushMetricsExporter {
 
 use error::{AofError, AofResult, BackpressureKind};
 use flush::{FlushManager, FlushMetrics, FlushMetricsSnapshot, FlushRequest, flush_with_retry};
-use segment::{Segment, SegmentAppendResult};
+use segment::{Segment, SegmentAppendResult, SegmentFooter};
 
 const DEFAULT_TIER0_CLUSTER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 const DEFAULT_TIER0_INSTANCE_QUOTA_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
@@ -163,6 +170,90 @@ impl AofManagerConfig {
         cfg.store.tier1 = Tier1Config::new(64 * 1024 * 1024).with_worker_threads(1);
         cfg.store.tier2 = None;
         cfg
+    }
+}
+
+#[derive(Debug)]
+pub struct InstanceMetadata {
+    coordinator_watermark: AtomicU64,
+    current_ext_id: AtomicU64,
+}
+
+impl InstanceMetadata {
+    fn new() -> Self {
+        Self {
+            coordinator_watermark: AtomicU64::new(0),
+            current_ext_id: AtomicU64::new(0),
+        }
+    }
+
+    pub fn coordinator_watermark(&self) -> u64 {
+        self.coordinator_watermark.load(Ordering::Acquire)
+    }
+
+    pub fn set_coordinator_watermark(&self, watermark: u64) {
+        self.coordinator_watermark
+            .store(watermark, Ordering::Release);
+    }
+
+    pub fn current_ext_id(&self) -> u64 {
+        self.current_ext_id.load(Ordering::Acquire)
+    }
+
+    pub fn set_current_ext_id(&self, ext_id: u64) {
+        self.current_ext_id.store(ext_id, Ordering::Release);
+    }
+}
+
+#[derive(Default)]
+pub struct CoordinatorMetadataRegistry {
+    instances: Mutex<HashMap<InstanceId, Arc<InstanceMetadata>>>,
+}
+
+impl CoordinatorMetadataRegistry {
+    pub fn register(&self, instance_id: InstanceId) -> Arc<InstanceMetadata> {
+        let mut instances = self.instances.lock();
+        Arc::clone(
+            instances
+                .entry(instance_id)
+                .or_insert_with(|| Arc::new(InstanceMetadata::new())),
+        )
+    }
+
+    pub fn get(&self, instance_id: InstanceId) -> Option<Arc<InstanceMetadata>> {
+        let instances = self.instances.lock();
+        instances.get(&instance_id).cloned()
+    }
+
+    pub fn unregister(&self, instance_id: InstanceId) {
+        self.instances.lock().remove(&instance_id);
+    }
+}
+
+#[derive(Clone)]
+pub struct InstanceMetadataHandle {
+    metadata: Arc<InstanceMetadata>,
+}
+
+impl InstanceMetadataHandle {
+    fn new(metadata: Arc<InstanceMetadata>) -> Self {
+        Self { metadata }
+    }
+
+    pub fn set_coordinator_watermark(&self, watermark: u64) {
+        self.metadata.set_coordinator_watermark(watermark);
+    }
+
+    pub fn coordinator_watermark(&self) -> u64 {
+        self.metadata.coordinator_watermark()
+    }
+
+    pub fn set_current_ext_id(&self, ext_id: u64) {
+        self.metadata.set_current_ext_id(ext_id);
+    }
+
+    pub fn current_ext_id(&self) -> u64 {
+        self.metadata.current_ext_id()
     }
 }
 
@@ -384,6 +475,7 @@ pub struct AofManagerHandle {
     runtime: Arc<TieredRuntime>,
     coordinator: Arc<TieredCoordinator>,
     flush_config: FlushConfig,
+    metadata: Arc<CoordinatorMetadataRegistry>,
 }
 
 impl AofManagerHandle {
@@ -396,6 +488,7 @@ impl AofManagerHandle {
             runtime,
             coordinator,
             flush_config,
+            metadata: Arc::new(CoordinatorMetadataRegistry::default()),
         }
     }
 
@@ -421,6 +514,23 @@ impl AofManagerHandle {
 
     pub fn admission_metrics(&self) -> AdmissionMetricsSnapshot {
         self.coordinator.admission_metrics()
+    }
+
+    pub(crate) fn register_instance_metadata(
+        &self,
+        instance_id: InstanceId,
+    ) -> Arc<InstanceMetadata> {
+        self.metadata.register(instance_id)
+    }
+
+    pub(crate) fn unregister_instance_metadata(&self, instance_id: InstanceId) {
+        self.metadata.unregister(instance_id);
+    }
+
+    pub fn metadata_handle(&self, instance_id: InstanceId) -> Option<InstanceMetadataHandle> {
+        self.metadata
+            .get(instance_id)
+            .map(InstanceMetadataHandle::new)
     }
 }
 
@@ -663,7 +773,9 @@ pub struct Aof {
     append: AppendState,
     management: Mutex<AofManagement>,
     metrics: Arc<FlushMetrics>,
+    flush_failed: Arc<AtomicBool>,
     flush: Arc<FlushManager>,
+    metadata: Arc<InstanceMetadata>,
     tail_signal: TailSignal,
 }
 
@@ -682,11 +794,14 @@ impl Aof {
         let rollover_notify = notifiers.rollover(instance_id);
         let metrics = Arc::new(FlushMetrics::default());
         let append = AppendState::new(metrics.clone());
+        let flush_failed = Arc::new(AtomicBool::new(false));
         let flush = FlushManager::new(
             manager.runtime(),
             append.unflushed_handle(),
             metrics.clone(),
+            flush_failed.clone(),
         );
+        let metadata = manager.register_instance_metadata(instance_id);
         let instance = Self {
             manager,
             config: normalized,
@@ -705,7 +820,9 @@ impl Aof {
                 rollovers: HashMap::new(),
             }),
             metrics,
+            flush_failed,
             flush,
+            metadata,
             tail_signal: TailSignal::new(),
         };
 
@@ -752,6 +869,11 @@ impl Aof {
         self.tier.durability_snapshot()
     }
 
+    #[cfg(test)]
+    pub(crate) fn flush_failed_for_tests(&self) -> bool {
+        self.flush_failed.load(Ordering::Acquire)
+    }
+
     pub fn open_reader(&self, segment_id: SegmentId) -> AofResult<SegmentReader> {
         if let Some(resident) = {
             let state = self.management.lock();
@@ -794,6 +916,26 @@ impl Aof {
         self.metrics.snapshot()
     }
 
+    pub fn coordinator_watermark(&self) -> u64 {
+        self.metadata.coordinator_watermark()
+    }
+
+    pub fn set_coordinator_watermark(&self, watermark: u64) {
+        self.metadata.set_coordinator_watermark(watermark);
+    }
+
+    pub fn set_current_ext_id(&self, ext_id: u64) -> AofResult<()> {
+        self.metadata.set_current_ext_id(ext_id);
+        if let Some(guard) = self.current_tail() {
+            guard.segment().set_ext_id(ext_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn metadata_handle(&self) -> InstanceMetadataHandle {
+        InstanceMetadataHandle::new(self.metadata.clone())
+    }
+
     pub fn tail_events(&self) -> watch::Receiver<TailState> {
         self.tail_signal.subscribe()
     }
@@ -807,6 +949,11 @@ impl Aof {
             return Err(AofError::InvalidState(
                 "record payload is empty".to_string(),
             ));
+        }
+
+        if self.flush_failed.load(Ordering::Acquire) {
+            self.record_would_block(BackpressureKind::Flush);
+            return Err(AofError::would_block(BackpressureKind::Flush));
         }
 
         let timestamp = Utc::now()
@@ -834,6 +981,11 @@ impl Aof {
             return Err(AofError::InvalidState(
                 "record payload is empty".to_string(),
             ));
+        }
+
+        if self.flush_failed.load(Ordering::Acquire) {
+            self.record_would_block(BackpressureKind::Flush);
+            return Err(AofError::would_block(BackpressureKind::Flush));
         }
 
         let timestamp = Utc::now()
@@ -1017,7 +1169,11 @@ impl Aof {
         if delta > 0 {
             self.append.sub_unflushed(delta as u64);
         }
-        segment.seal(current_timestamp_nanos())?;
+        let sealed_at = current_timestamp_nanos();
+        let coordinator_watermark = self.metadata.coordinator_watermark();
+        let flush_failure = self.flush_failed.load(Ordering::Acquire);
+        let footer = segment.seal(sealed_at, coordinator_watermark, flush_failure)?;
+        self.update_current_sealed_pointer(segment_id, &footer)?;
         guard.mark_sealed();
 
         let mut state = self.management.lock();
@@ -1272,7 +1428,12 @@ impl Aof {
             state.remove_flush(segment);
             state.resident_for(segment).map(|resident| {
                 state.flush_queue.push_back(resident.clone());
-                FlushRequest::new(self.instance_id, durability.clone(), resident)
+                FlushRequest::new(
+                    self.instance_id,
+                    self.tier.clone(),
+                    durability.clone(),
+                    resident,
+                )
             })
         };
 
@@ -1288,10 +1449,14 @@ impl Aof {
                         self.append.sub_unflushed(delta as u64);
                     }
                     self.metrics.incr_sync_flush();
+                    self.metrics.record_backlog(self.append.total_unflushed());
+                    self.flush_failed.store(false, Ordering::Release);
                     flush_state.finish_flush();
                     return Ok(());
                 }
                 Err(err) => {
+                    self.flush_failed.store(true, Ordering::Release);
+                    self.record_would_block(BackpressureKind::Flush);
                     flush_state.finish_flush();
                     return Err(err);
                 }
@@ -1306,16 +1471,25 @@ impl Aof {
                     let mut state = self.management.lock();
                     state.remove_flush(segment);
                 }
-                flush_with_retry(segment, &self.metrics)?;
-                let requested_after = flush_state.requested_bytes();
-                let durable_bytes = target_bytes.min(requested_after);
-                durability.record_flush(segment.id(), requested_after, durable_bytes);
-                let delta = segment.mark_durable(durable_bytes);
-                if delta > 0 {
-                    self.append.sub_unflushed(delta as u64);
+                match flush_with_retry(segment, &self.metrics) {
+                    Ok(()) => {
+                        let requested_after = flush_state.requested_bytes();
+                        let durable_bytes = target_bytes.min(requested_after);
+                        durability.record_flush(segment.id(), requested_after, durable_bytes);
+                        let delta = segment.mark_durable(durable_bytes);
+                        if delta > 0 {
+                            self.append.sub_unflushed(delta as u64);
+                        }
+                        self.metrics.incr_sync_flush();
+                        self.flush_failed.store(false, Ordering::Release);
+                        Ok(())
+                    }
+                    Err(err) => {
+                        self.flush_failed.store(true, Ordering::Release);
+                        self.record_would_block(BackpressureKind::Flush);
+                        Err(err)
+                    }
                 }
-                self.metrics.incr_sync_flush();
-                Ok(())
             }
             Err(err) => {
                 flush_state.finish_flush();
@@ -1323,6 +1497,8 @@ impl Aof {
                     let mut state = self.management.lock();
                     state.remove_flush(segment);
                 }
+                self.flush_failed.store(true, Ordering::Release);
+                self.record_would_block(BackpressureKind::Flush);
                 Err(err)
             }
         }
@@ -1339,6 +1515,28 @@ impl Aof {
 
     fn record_would_block(&self, kind: BackpressureKind) {
         self.tier.record_would_block(kind);
+    }
+
+    fn update_current_sealed_pointer(
+        &self,
+        segment_id: SegmentId,
+        footer: &SegmentFooter,
+    ) -> AofResult<()> {
+        let pointer = CurrentSealedPointer {
+            segment_id,
+            coordinator_watermark: footer.coordinator_watermark,
+            durable_bytes: footer.durable_bytes,
+        };
+        if let Err(err) = self.layout.store_current_sealed_pointer(pointer) {
+            warn!(
+                segment = segment_id.as_u64(),
+                durable_bytes = footer.durable_bytes,
+                watermark = footer.coordinator_watermark,
+                "failed to persist current.sealed pointer: {err}"
+            );
+            return Err(err);
+        }
+        Ok(())
     }
 
     fn enforce_backpressure(&self, segment: &Arc<Segment>, target_logical: u32) -> AofResult<()> {
@@ -1466,6 +1664,8 @@ impl Aof {
             segment_bytes,
             path.as_path(),
         )?);
+
+        segment.set_ext_id(self.metadata.current_ext_id())?;
 
         let resident = self.tier.admit_segment(
             segment.clone(),
@@ -1655,15 +1855,28 @@ impl Aof {
             return Ok(());
         }
 
+        let pointer = match self.layout.load_current_sealed_pointer() {
+            Ok(pointer) => pointer,
+            Err(err) => {
+                warn!(
+                    path = %self.layout.current_sealed_pointer_path().display(),
+                    "failed to load current.sealed pointer: {err}"
+                );
+                None
+            }
+        };
+
         let mut catalog = Vec::with_capacity(recovered.len());
         let mut pending_finalize = VecDeque::new();
         let mut flush_queue = VecDeque::new();
         let mut tail: Option<Arc<Segment>> = None;
-        let mut next_offset = 0u64;
+        let mut next_offset = pointer.as_ref().map(|p| p.durable_bytes).unwrap_or(0);
         let mut total_records = 0u64;
         let mut next_segment_index = 0u32;
         let mut unsealed_count = 0usize;
         let mut total_unflushed = 0u64;
+        let mut pointer_matched = pointer.is_none();
+        let mut highest_watermark = 0u64;
 
         for entry in recovered {
             let resident = entry.resident().clone();
@@ -1677,7 +1890,21 @@ impl Aof {
             let segment_end_offset = segment
                 .base_offset()
                 .saturating_add(segment.durable_size() as u64);
-            next_offset = segment_end_offset;
+            next_offset = next_offset.max(segment_end_offset);
+            if let Some(ptr) = pointer.as_ref() {
+                if ptr.segment_id == segment_id {
+                    pointer_matched = true;
+                    if segment_end_offset != ptr.durable_bytes {
+                        warn!(
+                            segment = ptr.segment_id.as_u64(),
+                            pointer_durable = ptr.durable_bytes,
+                            derived_durable = segment_end_offset,
+                            "current.sealed pointer durable bytes mismatch during recovery"
+                        );
+                    }
+                    highest_watermark = ptr.coordinator_watermark;
+                }
+            }
             total_records = segment
                 .base_record_count()
                 .saturating_add(segment.record_count());
@@ -1704,6 +1931,14 @@ impl Aof {
             }
 
             catalog.push(resident);
+        }
+        if let Some(ptr) = pointer.as_ref() {
+            if !pointer_matched {
+                warn!(
+                    segment = ptr.segment_id.as_u64(),
+                    "current.sealed pointer segment missing from recovered catalog"
+                );
+            }
         }
 
         let tail_guard_arc = tail.as_ref().and_then(|segment| {
@@ -1751,13 +1986,32 @@ impl Aof {
         self.tail_signal
             .replace(tail_snapshot, pending_snapshot, event);
 
+        if let Some(segment) = tail {
+            self.metadata.set_current_ext_id(segment.ext_id());
+        } else {
+            self.metadata.set_current_ext_id(0);
+        }
+        self.metadata.set_coordinator_watermark(highest_watermark);
+        self.flush_failed.store(false, Ordering::Release);
+
         let durability = self.tier.durability_handle();
         for resident in pending_for_flush {
-            let request = FlushRequest::new(self.instance_id, durability.clone(), resident);
+            let request = FlushRequest::new(
+                self.instance_id,
+                self.tier.clone(),
+                durability.clone(),
+                resident,
+            );
             self.flush.enqueue_segment(request)?;
         }
 
         Ok(())
+    }
+}
+
+impl Drop for Aof {
+    fn drop(&mut self) {
+        self.manager.unregister_instance_metadata(self.instance_id);
     }
 }
 
@@ -1788,32 +2042,41 @@ mod tests {
             asynchronous_flushes: 5,
             retry_attempts: 6,
             retry_failures: 7,
-            backlog_bytes: 8,
+            flush_failures: 8,
+            backlog_bytes: 9,
         };
         let exporter = FlushMetricsExporter::new(snapshot);
         assert_eq!(exporter.retry_attempts(), 6);
         assert_eq!(exporter.retry_failures(), 7);
-        assert_eq!(exporter.backlog_bytes(), 8);
+        assert_eq!(exporter.flush_failures(), 8);
+        assert_eq!(exporter.backlog_bytes(), 9);
 
         let mut samples: Vec<FlushMetricSample> = exporter.samples().collect();
         samples.sort_by(|a, b| a.name.cmp(b.name));
-        assert_eq!(samples.len(), 3);
+        assert_eq!(samples.len(), 4);
         assert_eq!(
             samples[0],
             FlushMetricSample {
                 name: "aof_flush_backlog_bytes",
-                value: 8
+                value: 9
             }
         );
         assert_eq!(
             samples[1],
+            FlushMetricSample {
+                name: "aof_flush_failures_total",
+                value: 8
+            }
+        );
+        assert_eq!(
+            samples[2],
             FlushMetricSample {
                 name: "aof_flush_retry_attempts_total",
                 value: 6
             }
         );
         assert_eq!(
-            samples[2],
+            samples[3],
             FlushMetricSample {
                 name: "aof_flush_retry_failures_total",
                 value: 7
@@ -1902,7 +2165,6 @@ mod tests {
         cfg.segment_max_bytes = 64 * 1024;
         cfg.segment_target_bytes = 64 * 1024;
         let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
         let aof = Aof::new(handle, cfg).expect("aof");
 
         let mut state = aof.management.lock();
@@ -1943,7 +2205,6 @@ mod tests {
         cfg.segment_max_bytes = 4096;
         cfg.segment_target_bytes = 4096;
         let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
         let aof = Aof::new(handle, cfg).expect("aof");
 
         let guard = aof.try_get_writable_segment().expect("segment");
@@ -1977,7 +2238,6 @@ mod tests {
         cfg.segment_max_bytes = 4096;
         cfg.segment_target_bytes = 4096;
         let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
         let aof = Aof::new(handle, cfg).expect("aof");
 
         let initial_guard = aof
@@ -2033,7 +2293,6 @@ mod tests {
         cfg.segment_max_bytes = 4096;
         cfg.segment_target_bytes = 4096;
         let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
         let aof = Aof::new(handle, cfg).expect("aof");
 
         aof.append_record(b"payload").expect("append");
@@ -2064,8 +2323,7 @@ mod tests {
         cfg.segment_max_bytes = 128;
         cfg.segment_target_bytes = 128;
 
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
         aof.flush.shutdown_worker_for_tests();
 
@@ -2122,8 +2380,7 @@ mod tests {
         cfg.segment_max_bytes = 128;
         cfg.segment_target_bytes = 128;
 
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
         aof.flush.shutdown_worker_for_tests();
 
@@ -2179,7 +2436,6 @@ mod tests {
         cfg.segment_max_bytes = 256;
         cfg.segment_target_bytes = 256;
         let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
         let aof = Aof::new(handle, cfg).expect("aof");
         aof.flush.shutdown_worker_for_tests();
 
@@ -2207,7 +2463,7 @@ mod tests {
                 aof.append.sub_unflushed(delta as u64);
             }
             if !segment.is_sealed() {
-                let _ = segment.seal(current_timestamp_nanos());
+                let _ = segment.seal(current_timestamp_nanos(), 0, false);
             }
         }
 
@@ -2226,7 +2482,7 @@ mod tests {
                 aof.append.sub_unflushed(delta as u64);
             }
             if !segment.is_sealed() {
-                let _ = segment.seal(current_timestamp_nanos());
+                let _ = segment.seal(current_timestamp_nanos(), 0, false);
             }
             aof.segment_finalized(segment.id())
                 .expect("segment finalized");
@@ -2244,7 +2500,6 @@ mod tests {
     fn recovery_reopens_existing_tail_segment() {
         let tmp = TempDir::new().expect("tempdir");
         let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
 
         let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
         aof.append_record(b"one").expect("append one");
@@ -2277,7 +2532,6 @@ mod tests {
     fn recovery_with_sealed_segments_allows_new_segment_creation() {
         let tmp = TempDir::new().expect("tempdir");
         let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
 
         {
             let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
@@ -2303,8 +2557,7 @@ mod tests {
     #[test]
     fn recovery_truncates_partial_tail_segment() {
         let tmp = TempDir::new().expect("tempdir");
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         {
             let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
@@ -2344,8 +2597,7 @@ mod tests {
     #[test]
     fn recovery_seeds_flush_queue_for_unsealed_segments() {
         let tmp = TempDir::new().expect("tempdir");
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         {
             let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("initial");
@@ -2362,8 +2614,7 @@ mod tests {
     #[test]
     fn flush_metrics_tracks_backlog_bytes() {
         let tmp = TempDir::new().expect("tempdir");
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, test_config(tmp.path())).expect("aof");
 
         assert_eq!(aof.flush_metrics().backlog_bytes, 0);
@@ -2379,8 +2630,7 @@ mod tests {
     #[test]
     fn flush_until_blocks_until_durable() {
         let tmp = TempDir::new().expect("tempdir");
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, test_config(tmp.path())).expect("aof");
 
         let record_id = aof.append_record(b"flush-me").expect("append");
@@ -2401,8 +2651,7 @@ mod tests {
         cfg.flush.flush_watermark_bytes = u64::MAX;
         cfg.flush.flush_interval_ms = 0;
         cfg.flush.max_unflushed_bytes = u64::MAX;
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
 
         let record_id = aof.append_record(b"fallback").expect("append");
@@ -2430,8 +2679,7 @@ mod tests {
     #[test]
     fn durability_cursor_tracks_flush_progress() {
         let tmp = TempDir::new().expect("tempdir");
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, test_config(tmp.path())).expect("aof");
 
         let record_id = aof.append_record(b"durability-progress").expect("append");
@@ -2452,8 +2700,7 @@ mod tests {
     #[test]
     fn durability_cursor_recovers_from_segment_scan() {
         let tmp = TempDir::new().expect("tempdir");
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let config = test_config(tmp.path());
 
         let (record_id, durability_path) = {
@@ -2491,10 +2738,60 @@ mod tests {
     }
 
     #[test]
+    fn flush_worker_failure_surfaces_backpressure() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let mut config = test_config(tmp.path());
+        config.flush.flush_watermark_bytes = u64::MAX;
+        config.flush.flush_interval_ms = 0;
+        config.flush.max_unflushed_bytes = u64::MAX;
+        let aof = Aof::new(handle.clone(), config).expect("aof");
+
+        let record_id = aof.append_record(b"flush-failure").expect("append");
+        let segment_id = SegmentId::new(record_id.segment_index() as u64);
+        let segment = aof.segment_by_id(segment_id).expect("segment");
+        segment.inject_flush_error(10);
+
+        aof.schedule_flush(&segment).expect("schedule flush");
+
+        for _ in 0..100 {
+            if aof.flush_failed_for_tests() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            aof.flush_failed_for_tests(),
+            "expected flush failure flag to set"
+        );
+
+        let err = aof.append_record(b"should-block");
+        assert!(matches!(
+            err,
+            Err(AofError::WouldBlock(BackpressureKind::Flush))
+        ));
+
+        segment.inject_flush_error(0);
+        aof.flush_until(record_id).expect("flush until");
+        for _ in 0..100 {
+            if !aof.flush_failed_for_tests() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            !aof.flush_failed_for_tests(),
+            "expected flush failure flag to clear"
+        );
+
+        aof.append_record(b"after-recover")
+            .expect("append after recovery");
+    }
+
+    #[test]
     fn admission_metrics_track_latency_and_would_block() {
         let tmp = TempDir::new().expect("tempdir");
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle.clone(), test_config(tmp.path())).expect("aof");
 
         let coordinator = handle.tiered();
@@ -2527,8 +2824,7 @@ mod tests {
         cfg.segment_min_bytes = 128;
         cfg.segment_max_bytes = 128;
         cfg.segment_target_bytes = 128;
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
         let tail_rx = aof.tail_events();
 
@@ -2546,7 +2842,7 @@ mod tests {
         }
 
         let sealed_at = current_timestamp_nanos();
-        segment.seal(sealed_at).expect("seal");
+        segment.seal(sealed_at, 0, false).expect("seal");
         aof.segment_finalized(segment_id).expect("finalized");
 
         let tail_state = tail_rx.borrow().clone();
@@ -2573,8 +2869,7 @@ mod tests {
         cfg.flush.flush_watermark_bytes = 1;
         cfg.flush.flush_interval_ms = 0;
         cfg.flush.max_unflushed_bytes = u64::MAX;
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         {
             let aof = Aof::new(handle.clone(), cfg.clone()).expect("aof");
@@ -2613,8 +2908,7 @@ mod tests {
         cfg.segment_min_bytes = 128;
         cfg.segment_max_bytes = 128;
         cfg.segment_target_bytes = 128;
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         let aof = Aof::new(handle, cfg).expect("aof");
         let mut follower = aof.tail_follower();
@@ -2632,7 +2926,9 @@ mod tests {
             aof.append.sub_unflushed(delta as u64);
         }
 
-        segment.seal(current_timestamp_nanos()).expect("seal");
+        segment
+            .seal(current_timestamp_nanos(), 0, false)
+            .expect("seal");
         aof.segment_finalized(segment_id).expect("finalized");
 
         let sealed_id = timeout(Duration::from_secs(1), follower.next_sealed_segment())
@@ -2658,8 +2954,7 @@ mod tests {
         cfg.segment_min_bytes = 256;
         cfg.segment_max_bytes = 256;
         cfg.segment_target_bytes = 256;
-        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
-        let _ = &manager;
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
 
         let aof = Aof::new(handle, cfg).expect("aof");
         let mut rx = aof.tail_events();
@@ -2701,7 +2996,7 @@ mod tests {
             aof.append.sub_unflushed(delta as u64);
         }
         initial_segment
-            .seal(current_timestamp_nanos())
+            .seal(current_timestamp_nanos(), 0, false)
             .expect("seal segment");
         aof.segment_finalized(initial_segment.id())
             .expect("segment finalized");
@@ -2735,5 +3030,112 @@ mod tests {
         drop(next_segment);
         drop(initial_segment);
         drop(aof);
+    }
+
+    #[test]
+    fn pointer_captures_watermark_and_durable_bytes() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let mut cfg = test_config(tmp.path());
+        cfg.segment_min_bytes = 512;
+        cfg.segment_max_bytes = 512;
+        cfg.segment_target_bytes = 512;
+
+        let aof = Aof::new(handle.clone(), cfg.clone()).expect("aof");
+        aof.set_coordinator_watermark(123);
+
+        let record_id = aof.append_record(b"pointer-payload").expect("append");
+        let sealed_id = seal_active_until_ready(&aof, &manager)
+            .expect("seal")
+            .expect("sealed segment");
+        assert_eq!(sealed_id, SegmentId::new(record_id.segment_index() as u64));
+
+        let pointer = aof
+            .layout()
+            .load_current_sealed_pointer()
+            .expect("load pointer")
+            .expect("pointer file present");
+        assert_eq!(pointer.segment_id, sealed_id);
+        assert_eq!(pointer.coordinator_watermark, 123);
+
+        let segment = aof.segment_by_id(sealed_id).expect("sealed segment state");
+        let expected_durable = segment.base_offset() + segment.durable_size() as u64;
+        assert_eq!(pointer.durable_bytes, expected_durable);
+
+        drop(aof);
+
+        let restarted = Aof::new(handle.clone(), cfg).expect("restart aof");
+        assert_eq!(restarted.coordinator_watermark(), 123);
+    }
+
+    #[test]
+    fn pointer_missing_segment_is_ignored_on_recovery() {
+        let tmp = TempDir::new().expect("tempdir");
+        let layout_cfg = test_config(tmp.path());
+        let layout = Layout::new(&layout_cfg);
+        layout.ensure().expect("ensure layout");
+        layout
+            .store_current_sealed_pointer(CurrentSealedPointer {
+                segment_id: SegmentId::new(999),
+                coordinator_watermark: 77,
+                durable_bytes: 1_024,
+            })
+            .expect("store pointer");
+
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle.clone(), layout_cfg.clone()).expect("recover aof");
+        assert_eq!(aof.coordinator_watermark(), 0);
+
+        // pointer file remains readable even though it was ignored
+        let pointer = aof
+            .layout()
+            .load_current_sealed_pointer()
+            .expect("load pointer")
+            .expect("pointer present");
+        assert_eq!(pointer.segment_id, SegmentId::new(999));
+    }
+
+    #[test]
+    fn set_current_ext_id_updates_active_segment() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let cfg = test_config(tmp.path());
+        let aof = Aof::new(handle, cfg).expect("aof");
+
+        aof.set_current_ext_id(88).expect("set ext id");
+        let record_id = aof.append_record(b"ext-id-record").expect("append");
+        let segment_id = SegmentId::new(record_id.segment_index() as u64);
+        let segment = aof.segment_by_id(segment_id).expect("segment");
+        assert_eq!(segment.ext_id(), 88);
+    }
+
+    #[test]
+    fn metadata_handle_updates_runtime_values() {
+        let tmp = TempDir::new().expect("tempdir");
+        let (manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let cfg = test_config(tmp.path());
+        let aof = Aof::new(handle, cfg).expect("aof");
+
+        let metadata = aof.metadata_handle();
+        metadata.set_current_ext_id(314);
+        metadata.set_coordinator_watermark(911);
+
+        let record_id = aof.append_record(b"metadata-handle").expect("append");
+        let segment_id = SegmentId::new(record_id.segment_index() as u64);
+        let segment = aof.segment_by_id(segment_id).expect("segment");
+        assert_eq!(segment.ext_id(), 314);
+
+        let sealed = seal_active_until_ready(&aof, &manager)
+            .expect("seal result")
+            .expect("segment sealed");
+        assert_eq!(sealed, segment_id);
+        assert_eq!(aof.coordinator_watermark(), 911);
+
+        let pointer = aof
+            .layout()
+            .load_current_sealed_pointer()
+            .expect("load pointer")
+            .expect("pointer present");
+        assert_eq!(pointer.coordinator_watermark, 911);
     }
 }

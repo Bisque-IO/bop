@@ -27,7 +27,7 @@ The payload is type specific. Fixed-size payloads are simple structs; variable d
 | Type | Id | Payload | Notes |
 | --- | --- | --- | --- |
 | `SegmentOpened` | 0 | `struct { u64 base_offset; u32 epoch; }` | Emitted when Tier 0 starts a new segment. |
-| `SealSegment` | 1 | `struct { u64 durable_bytes; u64 segment_crc64; }` | Marks segment sealed in Tier 0; durable bytes used for rollover accounting. |
+| `SealSegment` | 1 | `struct { u64 durable_bytes; u64 segment_crc64; u64 ext_id; u64 coordinator_watermark; u8 flush_failure; }` | Marks a segment sealed in Tier 0; carries the durable byte boundary, segment CRC, cohort ext_id, coordinator watermark, and the flush failure flag observed at seal time. |
 | `CompressionStarted` | 2 | `struct { u32 job_id; }` | Tier 1 compression admitted. |
 | `CompressionDone` | 3 | `struct { u64 compressed_bytes; u32 dictionary_id; }` | Compression finished and warm artifact durable. |
 | `CompressionFailed` | 4 | `struct { u32 reason_code; }` | Background compression errored; reason follows existing enum. |
@@ -109,6 +109,9 @@ writer.append(RecordType::SegmentOpened, segment.id(), opened);
 SealSegment seal{
     .durable_bytes = segment.durable_bytes(),
     .segment_crc64 = segment.content_crc64(),
+    .ext_id = segment.ext_id(),
+    .coordinator_watermark = segment.coordinator_watermark(),
+    .flush_failure = segment.flush_failed(),
 };
 writer.append(RecordType::SealSegment, segment.id(), seal);
 

@@ -691,7 +691,7 @@ mod tests {
         let sealed_at = Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
-        segment.seal(sealed_at).expect("seal");
+        segment.seal(sealed_at, 0, false).expect("seal");
 
         let reader =
             SegmentReader::new(ResidentSegment::new_for_tests(segment.clone())).expect("reader");
@@ -733,7 +733,7 @@ mod tests {
         let sealed_at = Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
-        segment.seal(sealed_at).expect("seal");
+        segment.seal(sealed_at, 0, false).expect("seal");
 
         let reader =
             SegmentReader::new(ResidentSegment::new_for_tests(segment.clone())).expect("reader");
@@ -776,7 +776,7 @@ mod tests {
         let sealed_at = Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
-        segment.seal(sealed_at).expect("seal");
+        segment.seal(sealed_at, 0, false).expect("seal");
 
         let reader =
             SegmentReader::new(ResidentSegment::new_for_tests(segment.clone())).expect("reader");
@@ -864,7 +864,7 @@ mod tests {
         let sealed_at = Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
-        segment.seal(sealed_at).expect("seal");
+        segment.seal(sealed_at, 0, false).expect("seal");
 
         let reader =
             SegmentReader::new(ResidentSegment::new_for_tests(segment.clone())).expect("reader");
@@ -900,7 +900,7 @@ mod tests {
         let sealed_at = Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
-        segment.seal(sealed_at).expect("seal");
+        segment.seal(sealed_at, 0, false).expect("seal");
 
         let reader =
             SegmentReader::new(ResidentSegment::new_for_tests(segment.clone())).expect("reader");

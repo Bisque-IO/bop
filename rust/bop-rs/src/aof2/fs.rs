@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use tempfile::NamedTempFile;
@@ -21,6 +21,17 @@ pub const SEGMENT_FILE_EXTENSION: &str = ".seg";
 pub const WARM_FILE_EXTENSION: &str = ".zst";
 const SEGMENT_FILE_BREAK: char = '_';
 const SEGMENT_FILE_PAD: usize = 20;
+
+const CURRENT_POINTER_MAGIC: u32 = 0x43505332; // "CPS2"
+const CURRENT_POINTER_VERSION: u16 = 1;
+const CURRENT_POINTER_SIZE: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CurrentSealedPointer {
+    pub segment_id: SegmentId,
+    pub coordinator_watermark: u64,
+    pub durable_bytes: u64,
+}
 
 /// Parsed components of a segment filename.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +130,72 @@ impl Layout {
 
     pub fn segments_dir(&self) -> &Path {
         &self.segments
+    }
+
+    pub fn current_sealed_pointer_path(&self) -> PathBuf {
+        self.segments.join("current.sealed")
+    }
+
+    pub fn load_current_sealed_pointer(&self) -> AofResult<Option<CurrentSealedPointer>> {
+        let path = self.current_sealed_pointer_path();
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                if err.kind() == io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(AofError::from(err));
+            }
+        };
+        let mut buf = [0u8; CURRENT_POINTER_SIZE];
+        if let Err(err) = file.read_exact(&mut buf) {
+            return Err(AofError::from(err));
+        }
+        let mut magic = [0u8; 4];
+        magic.copy_from_slice(&buf[0..4]);
+        let magic = u32::from_le_bytes(magic);
+        if magic != CURRENT_POINTER_MAGIC {
+            return Err(AofError::Corruption(format!(
+                "unexpected current.sealed pointer magic: {magic:#x}"
+            )));
+        }
+        let mut version = [0u8; 2];
+        version.copy_from_slice(&buf[4..6]);
+        let version = u16::from_le_bytes(version);
+        if version != CURRENT_POINTER_VERSION {
+            return Err(AofError::Corruption(format!(
+                "unsupported current.sealed pointer version: {version}"
+            )));
+        }
+        let mut segment_bytes = [0u8; 8];
+        segment_bytes.copy_from_slice(&buf[8..16]);
+        let segment_id = SegmentId::new(u64::from_le_bytes(segment_bytes));
+        let mut watermark_bytes = [0u8; 8];
+        watermark_bytes.copy_from_slice(&buf[16..24]);
+        let coordinator_watermark = u64::from_le_bytes(watermark_bytes);
+        let mut durable_bytes_bytes = [0u8; 8];
+        durable_bytes_bytes.copy_from_slice(&buf[24..32]);
+        let durable_bytes = u64::from_le_bytes(durable_bytes_bytes);
+        Ok(Some(CurrentSealedPointer {
+            segment_id,
+            coordinator_watermark,
+            durable_bytes,
+        }))
+    }
+
+    pub fn store_current_sealed_pointer(&self, pointer: CurrentSealedPointer) -> AofResult<()> {
+        let mut guard = TempFileGuard::new(self.segments_dir(), "current.sealed", ".tmp")?;
+        let mut buf = [0u8; CURRENT_POINTER_SIZE];
+        buf[0..4].copy_from_slice(&CURRENT_POINTER_MAGIC.to_le_bytes());
+        buf[4..6].copy_from_slice(&CURRENT_POINTER_VERSION.to_le_bytes());
+        buf[6..8].fill(0);
+        buf[8..16].copy_from_slice(&pointer.segment_id.as_u64().to_le_bytes());
+        buf[16..24].copy_from_slice(&pointer.coordinator_watermark.to_le_bytes());
+        buf[24..32].copy_from_slice(&pointer.durable_bytes.to_le_bytes());
+        guard.file_mut().write_all(&buf).map_err(AofError::from)?;
+        let path = self.current_sealed_pointer_path();
+        guard.persist(&path)?;
+        Ok(())
     }
 
     pub fn warm_dir(&self) -> &Path {
@@ -323,5 +400,98 @@ mod tests {
         assert!(layout.warm_dir().exists());
         assert!(layout.warm_dir().exists());
         assert!(layout.archive_dir().exists());
+    }
+
+    #[test]
+    fn current_pointer_roundtrip() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut cfg = AofConfig::default();
+        cfg.root_dir = tmp.path().join("pointer_root");
+        let layout = Layout::new(&cfg);
+        layout.ensure().expect("ensure layout");
+
+        let pointer = CurrentSealedPointer {
+            segment_id: SegmentId::new(7),
+            coordinator_watermark: 42,
+            durable_bytes: 9_999,
+        };
+
+        layout
+            .store_current_sealed_pointer(pointer)
+            .expect("store pointer");
+
+        let loaded = layout
+            .load_current_sealed_pointer()
+            .expect("load pointer")
+            .expect("pointer present");
+
+        assert_eq!(loaded.segment_id, pointer.segment_id);
+        assert_eq!(loaded.coordinator_watermark, pointer.coordinator_watermark);
+        assert_eq!(loaded.durable_bytes, pointer.durable_bytes);
+    }
+
+    #[test]
+    fn load_current_pointer_rejects_bad_magic() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut cfg = AofConfig::default();
+        cfg.root_dir = tmp.path().join("pointer_magic");
+        let layout = Layout::new(&cfg);
+        layout.ensure().expect("ensure layout");
+
+        let path = layout.current_sealed_pointer_path();
+        std::fs::write(&path, [0u8; CURRENT_POINTER_SIZE]).expect("write corrupt pointer");
+
+        let err = layout
+            .load_current_sealed_pointer()
+            .expect_err("invalid magic should error");
+        match err {
+            AofError::Corruption(message) => {
+                assert!(message.contains("magic"), "unexpected message: {message}");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pointer_writer_replaces_atomically() {
+        let tmp = TempDir::new().expect("tempdir");
+        let mut cfg = AofConfig::default();
+        cfg.root_dir = tmp.path().join("pointer_atomic");
+        let layout = Layout::new(&cfg);
+        layout.ensure().expect("ensure layout");
+
+        let initial = CurrentSealedPointer {
+            segment_id: SegmentId::new(1),
+            coordinator_watermark: 10,
+            durable_bytes: 512,
+        };
+        layout
+            .store_current_sealed_pointer(initial)
+            .expect("store initial");
+
+        let updated = CurrentSealedPointer {
+            segment_id: SegmentId::new(2),
+            coordinator_watermark: 20,
+            durable_bytes: 1024,
+        };
+        layout
+            .store_current_sealed_pointer(updated)
+            .expect("store updated");
+
+        let files: Vec<_> = std::fs::read_dir(layout.segments_dir())
+            .expect("segments dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+            .collect();
+        assert_eq!(files.len(), 1, "only pointer file expected");
+        assert_eq!(files[0].file_name(), "current.sealed");
+
+        let loaded = layout
+            .load_current_sealed_pointer()
+            .expect("load pointer")
+            .expect("pointer present");
+        assert_eq!(loaded.segment_id, updated.segment_id);
+        assert_eq!(loaded.coordinator_watermark, updated.coordinator_watermark);
+        assert_eq!(loaded.durable_bytes, updated.durable_bytes);
     }
 }
