@@ -11,6 +11,7 @@ use crate::aof2::store::{
     AdmissionGuard, InstanceId, ResidencyKind, ResidentSegment, RolloverSignal, SegmentCheckout,
     SegmentResidency, Tier0Cache, Tier0CacheConfig, Tier1Cache, Tier1Config, Tier2Config,
     Tier2Manager, TieredCoordinator, TieredCoordinatorNotifiers, TieredInstance,
+    TieredObservabilitySnapshot,
 };
 use arc_swap::ArcSwapOption;
 use chrono::Utc;
@@ -78,15 +79,34 @@ impl FlushMetricsExporter {
         self.snapshot.flush_failures
     }
 
+    pub fn metadata_retry_attempts(&self) -> u64 {
+        self.snapshot.metadata_retry_attempts
+    }
+
+    pub fn metadata_retry_failures(&self) -> u64 {
+        self.snapshot.metadata_retry_failures
+    }
+
+    pub fn metadata_failures(&self) -> u64 {
+        self.snapshot.metadata_failures
+    }
+
     pub fn backlog_bytes(&self) -> u64 {
         self.snapshot.backlog_bytes
     }
 
     pub fn samples(&self) -> impl Iterator<Item = FlushMetricSample> {
-        const METRIC_NAMES: [(&str, fn(&FlushMetricsSnapshot) -> u64); 4] = [
+        const METRIC_NAMES: [(&str, fn(&FlushMetricsSnapshot) -> u64); 7] = [
             ("aof_flush_retry_attempts_total", |s| s.retry_attempts),
             ("aof_flush_retry_failures_total", |s| s.retry_failures),
             ("aof_flush_failures_total", |s| s.flush_failures),
+            ("aof_flush_metadata_retry_attempts_total", |s| {
+                s.metadata_retry_attempts
+            }),
+            ("aof_flush_metadata_retry_failures_total", |s| {
+                s.metadata_retry_failures
+            }),
+            ("aof_flush_metadata_failures_total", |s| s.metadata_failures),
             ("aof_flush_backlog_bytes", |s| s.backlog_bytes),
         ];
         METRIC_NAMES
@@ -108,7 +128,10 @@ impl FlushMetricsExporter {
 }
 
 use error::{AofError, AofResult, BackpressureKind};
-use flush::{FlushManager, FlushMetrics, FlushMetricsSnapshot, FlushRequest, flush_with_retry};
+use flush::{
+    FlushManager, FlushMetrics, FlushMetricsSnapshot, FlushRequest, flush_with_retry,
+    persist_metadata_with_retry,
+};
 use segment::{Segment, SegmentAppendResult, SegmentFooter};
 
 const DEFAULT_TIER0_CLUSTER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
@@ -514,6 +537,10 @@ impl AofManagerHandle {
 
     pub fn admission_metrics(&self) -> AdmissionMetricsSnapshot {
         self.coordinator.admission_metrics()
+    }
+
+    pub fn observability_snapshot(&self) -> TieredObservabilitySnapshot {
+        self.coordinator.observability_snapshot()
     }
 
     pub(crate) fn register_instance_metadata(
@@ -1443,16 +1470,32 @@ impl Aof {
                 Ok(()) => {
                     let requested_after = flush_state.requested_bytes();
                     let durable_bytes = target_bytes.min(requested_after);
-                    durability.record_flush(segment.id(), requested_after, durable_bytes);
-                    let delta = segment.mark_durable(durable_bytes);
-                    if delta > 0 {
-                        self.append.sub_unflushed(delta as u64);
+                    match persist_metadata_with_retry(
+                        &self.tier,
+                        &self.metrics,
+                        segment.id(),
+                        requested_after,
+                        durable_bytes,
+                    ) {
+                        Ok(()) => {
+                            let delta = segment.mark_durable(durable_bytes);
+                            if delta > 0 {
+                                self.append.sub_unflushed(delta as u64);
+                            }
+                            self.metrics.incr_sync_flush();
+                            self.metrics.record_backlog(self.append.total_unflushed());
+                            self.flush_failed.store(false, Ordering::Release);
+                            flush_state.finish_flush();
+                            return Ok(());
+                        }
+                        Err(err) => {
+                            self.metrics.incr_flush_failure();
+                            self.flush_failed.store(true, Ordering::Release);
+                            self.record_would_block(BackpressureKind::Flush);
+                            flush_state.finish_flush();
+                            return Err(err);
+                        }
                     }
-                    self.metrics.incr_sync_flush();
-                    self.metrics.record_backlog(self.append.total_unflushed());
-                    self.flush_failed.store(false, Ordering::Release);
-                    flush_state.finish_flush();
-                    return Ok(());
                 }
                 Err(err) => {
                     self.flush_failed.store(true, Ordering::Release);
@@ -1475,14 +1518,29 @@ impl Aof {
                     Ok(()) => {
                         let requested_after = flush_state.requested_bytes();
                         let durable_bytes = target_bytes.min(requested_after);
-                        durability.record_flush(segment.id(), requested_after, durable_bytes);
-                        let delta = segment.mark_durable(durable_bytes);
-                        if delta > 0 {
-                            self.append.sub_unflushed(delta as u64);
+                        match persist_metadata_with_retry(
+                            &self.tier,
+                            &self.metrics,
+                            segment.id(),
+                            requested_after,
+                            durable_bytes,
+                        ) {
+                            Ok(()) => {
+                                let delta = segment.mark_durable(durable_bytes);
+                                if delta > 0 {
+                                    self.append.sub_unflushed(delta as u64);
+                                }
+                                self.metrics.incr_sync_flush();
+                                self.flush_failed.store(false, Ordering::Release);
+                                Ok(())
+                            }
+                            Err(err) => {
+                                self.metrics.incr_flush_failure();
+                                self.flush_failed.store(true, Ordering::Release);
+                                self.record_would_block(BackpressureKind::Flush);
+                                Err(err)
+                            }
                         }
-                        self.metrics.incr_sync_flush();
-                        self.flush_failed.store(false, Ordering::Release);
-                        Ok(())
                     }
                     Err(err) => {
                         self.flush_failed.store(true, Ordering::Release);
@@ -2043,44 +2101,55 @@ mod tests {
             retry_attempts: 6,
             retry_failures: 7,
             flush_failures: 8,
-            backlog_bytes: 9,
+            metadata_retry_attempts: 9,
+            metadata_retry_failures: 10,
+            metadata_failures: 11,
+            backlog_bytes: 12,
         };
         let exporter = FlushMetricsExporter::new(snapshot);
         assert_eq!(exporter.retry_attempts(), 6);
         assert_eq!(exporter.retry_failures(), 7);
         assert_eq!(exporter.flush_failures(), 8);
-        assert_eq!(exporter.backlog_bytes(), 9);
+        assert_eq!(exporter.metadata_retry_attempts(), 9);
+        assert_eq!(exporter.metadata_retry_failures(), 10);
+        assert_eq!(exporter.metadata_failures(), 11);
+        assert_eq!(exporter.backlog_bytes(), 12);
 
         let mut samples: Vec<FlushMetricSample> = exporter.samples().collect();
         samples.sort_by(|a, b| a.name.cmp(b.name));
-        assert_eq!(samples.len(), 4);
+        assert_eq!(samples.len(), 7);
         assert_eq!(
-            samples[0],
-            FlushMetricSample {
-                name: "aof_flush_backlog_bytes",
-                value: 9
-            }
-        );
-        assert_eq!(
-            samples[1],
-            FlushMetricSample {
-                name: "aof_flush_failures_total",
-                value: 8
-            }
-        );
-        assert_eq!(
-            samples[2],
-            FlushMetricSample {
-                name: "aof_flush_retry_attempts_total",
-                value: 6
-            }
-        );
-        assert_eq!(
-            samples[3],
-            FlushMetricSample {
-                name: "aof_flush_retry_failures_total",
-                value: 7
-            }
+            samples,
+            vec![
+                FlushMetricSample {
+                    name: "aof_flush_backlog_bytes",
+                    value: 12
+                },
+                FlushMetricSample {
+                    name: "aof_flush_failures_total",
+                    value: 8
+                },
+                FlushMetricSample {
+                    name: "aof_flush_metadata_failures_total",
+                    value: 11
+                },
+                FlushMetricSample {
+                    name: "aof_flush_metadata_retry_attempts_total",
+                    value: 9
+                },
+                FlushMetricSample {
+                    name: "aof_flush_metadata_retry_failures_total",
+                    value: 10
+                },
+                FlushMetricSample {
+                    name: "aof_flush_retry_attempts_total",
+                    value: 6
+                },
+                FlushMetricSample {
+                    name: "aof_flush_retry_failures_total",
+                    value: 7
+                },
+            ]
         );
 
         let mut emitted = Vec::new();

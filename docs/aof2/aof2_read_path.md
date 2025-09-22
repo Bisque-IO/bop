@@ -28,7 +28,7 @@
 - `AofError::NotFound` - the catalog and tiers could not locate the requested segment; treat as unrecoverable.
 - `AofError::WouldBlock(BackpressureKind::Hydration)` - wait for hydration notifier or escalate to async helper.
 - `AofError::WouldBlock(BackpressureKind::Rollover)` - resume when the rollover notifier signals completion.
-- `AofError::WouldBlock(BackpressureKind::Flush)` - the flush worker exhausted retries and raised the shared failure flag. Wait for `FlushMetricsSnapshot::flush_failures` to return to zero or call `flush_until` on the stalled record to clear it before retrying.
+- `AofError::WouldBlock(BackpressureKind::Flush)` - the flush worker exhausted retries and raised the shared failure flag. Watch `FlushMetricsSnapshot::flush_failures` and the `aof_flush_metadata_*` counters, wait for them to settle, or call `flush_until` on the stalled record before retrying.
 
 ## Async Read Flow
 1. `Aof::open_reader_async(segment_id)` follows the same steps but awaits hydration (`rust/bop-rs/src/aof2/mod.rs:769`).
@@ -47,7 +47,7 @@
 | `Admission` | `TieredInstance::admission_guard` rejects due to Tier 0 pressure | Wait on `TieredCoordinatorNotifiers::admission(instance_id)` or slow the producer. Applies mainly to writers but read-side admission is exposed for completeness. |
 | `Hydration` | `TieredInstance::checkout_sealed_segment` returns `Pending` | Await hydration notifier; optionally enqueue a prefetch via `TieredCoordinator` for anticipated readers. |
 | `Rollover` | Active segment is sealing (`Aof::queue_rollover`) | Await rollover notifier; readers should retry after a short delay or rely on async helper. |
-| `Flush` | Durable watermark trails requested bytes (AP4) | Let the manager drive a flush, or call the planned `await_flush(record_id)` helper once exposed. |
+| `Flush` | Durable watermark trails requested bytes (AP4) | Let the manager drive a flush, watch the `aof_flush_metadata_*` counters, or call the planned `await_flush(record_id)` helper once exposed. |
 | `Tail` | Tail follower outran durability signal | Retry after `TailSignal` publishes the next event; typically transient during heavy write bursts. |
 
 ## Integration Patterns
@@ -100,8 +100,8 @@ pub async fn read_segment_with_backoff(
 
 ```rust
 pub async fn tail_stream(mut stream: SealedSegmentStream<'_>) -> AofResult<()> {
-    while let Some(stream_segment) = stream.next_record_async().await? {
-        match stream_segment {
+    while let Some(segment) = stream.next_segment().await? {
+        match segment {
             StreamSegment::Sealed(mut cursor) => {
                 while let Some(record) = cursor.next()? {
                     process_record(record);
@@ -120,9 +120,13 @@ pub async fn tail_stream(mut stream: SealedSegmentStream<'_>) -> AofResult<()> {
 
 ## Observability Hooks
 - `reader.rs` exposes counters for hydration retries and tail catches; wire them into your telemetry sink.
+- The Tier 1 metrics snapshot now includes hydration queue depth and latency percentiles (`hydration_latency_p50_ms`, `p90`, `p99`). Track these alongside the residency gauge to spot segments stuck in `NeedsRecovery`.
 - Trace spans wrap hydration waits and sealed stream transitions, making it easy to visualise reader stalls.
 - Monitor `FlushMetricsSnapshot::scheduled_backpressure` to correlate reader stalls with outstanding writer flushes.
 - Monitor `FlushMetricsSnapshot::flush_failures` alongside the flag on the append path; a non-zero value means writers are blocked on durability and readers should expect `WouldBlock(BackpressureKind::Flush)` until the queue drains.
+- The `aof_flush_metadata_*` counters surface tier metadata persistence stalls; alert when retries climb so clients can widen backoff before reads see `WouldBlock(BackpressureKind::Flush)`.
+- Structured logs under `aof2::tier1` (`tier1_hydration_retry_*`, `tier1_hydration_failed`, `tier1_hydration_success`) provide a breadcrumb trail for hydration behaviour. Filter on these events when debugging cold reads.
+- `aof2-admin dump --root <path>` prints the same metrics and manifest residency on demand so operators can capture point-in-time state alongside log correlations.
 
 ## Migration Notes
 - Legacy callers that expected blocking IO must add retry loops or switch to the async helpers.

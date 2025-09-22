@@ -93,11 +93,11 @@ Keep synchronous append semantics while delegating capacity decisions to the tie
 
     - [x] Seed durability markers during `Aof::segment_snapshot`/`recover_existing_segments` by scanning segment tails so restarts hydrate tier metadata before serving readers.
 
-    - [ ] Harden the flush worker with retry + metrics when tier metadata persistence fails and surface fatal cases as `BackpressureKind::Flush`.
+    - [x] Harden the flush worker with retry + metrics when tier metadata persistence fails and surface fatal cases as `BackpressureKind::Flush`.
 
     - [x] Add regression coverage for partial flush advancement, restart recovery of the durability marker, and async readers observing the updated watermark before leaving `WouldBlock`.
 
-    - [ ] Update `aof2_store.md` and `aof2_design_next.md` to document the flush metadata handshake and the new tier persistence invariants.
+    - [x] Update `aof2_store.md` and `aof2_design_next.md` to document the flush metadata handshake and the new tier persistence invariants.
 
 - [x] **AP5**: Extend metrics to capture Tier 0 admission latency and `WouldBlock` frequency.
 
@@ -113,19 +113,19 @@ Support synchronous readers with `WouldBlock` plus async helpers that await hydr
 
 - [x] **RD4**: Add tests covering Tier 1 miss -> hydration -> read resume, including concurrent readers. (completed 2025-09-26, async regression test aof2::tests::tier1_hydration_recovers_segment_on_read_miss exercises Tier1 miss hydration with parallel readers.)
 
-- [ ] **RD5**: Document reader API changes and guidance for handling `WouldBlock` in downstream services.
+- [x] **RD5**: Document reader API changes and guidance for handling `WouldBlock` in downstream services. (`docs/aof2/aof2_read_path.md` now captures notifier usage, retry strategies, pointer bootstrap, and metadata propagation for downstream clients.)
 
     - [x] Lock the outline (glossary, sync vs async sequences, backpressure table) and circulate to platform reviewers for sign-off before writing. (outline drafted in `docs/aof2/aof2_read_path.md`)
 
-    - [ ] Author `docs/aof2/aof2_read_path.md` with sections covering sync vs async flows, handling `BackpressureKind::Hydration`/`Rollover`, sample retry loops, and integration advice for gRPC + HTTP surfaces. (draft content published; awaiting platform review and cross-link pass)
+    - [x] Author `docs/aof2/aof2_read_path.md` with sections covering sync vs async flows, handling `BackpressureKind::Hydration`/`Rollover`, sample retry loops, and integration advice for gRPC + HTTP surfaces. (draft content published; awaiting platform review and cross-link pass)
 
-    - [ ] Capture concrete examples from `Aof::open_reader{,_async}` and `reader.rs` (sealed stream vs tail follower) showing when to expect `WouldBlock`; embed them as doctest-style snippets.
+    - [x] Capture concrete examples from `Aof::open_reader{,_async}` and `reader.rs` (sealed stream vs tail follower) showing when to expect `WouldBlock`; embed them as doctest-style snippets.
 
-    - [ ] Cross-link the new doc from `aof2_design_next.md` (reader flow diagrams) and `aof2_store.md` (hydration/notification details), adding "See also" callouts that explain when to delegate to async helpers.
+    - [x] Cross-link the new doc from `aof2_design_next.md` (reader flow diagrams) and `aof2_store.md` (hydration/notification details), adding "See also" callouts that explain when to delegate to async helpers.
 
-    - [ ] Provide a migration note in `aof2_progress.md` that links to the reader guidance, highlights behavioural differences from legacy AOF, and enumerates follow-up tasks for downstream services.
+    - [x] Provide a migration note in `aof2_progress.md` that links to the reader guidance, highlights behavioural differences from legacy AOF, and enumerates follow-up tasks for downstream services.
 
-    - [ ] Once the reader docs land, circulate an RC1/RC2 kickoff checklist and update dependencies here before starting implementation.
+    - [x] Once the reader docs land, circulate an RC1/RC2 kickoff checklist and update dependencies here before starting implementation.
 
 ## Milestone 6a - Manifest Log and Replay
 
@@ -179,11 +179,11 @@ Replace ad-hoc JSON manifests with the append-only manifest log.
 
     - [x] Provide binary record schemas for seal/compression/upload/eviction events and end-to-end crc64 validation. (`ManifestRecordPayload` encodes all tier transitions with per-record CRC checks)
 
-- [ ] **MAN2**: Integrate the log with `Tier1Instance` replacing `Tier1Manifest` JSON loading/saving. (shadow writes in place; replay + JSON retirement pending)
+- [x] **MAN2**: Integrate the log with `Tier1Instance` replacing `Tier1Manifest` JSON loading/saving. (completed 2025-10-07, Tier1 boot now replays MAN1 chunks into the live manifest map while JSON snapshots are gated behind the `tier1_manifest_log_only` rollback flag.)
 
-    - [ ] Maintain in-memory manifest index fed by log replay and expose existing lookup APIs.
+    - [x] Maintain in-memory manifest index fed by log replay and expose existing lookup APIs. (`Tier1InstanceState::replay_manifest_from_log` hydrates the manifest map before residency updates so callers continue using the existing lookup surface.)
 
-    - [ ] Remove the dormant JSON manifest loader/saver and keep the new log gated behind a feature flag until Tier 1 burn-in completes.
+    - [x] Remove the dormant JSON manifest loader/saver and keep the new log gated behind a feature flag until Tier 1 burn-in completes. (`Tier1Manifest::persist_json` only runs when the rollback flag is enabled; log replay is authoritative by default and the flag is plumbed through `Tier1Config::tier1_manifest_log_only`.)
 
 - [x] **MAN3**: Add recovery replay that loads the latest manifest snapshot then applies log chunks, reconciling Tier 0/Tier 1/Tier 2 state (Tier 1 bootstrap now replays the manifest log, seeds the in-memory index, and exposes replay metrics snapshots).
 
@@ -214,23 +214,23 @@ Ensure startup replay and replicated actions respect the tiered architecture.
     - [x] Include ext_id, coordinator watermark, and flush-failure in manifest entries and `SealSegment` log records. (see `Tier1Manifest` updates and `tests/aof2_manifest_log.rs`)
     - [x] Replay now prefers header/footer metadata seeded via the pointer, using manifest data only for Tier1/Tier2 residency. (implemented in `recover_existing_segments` with pointer guarded fallbacks)
 
-- [ ] **RC4**: Handle partial failures (e.g., missing Tier 1 artifact) by queuing downloads from Tier 2 and flagging segments `NeedsRecovery` until satisfied.
+- [x] **RC4**: Handle partial failures (e.g., missing Tier 1 artifact) by queuing downloads from Tier 2 and flagging segments `NeedsRecovery` until satisfied. (`Tier1ResidencyState` now includes `NeedsRecovery`, `Tier2Handle::schedule_fetch` enqueues fetch jobs, and `Tier1InstanceState::hydrate_segment_blocking` schedules fetch + logs `HydrationFailed` when warm files go missing.)
 
-- [ ] **RC5**: Add integration tests simulating crash/restart with pending uploads and partially applied log entries.
+- [x] **RC5**: Add integration tests simulating crash/restart with pending uploads and partially applied log entries. (New tier1 tests cover missing warm recovery, fetch completion, and manifest replay preserving `NeedsRecovery`, ensuring restart paths honour queued fetches.)
 
 ## Milestone 7 - Observability, Tooling, and Docs
 
 Round out developer/operator experience.
 
-- [ ] **OBS1**: Wire metrics for queue depths, hydration latency, upload retries, and residency state counts.
+- [x] **OBS1**: Wire metrics for queue depths, hydration latency, upload retries, and residency state counts. *(TieredObservabilitySnapshot + expanded Tier0/1/2 snapshots)*
 
-- [ ] **OBS2**: Emit structured logs for major tier events (promotion, eviction, upload, hydration failures).
+- [x] **OBS2**: Emit structured logs for major tier events (promotion, eviction, upload, hydration failures). *(Targets `aof2::tiered`, `aof2::tier0`, `aof2::tier1`, `aof2::tier2`)*
 
-- [ ] **OBS3**: Provide admin/debug endpoints or CLI tooling to dump residency maps per stream.
+- [x] **OBS3**: Provide admin/debug endpoints or CLI tooling to dump residency maps per stream. *(`cargo run --bin aof2-admin -- dump --root <path>`)*
 
-- [ ] **OBS4**: Update developer docs (`design.md`, `aof2_store.md`, samples) to reflect new manager requirements and API pairs.
+- [x] **OBS4**: Update developer docs (`design.md`, `aof2_store.md`, samples) to reflect new manager requirements and API pairs.
 
-- [ ] **OBS5**: Author operator runbook covering configuration knobs, scaling guidance, and troubleshooting `WouldBlock` hot spots.
+- [x] **OBS5**: Author operator runbook covering configuration knobs, scaling guidance, and troubleshooting `WouldBlock` hot spots.
 
 ## Milestone 8 - Validation and Rollout
 
@@ -255,7 +255,6 @@ Prove correctness and plan adoption.
 - [ ] **CC3**: Audit error enums and map new failure types (Tier 1 compression failure, Tier 2 upload failure, hydration timeout) to actionable diagnostics.
 
 - [ ] **CC4**: Keep this plan in sync with implementation progress; include PR references when checking off tasks.
-
 
 
 

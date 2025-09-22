@@ -763,12 +763,15 @@ impl Tier0Inner {
         let mut state = self.state.lock();
         state.handles.remove(&key);
         if let Some(entry) = state.residents.remove(&key) {
-            trace!(
+            let was_sealed = entry.kind == ResidencyKind::Sealed;
+            tracing::event!(
+                target: "aof2::tier0",
+                tracing::Level::INFO,
                 instance = key.instance_id.get(),
                 segment = key.segment_id.as_u64(),
                 bytes = entry.bytes,
-                kind = ?entry.kind,
-                "Tier0 segment dropped"
+                sealed = was_sealed,
+                "tier0_segment_dropped"
             );
             state.total_bytes = state.total_bytes.saturating_sub(entry.bytes);
             if entry.phase == ResidentPhase::Evicting {
@@ -782,7 +785,7 @@ impl Tier0Inner {
                 instance_id: key.instance_id,
                 segment_id: key.segment_id,
                 bytes: entry.bytes,
-                was_sealed: entry.kind == ResidencyKind::Sealed,
+                was_sealed,
                 segment,
             });
             self.metrics.update_total_bytes(state.total_bytes);
@@ -837,11 +840,13 @@ impl Tier0Inner {
                     entry.phase = ResidentPhase::Evicting;
                     state.pending_evict_bytes =
                         state.pending_evict_bytes.saturating_add(entry.bytes);
-                    trace!(
+                    tracing::event!(
+                        target: "aof2::tier0",
+                        tracing::Level::INFO,
                         instance = key.instance_id.get(),
                         segment = key.segment_id.as_u64(),
                         bytes = entry.bytes,
-                        "Tier0 scheduling eviction"
+                        "tier0_eviction_scheduled"
                     );
                     return Some(Tier0Eviction {
                         instance_id: key.instance_id,

@@ -49,6 +49,10 @@ impl FlushRequest {
         self.durability.clone()
     }
 
+    pub fn tier(&self) -> &TieredInstance {
+        &self.tier
+    }
+
     pub fn resident(&self) -> &ResidentSegment {
         &self.resident
     }
@@ -190,6 +194,9 @@ pub struct FlushMetricsSnapshot {
     pub retry_attempts: u64,
     pub retry_failures: u64,
     pub flush_failures: u64,
+    pub metadata_retry_attempts: u64,
+    pub metadata_retry_failures: u64,
+    pub metadata_failures: u64,
     pub backlog_bytes: u64,
 }
 
@@ -203,6 +210,9 @@ pub struct FlushMetrics {
     retry_attempts: AtomicU64,
     retry_failures: AtomicU64,
     flush_failures: AtomicU64,
+    metadata_retry_attempts: AtomicU64,
+    metadata_retry_failures: AtomicU64,
+    metadata_failures: AtomicU64,
     backlog_bytes: AtomicU64,
 }
 
@@ -249,6 +259,24 @@ impl FlushMetrics {
     }
 
     #[inline]
+    pub fn add_metadata_retry_attempts(&self, attempts: u64) {
+        if attempts > 0 {
+            self.metadata_retry_attempts
+                .fetch_add(attempts, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn incr_metadata_retry_failure(&self) {
+        self.metadata_retry_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn incr_metadata_failure(&self) {
+        self.metadata_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
     pub fn record_backlog(&self, bytes: u64) {
         self.backlog_bytes.store(bytes, Ordering::Relaxed);
     }
@@ -263,6 +291,9 @@ impl FlushMetrics {
             retry_attempts: self.retry_attempts.load(Ordering::Relaxed),
             retry_failures: self.retry_failures.load(Ordering::Relaxed),
             flush_failures: self.flush_failures.load(Ordering::Relaxed),
+            metadata_retry_attempts: self.metadata_retry_attempts.load(Ordering::Relaxed),
+            metadata_retry_failures: self.metadata_retry_failures.load(Ordering::Relaxed),
+            metadata_failures: self.metadata_failures.load(Ordering::Relaxed),
             backlog_bytes: self.backlog_bytes.load(Ordering::Relaxed),
         }
     }
@@ -304,6 +335,58 @@ pub(crate) fn flush_with_retry(
     }
 }
 
+pub(crate) fn persist_metadata_with_retry(
+    tier: &TieredInstance,
+    metrics: &Arc<FlushMetrics>,
+    segment_id: SegmentId,
+    requested_bytes: u32,
+    durable_bytes: u32,
+) -> AofResult<()> {
+    let mut retries = 0u32;
+    loop {
+        match tier.persist_durability_flush(segment_id, requested_bytes, durable_bytes) {
+            Ok(()) => {
+                if retries > 0 {
+                    debug!(
+                        instance = tier.instance_id().get(),
+                        segment = segment_id.as_u64(),
+                        retries,
+                        "metadata persisted after retries"
+                    );
+                }
+                return Ok(());
+            }
+            Err(err) => {
+                debug!(
+                    instance = tier.instance_id().get(),
+                    segment = segment_id.as_u64(),
+                    attempt = retries + 1,
+                    error = %err,
+                    "retrying metadata persistence"
+                );
+                if retries < FLUSH_RETRY_MAX_ATTEMPTS && is_retryable_metadata_error(&err) {
+                    retries += 1;
+                    metrics.add_metadata_retry_attempts(1);
+                    thread::sleep(retry_backoff_delay(retries));
+                    continue;
+                }
+                if retries > 0 {
+                    metrics.incr_metadata_retry_failure();
+                }
+                metrics.incr_metadata_failure();
+                warn!(
+                    instance = tier.instance_id().get(),
+                    segment = segment_id.as_u64(),
+                    retries,
+                    error = %err,
+                    "metadata persistence failed"
+                );
+                return Err(err);
+            }
+        }
+    }
+}
+
 fn retry_backoff_delay(retries: u32) -> Duration {
     if retries == 0 {
         return Duration::from_millis(FLUSH_RETRY_BASE_DELAY_MS.min(FLUSH_RETRY_MAX_DELAY_MS));
@@ -315,6 +398,10 @@ fn retry_backoff_delay(retries: u32) -> Duration {
     let jitter = jitter_seed.min(jitter_window);
     let delay = base.saturating_add(jitter);
     Duration::from_millis(delay.min(FLUSH_RETRY_MAX_DELAY_MS))
+}
+
+fn is_retryable_metadata_error(err: &AofError) -> bool {
+    matches!(err, AofError::Io(_) | AofError::FileSystem(_))
 }
 
 fn is_retryable_error(err: &AofError) -> bool {
@@ -437,24 +524,38 @@ impl FlushManager {
 
         let target_bytes = flush_state.requested_bytes();
         let result = flush_with_retry(segment, metrics);
-        let durability = request.durability();
         let mut backlog_snapshot = total_unflushed.load(Ordering::Acquire);
         let result = match result {
             Ok(()) => {
                 let requested_after = flush_state.requested_bytes();
                 let durable_bytes = target_bytes.min(requested_after);
-                durability.record_flush(segment.id(), requested_after, durable_bytes);
-                let delta = segment.mark_durable(durable_bytes);
-                backlog_snapshot = if delta > 0 {
-                    total_unflushed
-                        .fetch_sub(delta as u64, Ordering::AcqRel)
-                        .saturating_sub(delta as u64)
-                } else {
-                    backlog_snapshot
-                };
-                metrics.incr_async_flush();
-                flush_failed.store(false, Ordering::Release);
-                Ok(())
+                match persist_metadata_with_retry(
+                    request.tier(),
+                    metrics,
+                    segment.id(),
+                    requested_after,
+                    durable_bytes,
+                ) {
+                    Ok(()) => {
+                        let delta = segment.mark_durable(durable_bytes);
+                        backlog_snapshot = if delta > 0 {
+                            total_unflushed
+                                .fetch_sub(delta as u64, Ordering::AcqRel)
+                                .saturating_sub(delta as u64)
+                        } else {
+                            backlog_snapshot
+                        };
+                        metrics.incr_async_flush();
+                        flush_failed.store(false, Ordering::Release);
+                        Ok(())
+                    }
+                    Err(err) => {
+                        metrics.incr_flush_failure();
+                        request.record_flush_failure();
+                        flush_failed.store(true, Ordering::Release);
+                        Err(err)
+                    }
+                }
             }
             Err(err) => {
                 metrics.incr_flush_failure();
@@ -541,7 +642,22 @@ mod tests {
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.retry_attempts, 1);
         assert_eq!(snapshot.retry_failures, 0);
+        assert_eq!(snapshot.metadata_retry_attempts, 0);
+        assert_eq!(snapshot.metadata_retry_failures, 0);
+        assert_eq!(snapshot.metadata_failures, 0);
         assert_eq!(segment.durable_size(), segment.current_size());
+    }
+
+    #[test]
+    fn metadata_metrics_increment() {
+        let metrics = FlushMetrics::default();
+        metrics.add_metadata_retry_attempts(3);
+        metrics.incr_metadata_retry_failure();
+        metrics.incr_metadata_failure();
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.metadata_retry_attempts, 3);
+        assert_eq!(snapshot.metadata_retry_failures, 1);
+        assert_eq!(snapshot.metadata_failures, 1);
     }
 
     fn backlog_snapshot_records_bytes() {

@@ -5,11 +5,12 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crc64fast_nvme::Digest;
 use futures::future::join_all;
+use hdrhistogram::Histogram;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
@@ -17,7 +18,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::{JoinHandle, spawn_blocking};
 use tokio::time::sleep as tokio_sleep;
-use tracing::{debug, trace, warn};
+use tracing::{trace, warn};
 use zstd::stream::{read::Decoder as ZstdDecoder, write::Encoder as ZstdEncoder};
 
 use crate::aof2::config::{SegmentId, aof2_manifest_log_enabled, aof2_manifest_log_only};
@@ -34,8 +35,8 @@ use crate::aof2::segment::{
 
 use super::tier0::{ActivationGrant, InstanceId, Tier0DropEvent};
 use super::tier2::{
-    Tier2DeleteComplete, Tier2DeleteRequest, Tier2Event, Tier2FetchRequest, Tier2Handle,
-    Tier2Metadata, Tier2UploadComplete, Tier2UploadDescriptor,
+    Tier2DeleteComplete, Tier2DeleteRequest, Tier2Event, Tier2FetchComplete, Tier2FetchFailed,
+    Tier2FetchRequest, Tier2Handle, Tier2Metadata, Tier2UploadComplete, Tier2UploadDescriptor,
 };
 
 fn current_epoch_ms() -> u64 {
@@ -44,6 +45,8 @@ fn current_epoch_ms() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default()
 }
+
+const HYDRATION_REASON_MISSING_WARM: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct Tier1Config {
@@ -111,28 +114,101 @@ impl Tier1Config {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+pub struct Tier1ResidencyGauge {
+    pub resident_in_tier0: u64,
+    pub staged_for_tier0: u64,
+    pub uploaded_to_tier2: u64,
+    pub needs_recovery: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Tier1MetricsSnapshot {
     pub stored_bytes: u64,
     pub compression_jobs: u64,
     pub compression_failures: u64,
     pub hydration_failures: u64,
+    pub compression_queue_depth: u32,
+    pub hydration_queue_depth: u32,
+    pub hydration_latency_p50_ms: u64,
+    pub hydration_latency_p90_ms: u64,
+    pub hydration_latency_p99_ms: u64,
+    pub hydration_latency_samples: u64,
+    pub residency: Tier1ResidencyGauge,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Tier1Metrics {
     stored_bytes: AtomicU64,
     compression_jobs: AtomicU64,
     compression_failures: AtomicU64,
     hydration_failures: AtomicU64,
+    compression_queue_depth: AtomicU32,
+    hydration_queue_depth: AtomicU32,
+    residency_resident_in_tier0: AtomicU64,
+    residency_staged_for_tier0: AtomicU64,
+    residency_uploaded_to_tier2: AtomicU64,
+    residency_needs_recovery: AtomicU64,
+    hydration_latency: Mutex<Histogram<u64>>,
+}
+
+impl Default for Tier1Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Tier1Metrics {
+    fn new() -> Self {
+        let histogram =
+            Histogram::new_with_bounds(1, 3_600_000, 2).expect("hydrate latency histogram bounds");
+        Self {
+            stored_bytes: AtomicU64::new(0),
+            compression_jobs: AtomicU64::new(0),
+            compression_failures: AtomicU64::new(0),
+            hydration_failures: AtomicU64::new(0),
+            compression_queue_depth: AtomicU32::new(0),
+            hydration_queue_depth: AtomicU32::new(0),
+            residency_resident_in_tier0: AtomicU64::new(0),
+            residency_staged_for_tier0: AtomicU64::new(0),
+            residency_uploaded_to_tier2: AtomicU64::new(0),
+            residency_needs_recovery: AtomicU64::new(0),
+            hydration_latency: Mutex::new(histogram),
+        }
+    }
+
     fn snapshot(&self) -> Tier1MetricsSnapshot {
+        let hist = self.hydration_latency.lock();
+        let samples = hist.len() as u64;
+        let percentile = |p: f64| -> u64 {
+            if samples == 0 {
+                0
+            } else {
+                hist.value_at_percentile(p)
+            }
+        };
         Tier1MetricsSnapshot {
             stored_bytes: self.stored_bytes.load(AtomicOrdering::Relaxed),
             compression_jobs: self.compression_jobs.load(AtomicOrdering::Relaxed),
             compression_failures: self.compression_failures.load(AtomicOrdering::Relaxed),
             hydration_failures: self.hydration_failures.load(AtomicOrdering::Relaxed),
+            compression_queue_depth: self.compression_queue_depth.load(AtomicOrdering::Relaxed),
+            hydration_queue_depth: self.hydration_queue_depth.load(AtomicOrdering::Relaxed),
+            hydration_latency_p50_ms: percentile(50.0),
+            hydration_latency_p90_ms: percentile(90.0),
+            hydration_latency_p99_ms: percentile(99.0),
+            hydration_latency_samples: samples,
+            residency: Tier1ResidencyGauge {
+                resident_in_tier0: self
+                    .residency_resident_in_tier0
+                    .load(AtomicOrdering::Relaxed),
+                staged_for_tier0: self
+                    .residency_staged_for_tier0
+                    .load(AtomicOrdering::Relaxed),
+                uploaded_to_tier2: self
+                    .residency_uploaded_to_tier2
+                    .load(AtomicOrdering::Relaxed),
+                needs_recovery: self.residency_needs_recovery.load(AtomicOrdering::Relaxed),
+            },
         }
     }
 
@@ -153,6 +229,93 @@ impl Tier1Metrics {
         self.hydration_failures
             .fetch_add(1, AtomicOrdering::Relaxed);
     }
+
+    fn incr_compression_queue(&self) {
+        self.compression_queue_depth
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn decr_compression_queue(&self) {
+        self.compression_queue_depth
+            .fetch_update(AtomicOrdering::AcqRel, AtomicOrdering::Relaxed, |value| {
+                value.checked_sub(1)
+            })
+            .ok();
+    }
+
+    fn add_hydration_queue(&self, count: usize) {
+        if count > 0 {
+            self.hydration_queue_depth
+                .fetch_add(count as u32, AtomicOrdering::Relaxed);
+        }
+    }
+
+    fn sub_hydration_queue(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.hydration_queue_depth
+            .fetch_update(AtomicOrdering::AcqRel, AtomicOrdering::Relaxed, |value| {
+                value.checked_sub(count as u32)
+            })
+            .ok();
+    }
+
+    fn record_hydration_latency(&self, latency: Duration) {
+        let value = latency.as_millis().max(1) as u64;
+        let mut histogram = self.hydration_latency.lock();
+        let _ = histogram.record(value);
+    }
+
+    fn rebuild_residency<I>(&self, states: I)
+    where
+        I: IntoIterator<Item = Tier1ResidencyState>,
+    {
+        self.residency_resident_in_tier0
+            .store(0, AtomicOrdering::Relaxed);
+        self.residency_staged_for_tier0
+            .store(0, AtomicOrdering::Relaxed);
+        self.residency_uploaded_to_tier2
+            .store(0, AtomicOrdering::Relaxed);
+        self.residency_needs_recovery
+            .store(0, AtomicOrdering::Relaxed);
+        for state in states {
+            self.inc_residency(state);
+        }
+    }
+
+    fn record_residency_transition(
+        &self,
+        previous: Option<Tier1ResidencyState>,
+        next: Option<Tier1ResidencyState>,
+    ) {
+        if let Some(state) = previous {
+            self.dec_residency(state);
+        }
+        if let Some(state) = next {
+            self.inc_residency(state);
+        }
+    }
+
+    fn inc_residency(&self, state: Tier1ResidencyState) {
+        self.cell_for(state).fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn dec_residency(&self, state: Tier1ResidencyState) {
+        let cell = self.cell_for(state);
+        let _ = cell.fetch_update(AtomicOrdering::AcqRel, AtomicOrdering::Relaxed, |value| {
+            value.checked_sub(1)
+        });
+    }
+
+    fn cell_for(&self, state: Tier1ResidencyState) -> &AtomicU64 {
+        match state {
+            Tier1ResidencyState::ResidentInTier0 => &self.residency_resident_in_tier0,
+            Tier1ResidencyState::StagedForTier0 => &self.residency_staged_for_tier0,
+            Tier1ResidencyState::UploadedToTier2 => &self.residency_uploaded_to_tier2,
+            Tier1ResidencyState::NeedsRecovery => &self.residency_needs_recovery,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +324,7 @@ pub enum Tier1ResidencyState {
     ResidentInTier0,
     StagedForTier0,
     UploadedToTier2,
+    NeedsRecovery,
 }
 
 impl Default for Tier1ResidencyState {
@@ -303,6 +467,12 @@ struct Tier1InstanceState {
     used_bytes: u64,
     lru: VecDeque<SegmentId>,
     replay_metrics: Arc<ManifestReplayMetrics>,
+}
+
+#[derive(Debug)]
+struct InsertOutcome {
+    replaced: Option<ManifestEntry>,
+    evicted: Vec<ManifestEntry>,
 }
 
 impl Tier1InstanceState {
@@ -512,11 +682,14 @@ impl Tier1InstanceState {
         }
     }
 
-    fn insert_entry(&mut self, entry: ManifestEntry, budget: u64) -> AofResult<Vec<ManifestEntry>> {
+    fn insert_entry(&mut self, entry: ManifestEntry, budget: u64) -> AofResult<InsertOutcome> {
         let mut evicted = Vec::new();
-        if let Some(existing) = self.manifest.insert(entry.clone()) {
+        let replaced = if let Some(existing) = self.manifest.insert(entry.clone()) {
             self.used_bytes = self.used_bytes.saturating_sub(existing.compressed_bytes);
-        }
+            Some(existing)
+        } else {
+            None
+        };
         self.used_bytes = self.used_bytes.saturating_add(entry.compressed_bytes);
         self.touch(entry.segment_id);
         while self.used_bytes > budget {
@@ -557,15 +730,16 @@ impl Tier1InstanceState {
                 },
             );
         }
-        Ok(evicted)
+        Ok(InsertOutcome { replaced, evicted })
     }
 
     fn update_residency(
         &mut self,
         segment_id: SegmentId,
         residency: Tier1ResidencyState,
-    ) -> AofResult<()> {
+    ) -> AofResult<Option<Tier1ResidencyState>> {
         if let Some(entry) = self.manifest.get_mut(segment_id) {
+            let previous = entry.residency;
             let (base_offset, payload) = {
                 entry.residency = residency;
                 entry.touch();
@@ -583,6 +757,11 @@ impl Tier1InstanceState {
                         })
                     }
                     Tier1ResidencyState::UploadedToTier2 => None,
+                    Tier1ResidencyState::NeedsRecovery => {
+                        Some(ManifestRecordPayload::HydrationFailed {
+                            reason_code: HYDRATION_REASON_MISSING_WARM,
+                        })
+                    }
                 };
                 (base_offset, payload)
             };
@@ -591,8 +770,10 @@ impl Tier1InstanceState {
             if let Some(payload) = payload {
                 self.log_manifest_record(segment_id, base_offset, payload);
             }
+            Ok(Some(previous))
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
 
     fn remove_entry(&mut self, segment_id: SegmentId) -> Option<ManifestEntry> {
@@ -863,6 +1044,9 @@ impl Tier1Inner {
         let mut instances = self.instances.lock();
         if !instances.contains_key(&instance_id) {
             let state = Tier1InstanceState::new(instance_id, layout, &self.config)?;
+            let residencies: Vec<Tier1ResidencyState> =
+                state.manifest.all().map(|entry| entry.residency).collect();
+            self.metrics.rebuild_residency(residencies);
             instances.insert(instance_id, state);
         }
         Ok(())
@@ -894,7 +1078,11 @@ impl Tier1Inner {
             ack,
         };
         match self.compression_tx.send(CompressionCommand::Compress(job)) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.metrics.incr_compression_jobs();
+                self.metrics.incr_compression_queue();
+                Ok(())
+            }
             Err(err) => {
                 if let CompressionCommand::Compress(job) = err.0 {
                     if let Some(tx) = job.ack {
@@ -943,6 +1131,23 @@ impl Tier1Inner {
                         failure.error
                     );
                 }
+                Tier2Event::FetchCompleted(info) => {
+                    if let Err(err) = self.apply_fetch_complete(info) {
+                        warn!("tier2 fetch complete handling failed: {err}");
+                    }
+                }
+                Tier2Event::FetchFailed(failure) => {
+                    self.metrics.incr_hydration_failures();
+                    warn!(
+                        instance = failure.instance_id.get(),
+                        segment = failure.segment_id.as_u64(),
+                        "tier2 fetch failed: {}",
+                        failure.error
+                    );
+                    if let Err(err) = self.apply_fetch_failed(failure) {
+                        warn!("tier2 fetch failure handling failed: {err}");
+                    }
+                }
             }
         }
     }
@@ -955,13 +1160,16 @@ impl Tier1Inner {
                 info.instance_id.get()
             ))
         })?;
+        let mut previous_residency = None;
         if let Some(entry) = state.manifest.get_mut(info.segment_id) {
+            let previous = entry.residency;
             let (base_offset, tier2_meta) = {
                 entry.tier2 = Some(info.metadata.clone());
                 entry.residency = Tier1ResidencyState::UploadedToTier2;
                 entry.touch();
                 (entry.base_offset, entry.tier2.clone())
             };
+            previous_residency = Some(previous);
             state.touch(info.segment_id);
             state.persist_manifest()?;
             if let Some(metadata) = tier2_meta {
@@ -974,6 +1182,13 @@ impl Tier1Inner {
                     },
                 );
             }
+        }
+        drop(instances);
+        if let Some(previous) = previous_residency {
+            self.metrics.record_residency_transition(
+                Some(previous),
+                Some(Tier1ResidencyState::UploadedToTier2),
+            );
         }
         Ok(())
     }
@@ -1006,11 +1221,81 @@ impl Tier1Inner {
         Ok(())
     }
 
+    fn apply_fetch_complete(&self, info: Tier2FetchComplete) -> AofResult<()> {
+        let mut instances = self.instances.lock();
+        let state = instances.get_mut(&info.instance_id).ok_or_else(|| {
+            AofError::InvalidState(format!(
+                "Tier1 instance {} not registered",
+                info.instance_id.get()
+            ))
+        })?;
+        let mut previous_residency = None;
+        if let Some(entry) = state.manifest.get_mut(info.segment_id) {
+            let previous = entry.residency;
+            entry.residency = Tier1ResidencyState::StagedForTier0;
+            entry.touch();
+            let base_offset = entry.base_offset;
+            state.persist_manifest()?;
+            let resident_bytes = fs::metadata(&info.destination)
+                .map(|meta| meta.len())
+                .unwrap_or_default();
+            state.log_manifest_record(
+                info.segment_id,
+                base_offset,
+                ManifestRecordPayload::HydrationDone { resident_bytes },
+            );
+            previous_residency = Some(previous);
+        }
+        drop(instances);
+        if let Some(previous) = previous_residency {
+            self.metrics.record_residency_transition(
+                Some(previous),
+                Some(Tier1ResidencyState::StagedForTier0),
+            );
+        }
+        Ok(())
+    }
+
+    fn apply_fetch_failed(&self, failure: Tier2FetchFailed) -> AofResult<()> {
+        let mut instances = self.instances.lock();
+        let state = instances.get_mut(&failure.instance_id).ok_or_else(|| {
+            AofError::InvalidState(format!(
+                "Tier1 instance {} not registered",
+                failure.instance_id.get()
+            ))
+        })?;
+        let mut previous_residency = None;
+        if let Some(entry) = state.manifest.get_mut(failure.segment_id) {
+            let previous = entry.residency;
+            entry.residency = Tier1ResidencyState::NeedsRecovery;
+            entry.touch();
+            let base_offset = entry.base_offset;
+            state.persist_manifest()?;
+            state.log_manifest_record(
+                failure.segment_id,
+                base_offset,
+                ManifestRecordPayload::HydrationFailed {
+                    reason_code: HYDRATION_REASON_MISSING_WARM,
+                },
+            );
+            previous_residency = Some(previous);
+        }
+        drop(instances);
+        if let Some(previous) = previous_residency {
+            self.metrics.record_residency_transition(
+                Some(previous),
+                Some(Tier1ResidencyState::NeedsRecovery),
+            );
+        }
+        Ok(())
+    }
+
     async fn process_compression_job(self: Arc<Self>, mut job: CompressionJob) {
         let max_attempts = self.config.max_retries.max(1);
         let mut attempt = 0;
         let instance_id = job.instance_id;
         let segment = job.segment.clone();
+        let start = Instant::now();
 
         let final_result = loop {
             let inner = Arc::clone(&self);
@@ -1026,28 +1311,42 @@ impl Tier1Inner {
                     attempt += 1;
                     if attempt >= max_attempts {
                         self.metrics.incr_compression_failures();
-                        warn!(
-                            instance = instance_id.get(),
-                            segment = segment.id().as_u64(),
-                            "compression job failed: {err}"
-                        );
                         break Err(err);
                     }
                     tokio_sleep(self.config.retry_backoff * attempt as u32).await;
                 }
                 Err(join_err) => {
                     self.metrics.incr_compression_failures();
-                    warn!(
-                        instance = instance_id.get(),
-                        segment = segment.id().as_u64(),
-                        "compression job panicked: {join_err}"
-                    );
                     break Err(AofError::other(format!(
                         "compression task panicked: {join_err}"
                     )));
                 }
             }
         };
+
+        let attempts = attempt + 1;
+        match &final_result {
+            Ok(()) => tracing::event!(
+                target: "aof2::tier1",
+                tracing::Level::INFO,
+                instance = instance_id.get(),
+                segment = segment.id().as_u64(),
+                attempts,
+                elapsed_ms = start.elapsed().as_millis() as u64,
+                "tier1_compression_success"
+            ),
+            Err(err) => tracing::event!(
+                target: "aof2::tier1",
+                tracing::Level::WARN,
+                instance = instance_id.get(),
+                segment = segment.id().as_u64(),
+                attempts,
+                error = %err,
+                "tier1_compression_failed"
+            ),
+        }
+
+        self.metrics.decr_compression_queue();
 
         if let Some(ack) = job.ack.take() {
             let _ = ack.send(final_result);
@@ -1071,7 +1370,7 @@ impl Tier1Inner {
         footer: SegmentFooter,
     ) -> AofResult<()> {
         let tier2_handle = self.tier2();
-        let (evicted, stored_bytes, upload_descriptor) = {
+        let (insert_outcome, stored_bytes, upload_descriptor, new_residency) = {
             let mut instances = self.instances.lock();
             let state = instances.get_mut(&instance_id).ok_or_else(|| {
                 AofError::InvalidState(format!(
@@ -1102,11 +1401,23 @@ impl Tier1Inner {
                     flush_failure: entry.flush_failure,
                 },
             );
+            let new_residency = entry.residency;
             let evicted = state.insert_entry(entry, self.config.max_bytes)?;
             let stored_bytes = state.used_bytes();
-            (evicted, stored_bytes, descriptor)
+            (evicted, stored_bytes, descriptor, new_residency)
         };
         self.metrics.set_stored_bytes(stored_bytes);
+        self.metrics.record_residency_transition(
+            insert_outcome
+                .replaced
+                .as_ref()
+                .map(|entry| entry.residency),
+            Some(new_residency),
+        );
+        for evicted_entry in &insert_outcome.evicted {
+            self.metrics
+                .record_residency_transition(Some(evicted_entry.residency), None);
+        }
 
         if let Some(tier2) = tier2_handle {
             if let Some(descriptor) = upload_descriptor {
@@ -1114,7 +1425,7 @@ impl Tier1Inner {
                     .schedule_upload(descriptor)
                     .map_err(AofError::rollover_failed)?;
             }
-            for evicted_entry in &evicted {
+            for evicted_entry in &insert_outcome.evicted {
                 if let Some(metadata) = &evicted_entry.tier2 {
                     let key = metadata.object_key.clone();
                     let request = Tier2DeleteRequest {
@@ -1222,29 +1533,40 @@ impl Tier1Inner {
         self: &Arc<Self>,
         grants: Vec<ActivationGrant>,
     ) -> Vec<HydrationOutcome> {
+        let grant_count = grants.len();
+        self.metrics.add_hydration_queue(grant_count);
         let futures = grants.into_iter().map(|grant| {
             let inner = Arc::clone(self);
             async move {
+                let start = Instant::now();
                 let hydrate_owner = Arc::clone(&inner);
-                match hydrate_owner
+                let result = hydrate_owner
                     .hydrate_segment_async(grant.instance_id, grant.segment_id)
-                    .await
-                {
-                    Ok(Some(outcome)) => Some(outcome),
-                    Ok(None) => {
-                        debug!(
+                    .await;
+                inner.metrics.sub_hydration_queue(1);
+                match result {
+                    Ok(Some(outcome)) => {
+                        inner.metrics.record_hydration_latency(start.elapsed());
+                        tracing::event!(
+                            target: "aof2::tier1",
+                            tracing::Level::INFO,
                             instance = grant.instance_id.get(),
                             segment = grant.segment_id.as_u64(),
-                            "hydrate skipped: no manifest entry"
+                            latency_ms = start.elapsed().as_millis() as u64,
+                            "tier1_hydration_success"
                         );
-                        None
+                        Some(outcome)
                     }
+                    Ok(None) => None,
                     Err(err) => {
                         inner.metrics.incr_hydration_failures();
-                        warn!(
+                        tracing::event!(
+                            target: "aof2::tier1",
+                            tracing::Level::WARN,
                             instance = grant.instance_id.get(),
                             segment = grant.segment_id.as_u64(),
-                            "hydrate failed: {err}"
+                            error = %err,
+                            "tier1_hydration_failed"
                         );
                         None
                     }
@@ -1302,6 +1624,7 @@ impl Tier1Inner {
             "hydrate warm lookup"
         );
         if !compressed_path.exists() {
+            self.metrics.incr_hydration_failures();
             if let Some(tier2) = self.tier2() {
                 let fetch_request = Tier2FetchRequest {
                     instance_id,
@@ -1309,23 +1632,52 @@ impl Tier1Inner {
                     sealed_at: entry.sealed_at,
                     destination: compressed_path.clone(),
                 };
-                match tier2.fetch_segment(fetch_request) {
-                    Ok(true) => {
-                        debug!("tier2 provided warm file for hydrate");
-                    }
-                    Ok(false) => {
-                        return Ok(None);
-                    }
-                    Err(err) => {
-                        self.metrics.incr_hydration_failures();
-                        warn!("tier2 fetch failed during hydrate: {err}");
-                        return Err(err);
-                    }
+                if let Err(err) = tier2.schedule_fetch(fetch_request) {
+                    tracing::event!(
+                        target: "aof2::tier1",
+                        tracing::Level::WARN,
+                        instance = instance_id.get(),
+                        segment = segment_id.as_u64(),
+                        error = %err,
+                        "tier1_hydration_retry_failed"
+                    );
+                } else {
+                    tracing::event!(
+                        target: "aof2::tier1",
+                        tracing::Level::INFO,
+                        instance = instance_id.get(),
+                        segment = segment_id.as_u64(),
+                        sealed_at = entry.sealed_at,
+                        "tier1_hydration_retry_queued"
+                    );
                 }
             } else {
-                warn!("warm file missing during hydrate and tier2 unavailable");
-                return Ok(None);
+                tracing::event!(
+                    target: "aof2::tier1",
+                    tracing::Level::WARN,
+                    instance = instance_id.get(),
+                    segment = segment_id.as_u64(),
+                    "tier1_hydration_retry_unavailable"
+                );
             }
+
+            let mut instances = self.instances.lock();
+            if let Some(state) = instances.get_mut(&instance_id) {
+                if let Some(manifest_entry) = state.manifest.get_mut(segment_id) {
+                    manifest_entry.residency = Tier1ResidencyState::NeedsRecovery;
+                    manifest_entry.touch();
+                    let base_offset = manifest_entry.base_offset;
+                    state.persist_manifest()?;
+                    state.log_manifest_record(
+                        segment_id,
+                        base_offset,
+                        ManifestRecordPayload::HydrationFailed {
+                            reason_code: HYDRATION_REASON_MISSING_WARM,
+                        },
+                    );
+                }
+            }
+            return Ok(None);
         }
 
         let mut decoder = ZstdDecoder::new(File::open(&compressed_path).map_err(AofError::from)?)
@@ -1392,14 +1744,19 @@ impl Tier1Inner {
         segment_id: SegmentId,
         residency: Tier1ResidencyState,
     ) -> AofResult<()> {
-        let mut instances = self.instances.lock();
-        let state = instances.get_mut(&instance_id).ok_or_else(|| {
-            AofError::InvalidState(format!(
-                "Tier1 instance {:?} not registered",
-                instance_id.get()
-            ))
-        })?;
-        state.update_residency(segment_id, residency)
+        let previous = {
+            let mut instances = self.instances.lock();
+            let state = instances.get_mut(&instance_id).ok_or_else(|| {
+                AofError::InvalidState(format!(
+                    "Tier1 instance {:?} not registered",
+                    instance_id.get()
+                ))
+            })?;
+            state.update_residency(segment_id, residency)?
+        };
+        self.metrics
+            .record_residency_transition(previous, Some(residency));
+        Ok(())
     }
 
     fn manifest_entry(
@@ -1546,10 +1903,12 @@ mod tests {
     use crate::aof2::store::tier0::{Tier0Cache, Tier0CacheConfig};
     use crate::aof2::store::tier2::{
         GetObjectRequest, GetObjectResult, HeadObjectResult, PutObjectRequest, PutObjectResult,
-        Tier2Client, Tier2Config, Tier2Event, Tier2Manager, Tier2Metadata, Tier2UploadComplete,
+        Tier2Client, Tier2Config, Tier2Event, Tier2FetchComplete, Tier2Manager, Tier2Metadata,
+        Tier2UploadComplete,
     };
     use async_trait::async_trait;
     use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn build_layout(dir: &TempDir) -> Layout {
@@ -1562,6 +1921,31 @@ mod tests {
         let layout = Layout::new(&config);
         layout.ensure().expect("layout ensure");
         layout
+    }
+
+    #[test]
+    fn tier1_metrics_snapshot_tracks_new_gauges() {
+        let metrics = Tier1Metrics::default();
+        metrics.record_residency_transition(None, Some(Tier1ResidencyState::StagedForTier0));
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.residency.staged_for_tier0, 1);
+
+        metrics.record_residency_transition(
+            Some(Tier1ResidencyState::StagedForTier0),
+            Some(Tier1ResidencyState::ResidentInTier0),
+        );
+        metrics.record_residency_transition(Some(Tier1ResidencyState::ResidentInTier0), None);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.residency.staged_for_tier0, 0);
+        assert_eq!(snapshot.residency.resident_in_tier0, 0);
+
+        metrics.add_hydration_queue(3);
+        metrics.sub_hydration_queue(2);
+        metrics.record_hydration_latency(Duration::from_millis(25));
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.hydration_queue_depth, 1);
+        assert_eq!(snapshot.hydration_latency_samples, 1);
+        assert_eq!(snapshot.hydration_latency_p50_ms, 25);
     }
 
     fn seed_manifest_log(
@@ -1958,6 +2342,196 @@ mod tests {
             .collect::<AofResult<Vec<_>>>()
             .expect("collect manifest records");
         assert!(records.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hydrate_missing_warm_marks_needs_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = build_layout(&dir);
+        let instance_id = InstanceId::new(7);
+
+        let config = Tier1Config::new(2 * 1024 * 1024).with_worker_threads(1);
+        let tier1 =
+            Tier1Cache::new(tokio::runtime::Handle::current(), config).expect("tier1 cache");
+        let instance = tier1
+            .register_instance(instance_id, layout.clone())
+            .expect("register instance");
+
+        let segment_id = SegmentId::new(55);
+        let missing_name = "missing-segment.zst".to_string();
+        {
+            let mut instances = tier1.inner.instances.lock();
+            let state = instances
+                .get_mut(&instance_id)
+                .expect("tier1 state present");
+            let entry = ManifestEntry {
+                segment_id,
+                base_offset: 0,
+                base_record_count: 0,
+                created_at: 0,
+                sealed_at: 0,
+                checksum: 0,
+                ext_id: 0,
+                coordinator_watermark: 0,
+                flush_failure: false,
+                original_bytes: 0,
+                compressed_bytes: 512,
+                compressed_path: missing_name.clone(),
+                dictionary: None,
+                offset_index: Vec::new(),
+                residency: Tier1ResidencyState::StagedForTier0,
+                tier2: None,
+                last_access_epoch_ms: current_epoch_ms(),
+            };
+            state.manifest.insert(entry.clone());
+            state.used_bytes = state.used_bytes.saturating_add(entry.compressed_bytes);
+            state.lru.push_back(segment_id);
+        }
+
+        let result = instance
+            .hydrate_segment_blocking(segment_id)
+            .expect("hydrate call");
+        assert!(result.is_none());
+
+        let entry = instance
+            .manifest_entry(segment_id)
+            .expect("manifest entry")
+            .expect("entry present");
+        assert_eq!(entry.residency, Tier1ResidencyState::NeedsRecovery);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_events_clear_needs_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = build_layout(&dir);
+        let instance_id = InstanceId::new(9);
+
+        let mut config = Tier1Config::new(2 * 1024 * 1024).with_worker_threads(1);
+        config.manifest_log.enabled = false;
+        let tier1 =
+            Tier1Cache::new(tokio::runtime::Handle::current(), config).expect("tier1 cache");
+        tier1
+            .register_instance(instance_id, layout.clone())
+            .expect("register instance");
+
+        let segment_id = SegmentId::new(99);
+        let warm_name = "recovered-segment.zst".to_string();
+        let warm_path = layout.warm_dir().join(&warm_name);
+        std::fs::write(&warm_path, b"warm-bytes").expect("write warm file");
+
+        {
+            let mut instances = tier1.inner.instances.lock();
+            let state = instances
+                .get_mut(&instance_id)
+                .expect("tier1 state present");
+            let entry = ManifestEntry {
+                segment_id,
+                base_offset: 0,
+                base_record_count: 0,
+                created_at: 0,
+                sealed_at: 0,
+                checksum: 0,
+                ext_id: 0,
+                coordinator_watermark: 0,
+                flush_failure: false,
+                original_bytes: 0,
+                compressed_bytes: warm_path.metadata().unwrap().len(),
+                compressed_path: warm_name.clone(),
+                dictionary: None,
+                offset_index: Vec::new(),
+                residency: Tier1ResidencyState::NeedsRecovery,
+                tier2: None,
+                last_access_epoch_ms: current_epoch_ms(),
+            };
+            state.manifest.insert(entry.clone());
+            state.used_bytes = state.used_bytes.saturating_add(entry.compressed_bytes);
+            state.lru.push_back(segment_id);
+        }
+
+        tier1.handle_tier2_events(vec![Tier2Event::FetchCompleted(Tier2FetchComplete {
+            instance_id,
+            segment_id,
+            destination: layout.warm_dir().join(&warm_name),
+        })]);
+
+        let entry = tier1
+            .manifest_snapshot(instance_id)
+            .expect("manifest snapshot")
+            .into_iter()
+            .find(|entry| entry.segment_id == segment_id)
+            .expect("entry present");
+        assert_eq!(entry.residency, Tier1ResidencyState::StagedForTier0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_recovery_persists_across_manifest_replay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layout = build_layout(&dir);
+        let instance_id = InstanceId::new(11);
+
+        let mut config = Tier1Config::new(2 * 1024 * 1024)
+            .with_worker_threads(1)
+            .with_manifest_log_enabled(true)
+            .with_manifest_log_only(true);
+        config.manifest_log.chunk_capacity_bytes = 128 * 1024;
+
+        let tier1 =
+            Tier1Cache::new(tokio::runtime::Handle::current(), config.clone()).expect("tier1");
+        tier1
+            .register_instance(instance_id, layout.clone())
+            .expect("register instance");
+
+        let segment_id = SegmentId::new(123);
+        {
+            let mut instances = tier1.inner.instances.lock();
+            let state = instances
+                .get_mut(&instance_id)
+                .expect("tier1 state present");
+            let entry = ManifestEntry {
+                segment_id,
+                base_offset: 0,
+                base_record_count: 0,
+                created_at: 0,
+                sealed_at: 0,
+                checksum: 0,
+                ext_id: 0,
+                coordinator_watermark: 0,
+                flush_failure: false,
+                original_bytes: 0,
+                compressed_bytes: 256,
+                compressed_path: "needs-recovery.zst".to_string(),
+                dictionary: None,
+                offset_index: Vec::new(),
+                residency: Tier1ResidencyState::NeedsRecovery,
+                tier2: None,
+                last_access_epoch_ms: current_epoch_ms(),
+            };
+            state.manifest.insert(entry.clone());
+            state.used_bytes = state.used_bytes.saturating_add(entry.compressed_bytes);
+            state.lru.push_back(segment_id);
+            state.log_manifest_record(
+                segment_id,
+                entry.base_offset,
+                ManifestRecordPayload::HydrationFailed {
+                    reason_code: HYDRATION_REASON_MISSING_WARM,
+                },
+            );
+            state.persist_manifest().expect("persist manifest");
+        }
+
+        drop(tier1);
+
+        let tier1 =
+            Tier1Cache::new(tokio::runtime::Handle::current(), config).expect("tier1 replay");
+        let instance = tier1
+            .register_instance(instance_id, layout.clone())
+            .expect("register instance");
+
+        let entry = instance
+            .manifest_entry(segment_id)
+            .expect("manifest entry")
+            .expect("entry present after replay");
+        assert_eq!(entry.residency, Tier1ResidencyState::NeedsRecovery);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

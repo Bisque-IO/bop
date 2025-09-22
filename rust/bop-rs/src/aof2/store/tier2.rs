@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -55,6 +55,35 @@ impl Default for RetryPolicy {
             base_delay: Duration::from_millis(100),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RetryKind {
+    Upload,
+    Delete,
+    Fetch,
+}
+
+impl RetryKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            RetryKind::Upload => "upload",
+            RetryKind::Delete => "delete",
+            RetryKind::Fetch => "fetch",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RetryStats<T> {
+    value: T,
+    attempts: u32,
+}
+
+#[derive(Debug)]
+struct RetryError {
+    error: AofError,
+    attempts: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +224,12 @@ pub struct Tier2MetricsSnapshot {
     pub download_failures: u64,
     pub deletes: u64,
     pub delete_failures: u64,
+    pub upload_retry_attempts: u64,
+    pub upload_retry_failures: u64,
+    pub delete_retry_attempts: u64,
+    pub delete_retry_failures: u64,
+    pub upload_queue_depth: u32,
+    pub delete_queue_depth: u32,
 }
 
 #[derive(Debug, Default)]
@@ -205,6 +240,12 @@ pub struct Tier2Metrics {
     download_failures: AtomicU64,
     deletes: AtomicU64,
     delete_failures: AtomicU64,
+    upload_retry_attempts: AtomicU64,
+    upload_retry_failures: AtomicU64,
+    delete_retry_attempts: AtomicU64,
+    delete_retry_failures: AtomicU64,
+    upload_queue_depth: AtomicU32,
+    delete_queue_depth: AtomicU32,
 }
 
 impl Tier2Metrics {
@@ -216,6 +257,12 @@ impl Tier2Metrics {
             download_failures: self.download_failures.load(AtomicOrdering::Relaxed),
             deletes: self.deletes.load(AtomicOrdering::Relaxed),
             delete_failures: self.delete_failures.load(AtomicOrdering::Relaxed),
+            upload_retry_attempts: self.upload_retry_attempts.load(AtomicOrdering::Relaxed),
+            upload_retry_failures: self.upload_retry_failures.load(AtomicOrdering::Relaxed),
+            delete_retry_attempts: self.delete_retry_attempts.load(AtomicOrdering::Relaxed),
+            delete_retry_failures: self.delete_retry_failures.load(AtomicOrdering::Relaxed),
+            upload_queue_depth: self.upload_queue_depth.load(AtomicOrdering::Relaxed),
+            delete_queue_depth: self.delete_queue_depth.load(AtomicOrdering::Relaxed),
         }
     }
 
@@ -225,6 +272,16 @@ impl Tier2Metrics {
 
     fn incr_upload_failure(&self) {
         self.upload_failures.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn incr_upload_retry_attempt(&self) {
+        self.upload_retry_attempts
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn incr_upload_retry_failure(&self) {
+        self.upload_retry_failures
+            .fetch_add(1, AtomicOrdering::Relaxed);
     }
 
     fn incr_download(&self) {
@@ -241,6 +298,58 @@ impl Tier2Metrics {
 
     fn incr_delete_failure(&self) {
         self.delete_failures.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn incr_delete_retry_attempt(&self) {
+        self.delete_retry_attempts
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn incr_delete_retry_failure(&self) {
+        self.delete_retry_failures
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn incr_upload_queue(&self) {
+        self.upload_queue_depth
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn decr_upload_queue(&self) {
+        let _ = self.upload_queue_depth.fetch_update(
+            AtomicOrdering::AcqRel,
+            AtomicOrdering::Relaxed,
+            |value| value.checked_sub(1),
+        );
+    }
+
+    fn incr_delete_queue(&self) {
+        self.delete_queue_depth
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    fn decr_delete_queue(&self) {
+        let _ = self.delete_queue_depth.fetch_update(
+            AtomicOrdering::AcqRel,
+            AtomicOrdering::Relaxed,
+            |value| value.checked_sub(1),
+        );
+    }
+
+    fn record_retry_attempt(&self, kind: RetryKind) {
+        match kind {
+            RetryKind::Upload => self.incr_upload_retry_attempt(),
+            RetryKind::Delete => self.incr_delete_retry_attempt(),
+            RetryKind::Fetch => {}
+        }
+    }
+
+    fn record_retry_failure(&self, kind: RetryKind) {
+        match kind {
+            RetryKind::Upload => self.incr_upload_retry_failure(),
+            RetryKind::Delete => self.incr_delete_retry_failure(),
+            RetryKind::Fetch => {}
+        }
     }
 }
 
@@ -474,6 +583,8 @@ pub enum Tier2Event {
     UploadFailed(Tier2UploadFailed),
     DeleteCompleted(Tier2DeleteComplete),
     DeleteFailed(Tier2DeleteFailed),
+    FetchCompleted(Tier2FetchComplete),
+    FetchFailed(Tier2FetchFailed),
 }
 
 #[derive(Debug)]
@@ -509,9 +620,24 @@ pub struct Tier2DeleteFailed {
 }
 
 #[derive(Debug)]
+pub struct Tier2FetchComplete {
+    pub instance_id: InstanceId,
+    pub segment_id: SegmentId,
+    pub destination: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct Tier2FetchFailed {
+    pub instance_id: InstanceId,
+    pub segment_id: SegmentId,
+    pub error: AofError,
+}
+
+#[derive(Debug)]
 enum Tier2Command {
     Upload(UploadJob),
     Delete(DeleteJob),
+    Fetch(FetchJob),
 }
 
 #[derive(Debug)]
@@ -528,6 +654,11 @@ struct DeleteJob {
     request: Tier2DeleteRequest,
 }
 
+#[derive(Debug)]
+struct FetchJob {
+    request: Tier2FetchRequest,
+}
+
 #[derive(Debug, Clone)]
 struct RetentionEntry {
     request: Tier2DeleteRequest,
@@ -542,7 +673,8 @@ struct Tier2Inner {
     events_tx: mpsc::UnboundedSender<Tier2Event>,
     retry: RetryPolicy,
     retention: Mutex<VecDeque<RetentionEntry>>,
-    inflight: Mutex<HashSet<(InstanceId, SegmentId)>>,
+    inflight_uploads: Mutex<HashSet<(InstanceId, SegmentId)>>,
+    inflight_fetches: Mutex<HashSet<(InstanceId, SegmentId)>>,
     metrics: Tier2Metrics,
     semaphore: Arc<Semaphore>,
 }
@@ -593,7 +725,7 @@ impl Tier2Inner {
         }
         let key = (descriptor.instance_id, descriptor.segment_id);
         {
-            let inflight = self.inflight.lock();
+            let inflight = self.inflight_uploads.lock();
             if inflight.contains(&key) {
                 trace!(
                     instance = descriptor.instance_id.get(),
@@ -604,7 +736,7 @@ impl Tier2Inner {
             }
         }
         {
-            let mut inflight = self.inflight.lock();
+            let mut inflight = self.inflight_uploads.lock();
             inflight.insert(key);
         }
         let object_key = self.config.object_key(
@@ -621,17 +753,48 @@ impl Tier2Inner {
             inflight_key: key,
         };
         if let Err(err) = self.command_tx.send(Tier2Command::Upload(job)) {
-            let mut inflight = self.inflight.lock();
+            let mut inflight = self.inflight_uploads.lock();
             inflight.remove(&key);
             return Err(AofError::InternalError(err.to_string()));
         }
+        self.metrics.incr_upload_queue();
         Ok(())
     }
 
     fn schedule_delete(&self, request: Tier2DeleteRequest) -> AofResult<()> {
         self.command_tx
             .send(Tier2Command::Delete(DeleteJob { request }))
-            .map_err(|err| AofError::InternalError(err.to_string()))
+            .map_err(|err| AofError::InternalError(err.to_string()))?;
+        self.metrics.incr_delete_queue();
+        Ok(())
+    }
+
+    fn schedule_fetch(&self, request: Tier2FetchRequest) -> AofResult<()> {
+        let key = (request.instance_id, request.segment_id);
+        {
+            let inflight = self.inflight_fetches.lock();
+            if inflight.contains(&key) {
+                trace!(
+                    instance = request.instance_id.get(),
+                    segment = request.segment_id.as_u64(),
+                    "tier2 fetch already in flight"
+                );
+                return Ok(());
+            }
+        }
+        {
+            let mut inflight = self.inflight_fetches.lock();
+            inflight.insert(key);
+        }
+        if let Err(err) = self
+            .command_tx
+            .send(Tier2Command::Fetch(FetchJob { request }))
+        {
+            let mut inflight = self.inflight_fetches.lock();
+            inflight.remove(&key);
+            return Err(AofError::InternalError(err.to_string()));
+        }
+        Ok(())
     }
 
     fn process_retention(&self) {
@@ -668,6 +831,7 @@ impl Tier2Inner {
                 match command {
                     Tier2Command::Upload(job) => inner.handle_upload(job).await,
                     Tier2Command::Delete(job) => inner.handle_delete(job).await,
+                    Tier2Command::Fetch(job) => inner.handle_fetch(job).await,
                 }
             });
         }
@@ -685,9 +849,29 @@ impl Tier2Inner {
             .perform_upload(&descriptor, &object_key, &metadata, security.clone())
             .await;
         match result {
-            Ok(event) => {
-                if let Err(err) = self.events_tx.send(Tier2Event::UploadCompleted(event)) {
-                    warn!("failed to send tier2 upload complete: {err}");
+            Ok(stats) => {
+                let attempts = stats.attempts;
+                let complete = stats.value;
+                tracing::event!(
+                    target: "aof2::tier2",
+                    tracing::Level::INFO,
+                    instance = descriptor.instance_id.get(),
+                    segment = descriptor.segment_id.as_u64(),
+                    attempts,
+                    object_key = %complete.metadata.object_key,
+                    compressed_bytes = descriptor.compressed_bytes,
+                    original_bytes = descriptor.original_bytes,
+                    "tier2_upload_success"
+                );
+                if let Err(err) = self.events_tx.send(Tier2Event::UploadCompleted(complete)) {
+                    tracing::event!(
+                        target: "aof2::tier2",
+                        tracing::Level::WARN,
+                        instance = descriptor.instance_id.get(),
+                        segment = descriptor.segment_id.as_u64(),
+                        error = %err,
+                        "tier2_upload_event_send_failed"
+                    );
                 }
                 if let Some(ttl) = self.config.retention_ttl {
                     if let Ok(entry) = self.build_retention_entry(&descriptor, &object_key, ttl) {
@@ -697,20 +881,107 @@ impl Tier2Inner {
             }
             Err(err) => {
                 self.metrics.incr_upload_failure();
+                let attempts = err.attempts;
+                let error = err.error;
+                tracing::event!(
+                    target: "aof2::tier2",
+                    tracing::Level::WARN,
+                    instance = descriptor.instance_id.get(),
+                    segment = descriptor.segment_id.as_u64(),
+                    attempts,
+                    error = %error,
+                    "tier2_upload_failed"
+                );
                 if let Err(send_err) =
                     self.events_tx
                         .send(Tier2Event::UploadFailed(Tier2UploadFailed {
                             instance_id: descriptor.instance_id,
                             segment_id: descriptor.segment_id,
-                            error: err,
+                            error,
                         }))
                 {
-                    warn!("failed to send tier2 upload failure: {send_err}");
+                    tracing::event!(
+                        target: "aof2::tier2",
+                        tracing::Level::WARN,
+                        instance = descriptor.instance_id.get(),
+                        segment = descriptor.segment_id.as_u64(),
+                        error = %send_err,
+                        "tier2_upload_failure_event_send_failed"
+                    );
                 }
             }
         }
-        let mut inflight = self.inflight.lock();
+        self.metrics.decr_upload_queue();
+        let mut inflight = self.inflight_uploads.lock();
         inflight.remove(&inflight_key);
+    }
+
+    async fn handle_fetch(self: Arc<Self>, job: FetchJob) {
+        let request = job.request;
+        let key = (request.instance_id, request.segment_id);
+        let result = self.fetch_segment(request.clone()).await;
+        match result {
+            Ok(stats) => {
+                tracing::event!(
+                    target: "aof2::tier2",
+                    tracing::Level::INFO,
+                    instance = request.instance_id.get(),
+                    segment = request.segment_id.as_u64(),
+                    attempts = stats.attempts,
+                    destination = %request.destination.display(),
+                    "tier2_fetch_success"
+                );
+                if let Err(err) =
+                    self.events_tx
+                        .send(Tier2Event::FetchCompleted(Tier2FetchComplete {
+                            instance_id: request.instance_id,
+                            segment_id: request.segment_id,
+                            destination: request.destination.clone(),
+                        }))
+                {
+                    tracing::event!(
+                        target: "aof2::tier2",
+                        tracing::Level::WARN,
+                        instance = request.instance_id.get(),
+                        segment = request.segment_id.as_u64(),
+                        error = %err,
+                        "tier2_fetch_event_send_failed"
+                    );
+                }
+            }
+            Err(err) => {
+                let attempts = err.attempts;
+                let error = err.error;
+                tracing::event!(
+                    target: "aof2::tier2",
+                    tracing::Level::WARN,
+                    instance = request.instance_id.get(),
+                    segment = request.segment_id.as_u64(),
+                    attempts,
+                    error = %error,
+                    "tier2_fetch_failed"
+                );
+                if let Err(send_err) =
+                    self.events_tx
+                        .send(Tier2Event::FetchFailed(Tier2FetchFailed {
+                            instance_id: request.instance_id,
+                            segment_id: request.segment_id,
+                            error,
+                        }))
+                {
+                    tracing::event!(
+                        target: "aof2::tier2",
+                        tracing::Level::WARN,
+                        instance = request.instance_id.get(),
+                        segment = request.segment_id.as_u64(),
+                        error = %send_err,
+                        "tier2_fetch_failure_event_send_failed"
+                    );
+                }
+            }
+        }
+        let mut inflight = self.inflight_fetches.lock();
+        inflight.remove(&key);
     }
 
     async fn perform_upload(
@@ -719,40 +990,44 @@ impl Tier2Inner {
         object_key: &str,
         metadata: &HashMap<String, String>,
         security: Option<Tier2Security>,
-    ) -> AofResult<Tier2UploadComplete> {
+    ) -> Result<RetryStats<Tier2UploadComplete>, RetryError> {
         self.metrics.incr_upload_attempt();
         let bucket = self.config.bucket.clone();
-        let head = self
-            .with_retry(|| {
+        let head_stats = match self
+            .with_retry(RetryKind::Upload, || {
                 let client = Arc::clone(&self.client);
                 let bucket = bucket.clone();
                 let key = object_key.to_string();
                 async move { client.head_object(&bucket, &key).await }
             })
-            .await?;
-        if let Some(existing) = head {
+            .await
+        {
+            Ok(stats) => stats,
+            Err(err) => return Err(err),
+        };
+        if let Some(existing) = head_stats.value {
             if self.remote_matches(&existing, descriptor) {
+                let HeadObjectResult { size, etag, .. } = existing;
                 trace!(
                     instance = descriptor.instance_id.get(),
                     segment = descriptor.segment_id.as_u64(),
                     "tier2 upload skipped due to matching remote"
                 );
-                return Ok(Tier2UploadComplete {
-                    instance_id: descriptor.instance_id,
-                    segment_id: descriptor.segment_id,
-                    metadata: Tier2Metadata::new(
-                        object_key.to_string(),
-                        existing.etag,
-                        existing.size,
-                    ),
-                    base_offset: descriptor.base_offset,
-                    base_record_count: descriptor.base_record_count,
-                    checksum: descriptor.checksum,
+                return Ok(RetryStats {
+                    attempts: head_stats.attempts,
+                    value: Tier2UploadComplete {
+                        instance_id: descriptor.instance_id,
+                        segment_id: descriptor.segment_id,
+                        metadata: Tier2Metadata::new(object_key.to_string(), etag, size),
+                        base_offset: descriptor.base_offset,
+                        base_record_count: descriptor.base_record_count,
+                        checksum: descriptor.checksum,
+                    },
                 });
             }
         }
-        let put_result = self
-            .with_retry(|| {
+        let put_stats = match self
+            .with_retry(RetryKind::Upload, || {
                 let client = Arc::clone(&self.client);
                 let bucket = bucket.clone();
                 let key = object_key.to_string();
@@ -771,14 +1046,22 @@ impl Tier2Inner {
                         .await
                 }
             })
-            .await?;
-        Ok(Tier2UploadComplete {
-            instance_id: descriptor.instance_id,
-            segment_id: descriptor.segment_id,
-            metadata: Tier2Metadata::new(object_key.to_string(), put_result.etag, put_result.size),
-            base_offset: descriptor.base_offset,
-            base_record_count: descriptor.base_record_count,
-            checksum: descriptor.checksum,
+            .await
+        {
+            Ok(stats) => stats,
+            Err(err) => return Err(err),
+        };
+        let PutObjectResult { etag, size } = put_stats.value;
+        Ok(RetryStats {
+            attempts: put_stats.attempts,
+            value: Tier2UploadComplete {
+                instance_id: descriptor.instance_id,
+                segment_id: descriptor.segment_id,
+                metadata: Tier2Metadata::new(object_key.to_string(), etag, size),
+                base_offset: descriptor.base_offset,
+                base_record_count: descriptor.base_record_count,
+                checksum: descriptor.checksum,
+            },
         })
     }
 
@@ -787,7 +1070,7 @@ impl Tier2Inner {
         self.metrics.incr_delete();
         let bucket = self.config.bucket.clone();
         match self
-            .with_retry(|| {
+            .with_retry(RetryKind::Delete, || {
                 let client = Arc::clone(&self.client);
                 let bucket = bucket.clone();
                 let key = request.object_key.clone();
@@ -795,7 +1078,16 @@ impl Tier2Inner {
             })
             .await
         {
-            Ok(()) => {
+            Ok(stats) => {
+                tracing::event!(
+                    target: "aof2::tier2",
+                    tracing::Level::INFO,
+                    instance = request.instance_id.get(),
+                    segment = request.segment_id.as_u64(),
+                    attempts = stats.attempts,
+                    object_key = %request.object_key,
+                    "tier2_delete_success"
+                );
                 if let Err(err) =
                     self.events_tx
                         .send(Tier2Event::DeleteCompleted(Tier2DeleteComplete {
@@ -804,29 +1096,62 @@ impl Tier2Inner {
                             object_key: request.object_key,
                         }))
                 {
-                    warn!("failed to send tier2 delete complete: {err}");
+                    tracing::event!(
+                        target: "aof2::tier2",
+                        tracing::Level::WARN,
+                        instance = request.instance_id.get(),
+                        segment = request.segment_id.as_u64(),
+                        error = %err,
+                        "tier2_delete_event_send_failed"
+                    );
                 }
             }
             Err(err) => {
                 self.metrics.incr_delete_failure();
+                let attempts = err.attempts;
+                let error = err.error;
+                tracing::event!(
+                    target: "aof2::tier2",
+                    tracing::Level::WARN,
+                    instance = request.instance_id.get(),
+                    segment = request.segment_id.as_u64(),
+                    attempts,
+                    object_key = %request.object_key,
+                    error = %error,
+                    "tier2_delete_failed"
+                );
                 if let Err(send_err) =
                     self.events_tx
                         .send(Tier2Event::DeleteFailed(Tier2DeleteFailed {
                             instance_id: request.instance_id,
                             segment_id: request.segment_id,
                             object_key: request.object_key,
-                            error: err,
+                            error,
                         }))
                 {
-                    warn!("failed to send tier2 delete failure: {send_err}");
+                    tracing::event!(
+                        target: "aof2::tier2",
+                        tracing::Level::WARN,
+                        instance = request.instance_id.get(),
+                        segment = request.segment_id.as_u64(),
+                        error = %send_err,
+                        "tier2_delete_failure_event_send_failed"
+                    );
                 }
             }
         }
+        self.metrics.decr_delete_queue();
     }
 
-    async fn fetch_segment(&self, request: Tier2FetchRequest) -> AofResult<bool> {
+    async fn fetch_segment(
+        &self,
+        request: Tier2FetchRequest,
+    ) -> Result<RetryStats<bool>, RetryError> {
         if request.destination.exists() {
-            return Ok(true);
+            return Ok(RetryStats {
+                value: true,
+                attempts: 0,
+            });
         }
         let object_key =
             self.config
@@ -834,7 +1159,7 @@ impl Tier2Inner {
         let temp = request.destination.with_extension("download");
         let bucket = self.config.bucket.clone();
         let result = self
-            .with_retry(|| {
+            .with_retry(RetryKind::Fetch, || {
                 let client = Arc::clone(&self.client);
                 let bucket = bucket.clone();
                 let key = object_key.clone();
@@ -853,16 +1178,21 @@ impl Tier2Inner {
             })
             .await;
         match result {
-            Ok(_response) => {
+            Ok(stats) => {
+                let attempts = stats.attempts;
+                let _response = stats.value;
                 tokio::fs::rename(&temp, &request.destination)
                     .await
-                    .map_err(AofError::from)?;
+                    .map_err(AofError::from)
+                    .map_err(|error| RetryError { error, attempts })?;
                 self.metrics.incr_download();
-                Ok(true)
+                Ok(RetryStats {
+                    value: true,
+                    attempts,
+                })
             }
             Err(err) => {
                 self.metrics.incr_download_failure();
-                warn!("tier2 fetch failed: {err}");
                 let _ = tokio::fs::remove_file(&temp).await;
                 Err(err)
             }
@@ -895,22 +1225,35 @@ impl Tier2Inner {
         })
     }
 
-    async fn with_retry<F, Fut, T>(&self, mut op: F) -> AofResult<T>
+    async fn with_retry<F, Fut, T>(
+        &self,
+        kind: RetryKind,
+        mut op: F,
+    ) -> Result<RetryStats<T>, RetryError>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = AofResult<T>>,
     {
-        let mut attempt = 0;
+        let mut attempts = 0;
         loop {
+            attempts += 1;
             match op().await {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    return Ok(RetryStats {
+                        value: result,
+                        attempts,
+                    });
+                }
                 Err(err) => {
-                    attempt += 1;
-                    if attempt >= self.retry.max_attempts {
-                        return Err(err);
+                    if attempts >= self.retry.max_attempts {
+                        self.metrics.record_retry_failure(kind);
+                        return Err(RetryError {
+                            error: err,
+                            attempts,
+                        });
                     }
-                    warn!(attempt, "tier2 retry after error: {err}");
-                    self.retry.sleep_for(attempt).await;
+                    self.metrics.record_retry_attempt(kind);
+                    self.retry.sleep_for(attempts).await;
                 }
             }
         }
@@ -957,7 +1300,8 @@ impl Tier2Manager {
             events_tx,
             retry: config.retry,
             retention: Mutex::new(VecDeque::new()),
-            inflight: Mutex::new(HashSet::new()),
+            inflight_uploads: Mutex::new(HashSet::new()),
+            inflight_fetches: Mutex::new(HashSet::new()),
             metrics: Tier2Metrics::default(),
             semaphore,
         });
@@ -1014,12 +1358,22 @@ impl Tier2Handle {
         self.inner.schedule_delete(request)
     }
 
+    pub fn schedule_fetch(&self, request: Tier2FetchRequest) -> AofResult<()> {
+        self.inner.schedule_fetch(request)
+    }
+
     pub fn fetch_segment(&self, request: Tier2FetchRequest) -> AofResult<bool> {
-        self.runtime.block_on(self.inner.fetch_segment(request))
+        match self.runtime.block_on(self.inner.fetch_segment(request)) {
+            Ok(stats) => Ok(stats.value),
+            Err(err) => Err(err.error),
+        }
     }
 
     pub async fn fetch_segment_async(&self, request: Tier2FetchRequest) -> AofResult<bool> {
-        self.inner.fetch_segment(request).await
+        match self.inner.fetch_segment(request).await {
+            Ok(stats) => Ok(stats.value),
+            Err(err) => Err(err.error),
+        }
     }
 }
 
@@ -1027,10 +1381,89 @@ impl Tier2Handle {
 mod tests {
     use super::*;
     use std::collections::HashMap as StdHashMap;
+    use std::fmt;
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
     use tempfile::tempdir;
+    use tracing::Subscriber;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::{
+        Layer, Registry, layer::Context, layer::SubscriberExt, registry::LookupSpan,
+    };
+
+    #[derive(Clone, Debug)]
+    struct CapturedEvent {
+        target: String,
+        name: String,
+        fields: StdHashMap<String, String>,
+    }
+
+    #[derive(Clone)]
+    struct RecordingLayer {
+        events: Arc<StdMutex<Vec<CapturedEvent>>>,
+    }
+
+    impl RecordingLayer {
+        fn new(events: Arc<StdMutex<Vec<CapturedEvent>>>) -> Self {
+            Self { events }
+        }
+    }
+
+    struct FieldVisitor<'a> {
+        fields: &'a mut StdHashMap<String, String>,
+    }
+
+    impl<'a> Visit for FieldVisitor<'a> {
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u128(&mut self, field: &Field, value: u128) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{:?}", value));
+        }
+    }
+
+    impl<S> Layer<S> for RecordingLayer
+    where
+        S: Subscriber + for<'span> LookupSpan<'span>,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut captured = CapturedEvent {
+                target: event.metadata().target().to_string(),
+                name: event.metadata().name().to_string(),
+                fields: StdHashMap::new(),
+            };
+            event.record(&mut FieldVisitor {
+                fields: &mut captured.fields,
+            });
+            if let Ok(mut events) = self.events.lock() {
+                events.push(captured);
+            }
+        }
+    }
 
     #[derive(Default)]
     struct StoredObject {
@@ -1054,6 +1487,8 @@ mod tests {
             *self.get_calls.lock().unwrap()
         }
     }
+
+    struct AlwaysFailTier2Client;
 
     #[allow(async_fn_in_trait)]
     #[async_trait]
@@ -1120,6 +1555,30 @@ mod tests {
                 })),
                 None => Ok(None),
             }
+        }
+    }
+
+    #[allow(async_fn_in_trait)]
+    #[async_trait]
+    impl Tier2Client for AlwaysFailTier2Client {
+        async fn put_object(&self, _request: PutObjectRequest) -> AofResult<PutObjectResult> {
+            Err(AofError::RemoteStorage("put failed".to_string()))
+        }
+
+        async fn get_object(&self, _request: GetObjectRequest) -> AofResult<GetObjectResult> {
+            Err(AofError::RemoteStorage("get failed".to_string()))
+        }
+
+        async fn delete_object(&self, _bucket: &str, _key: &str) -> AofResult<()> {
+            Err(AofError::RemoteStorage("delete failed".to_string()))
+        }
+
+        async fn head_object(
+            &self,
+            _bucket: &str,
+            _key: &str,
+        ) -> AofResult<Option<HeadObjectResult>> {
+            Ok(None)
         }
     }
 
@@ -1194,6 +1653,147 @@ mod tests {
         );
         assert!(warm_path.exists());
         assert_eq!(client.get_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn upload_success_emits_structured_event() {
+        let temp = tempdir().expect("tempdir");
+        let warm_path = temp.path().join("segment.zst");
+        tokio::fs::write(&warm_path, b"payload")
+            .await
+            .expect("write warm");
+
+        let mut config = Tier2Config::new(
+            "http://localhost:9000",
+            "us-east-1",
+            "bucket",
+            "access",
+            "secret",
+        )
+        .with_concurrency(1)
+        .with_retention_ttl(None);
+        config.retry = RetryPolicy::new(3, Duration::from_millis(0));
+        config.prefix = "logs".to_string();
+
+        let client = Arc::new(MockTier2Client::default());
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(events.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let runtime = Handle::current();
+        let manager = Tier2Manager::with_client(runtime.clone(), config.clone(), client.clone())
+            .expect("manager");
+        let inner = manager.inner.clone();
+        let instance_id = InstanceId::new(11);
+        let segment_id = SegmentId::new(7);
+        let sealed_at = 33;
+        let descriptor = Tier2UploadDescriptor {
+            instance_id,
+            segment_id,
+            warm_path: warm_path.clone(),
+            sealed_at,
+            base_offset: 0,
+            base_record_count: 0,
+            checksum: 0xABCD,
+            compressed_bytes: 7,
+            original_bytes: 7,
+        };
+        let object_key = inner.config.object_key(instance_id, segment_id, sealed_at);
+        let metadata = inner.build_metadata(&descriptor, &object_key);
+        let job = UploadJob {
+            descriptor,
+            object_key,
+            metadata,
+            security: inner.config.security.clone(),
+            inflight_key: (instance_id, segment_id),
+        };
+        inner.handle_upload(job).await;
+
+        let recorded = events.lock().expect("events lock");
+        let upload_event = recorded
+            .iter()
+            .find(|event| {
+                event.fields.get("message").map(String::as_str) == Some("tier2_upload_success")
+            })
+            .expect("upload success event");
+        assert_eq!(
+            upload_event.fields.get("attempts").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            upload_event
+                .fields
+                .get("compressed_bytes")
+                .map(String::as_str),
+            Some("7")
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_failure_emits_attempt_count() {
+        let temp = tempdir().expect("tempdir");
+        let warm_path = temp.path().join("segment.zst");
+        tokio::fs::write(&warm_path, b"payload")
+            .await
+            .expect("write warm");
+
+        let mut config = Tier2Config::new(
+            "http://localhost:9000",
+            "us-east-1",
+            "bucket",
+            "access",
+            "secret",
+        )
+        .with_concurrency(1)
+        .with_retention_ttl(None);
+        config.retry = RetryPolicy::new(2, Duration::from_millis(0));
+        config.prefix = "logs".to_string();
+
+        let client = Arc::new(AlwaysFailTier2Client);
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = Registry::default().with(RecordingLayer::new(events.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let runtime = Handle::current();
+        let manager = Tier2Manager::with_client(runtime.clone(), config.clone(), client.clone())
+            .expect("manager");
+        let inner = manager.inner.clone();
+        let instance_id = InstanceId::new(17);
+        let segment_id = SegmentId::new(5);
+        let sealed_at = 21;
+        let descriptor = Tier2UploadDescriptor {
+            instance_id,
+            segment_id,
+            warm_path: warm_path.clone(),
+            sealed_at,
+            base_offset: 0,
+            base_record_count: 0,
+            checksum: 0x1234,
+            compressed_bytes: 7,
+            original_bytes: 7,
+        };
+        let object_key = inner.config.object_key(instance_id, segment_id, sealed_at);
+        let metadata = inner.build_metadata(&descriptor, &object_key);
+        let job = UploadJob {
+            descriptor,
+            object_key,
+            metadata,
+            security: inner.config.security.clone(),
+            inflight_key: (instance_id, segment_id),
+        };
+        inner.handle_upload(job).await;
+
+        let recorded = events.lock().expect("events lock");
+        let upload_event = recorded
+            .iter()
+            .find(|event| {
+                event.fields.get("message").map(String::as_str) == Some("tier2_upload_failed")
+            })
+            .expect("upload failure event");
+        assert_eq!(
+            upload_event.fields.get("attempts").map(String::as_str),
+            Some("2")
+        );
     }
 
     async fn wait_for<F>(mut predicate: F)

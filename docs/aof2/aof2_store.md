@@ -80,13 +80,13 @@ See [`aof2_design_next.md`](aof2_design_next.md#111-rollover-handshake-ap2) for 
 
 ### Durability Cursor and Admission Metrics
 
-- Each `TieredInstance` maintains a durability cursor that records the highest requested flush offset and the bytes proven durable per segment.
-- The cursor remains in-memory and is reseeded from recovered segment scans whenever the flush worker advances progress, so restart rebuilds pending flush state without writing metadata to disk.
-- Flush workers update the cursor after every successful `mark_durable` and, if retries are exhausted, set a shared failure flag that surfaces `WouldBlock(BackpressureKind::Flush)` until a subsequent flush clears it. Operators can monitor `FlushMetricsSnapshot::flush_failures` to trace when backpressure is active.
-- Flush workers update the cursor after every successful  and, if retries are exhausted, set a shared failure flag that surfaces  until a subsequent flush clears it. Operators can monitor  to trace when backpressure is active.
-- Flush workers update the cursor after every successful  and, if retries are exhausted, set a shared failure flag that surfaces  until a subsequent flush clears it. Operators can monitor  to trace when backpressure is active.
-- Recovery hydrates the cursor before rebuilding the catalog so background hydrations and readers observe the correct durability watermark.
-- Admission metrics record the latency to acquire an `AdmissionGuard` and the frequency of `WouldBlock` events per backpressure kind. Snapshots are available via `AofManagerHandle::admission_metrics()` for integration with dashboards.
+- Each `TieredInstance` maintains a durability cursor that captures the highest requested offset and the bytes proven durable for every segment. The cursor is hydrated before the catalog rebuild so readers and hydrators start with the correct watermark immediately after recovery.
+- Every successful flush now atomically persists those entries to `warm/durability/<instance>.json`. The worker reuses the flush retry envelope; failures increment the `aof_flush_metadata_*` counters, set `flush_failed`, and surface `WouldBlock(BackpressureKind::Flush)` until a retry succeeds.
+- `Segment::mark_durable` only runs once metadata is durable, keeping the segment footer, in-memory cursor, and tier metadata snapshot in lockstep. Restart loads the JSON snapshot before scanning segment tails, avoiding regressions in tier-coordinator state.
+- `FlushMetricsSnapshot` exposes `metadata_retry_attempts`, `metadata_retry_failures`, and `metadata_failures`. They export as Prometheus samples (`aof_flush_metadata_retry_attempts_total`, etc.) alongside backlog bytes so operators can isolate tier metadata issues from disk flush failures.
+- Admission metrics continue to track `AdmissionGuard` latency and the frequency of each `WouldBlock` variant. Snapshots remain available via `AofManagerHandle::admission_metrics()` for dashboards and alerting.
+
+See also [AOF2 Read Path Guide](aof2_read_path.md) for client-facing retry patterns.
 
 ---
 
@@ -143,6 +143,41 @@ Consuming nodes
 
 - Followers never mutate Tier 2. They mirror Tier 2 contents by replaying the master operation log, fetching objects on demand via the Tier 1 manager.
 - Tier 1 hydrators call into the Tier 2 handle synchronously; the handle proxies that request onto the shared runtime so existing call sites stay synchronous while network I/O remains async.
+
+---
+
+## Observability and Tooling
+
+The tiered store now exposes a consolidated `TieredObservabilitySnapshot` via `AofManagerHandle::observability_snapshot()`. Exporters can sample the snapshot to publish per-tier health without touching internal maps.
+
+### Metrics
+
+- **Tier 0:** `Tier0MetricsSnapshot` includes total bytes, eviction/drop counters, and the live activation queue depth. The queue gauge reflects pending activations across all instances and is updated atomically on every enqueue/dequeue.
+- **Tier 1:** `Tier1MetricsSnapshot` adds compression and hydration queue depths plus a hydration latency histogram. The histogram is reported as `hydration_latency_p50_ms`, `p90_ms`, `p99_ms`, and a sample count. A residency gauge (`resident_in_tier0`, `staged_for_tier0`, `uploaded_to_tier2`, `needs_recovery`) mirrors the manifest so operators can spot stragglers.
+- **Tier 2:** `Tier2MetricsSnapshot` now tracks upload/delete retry attempts and failures alongside the queue depths for each transfer type. The existing download counters remain unchanged.
+
+All counters use relaxed atomics; exporters can continue the existing pull loop without additional locking.
+
+### Structured Logs
+
+Structured `tracing::event!` calls accompany major state transitions. Each event carries `instance`, `segment`, and any relevant counters so it can be filtered downstream:
+
+- `aof2::tiered` – `tiered_admit_segment`: Tier 0 admission/promotions (includes evictions drained).
+- `aof2::tier0` – `tier0_eviction_scheduled`, `tier0_segment_dropped`: queued evictions and drop notifications.
+- `aof2::tier1` – `tier1_compression_success`, `tier1_compression_failed`, `tier1_hydration_success`, `tier1_hydration_failed`, `tier1_hydration_retry_queued`, `tier1_hydration_retry_failed`, `tier1_hydration_retry_unavailable`.
+- `aof2::tier2` – `tier2_upload_success`, `tier2_upload_failed`, `tier2_delete_success`, `tier2_delete_failed`, `tier2_fetch_success`, `tier2_fetch_failed`, plus `*_event_send_failed` when dispatcher channels are full.
+
+Operators can enable `INFO` level logging for the relevant targets to track admission churn, hydration retries, and Tier 2 reliability without enabling verbose tracing globally.
+
+### Admin CLI
+
+An admin helper, `aof2-admin`, surfaces the snapshot in both human-readable and JSON form:
+
+```bash
+cargo run --bin aof2-admin -- dump --root /var/lib/bop/aof2
+```
+
+The command prints Tier 0 queue state, Tier 1 manifest residency (including warm paths and Tier 2 keys), Tier 2 queue depths, and a JSON blob that can be captured for automation or audits.
 
 ---
 
@@ -356,7 +391,6 @@ Delivering these milestones incrementally ensures the tiered store evolves from 
 - [ ] Pass tier handles through Aof::new/TieredInstance and ensure orderly shutdown.
 - [ ] Update APIs/tests to await async tier operations; migrate affected tests to Tokio.
 - [ ] Refresh documentation/examples describing async tier integration.
-
 
 
 

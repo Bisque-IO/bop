@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 
+use crate::aof2::error::AofResult;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -68,7 +69,74 @@ impl DurabilityCursor {
         if requested_bytes > entry.requested_bytes {
             entry.requested_bytes = requested_bytes;
         }
-        entry.durable_bytes = durable_bytes.min(entry.requested_bytes);
+        let capped = durable_bytes.min(entry.requested_bytes);
+        if capped > entry.durable_bytes {
+            entry.durable_bytes = capped;
+        }
+    }
+
+    pub(crate) fn update_flush_with_snapshot<F>(
+        &self,
+        segment_id: SegmentId,
+        requested_bytes: u32,
+        durable_bytes: u32,
+        mut persist: F,
+    ) -> AofResult<()>
+    where
+        F: FnMut(&[(SegmentId, DurabilityEntry)]) -> AofResult<()>,
+    {
+        let (snapshot, previous, existed_before) = {
+            let mut state = self.state.lock();
+            let entry_slot = state.entry(segment_id);
+            let (prev, existed_before) = match entry_slot {
+                Entry::Occupied(mut occupied) => {
+                    let prev = *occupied.get();
+                    let mut updated = prev;
+                    if requested_bytes > updated.requested_bytes {
+                        updated.requested_bytes = requested_bytes;
+                    }
+                    let capped = durable_bytes.min(updated.requested_bytes);
+                    if capped > updated.durable_bytes {
+                        updated.durable_bytes = capped;
+                    }
+                    occupied.insert(updated);
+                    (prev, true)
+                }
+                Entry::Vacant(vacant) => {
+                    let mut updated = DurabilityEntry::default();
+                    if requested_bytes > updated.requested_bytes {
+                        updated.requested_bytes = requested_bytes;
+                    }
+                    updated.durable_bytes = durable_bytes.min(updated.requested_bytes);
+                    vacant.insert(updated);
+                    (DurabilityEntry::default(), false)
+                }
+            };
+            let snapshot = state
+                .iter()
+                .map(|(segment_id, entry)| (*segment_id, *entry))
+                .collect::<Vec<_>>();
+            (snapshot, prev, existed_before)
+        };
+        if let Err(err) = persist(&snapshot) {
+            let mut state = self.state.lock();
+            match state.entry(segment_id) {
+                Entry::Occupied(mut occupied) => {
+                    if existed_before {
+                        occupied.insert(previous);
+                    } else {
+                        occupied.remove();
+                    }
+                }
+                Entry::Vacant(vacant) => {
+                    if existed_before {
+                        vacant.insert(previous);
+                    }
+                }
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     pub fn entry(&self, segment_id: SegmentId) -> Option<DurabilityEntry> {
@@ -96,6 +164,17 @@ mod tests {
         let entry = cursor.entry(segment).expect("entry after seed");
         assert_eq!(entry.requested_bytes, 512);
         assert_eq!(entry.durable_bytes, 256);
+    }
+    #[test]
+    fn update_flush_with_snapshot_reverts_on_failure() {
+        use crate::aof2::error::AofError;
+        let cursor = DurabilityCursor::new(InstanceId::new(5));
+        let segment = SegmentId::new(11);
+        let result = cursor.update_flush_with_snapshot(segment, 256, 128, |_| {
+            Err(AofError::other("persist failure"))
+        });
+        assert!(result.is_err());
+        assert!(cursor.entry(segment).is_none());
     }
 
     #[test]

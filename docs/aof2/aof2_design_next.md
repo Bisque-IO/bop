@@ -89,6 +89,7 @@
 **Current sealed pointer**
 - `segments/current.sealed` stores `{segment_id, durable_bytes, coordinator_watermark}` for the latest acknowledged seal.
 - The pointer file is updated atomically via a temp-file + rename sequence once the footer and fsync succeed, giving restart a constant-time jump to the live sealed tail.
+- Tier1 tracks a `NeedsRecovery` residency state for warm artifacts that fail to materialize. When the warm file is missing, the cache logs `HydrationFailed`, queues a Tier2 fetch, and keeps the entry pinned until the fetch-complete event logs `HydrationDone` and returns the entry to `StagedForTier0`.
 
 ## 4. Core Components
 ### 4.1 `AofManager`
@@ -136,9 +137,12 @@
 ## 7. Flush and Durability
 - Each segment exposes a `SegmentFlushState` describing its durability goal and providing async notifiers. The `AofManager` polls these states concurrently without touching the append lock.
 - `FlushConfig` thresholds still determine when to enqueue a flush, but enqueues happen via lock-free command queues so appenders never contend with background work.
-- `FlushManager::enqueue_segment` accepts a `FlushRequest` bundling `ResidentSegment` and `InstanceId` (`rust/bop-rs/src/aof2/flush.rs:30`), giving the worker the context it needs to persist tier metadata as soon as `Segment::mark_durable` advances.
+- `FlushManager::enqueue_segment` accepts a `FlushRequest` bundling `ResidentSegment` and `InstanceId` (`rust/bop-rs/src/aof2/flush.rs:30`), giving the worker everything it needs to flush the segment to disk and then persist the {requested, durable} pair to `warm/durability/<instance>.json`. `Segment::mark_durable` only runs after that persistence succeeds, keeping the tier snapshot, JSON metadata, and segment footer in lockstep.
 - Sealing consumes a flush-state handle: once durable bytes reach the logical size, `Segment::seal` writes the footer, marks the state finalized, and the manager moves on to the next segment.
 - `Aof::flush(record_id)` (future work) will map the record to its `SegmentFlushState` and await its notifier instead of blocking on a global mutex.
+
+
+See also [AOF2 Read Path Guide](aof2_read_path.md) for reader retry guidance aligned with these tiers.
 
 ## 8. Segment Lifecycle
 1. **Allocation**: preallocate a zeroed file under `segments/` using a power-of-two size within the configured 64 MiB–1 GiB window. No header is emitted yet.
@@ -211,10 +215,11 @@ The explicit mapping documents the steady-state expectations for reviewers: admi
 - Retention hooks ensure archival moves happen off the hot path so they do not interfere with the writer.
 
 ## 12. Observability and Telemetry
-- Counters: bytes appended, durable bytes, record count, flush operations, segment rollovers, recovery duration, and `would_block_*` frequency per `BackpressureKind`.
-- Histograms: append latency, flush latency, bytes per segment, and admission latency (exposed via `AdmissionMetrics`).
-- Structured events: checksum mismatch, recovery truncation, footer write failure.
-- Integrate with `tracing` to surround append, flush, and seal operations.
+- `TieredObservabilitySnapshot` aggregates Tier 0/1/2 metrics (activation queue depth, residency gauge, hydration latency histogram, Tier 2 retry counters) for exporters and the admin CLI.
+- Append/flush metrics continue to track bytes appended, durable bytes, record counts, flush operations, segment rollovers, recovery duration, `aof_flush_metadata_*` retry totals, and `would_block_*` frequency per `BackpressureKind`.
+- Histograms now cover append latency, flush latency, bytes per segment, admission latency (`AdmissionMetrics`), and hydration latency (p50/p90/p99) derived from Tier 1 transitions.
+- Structured `tracing` events capture admissions (`tiered_admit_segment`), Tier 0 evictions/drops, Tier 1 compression/hydration success and failure (including retries), and Tier 2 upload/delete/fetch outcomes with attempt counts.
+- `aof2-admin dump --root <path>` exposes the same metrics, residency state, and queue depths as JSON plus a console table for on-demand diagnostics.
 
 ## 13. Configuration Surface (`AofConfig`)
 - `root_dir`: directory containing `segments/` and `archive/`.
@@ -252,9 +257,9 @@ The explicit mapping documents the steady-state expectations for reviewers: admi
 7. **Reader API** *(pending)*  
    - Implement synchronous/asynchronous readers that derive offsets from `RecordId` and follow the sealing notifications.
 8. **Flush coordination** *(in progress)*  
-   - Background flush manager with single in-flight semantics per segment, durability tracking hooked into `FlushConfig`, and an in-memory durability cursor seeded from recovered segment scans so restart observes the correct watermark without writing metadata to disk.
+   - Background flush manager with single in-flight semantics per segment, durability tracking hooked into `FlushConfig`, and a persisted durability cursor snapshot under `warm/durability/<instance>.json` so restart seeds tier metadata before hydrating the catalog.
    - Flush backpressure now toggles a shared failure flag when the worker exhausts retries, surfacing `WouldBlock(BackpressureKind::Flush)` to producers until a successful flush clears it. The flag feeds the new `FlushMetricsSnapshot::flush_failures` counter for alerting.
 9. **Retention and archival hooks** *(pending)*  
    - Policies for migrating sealed segments into `archive/`, pruning old data, and (eventually) packaging cold segments.
-10. **Observability and tooling** *(pending)*  
-    - Metrics, tracing integration, administrative commands, and benchmarks.
+10. **Observability and tooling** *(done)*  
+    - Tiered metrics snapshot (queue depths, latency histogram, retry counters), structured log events for admissions/hydration/Tier2 transfers, and the `aof2-admin` CLI for residency dumps.

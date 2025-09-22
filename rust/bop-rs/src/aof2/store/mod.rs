@@ -27,9 +27,18 @@ pub use tier2::{
     Tier2Metadata, Tier2Metrics, Tier2MetricsSnapshot, Tier2UploadDescriptor,
 };
 
+#[derive(Debug, Clone)]
+pub struct TieredObservabilitySnapshot {
+    pub tier0: Tier0MetricsSnapshot,
+    pub tier1: Tier1MetricsSnapshot,
+    pub tier2: Option<Tier2MetricsSnapshot>,
+}
+
+use serde::{Deserialize, Serialize};
+use serde_json::{from_slice, to_writer};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
-use std::fs::{File, read_dir};
+use std::fs::{self, File, read_dir};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -37,11 +46,11 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::sync::{Notify, oneshot};
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::aof2::config::SegmentId;
 use crate::aof2::error::{AofError, AofResult, BackpressureKind};
-use crate::aof2::fs::{Layout, SEGMENT_FILE_EXTENSION, SegmentFileName};
+use crate::aof2::fs::{Layout, SEGMENT_FILE_EXTENSION, SegmentFileName, TempFileGuard};
 use crate::aof2::metrics::admission::{AdmissionMetrics, AdmissionMetricsSnapshot};
 use crate::aof2::segment::{
     SEGMENT_FOOTER_SIZE, Segment, SegmentFooter, SegmentHeaderInfo, SegmentScan,
@@ -114,6 +123,78 @@ impl SegmentWaiter {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct DurabilitySnapshotEntry {
+    segment_id: u64,
+    requested_bytes: u32,
+    durable_bytes: u32,
+}
+
+struct DurabilityMetadataStore {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+impl DurabilityMetadataStore {
+    fn new(layout: &Layout, instance_id: InstanceId) -> AofResult<Self> {
+        let dir = layout.warm_dir().join("durability");
+        fs::create_dir_all(&dir).map_err(AofError::from)?;
+        Ok(Self {
+            path: dir.join(format!("{:020}.json", instance_id.get())),
+            lock: Mutex::new(()),
+        })
+    }
+
+    fn persist(&self, snapshot: &[(SegmentId, DurabilityEntry)]) -> AofResult<()> {
+        let _guard = self.lock.lock();
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| AofError::invalid_config("durability metadata path missing parent"))?;
+        let mut temp = TempFileGuard::new(parent, "durability", ".json")?;
+        let entries: Vec<DurabilitySnapshotEntry> = snapshot
+            .iter()
+            .map(|(segment_id, entry)| DurabilitySnapshotEntry {
+                segment_id: segment_id.as_u64(),
+                requested_bytes: entry.requested_bytes,
+                durable_bytes: entry.durable_bytes,
+            })
+            .collect();
+        to_writer(temp.file_mut(), &entries)
+            .map_err(|err| AofError::Serialization(err.to_string()))?;
+        temp.persist(&self.path)?;
+        debug!(path = %self.path.display(), count = entries.len(), "persisted durability metadata");
+        Ok(())
+    }
+
+    fn load_into(&self, cursor: &DurabilityCursor) -> AofResult<()> {
+        let _guard = self.lock.lock();
+        let data = match fs::read(&self.path) {
+            Ok(data) => data,
+            Err(err) => {
+                return if err.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(AofError::from(err))
+                };
+            }
+        };
+        drop(_guard);
+        let entries: Vec<DurabilitySnapshotEntry> =
+            from_slice(&data).map_err(|err| AofError::Serialization(err.to_string()))?;
+        let count = entries.len();
+        for entry in entries {
+            cursor.seed_entry(
+                SegmentId::new(entry.segment_id),
+                entry.requested_bytes,
+                entry.durable_bytes,
+            );
+        }
+        debug!(path = %self.path.display(), count, "loaded durability metadata");
+        Ok(())
+    }
+}
+
 struct TieredInstanceInner {
     coordinator: Arc<TieredCoordinator>,
     layout: Layout,
@@ -121,6 +202,7 @@ struct TieredInstanceInner {
     tier1: Tier1Instance,
     tier2: Option<Tier2Handle>,
     durability: Arc<DurabilityCursor>,
+    metadata: DurabilityMetadataStore,
     waiters: Mutex<HashMap<SegmentId, Vec<Arc<Notify>>>>,
 }
 
@@ -134,6 +216,8 @@ impl TieredInstanceInner {
     ) -> AofResult<Arc<Self>> {
         let instance_id = tier0.instance_id();
         let durability = Arc::new(DurabilityCursor::new(instance_id));
+        let metadata = DurabilityMetadataStore::new(&layout, instance_id)?;
+        metadata.load_into(durability.as_ref())?;
         Ok(Arc::new(Self {
             coordinator,
             layout,
@@ -141,6 +225,7 @@ impl TieredInstanceInner {
             tier1,
             tier2,
             durability,
+            metadata,
             waiters: Mutex::new(HashMap::new()),
         }))
     }
@@ -154,12 +239,24 @@ impl TieredInstanceInner {
         segment: Arc<Segment>,
         residency: SegmentResidency,
     ) -> AofResult<ResidentSegment> {
+        let residency_kind = residency.kind;
+        let residency_bytes = residency.bytes;
         let (resident, evictions) = self.tier0.admit_segment(segment.clone(), residency);
         self.durability
             .record_request(segment.id(), segment.current_size());
         self.tier1
             .update_residency(segment.id(), Tier1ResidencyState::ResidentInTier0)?;
         self.handle_tier0_evictions(&evictions);
+        tracing::event!(
+            target: "aof2::tiered",
+            tracing::Level::INFO,
+            instance = self.instance_id().get(),
+            segment = segment.id().as_u64(),
+            resident_bytes = residency_bytes,
+            residency_kind = ?residency_kind,
+            evictions = evictions.len(),
+            "tiered_admit_segment"
+        );
         Ok(resident)
     }
 
@@ -438,6 +535,20 @@ impl TieredInstanceInner {
     fn record_would_block(&self, kind: BackpressureKind) {
         self.coordinator.record_would_block(kind);
     }
+
+    fn persist_durability_flush(
+        &self,
+        segment_id: SegmentId,
+        requested_bytes: u32,
+        durable_bytes: u32,
+    ) -> AofResult<()> {
+        self.durability.update_flush_with_snapshot(
+            segment_id,
+            requested_bytes,
+            durable_bytes,
+            |snapshot| self.metadata.persist(snapshot),
+        )
+    }
 }
 
 impl Drop for TieredInstanceInner {
@@ -478,15 +589,14 @@ impl TieredInstance {
             .record_request(segment_id, requested_bytes);
     }
 
-    pub(crate) fn record_durability_flush(
+    pub(crate) fn persist_durability_flush(
         &self,
         segment_id: SegmentId,
         requested_bytes: u32,
         durable_bytes: u32,
-    ) {
+    ) -> AofResult<()> {
         self.inner
-            .durability
-            .record_flush(segment_id, requested_bytes, durable_bytes);
+            .persist_durability_flush(segment_id, requested_bytes, durable_bytes)
     }
 
     pub(crate) fn record_admission_latency(&self, latency: Duration) {
@@ -629,6 +739,15 @@ impl TieredCoordinator {
 
     pub fn admission_metrics(&self) -> AdmissionMetricsSnapshot {
         self.admission_metrics.snapshot()
+    }
+
+    pub fn observability_snapshot(&self) -> TieredObservabilitySnapshot {
+        let tier2 = self.tier2.as_ref().map(|manager| manager.metrics());
+        TieredObservabilitySnapshot {
+            tier0: self.tier0.metrics(),
+            tier1: self.tier1.metrics(),
+            tier2,
+        }
     }
 
     pub fn record_admission_latency(&self, latency: Duration) {
