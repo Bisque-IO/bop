@@ -52,9 +52,7 @@ use crate::config::SegmentId;
 use crate::error::{AofError, AofResult, BackpressureKind};
 use crate::fs::{Layout, SEGMENT_FILE_EXTENSION, SegmentFileName, TempFileGuard};
 use crate::metrics::admission::{AdmissionMetrics, AdmissionMetricsSnapshot};
-use crate::segment::{
-    SEGMENT_FOOTER_SIZE, Segment, SegmentFooter, SegmentHeaderInfo, SegmentScan,
-};
+use crate::segment::{SEGMENT_FOOTER_SIZE, Segment, SegmentFooter, SegmentHeaderInfo, SegmentScan};
 
 fn read_segment_footer_from_path(
     path: &Path,
@@ -1057,4 +1055,3 @@ mod tests {
         drop(segment);
     }
 }
-

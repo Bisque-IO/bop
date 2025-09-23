@@ -1,4 +1,5 @@
 use std::mem;
+use std::path::PathBuf;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,10 +13,11 @@ use crate::callbacks::log_store::LogStoreHandle;
 use crate::callbacks::logger::LoggerHandle;
 use crate::callbacks::state_machine::StateMachineHandle;
 use crate::callbacks::state_manager::StateManagerHandle;
-use crate::config::{ClusterConfig, RaftParams, ServerConfig};
+use crate::config::{ClusterConfig, ClusterMembershipSnapshot, RaftParams, ServerConfig};
 use crate::error::{RaftError, RaftResult};
 use crate::metrics::{Counter, Gauge, Histogram};
 use crate::state::PeerInfo;
+use crate::storage::{LogStoreBuild, StateManagerBuild, StorageComponents};
 use crate::traits::{
     LogStoreInterface, Logger, ServerCallbacks, StateMachine, StateManagerInterface,
 };
@@ -35,8 +37,8 @@ pub struct RaftServer {
 /// Launch configuration for a Raft server instance.
 pub struct LaunchConfig {
     pub state_machine: Box<dyn StateMachine>,
-    pub state_manager: Box<dyn StateManagerInterface>,
-    pub log_store: Box<dyn LogStoreInterface>,
+    pub state_manager: StateManagerBuild,
+    pub log_store: LogStoreBuild,
     pub asio_service: AsioService,
     pub params: RaftParams,
     pub logger: Option<Arc<dyn Logger>>,
@@ -65,12 +67,20 @@ impl RaftServer {
         } = config;
 
         let state_machine_handle = StateMachineHandle::new(state_machine)?;
-        let log_store_handle = LogStoreHandle::new(log_store)?;
-        let state_manager_handle = StateManagerHandle::new(state_manager, Some(log_store_handle))?;
         let logger_handle = match logger {
             Some(logger) => Some(LoggerHandle::new(logger)?),
             None => None,
         };
+        let logger_ptr = logger_handle.as_ref().map(|handle| handle.as_ptr());
+        let log_store_handle = LogStoreHandle::new(log_store, logger_ptr)?;
+        let log_backend = log_store_handle.backend();
+        let state_manager_handle =
+            StateManagerHandle::new(state_manager, Some(log_store_handle), logger_ptr)?;
+        if state_manager_handle.backend() != log_backend {
+            return Err(RaftError::ConfigError(
+                "State manager and log store backends must match".into(),
+            ));
+        }
         let callbacks_handle: Option<ServerCallbacksHandle> =
             callbacks.map(ServerCallbacksHandle::new);
         let (user_data, cb_func) = if let Some(handle) = callbacks_handle.as_ref() {
@@ -268,6 +278,37 @@ impl RaftServer {
         unsafe { bop_raft_server_request_leadership(self.raw_server_ptr()) }
     }
 
+    /// Ask the leader to re-establish the connection to this server.
+    pub fn send_reconnect_request(&mut self) {
+        unsafe { bop_raft_server_send_reconnect_request(self.raw_server_ptr()) }
+    }
+
+    /// Fetch the server's current Raft parameters.
+    pub fn current_params(&self) -> RaftResult<RaftParams> {
+        let params = RaftParams::new()?;
+        unsafe {
+            bop_raft_server_get_current_params(self.raw_server_ptr(), params.as_ptr());
+        }
+        Ok(params)
+    }
+
+    /// Apply a new set of Raft parameters and keep the internal copy in sync.
+    pub fn update_params(&mut self, params: &RaftParams) -> RaftResult<()> {
+        unsafe { bop_raft_server_update_params(self.raw_server_ptr(), params.as_ptr()) };
+        self._params.copy_from(params);
+        Ok(())
+    }
+
+    /// Convenience helper to fetch, mutate, and reapply parameters atomically.
+    pub fn reload_params<F>(&mut self, updater: F) -> RaftResult<()>
+    where
+        F: FnOnce(&mut RaftParams),
+    {
+        let mut params = self.current_params()?;
+        updater(&mut params);
+        self.update_params(&params)
+    }
+
     /// Get the server ID.
     pub fn get_id(&self) -> ServerId {
         unsafe { ServerId(bop_raft_server_get_id(self.raw_server_ptr())) }
@@ -320,6 +361,12 @@ impl RaftServer {
             let cluster = ClusterConfig::from_raw(cloned_ptr)?;
             Ok(cluster)
         }
+    }
+
+    /// Capture a read-only snapshot of cluster membership.
+    pub fn membership_snapshot(&self) -> RaftResult<ClusterMembershipSnapshot> {
+        let config = self.get_config()?;
+        ClusterMembershipSnapshot::from_view(config.view())
     }
 
     /// Get peer information for all servers.
@@ -530,8 +577,8 @@ pub struct RaftServerBuilder {
     asio_service: Option<AsioService>,
     params: Option<RaftParams>,
     state_machine: Option<Box<dyn StateMachine>>,
-    state_manager: Option<Box<dyn StateManagerInterface>>,
-    log_store: Option<Box<dyn LogStoreInterface>>,
+    state_manager: Option<StateManagerBuild>,
+    log_store: Option<LogStoreBuild>,
     logger: Option<Arc<dyn Logger>>,
     callbacks: Option<Arc<dyn ServerCallbacks>>,
     port: i32,
@@ -578,14 +625,54 @@ impl RaftServerBuilder {
 
     /// Set the state manager.
     pub fn state_manager(mut self, state_mgr: Box<dyn StateManagerInterface>) -> Self {
-        self.state_manager = Some(state_mgr);
+        let backend = state_mgr.storage_backend();
+        self.state_manager = Some(StateManagerBuild::Callbacks {
+            backend,
+            manager: state_mgr,
+        });
         self
     }
 
     /// Set the log store.
     pub fn log_store(mut self, log_store: Box<dyn LogStoreInterface>) -> Self {
+        let backend = log_store.storage_backend();
+        self.log_store = Some(LogStoreBuild::Callbacks {
+            backend,
+            store: log_store,
+        });
+        self
+    }
+
+    /// Provide both state manager and log store as a single storage bundle.
+    pub fn storage(mut self, components: StorageComponents) -> Self {
+        let (state_manager, log_store) = components.into_parts();
+        self.state_manager = Some(state_manager);
         self.log_store = Some(log_store);
         self
+    }
+
+    #[cfg(feature = "mdbx")]
+    pub fn with_mdbx_storage(mut self, storage: crate::mdbx::MdbxStorage) -> Self {
+        self.storage(storage.into_components())
+    }
+
+    /// Attempt to configure MDBX storage regardless of feature state.
+    pub fn try_mdbx_storage<P>(self, server_config: ServerConfig, data_dir: P) -> RaftResult<Self>
+    where
+        P: Into<PathBuf>,
+    {
+        #[cfg(feature = "mdbx")]
+        {
+            let storage = crate::mdbx::MdbxStorage::new(server_config, data_dir.into());
+            Ok(self.with_mdbx_storage(storage))
+        }
+
+        #[cfg(not(feature = "mdbx"))]
+        {
+            let _ = server_config;
+            let _ = data_dir.into();
+            Err(RaftError::feature_disabled("mdbx"))
+        }
     }
 
     /// Set the optional logger.
@@ -643,6 +730,15 @@ impl RaftServerBuilder {
         let log_store = self
             .log_store
             .ok_or_else(|| RaftError::ConfigError("Log store is required".to_string()))?;
+
+        let sm_backend = state_manager.backend();
+        let ls_backend = log_store.backend();
+        if sm_backend != ls_backend {
+            return Err(RaftError::ConfigError(format!(
+                "Storage backend mismatch: state manager uses `{}`, log store uses `{}`",
+                sm_backend, ls_backend
+            )));
+        }
 
         let config = LaunchConfig {
             state_machine,

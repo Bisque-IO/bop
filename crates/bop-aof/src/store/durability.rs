@@ -194,4 +194,3 @@ mod tests {
         assert_eq!(flushed.durable_bytes, 2048);
     }
 }
-

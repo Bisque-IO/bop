@@ -760,6 +760,18 @@ struct bop_raft_logger final : nuraft::logger {
     }
 };
 
+struct bop_raft_null_logger final : nuraft::logger {
+    void put_details(
+        int,
+        const char *,
+        const char *,
+        size_t,
+        const std::string &
+    ) override {
+    }
+};
+
+
 BOP_API bop_raft_logger_ptr *
 bop_raft_logger_make(void *user_data, bop_raft_logger_put_details_func callback) {
     return new bop_raft_logger_ptr(std::make_shared<bop_raft_logger>(user_data, callback));
@@ -885,8 +897,14 @@ BOP_API bop_raft_asio_service_ptr *bop_raft_asio_service_make(
                 };
     }
     opts.streaming_mode_ = options->streaming_mode;
+    nuraft::ptr<nuraft::logger> effective_logger;
+    if (logger && logger->logger) {
+        effective_logger = logger->logger;
+    } else {
+        effective_logger = nuraft::cs_new<bop_raft_null_logger>();
+    }
     auto result = new bop_raft_asio_service_ptr(
-        std::make_shared<nuraft::asio_service>(opts, logger->logger), opts
+        std::make_shared<nuraft::asio_service>(opts, effective_logger), opts
     );
     return result;
 }
@@ -1000,8 +1018,14 @@ BOP_API bop_raft_rpc_listener_ptr *bop_raft_asio_rpc_listener_make(
     uint16_t listening_port,
     bop_raft_logger_ptr *logger
 ) {
-    if (!asio_service || !asio_service->service || !logger || !logger->logger) return nullptr;
-    auto listener = asio_service->service->create_rpc_listener(listening_port, logger->logger);
+    if (!asio_service || !asio_service->service) return nullptr;
+    nuraft::ptr<nuraft::logger> effective_logger;
+    if (logger && logger->logger) {
+        effective_logger = logger->logger;
+    } else {
+        effective_logger = nuraft::cs_new<bop_raft_null_logger>();
+    }
+    auto listener = asio_service->service->create_rpc_listener(listening_port, effective_logger);
     if (!listener) return nullptr;
     return new bop_raft_rpc_listener_ptr(listener);
 }
@@ -2761,10 +2785,17 @@ BOP_API bop_raft_server_ptr *bop_raft_server_launch(
     bool test_mode_flag,
     bop_raft_cb_func cb_func
 ) {
-    if (!fsm || !state_mgr || !logger || !asio_service || !params_given)
+    if (!fsm || !state_mgr || !asio_service || !asio_service->service || !params_given)
         return nullptr;
 
-    auto asio_listener = asio_service->service->create_rpc_listener(port_number, logger->logger);
+    nuraft::ptr<nuraft::logger> effective_logger;
+    if (logger && logger->logger) {
+        effective_logger = logger->logger;
+    } else {
+        effective_logger = nuraft::cs_new<bop_raft_null_logger>();
+    }
+
+    auto asio_listener = asio_service->service->create_rpc_listener(port_number, effective_logger);
     if (!asio_listener)
         return nullptr;
 
@@ -2775,7 +2806,7 @@ BOP_API bop_raft_server_ptr *bop_raft_server_launch(
         state_mgr->state_mgr,
         fsm->sm,
         asio_listener,
-        logger->logger,
+        effective_logger,
         rpc_client_factory,
         scheduler,
         *reinterpret_cast<nuraft::raft_params *>(params_given)
@@ -2899,15 +2930,14 @@ BOP_API bool bop_raft_server_is_receiving_snapshot(const bop_raft_server *rs) {
 BOP_API bool bop_raft_server_add_srv(
     bop_raft_server *rs, const bop_raft_srv_config_ptr *srv, bop_raft_async_buffer_ptr *handler
 ) {
-    if (!rs)
+    if (!rs || !srv || !srv->config)
         return false;
-    if (!srv)
+    auto result = reinterpret_cast<nuraft::raft_server *>(rs)->add_srv(*srv->config);
+    if (!result)
         return false;
-    if (!handler)
-        return false;
-    if (!srv->config)
-        return false;
-    handler->set(reinterpret_cast<nuraft::raft_server *>(rs)->add_srv(*srv->config));
+    if (handler) {
+        handler->set(result);
+    }
     return true;
 }
 
@@ -2926,9 +2956,12 @@ BOP_API bool bop_raft_server_remove_srv(
 ) {
     if (!rs)
         return false;
-    if (!handler)
+    auto result = reinterpret_cast<nuraft::raft_server *>(rs)->remove_srv(srv_id);
+    if (!result)
         return false;
-    handler->set(reinterpret_cast<nuraft::raft_server *>(rs)->remove_srv(srv_id));
+    if (handler) {
+        handler->set(result);
+    }
     return true;
 }
 
@@ -2951,9 +2984,12 @@ BOP_API bool bop_raft_server_flip_learner_flag(
 ) {
     if (!rs)
         return false;
-    if (!handler)
+    auto result = reinterpret_cast<nuraft::raft_server *>(rs)->flip_learner_flag(srv_id, to);
+    if (!result)
         return false;
-    handler->set(reinterpret_cast<nuraft::raft_server *>(rs)->flip_learner_flag(srv_id, to));
+    if (handler) {
+        handler->set(result);
+    }
     return true;
 }
 
@@ -3829,11 +3865,13 @@ BOP_API bool bop_raft_server_is_excluded_by_leader(bop_raft_server *rs) {
  * @return `cmd_result` instance. It will contain `true` if the commit
  *         has been invoked, and `false` if not.
  */
-bool bop_raft_server_wait_for_state_machine_commit(
+BOP_API bool bop_raft_server_wait_for_state_machine_commit(
     bop_raft_server *rs, bop_raft_async_bool_ptr *result, uint64_t target_idx
 ) {
     if (!rs || !result) return false;
-    result->cmd_result = reinterpret_cast<nuraft::raft_server *>(rs)->wait_for_state_machine_commit(target_idx);
+    auto cmd = reinterpret_cast<nuraft::raft_server *>(rs)->wait_for_state_machine_commit(target_idx);
+    if (!cmd) return false;
+    result->cmd_result = std::move(cmd);
     return true;
 }
 

@@ -3,6 +3,7 @@ use crate::config::{ClusterConfig, ClusterConfigView};
 use crate::error::RaftResult;
 use crate::log_entry::{LogEntryRecord, LogEntryView};
 use crate::state::{ServerState, ServerStateView};
+use crate::storage::StorageBackendKind;
 use crate::types::{CallbackAction, CallbackContext, LogIndex, LogLevel, ServerId, Term};
 
 /// State Machine Interface for Raft.
@@ -32,6 +33,11 @@ pub trait StateMachine: Send {
 /// Log Store Interface for Raft.
 /// Defines the interface for persistent log storage.
 pub trait LogStoreInterface {
+    /// Preferred backend for this implementation.
+    fn storage_backend(&self) -> StorageBackendKind {
+        StorageBackendKind::Callbacks
+    }
+
     /// Index of the first entry stored.
     fn start_index(&self) -> LogIndex;
 
@@ -81,6 +87,11 @@ pub trait LogStoreInterface {
 /// State Manager Interface for Raft.
 /// Defines the interface for managing persistent server state.
 pub trait StateManagerInterface: Send {
+    /// Preferred backend for this implementation.
+    fn storage_backend(&self) -> StorageBackendKind {
+        StorageBackendKind::Callbacks
+    }
+
     /// Load the server state.
     fn load_state(&self) -> RaftResult<Option<ServerState>>;
 

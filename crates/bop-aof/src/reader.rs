@@ -1149,4 +1149,3 @@ mod tests {
         drop(aof);
     }
 }
-

@@ -12,83 +12,148 @@ use bop_sys::{
 use crate::buffer::Buffer;
 use crate::error::{RaftError, RaftResult};
 use crate::log_entry::{LogEntryRecord, LogEntryView};
+use crate::storage::{LogStoreBuild, RawLogStore, StorageBackendKind};
 use crate::traits::LogStoreInterface;
 use crate::types::{LogIndex, Term};
 
 pub(crate) struct LogStoreHandle {
-    ptr: NonNull<bop_raft_log_store_ptr>,
-    adapter: *mut LogStoreAdapter,
+    backend: StorageBackendKind,
+    inner: LogStoreHandleInner,
+}
+
+enum LogStoreHandleInner {
+    Callback {
+        ptr: NonNull<bop_raft_log_store_ptr>,
+        adapter: *mut LogStoreAdapter,
+    },
+    Raw(RawLogStore),
 }
 
 impl LogStoreHandle {
-    pub(crate) fn new(log_store: Box<dyn LogStoreInterface>) -> RaftResult<Self> {
-        let adapter = Box::new(LogStoreAdapter::new(log_store));
-        let adapter_ptr = Box::into_raw(adapter);
-
-        let log_store_ptr = unsafe {
-            bop_raft_log_store_make(
-                adapter_ptr as *mut c_void,
-                Some(log_store_next_slot),
-                Some(log_store_start_index),
-                Some(log_store_last_entry),
-                Some(log_store_append),
-                Some(log_store_write_at),
-                Some(log_store_end_of_append_batch),
-                Some(log_store_log_entries),
-                Some(log_store_entry_at),
-                Some(log_store_term_at),
-                Some(log_store_pack),
-                Some(log_store_apply_pack),
-                Some(log_store_compact),
-                Some(log_store_compact_async),
-                Some(log_store_flush),
-                Some(log_store_last_durable_index),
-            )
-        };
-
-        let ptr = match NonNull::new(log_store_ptr) {
-            Some(ptr) => ptr,
-            None => {
-                unsafe {
-                    drop(Box::from_raw(adapter_ptr));
-                }
-                return Err(RaftError::NullPointer);
+    pub(crate) fn new(
+        build: LogStoreBuild,
+        mut _logger_ptr: Option<*mut bop_sys::bop_raft_logger_ptr>,
+    ) -> RaftResult<Self> {
+        match build {
+            LogStoreBuild::Raw(raw) => {
+                let backend = raw.backend();
+                Ok(Self {
+                    backend,
+                    inner: LogStoreHandleInner::Raw(raw),
+                })
             }
-        };
+            LogStoreBuild::Callbacks { backend, store } => {
+                if backend != StorageBackendKind::Callbacks {
+                    return Err(RaftError::ConfigError(format!(
+                        "Unsupported log store backend `{}` for callback adapter. Use `RaftServerBuilder::try_mdbx_storage` or provide a raw backend handle.",
+                        backend
+                    )));
+                }
+                let adapter = Box::new(LogStoreAdapter::new(store));
+                let adapter_ptr = Box::into_raw(adapter);
 
-        Ok(Self {
-            ptr,
-            adapter: adapter_ptr,
-        })
+                let log_store_ptr = unsafe {
+                    bop_raft_log_store_make(
+                        adapter_ptr as *mut c_void,
+                        Some(log_store_next_slot),
+                        Some(log_store_start_index),
+                        Some(log_store_last_entry),
+                        Some(log_store_append),
+                        Some(log_store_write_at),
+                        Some(log_store_end_of_append_batch),
+                        Some(log_store_log_entries),
+                        Some(log_store_entry_at),
+                        Some(log_store_term_at),
+                        Some(log_store_pack),
+                        Some(log_store_apply_pack),
+                        Some(log_store_compact),
+                        Some(log_store_compact_async),
+                        Some(log_store_flush),
+                        Some(log_store_last_durable_index),
+                    )
+                };
+
+                let ptr = match NonNull::new(log_store_ptr) {
+                    Some(ptr) => ptr,
+                    None => {
+                        unsafe {
+                            drop(Box::from_raw(adapter_ptr));
+                        }
+                        return Err(RaftError::NullPointer);
+                    }
+                };
+
+                Ok(Self {
+                    backend: StorageBackendKind::Callbacks,
+                    inner: LogStoreHandleInner::Callback {
+                        ptr,
+                        adapter: adapter_ptr,
+                    },
+                })
+            }
+            #[cfg(feature = "mdbx")]
+            LogStoreBuild::Mdbx(builder) => {
+                let logger_ptr = _logger_ptr.ok_or_else(|| {
+                    RaftError::ConfigError(
+                        "MDBX log store requires a logger to be configured".to_string(),
+                    )
+                })?;
+                let raw = builder.into_raw(logger_ptr)?;
+                let backend = raw.backend();
+                Ok(Self {
+                    backend,
+                    inner: LogStoreHandleInner::Raw(raw),
+                })
+            }
+        }
     }
 
     pub(crate) fn as_ptr(&self) -> *mut bop_raft_log_store_ptr {
-        self.ptr.as_ptr()
+        match &self.inner {
+            LogStoreHandleInner::Callback { ptr, .. } => ptr.as_ptr(),
+            LogStoreHandleInner::Raw(raw) => raw.as_ptr(),
+        }
+    }
+
+    pub(crate) fn backend(&self) -> StorageBackendKind {
+        self.backend
     }
 
     #[allow(dead_code)]
     pub(crate) fn take_last_error(&self) -> Option<RaftError> {
-        unsafe { (&*self.adapter).take_last_error() }
+        match &self.inner {
+            LogStoreHandleInner::Callback { adapter, .. } => unsafe {
+                let adapter_ptr = *adapter;
+                let adapter_ref = &*adapter_ptr;
+                adapter_ref.take_last_error()
+            },
+            LogStoreHandleInner::Raw(_) => None,
+        }
     }
 
     #[cfg(test)]
     pub(super) fn adapter_ptr(&self) -> *mut c_void {
-        self.adapter as *mut c_void
+        match &self.inner {
+            LogStoreHandleInner::Callback { adapter, .. } => *adapter as *mut c_void,
+            LogStoreHandleInner::Raw(_) => ptr::null_mut(),
+        }
     }
 }
 
 impl Drop for LogStoreHandle {
     fn drop(&mut self) {
-        unsafe {
-            bop_raft_log_store_delete(self.ptr.as_ptr());
-            drop(Box::from_raw(self.adapter));
+        match &self.inner {
+            LogStoreHandleInner::Callback { ptr, adapter } => unsafe {
+                bop_raft_log_store_delete(ptr.as_ptr());
+                drop(Box::from_raw(*adapter));
+            },
+            LogStoreHandleInner::Raw(_) => {}
         }
     }
 }
 
 unsafe impl Send for LogStoreHandle {}
 unsafe impl Sync for LogStoreHandle {}
-
 struct LogStoreAdapter {
     log_store: Mutex<Box<dyn LogStoreInterface>>,
     last_error: Mutex<Option<RaftError>>,
@@ -481,7 +546,15 @@ mod tests {
     #[test]
     fn append_callback_forwards_payload() {
         let mock = MockLogStore::default();
-        let handle = LogStoreHandle::new(Box::new(mock.clone())).expect("handle");
+        let backend = mock.storage_backend();
+        let handle = LogStoreHandle::new(
+            LogStoreBuild::Callbacks {
+                backend,
+                store: Box::new(mock.clone()),
+            },
+            None,
+        )
+        .expect("handle");
         let adapter = handle.adapter_ptr();
 
         let mut payload = vec![1_u8, 2, 3];
@@ -511,7 +584,15 @@ mod tests {
     #[test]
     fn write_at_callback_records_update() {
         let mock = MockLogStore::default();
-        let handle = LogStoreHandle::new(Box::new(mock.clone())).expect("handle");
+        let backend = mock.storage_backend();
+        let handle = LogStoreHandle::new(
+            LogStoreBuild::Callbacks {
+                backend,
+                store: Box::new(mock.clone()),
+            },
+            None,
+        )
+        .expect("handle");
         let adapter = handle.adapter_ptr();
 
         let mut payload = vec![5_u8, 6, 7];

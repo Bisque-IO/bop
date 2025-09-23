@@ -505,4 +505,3 @@ fn ensure_consumed(payload: &[u8], consumed: u64) -> AofResult<()> {
     }
     Ok(())
 }
-

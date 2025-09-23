@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 
-pub mod usockets;
 #[cfg(feature = "usockets-udp")]
 pub mod socket;
+pub mod usockets;
 #[cfg(feature = "usockets-udp")]
 pub mod uws;
 
-pub use usockets::*;
 #[cfg(feature = "usockets-udp")]
 pub use socket::*;
+pub use usockets::*;
 #[cfg(feature = "usockets-udp")]
 pub use uws::*;

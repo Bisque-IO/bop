@@ -1742,6 +1742,8 @@ BOP_API bool bop_raft_server_is_receiving_snapshot(const struct bop_raft_server 
  * Returning this function does not guarantee adding the server.
  *
  * @param srv Configuration of server to add.
+ * @param handler Optional async result handle receiving the outcome; pass NULL to
+ *                fire-and-forget.
  * @return `get_accepted()` will be true on success.
  */
 BOP_API bool bop_raft_server_add_srv(
@@ -1753,6 +1755,8 @@ BOP_API bool bop_raft_server_add_srv(
  * The same as `add_srv`, this is also an asynchronous task.
  *
  * @param srv_id ID of server to remove.
+ * @param handler Optional async result handle receiving the outcome; pass NULL to
+ *                fire-and-forget.
  * @return `get_accepted()` will be true on success.
  */
 BOP_API bool bop_raft_server_remove_srv(
@@ -1767,6 +1771,8 @@ BOP_API bool bop_raft_server_remove_srv(
  *
  * @param srv_id ID of the server to set as a learner.
  * @param to If `true`, set the server as a learner, otherwise, clear learner flag.
+ * @param handler Optional async result handle receiving the outcome; pass NULL to
+ *                fire-and-forget.
  * @return `ret->get_result_code()` will be OK on success.
  */
 BOP_API bool bop_raft_server_flip_learner_flag(
@@ -2301,9 +2307,9 @@ BOP_API bool bop_raft_server_is_excluded_by_leader(struct bop_raft_server *rs);
  * @return `cmd_result` instance. It will contain `true` if the commit
  *         has been invoked, and `false` if not.
  */
-bool bop_raft_server_wait_for_state_machine_commit(
+BOP_API bool bop_raft_server_wait_for_state_machine_commit(
     struct bop_raft_server *rs,
-    struct bop_raft_async_bool_ptr* result,
+    struct bop_raft_async_bool_ptr *result,
     uint64_t target_idx
 ); // ptr<cmd_result<bool>>
 

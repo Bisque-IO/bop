@@ -333,5 +333,3 @@ impl Tier2Client for ScriptedTier2Client {
         Box::pin(async { Ok(None) })
     }
 }
-
-

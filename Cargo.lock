@@ -363,7 +363,10 @@ name = "bop-raft"
 version = "0.1.0"
 dependencies = [
  "bop-sys",
+ "serde",
+ "serde_json",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

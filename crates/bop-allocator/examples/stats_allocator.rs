@@ -247,4 +247,3 @@ fn final_report() {
         );
     }
 }
-

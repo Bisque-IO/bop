@@ -240,4 +240,3 @@ mod tests {
         assert!(s.capacity() >= 1000);
     }
 }
-

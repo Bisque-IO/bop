@@ -3,9 +3,13 @@
 #[cfg(test)]
 mod tests {
     use crate::{
-        Buffer, CallbackType, ClusterConfig, DataCenterId, LogIndex, PeerInfo, PrioritySetResult,
-        RaftError, RaftParams, RaftServerBuilder, ServerConfig, ServerId, Term,
+        Buffer, CallbackType, ClusterConfig, ClusterMembershipSnapshot, DataCenterId, LogIndex,
+        MembershipEntry, PeerInfo, PrioritySetResult, RaftError, RaftParams, RaftServerBuilder,
+        ServerConfig, ServerId, Term,
     };
+
+    #[cfg(feature = "mdbx")]
+    use crate::{LogStoreBuild, StateManagerBuild};
 
     #[test]
     fn test_strong_types() {
@@ -165,5 +169,156 @@ mod tests {
         assert_eq!(peer_info.server_id, ServerId::new(1));
         assert_eq!(peer_info.last_log_idx, LogIndex::new(100));
         assert_eq!(peer_info.last_succ_resp_us, 1000000u64);
+    }
+
+    #[cfg(not(feature = "mdbx"))]
+    #[test]
+    fn try_mdbx_storage_requires_feature() {
+        let builder = RaftServerBuilder::new();
+        let config = ServerConfig::new(
+            ServerId::new(1),
+            DataCenterId::new(0),
+            "127.0.0.1:9000",
+            "node",
+            false,
+        )
+        .expect("config");
+
+        let result = builder.try_mdbx_storage(config, "./tmp/mdbx-disabled");
+        let err = match result {
+            Ok(_) => panic!("expected feature disabled error"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, RaftError::FeatureDisabled(feature) if feature == "mdbx"));
+    }
+
+    #[cfg(feature = "mdbx")]
+    #[test]
+    fn mdbx_storage_into_components_uses_mdbx_backend() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let config = ServerConfig::new(
+            ServerId::new(2),
+            DataCenterId::new(0),
+            "127.0.0.1:9001",
+            "node-mdbx",
+            false,
+        )
+        .expect("config");
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_millis();
+        let dir = std::env::temp_dir().join(format!("bop-raft-mdbx-{suffix}"));
+
+        let storage = crate::mdbx::MdbxStorage::new(config, dir.clone());
+        let components = storage.into_components();
+        let (state_manager, log_store) = components.into_parts();
+
+        matches!(state_manager, StateManagerBuild::Mdbx(_))
+            .then_some(())
+            .expect("state manager backend");
+        matches!(log_store, LogStoreBuild::Mdbx(_))
+            .then_some(())
+            .expect("log store backend");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn raft_params_clone_and_copy() {
+        let mut params = RaftParams::new().expect("params");
+        params.set_election_timeout(150, 450);
+        params.set_heart_beat_interval(120);
+        params.set_rpc_failure_backoff(60);
+        params.set_parallel_log_appending(true);
+
+        assert_eq!(params.election_timeout(), (150, 450));
+        assert_eq!(params.heart_beat_interval(), 120);
+        assert!(params.parallel_log_appending());
+
+        let mut clone = params.clone();
+        assert_eq!(clone.election_timeout(), (150, 450));
+        clone.set_heart_beat_interval(240);
+        assert_eq!(clone.heart_beat_interval(), 240);
+        assert_eq!(params.heart_beat_interval(), 120);
+
+        let mut copy_target = RaftParams::new().expect("copy target");
+        copy_target.copy_from(&clone);
+        assert_eq!(copy_target.heart_beat_interval(), 240);
+        assert_eq!(copy_target.election_timeout(), (150, 450));
+        assert!(copy_target.parallel_log_appending());
+    }
+
+    #[test]
+    fn membership_snapshot_diff_detects_changes() {
+        let original = ClusterMembershipSnapshot::new(
+            LogIndex::new(10),
+            LogIndex::new(5),
+            vec![
+                MembershipEntry {
+                    server_id: ServerId::new(1),
+                    dc_id: DataCenterId::new(0),
+                    endpoint: "127.0.0.1:9000".into(),
+                    aux: "node-a".into(),
+                    is_learner: false,
+                    is_new_joiner: false,
+                    priority: 1,
+                },
+                MembershipEntry {
+                    server_id: ServerId::new(2),
+                    dc_id: DataCenterId::new(0),
+                    endpoint: "127.0.0.1:9001".into(),
+                    aux: "node-b".into(),
+                    is_learner: false,
+                    is_new_joiner: false,
+                    priority: 1,
+                },
+            ],
+        );
+
+        let updated = ClusterMembershipSnapshot::new(
+            LogIndex::new(20),
+            LogIndex::new(10),
+            vec![
+                MembershipEntry {
+                    server_id: ServerId::new(1),
+                    dc_id: DataCenterId::new(0),
+                    endpoint: "127.0.0.1:9000".into(),
+                    aux: "node-a".into(),
+                    is_learner: false,
+                    is_new_joiner: false,
+                    priority: 5,
+                },
+                MembershipEntry {
+                    server_id: ServerId::new(3),
+                    dc_id: DataCenterId::new(1),
+                    endpoint: "127.0.0.1:9002".into(),
+                    aux: "node-c".into(),
+                    is_learner: true,
+                    is_new_joiner: true,
+                    priority: 0,
+                },
+            ],
+        );
+
+        let diff = original.diff(&updated);
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.removed.len(), 1);
+        assert_eq!(diff.updated.len(), 1);
+
+        let added = &diff.added[0];
+        assert_eq!(added.server_id, ServerId::new(3));
+        assert!(added.is_learner);
+
+        let removed = &diff.removed[0];
+        assert_eq!(removed.server_id, ServerId::new(2));
+
+        let delta = &diff.updated[0];
+        assert_eq!(delta.before.server_id, ServerId::new(1));
+        assert_eq!(delta.before.priority, 1);
+        assert_eq!(delta.after.priority, 5);
     }
 }

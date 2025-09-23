@@ -231,4 +231,3 @@ mod tests {
         assert!(chunk.crc_ok());
     }
 }
-

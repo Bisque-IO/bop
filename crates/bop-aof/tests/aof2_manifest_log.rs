@@ -608,5 +608,3 @@ async fn manifest_follower_catch_up_flow() {
         ManifestLogWriter::new(dir.path().to_path_buf(), 4, writer_config()).expect("writer");
     drop(dir);
 }
-
-

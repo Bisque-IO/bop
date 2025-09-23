@@ -18,6 +18,8 @@
 - Async result helpers surface boolean, u64, and buffer completions with reusable future glue, but higher level abstractions still need ergonomic wrappers.
 - Server control APIs grew snapshot scheduling, commit waiters, and pause/resume helpers yet still omit portions of the NuRaft lifecycle surface.
 - Vector outputs (peer info, server config lists) are not implemented; TODOs mark missing ownership management.
+- Metrics registry now caches FFI handles for counters/gauges/histograms, supports JSON snapshots (behind `serde`), percentile helpers, and bulk reset utilities; `RaftServer` surfaces typed server/peer metrics for exporters.
+- Optional `tracing` feature bridges NuRaft callbacks into structured events via `TracingObserver`, with launch/member lifecycle instrumentation guarded against panics.
 
 ## Constraints & Dependencies
 - Relies on `bop-sys` bindgen output; regeneration may move symbol names but will stay `bop_raft_*` prefixed.
@@ -158,6 +160,7 @@
 - Determine default runtime strategy for executing callbacks when no async runtime is present; consider exposing a pluggable executor trait.
 - Clarify ownership rules for buffers returned by callbacks (e.g., does NuRaft free command buffers after callback returns?). Gather authoritative guidance from C headers or maintainers.
 - Validate whether `bop_raft_server_launch` expects the builder to retain `params_given` pointer beyond the call (likely yes); design builder to keep owned handle alive.
+- Confirm metric name catalogue against the upstream stat manager and document any required overrides before Phase 7; integration tests with a live NuRaft instance are still pending.
 - Investigate lifetime of `Logger` callbacks: must remain valid until server shutdown; ensure `Arc` reference counting covers this.
 - Evaluate need for interior mutability wrappers (e.g., `Mutex`, `RwLock`) around trait objects to allow mutation across callbacks without deadlocks.
 
@@ -166,3 +169,70 @@
 - Offer `cargo xtask` or `bake` integration to regenerate bindings and run conformance suites.
 - Add `deny(missing_docs)` once API surface stabilises to keep documentation comprehensive.
 
+
+
+## Phase 6 Recap
+- Observability stack landed: cached metric handles with JSON snapshots, typed server/peer summaries, and tracing-safe callback bridges.
+- Tokio exporter example exercises the tracing bridge; serde integration tests cover JSON round-trips for metrics snapshots.
+- Outstanding follow-up: reconcile metric names against the upstream NuRaft catalog and document any deviations.
+
+## Phase 7 Progress
+- Added a feature-gated `mdbx` module with RAII wrappers, explicit backend matching, and builder helpers (`try_mdbx_storage`, `with_mdbx_storage`).
+- Tightened storage wiring so callback/RAII backends cannot be mixed and disabled features emit actionable errors.
+- Extended runtime controls with `RaftServer::current_params`, `update_params`, `reload_params`, and `send_reconnect_request` for hot reload scenarios.
+- Introduced read-only cluster membership snapshots (`ClusterMembershipSnapshot`) with diff utilities for external observers.
+- Expanded unit coverage for parameter cloning/hot reload paths and membership diffs, and published `examples/mdbx_cluster.rs` to showcase MDBX setup.
+
+## Phase 8 Objectives
+### Observability & Metrics Completion
+- Reconcile the Rust metrics catalog with upstream NuRaft stat names; add automated drift checks and comprehensive documentation tables.
+- Flesh out `observability.rs` with structured exporters (serde/tracing) and cross-feature smoke tests.
+- Provide opt-in metric scrapers (e.g., Prometheus format) with zero-copy string reuse and feature gating.
+
+### Runtime & API Ergonomics
+- Ship safe constructors for `AsioService` and any remaining raw handles, eliminating `MaybeUninit` placeholders in examples.
+- Generalise runtime integration beyond Tokio by introducing a pluggable executor trait and updating async result helpers accordingly.
+- Finalise lifecycle controls: leadership transfer APIs, mark-down flows, snapshot scheduling futures, and reconnect requests with typed results.
+
+### Storage & State Management Enhancements
+- Validate MDBX integration across platforms with feature-flag integration tests and document tuning knobs (geometry, compaction).
+- Add higher-level storage builders that combine state manager/log store presets while keeping backend matching guarantees.
+- Explore incremental snapshot support (using NuRaft hooks) and document the roadmap for alternative backends.
+
+### Tooling, CI, and QA
+- Wire a “minimal build” CI guard (`cargo check --no-default-features`) plus feature matrix coverage (`serde`, `tracing`, `mdbx`).
+- Integrate forge/xmake pipelines with the existing build scripts, including automatic dependency confirmation and cache priming.
+- Add sanitiser-friendly builds (ASan/TSan) and targeted stress tests for hot-reload paths.
+
+### Documentation & Examples
+- Update README and crate docs with persistence, runtime, and observability guides; include feature flag compatibility charts and quickstart flows.
+- Deliver a full runnable example that launches a multi-node cluster with MDBX persistence, async executor abstraction, and metric exports.
+- Capture Phase 8 risks, stretch goals, and decision logs for future contributors.
+
+## Phase 7 Objectives
+### Persistence & Storage
+- Wrap op_raft_mdbx_* handles with RAII guards, safe builders, and RaftError mapping.
+- Extend state manager/log store traits to accept MDBX-backed implementations without mixing incompatible storage drivers.
+- Provide feature-gated configuration APIs with explicit errors when mdbx is disabled.
+### Runtime Controls
+- Promote op_raft_server_update_params into safe hot-reload APIs on RaftServer/RaftParams.
+- Audit lifecycle helpers (pause/resume, mark-down, reconnect, leadership transfer, log append notifications) for ergonomic wrappers and consistent RaftResult returns.
+- Add RaftServerBuilder shortcuts for common launch templates that compose storage, callbacks, and tracing observers.
+### Resilience & Inspection
+- Expand ServerState/ServerStateView and related telemetry to surface leadership flags, catch-up and snapshot progress, and membership snapshots.
+- Implement read-only cluster membership snapshots with change-detection utilities for observers.
+### Feature Flags & Build Matrix
+- Introduce an off-by-default mdbx feature and ensure combinations with serde/	racing remain additive without duplicate deps.
+- Add a minimal feature-less cargo check guard and verify the full test matrix across feature permutations.
+### Docs & Examples
+- Refresh README/plan docs with persistence and runtime control guidance plus feature-flag tables.
+- Ship a runnable xamples/mdbx_cluster.rs demonstrating MDBX persistence and parameter hot reload.
+### Testing & Validation
+- Add unit + integration coverage for MDBX wrappers, hot reload paths, and durability checkpoints.
+- Run cargo test -p bop-raft for all feature sets, ./forge b bop, and xmake run test-uws before sign-off.
+
+## Phase 7 Risks & Deferred Items (Phase 8)
+- NuRaft stat catalog validation remains pending; schedule once persistence work stabilises.
+- CI coverage for feature permutations still needs automation hooks.
+- Full async runtime abstraction (beyond Tokio example) and live metric catalog sync are deferred to Phase 8.
+- Safe wrappers for acquiring an `AsioService` handle (currently placeholder in examples) remain TODO alongside real end-to-end launch smoke tests.

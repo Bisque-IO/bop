@@ -26,30 +26,35 @@ elif IS_MAC:
 elif IS_WINDOWS:
     SO_SUFFIX = ".dll"
 
+LIB_ROOT = os.path.join("crates", "bop-sys", "libs")
+
 # Normalize to common arch names
 if arch in ("x86_64", "amd64"):
     IS_AMD64 = True
     if IS_LINUX:
-        LIB_DIR = "odin/libbop/linux/amd64"
+        LIB_DIR = os.path.join(LIB_ROOT, "linux", "amd64")
     elif IS_MAC:
-        LIB_DIR = "odin/libbop/macos/amd64"
+        LIB_DIR = os.path.join(LIB_ROOT, "macos", "amd64")
     elif IS_WINDOWS:
-        LIB_DIR = "odin/libbop/windows/amd64"
+        LIB_DIR = os.path.join(LIB_ROOT, "windows", "amd64")
 elif arch in ("aarch64", "arm64"):
     IS_ARM64 = True
     if IS_LINUX:
-        LIB_DIR = "odin/libbop/linux/arm64"
+        LIB_DIR = os.path.join(LIB_ROOT, "linux", "arm64")
     elif IS_MAC:
-        LIB_DIR = "odin/libbop/macos/arm64"
+        LIB_DIR = os.path.join(LIB_ROOT, "macos", "arm64")
     elif IS_WINDOWS:
-        LIB_DIR = "odin/libbop/windows/arm64"
+        LIB_DIR = os.path.join(LIB_ROOT, "windows", "arm64")
 elif arch in ("riscv64",):
     IS_RISCV64 = True
     if IS_LINUX:
-        LIB_DIR = "odin/libbop/linux/riscv64"
+        LIB_DIR = os.path.join(LIB_ROOT, "linux", "riscv64")
 else:
     print(f"Unknown architecture: {arch}")
     sys.exit(-1)
+
+if LIB_DIR:
+    os.makedirs(LIB_DIR, exist_ok=True)
 
 @dataclass
 class Test:
@@ -692,7 +697,7 @@ def xmake_configure(platform: str, arch: str, toolchain: str, debug = False):
 
 def xmake_build_bop(platform: str, arch: str, toolchain: str):
     try:
-        subprocess.run(["xmake", "b", "bop"], check=True)
+        subprocess.run(["xmake", "b", "-y", "bop"], check=True)
     except subprocess.CalledProcessError as e:
         print(f"exited with exit code {e.returncode}\n")
         sys.exit(e.returncode)
@@ -724,7 +729,8 @@ def xmake_configure_and_build_bop(platform: str, arch: str, toolchain: str, debu
     elif arch == "riscv64":
         arch_name = "riscv64"
 
-    dest_dir = os.path.join("odin", "libbop", platform_name, arch_name)
+    dest_dir = os.path.join(LIB_ROOT, platform_name, arch_name)
+    os.makedirs(dest_dir, exist_ok=True)
     dest_libbop = os.path.join(dest_dir, "libbop.a" if not IS_WINDOWS else "bop.lib")
     shutil.copy(
         libbop_path,
@@ -887,21 +893,22 @@ def wolfssl_do_configure_build(
 
     if IS_MAC:
         if host.startswith("x86_64") or (IS_AMD64 and len(host) == 0):
-            dst_dir = os.path.join("odin", "libbop", "macos", "amd64")
+            dst_dir = os.path.join(LIB_ROOT, "macos", "amd64")
         elif host.startswith("arm64") or (IS_ARM64 and len(host) == 0):
-            dst_dir = os.path.join("odin", "libbop", "macos", "arm64")
+            dst_dir = os.path.join(LIB_ROOT, "macos", "arm64")
     elif IS_LINUX:
         if host.startswith("x86_64"):
-            dst_dir = os.path.join("odin", "libbop", "linux", "amd64")
+            dst_dir = os.path.join(LIB_ROOT, "linux", "amd64")
         elif host.startswith("aarch64"):
-            dst_dir = os.path.join("odin", "libbop", "linux", "arm64")
+            dst_dir = os.path.join(LIB_ROOT, "linux", "arm64")
         elif host.startswith("riscv64"):
-            dst_dir = os.path.join("odin", "libbop", "linux", "riscv64")
+            dst_dir = os.path.join(LIB_ROOT, "linux", "riscv64")
 
     if len(dst_dir) == 0:
         print("unknown arch: expected amd64, arm64 or riscv64")
         sys.exit(-1)
 
+    os.makedirs(dst_dir, exist_ok=True)
     src_libwolfssl_a = os.path.join("lib/wolfssl/src/.libs/libwolfssl.a")
     dst_libwolfssl_a = os.path.join(dst_dir, "libwolfssl.a")
     shutil.copy(src_libwolfssl_a, dst_libwolfssl_a)

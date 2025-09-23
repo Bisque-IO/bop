@@ -151,4 +151,3 @@ impl<'a> Iterator for ManifestRecordIter<'a> {
         }
     }
 }
-

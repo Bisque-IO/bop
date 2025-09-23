@@ -679,4 +679,3 @@ mod tests {
         assert_eq!(metrics.snapshot().backlog_bytes, 456);
     }
 }
-

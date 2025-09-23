@@ -1038,4 +1038,3 @@ mod tests {
         assert_eq!(cache.pending_activation_snapshot().queued.len(), 0);
     }
 }
-

@@ -3,6 +3,15 @@ name = "bop-raft"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+mdbx = []
+serde = ["dep:serde", "dep:serde_json"]
+tracing = ["dep:tracing"]
+
 [dependencies]
 bop-sys = { path = "../bop-sys" }
 thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }

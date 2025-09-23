@@ -189,4 +189,3 @@ pub fn clear_tier2_manager_factory() {}
 pub fn make_instance_id(value: u64) -> InstanceId {
     InstanceId::new(value)
 }
-

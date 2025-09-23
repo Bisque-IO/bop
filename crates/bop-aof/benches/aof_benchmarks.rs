@@ -124,6 +124,3 @@ fn bench_append_with_metrics(c: &mut Criterion) {
 
 criterion_group!(benches, bench_append_flush, bench_append_with_metrics);
 criterion_main!(benches);
-
-
-

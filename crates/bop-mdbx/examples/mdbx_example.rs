@@ -16,13 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dbi = Dbi::open(&wtx, None, DbFlags::DEFAULTS)?;
 
     // Put a key/value
-    put(
-        &wtx,
-        dbi,
-        b"hello",
-        b"world",
-        bop_mdbx::PutFlags::empty(),
-    )?;
+    put(&wtx, dbi, b"hello", b"world", bop_mdbx::PutFlags::empty())?;
     wtx.commit()?;
 
     // Read it back
@@ -84,4 +78,3 @@ impl<'e> AbortExt for bop_mdbx::Txn<'e> {
         Ok(())
     }
 }
-

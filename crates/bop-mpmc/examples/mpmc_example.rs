@@ -695,4 +695,3 @@ fn backpressure_pattern() -> MpmcResult<()> {
 
     Ok(())
 }
-

@@ -98,6 +98,13 @@ unsafe extern "C" fn dispatch_callback(
             }
         },
         Err(err) => {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                target = "bop_raft::callbacks",
+                error = %err,
+                event = ?callback_type,
+                "server callback returned error"
+            );
             adapter.record_error(err);
             bop_raft_cb_return_code_bop_raft_cb_return_code_return_null
         }

@@ -10,68 +10,140 @@ use bop_sys::{
 use crate::config::ClusterConfigView;
 use crate::error::{RaftError, RaftResult};
 use crate::state::ServerStateView;
+use crate::storage::{LogStoreBuild, RawStateManager, StateManagerBuild, StorageBackendKind};
 use crate::traits::StateManagerInterface;
 
 use super::log_store::LogStoreHandle;
 
-#[allow(dead_code)]
 pub(crate) struct StateManagerHandle {
     ptr: NonNull<bop_raft_state_mgr_ptr>,
-    adapter: *mut StateManagerAdapter,
+    backend: StorageBackendKind,
+    kind: StateManagerHandleKind,
 }
 
-#[allow(dead_code)]
+enum StateManagerHandleKind {
+    Callback {
+        adapter: *mut StateManagerAdapter,
+    },
+    Raw {
+        _guard: RawStateManager,
+        _log_store: Option<LogStoreHandle>,
+    },
+}
+
 impl StateManagerHandle {
     pub(crate) fn new(
-        state_manager: Box<dyn StateManagerInterface>,
+        state_manager: StateManagerBuild,
         log_store: Option<LogStoreHandle>,
+        mut _logger_ptr: Option<*mut bop_sys::bop_raft_logger_ptr>,
     ) -> RaftResult<Self> {
-        let adapter = Box::new(StateManagerAdapter::new(state_manager, log_store));
-        let adapter_ptr = Box::into_raw(adapter);
-
-        let state_mgr_ptr = unsafe {
-            bop_raft_state_mgr_make(
-                adapter_ptr as *mut c_void,
-                Some(state_manager_load_config),
-                Some(state_manager_save_config),
-                Some(state_manager_read_state),
-                Some(state_manager_save_state),
-                Some(state_manager_load_log_store),
-                Some(state_manager_server_id),
-                Some(state_manager_system_exit),
-            )
-        };
-
-        let ptr = match NonNull::new(state_mgr_ptr) {
-            Some(ptr) => ptr,
-            None => {
-                unsafe {
-                    drop(Box::from_raw(adapter_ptr));
+        match state_manager {
+            StateManagerBuild::Callbacks { backend, manager } => {
+                if backend != StorageBackendKind::Callbacks {
+                    return Err(RaftError::ConfigError(format!(
+                        "Unsupported state manager backend `{}` for callback adapter. Use `RaftServerBuilder::try_mdbx_storage` or provide a raw backend handle.",
+                        backend
+                    )));
                 }
-                return Err(RaftError::NullPointer);
-            }
-        };
+                let adapter = Box::new(StateManagerAdapter::new(manager, log_store));
+                let adapter_ptr = Box::into_raw(adapter);
 
-        Ok(Self {
-            ptr,
-            adapter: adapter_ptr,
-        })
+                let state_mgr_ptr = unsafe {
+                    bop_raft_state_mgr_make(
+                        adapter_ptr as *mut c_void,
+                        Some(state_manager_load_config),
+                        Some(state_manager_save_config),
+                        Some(state_manager_read_state),
+                        Some(state_manager_save_state),
+                        Some(state_manager_load_log_store),
+                        Some(state_manager_server_id),
+                        Some(state_manager_system_exit),
+                    )
+                };
+
+                let ptr = match NonNull::new(state_mgr_ptr) {
+                    Some(ptr) => ptr,
+                    None => {
+                        unsafe {
+                            drop(Box::from_raw(adapter_ptr));
+                        }
+                        return Err(RaftError::NullPointer);
+                    }
+                };
+
+                Ok(Self {
+                    ptr,
+                    backend: StorageBackendKind::Callbacks,
+                    kind: StateManagerHandleKind::Callback {
+                        adapter: adapter_ptr,
+                    },
+                })
+            }
+            StateManagerBuild::Raw(guard) => {
+                let ptr = NonNull::new(guard.as_ptr()).ok_or(RaftError::NullPointer)?;
+                Ok(Self {
+                    ptr,
+                    backend: guard.backend(),
+                    kind: StateManagerHandleKind::Raw {
+                        _guard: guard,
+                        _log_store: log_store,
+                    },
+                })
+            }
+            #[cfg(feature = "mdbx")]
+            StateManagerBuild::Mdbx(builder) => {
+                let logger_ptr = _logger_ptr.ok_or_else(|| {
+                    RaftError::ConfigError(
+                        "MDBX state manager requires a logger to be configured".to_string(),
+                    )
+                })?;
+                let mut log_store_handle = log_store.ok_or_else(|| {
+                    RaftError::ConfigError("MDBX state manager requires a log store".to_string())
+                })?;
+                let log_store_ptr = log_store_handle.as_ptr();
+                let raw = builder.into_raw(logger_ptr, log_store_ptr)?;
+                let backend = raw.backend();
+                let ptr = NonNull::new(raw.as_ptr()).ok_or(RaftError::NullPointer)?;
+                Ok(Self {
+                    ptr,
+                    backend,
+                    kind: StateManagerHandleKind::Raw {
+                        _guard: raw,
+                        _log_store: Some(log_store_handle),
+                    },
+                })
+            }
+        }
     }
 
     pub(crate) fn as_ptr(&self) -> *mut bop_raft_state_mgr_ptr {
         self.ptr.as_ptr()
     }
 
+    pub(crate) fn backend(&self) -> StorageBackendKind {
+        self.backend
+    }
+
     pub(crate) fn take_last_error(&self) -> Option<RaftError> {
-        unsafe { (&*self.adapter).take_last_error() }
+        match &self.kind {
+            StateManagerHandleKind::Callback { adapter } => unsafe {
+                let adapter_ptr = *adapter;
+                let adapter_ref = &*adapter_ptr;
+                adapter_ref.take_last_error()
+            },
+            StateManagerHandleKind::Raw { .. } => None,
+        }
     }
 }
 
 impl Drop for StateManagerHandle {
     fn drop(&mut self) {
-        unsafe {
-            bop_raft_state_mgr_delete(self.ptr.as_ptr());
-            drop(Box::from_raw(self.adapter));
+        match &self.kind {
+            StateManagerHandleKind::Callback { adapter } => unsafe {
+                bop_raft_state_mgr_delete(self.ptr.as_ptr());
+                drop(Box::from_raw(*adapter));
+            },
+            StateManagerHandleKind::Raw { .. } => {}
         }
     }
 }
@@ -129,7 +201,14 @@ impl StateManagerAdapter {
             }
 
             if let Some(ls_impl) = self.with_state_manager(|sm| sm.load_log_store())? {
-                let handle = LogStoreHandle::new(ls_impl)?;
+                let backend = ls_impl.storage_backend();
+                let handle = LogStoreHandle::new(
+                    LogStoreBuild::Callbacks {
+                        backend,
+                        store: ls_impl,
+                    },
+                    None,
+                )?;
                 let ptr = handle.as_ptr();
                 *guard = Some(handle);
                 return Ok(ptr);
@@ -141,8 +220,6 @@ impl StateManagerAdapter {
         Ok(ptr::null_mut())
     }
 }
-
-#[allow(dead_code)]
 unsafe extern "C" fn state_manager_load_config(
     user_data: *mut c_void,
 ) -> *mut bop_raft_cluster_config {

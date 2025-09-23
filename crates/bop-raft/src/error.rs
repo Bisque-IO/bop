@@ -32,4 +32,14 @@ pub enum RaftError {
 
     #[error("Log store error: {0}")]
     LogStoreError(String),
+
+    #[error("Feature `{0}` is disabled. Enable the `{0}` Cargo feature to use this API")]
+    FeatureDisabled(String),
+}
+
+impl RaftError {
+    /// Convenience constructor for feature-flagged APIs.
+    pub fn feature_disabled(feature: &str) -> Self {
+        Self::FeatureDisabled(feature.to_string())
+    }
 }
