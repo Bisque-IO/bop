@@ -49,7 +49,6 @@ local target_of = function(kind, use_openssl)
         -- add_toolchains("@llvm")
     else
     end
-    -- set_pcxxheader("include/pch.hpp")
 
     if is_plat("windows") then
         if kind == "static" then
@@ -169,9 +168,9 @@ local target_of = function(kind, use_openssl)
         add_syslinks("bcrypt", "advapi32", "iphlpapi", "psapi", "user32", "userenv", "ws2_32", "shell32", "ole32", "uuid",
             "Dbghelp")
 
-        -- add_files("libuv/src/*.c", "libuv/src/win/*.c")
-        -- add_includedirs("libuv/src", { public = false })
-        -- add_includedirs("libuv/include", { public = true })
+        add_files("libuv/src/*.c", "libuv/src/win/*.c")
+        add_includedirs("libuv/src", { public = false })
+        add_includedirs("libuv/include", { public = true })
     else
         if not use_openssl then
             add_defines("ASIO_USE_WOLFSSL=1")
@@ -224,11 +223,11 @@ local target_of = function(kind, use_openssl)
         -- add_defines("LIBUS_USE_OPENSSL")
         -- add_packages("openssl3")
     end
-    -- add_files("usockets/src/**.c", { languages = "c23", includedirs = "include", cflags = "-O3" })
-    -- add_files("usockets/src/**.cpp", { languages = "c++23", includedirs = "include", cflags = "-O3" })
-    -- remove_files("usockets/src/eventing/asio.cpp")
-    -- add_includedirs("usockets/src", { public = false })
-    -- add_includedirs("usockets/include", { public = true })
+    add_files("usockets/src/**.c", { languages = "c23", includedirs = "include", cflags = "-O3" })
+    add_files("usockets/src/**.cpp", { languages = "c++23", includedirs = "include", cflags = "-O3" })
+    remove_files("usockets/src/eventing/asio.cpp")
+    add_includedirs("usockets/src", { public = false })
+    add_includedirs("usockets/include", { public = true })
 
     -- bop
     add_includedirs(".", { public = true })

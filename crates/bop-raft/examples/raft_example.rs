@@ -1,113 +1,127 @@
-// //! Example of using the BOP Raft wrapper
-// //!
-// //! This example demonstrates basic usage of the Raft consensus wrapper,
-// //! including creating server configurations, buffers, and working with
-// //! the type-safe API.
+//! Builder wiring examples with mocked callbacks.
 
-// use bop_raft::*;
+#![allow(clippy::needless_return)]
 
-// fn main() -> RaftResult<()> {
-//     println!("BOP Raft Example");
+use bop_raft::buffer::Buffer;
+use bop_raft::error::RaftResult;
+use bop_raft::traits::{LogStoreInterface, StateMachine, StateManagerInterface};
+use bop_raft::{LogEntryRecord, LogEntryView, LogIndex, RaftParams, RaftServerBuilder, Term};
 
-//     // Create strong-typed IDs
-//     let server_id = ServerId::new(1);
-//     let dc_id = DataCenterId::new(0);
-//     let term = Term::new(1);
-//     let log_idx = LogIndex::new(0);
-
-//     println!("Server ID: {:?}", server_id);
-//     println!("Data Center ID: {:?}", dc_id);
-//     println!("Term: {:?}", term);
-//     println!("Log Index: {:?}", log_idx);
-
-//     // Create a buffer
-//     let buffer = Buffer::new(1024)?;
-//     println!("Created buffer with capacity: {}", buffer.container_size());
-
-//     // Create server configuration
-//     let server_config = ServerConfig::new(
-//         server_id,
-//         dc_id,
-//         "127.0.0.1:8080",
-//         "example-node",
-//         false, // Not a learner
-//     )?;
-
-//     println!("Server config ID: {:?}", server_config.id());
-//     println!("Server config DC ID: {:?}", server_config.dc_id());
-//     println!("Server config endpoint: {}", server_config.endpoint()?);
-//     println!("Server config aux: {}", server_config.aux()?);
-//     println!("Is learner: {}", server_config.is_learner());
-
-//     // Create cluster configuration
-//     let cluster_config = ClusterConfig::new()?;
-//     println!("Cluster config servers: {}", cluster_config.servers_size());
-
-//     // Create Raft parameters
-//     let raft_params = RaftParams::new()?;
-//     println!("Created Raft parameters");
-
-//     // Demonstrate type safety
-//     demonstrate_type_safety();
-
-//     // Demonstrate builder pattern
-//     demonstrate_builder_pattern()?;
-
-//     println!("Example completed successfully");
-//     Ok(())
-// }
-
-// fn demonstrate_type_safety() {
-//     println!("\nDemonstrating type safety:");
-
-//     let term1 = Term::new(1);
-//     let term2 = Term::new(2);
-//     let log_idx1 = LogIndex::new(10);
-//     let log_idx2 = LogIndex::new(20);
-
-//     // These comparisons are type-safe
-//     println!("Term {} < Term {}: {}", term1.inner(), term2.inner(), term1 < term2);
-//     println!("LogIndex {} < LogIndex {}: {}", log_idx1.inner(), log_idx2.inner(), log_idx1 < log_idx2);
-
-//     // Demonstrate next/prev operations
-//     println!("Term {} -> next: {}", term1.inner(), term1.next().inner());
-//     println!("LogIndex {} -> next: {}", log_idx1.inner(), log_idx1.next().inner());
-//     println!("LogIndex {} -> prev: {:?}", log_idx1.inner(), log_idx1.prev().map(|i| i.inner()));
-
-//     // Demonstrate zero edge case
-//     let zero_idx = LogIndex::new(0);
-//     println!("LogIndex 0 -> prev: {:?}", zero_idx.prev());
-// }
-
-// fn demonstrate_builder_pattern() -> RaftResult<()> {
-//     println!("\nDemonstrating builder pattern:");
-
-//     let builder = RaftServerBuilder::new();
-//     println!("Created RaftServerBuilder");
-
-//     // This will fail because we don't have all required components
-//     match builder.build() {
-//         Ok(_) => println!("Unexpectedly succeeded in building server"),
-//         Err(e) => println!("Expected error: {}", e),
-//     }
-
-//     // Show how you would configure the builder (though we can't actually build without C library)
-//     let _configured_builder = RaftServerBuilder::new()
-//         .params(RaftParams::default());
-
-//     println!("Builder pattern demonstrated");
-//     Ok(())
-// }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-
-//     #[test]
-//     fn test_example_runs() {
-//         // This test ensures the example compiles and the basic API works
-//         assert!(main().is_ok());
-//     }
-// }
 fn main() {}
 
+#[allow(dead_code)]
+fn mocked_launch_example() -> RaftResult<()> {
+    use bop_raft::AsioService;
+    use std::sync::{Arc, Mutex};
+
+    struct MockStateMachine;
+    impl StateMachine for MockStateMachine {
+        fn apply(&mut self, _log_idx: LogIndex, _data: &[u8]) -> RaftResult<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn take_snapshot(&self) -> RaftResult<Buffer> {
+            Buffer::from_bytes(&[])
+        }
+        fn restore_from_snapshot(&mut self, _snapshot: &[u8]) -> RaftResult<()> {
+            Ok(())
+        }
+        fn last_applied_index(&self) -> LogIndex {
+            LogIndex(0)
+        }
+    }
+
+    struct MockStateManager;
+    impl StateManagerInterface for MockStateManager {
+        fn load_state(&self) -> RaftResult<Option<bop_raft::ServerState>> {
+            Ok(None)
+        }
+        fn save_state(&mut self, _state: bop_raft::state::ServerStateView<'_>) -> RaftResult<()> {
+            Ok(())
+        }
+        fn load_config(&self) -> RaftResult<Option<bop_raft::ClusterConfig>> {
+            Ok(None)
+        }
+        fn save_config(
+            &mut self,
+            _config: bop_raft::config::ClusterConfigView<'_>,
+        ) -> RaftResult<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default, Clone)]
+    struct MockLogStore {
+        entries: Arc<Mutex<Vec<LogEntryRecord>>>,
+    }
+
+    impl LogStoreInterface for MockLogStore {
+        fn start_index(&self) -> LogIndex {
+            LogIndex(0)
+        }
+        fn next_slot(&self) -> LogIndex {
+            LogIndex(self.entries.lock().unwrap().len() as u64 + 1)
+        }
+        fn last_entry(&self) -> RaftResult<Option<LogEntryRecord>> {
+            Ok(self.entries.lock().unwrap().last().cloned())
+        }
+        fn append(&mut self, entry: LogEntryView<'_>) -> RaftResult<LogIndex> {
+            let mut entries = self.entries.lock().unwrap();
+            entries.push(LogEntryRecord::from_view(entry));
+            Ok(LogIndex(entries.len() as u64))
+        }
+        fn write_at(&mut self, idx: LogIndex, entry: LogEntryView<'_>) -> RaftResult<()> {
+            let mut entries = self.entries.lock().unwrap();
+            let record = LogEntryRecord::from_view(entry);
+            if idx.0 as usize <= entries.len() {
+                entries[idx.0 as usize - 1] = record;
+            }
+            Ok(())
+        }
+        fn end_of_append_batch(&mut self, _start: LogIndex, _count: u64) -> RaftResult<()> {
+            Ok(())
+        }
+        fn log_entries(&self, start: LogIndex, end: LogIndex) -> RaftResult<Vec<LogEntryRecord>> {
+            let entries = self.entries.lock().unwrap();
+            Ok(entries[start.0 as usize..end.0 as usize].to_vec())
+        }
+        fn entry_at(&self, idx: LogIndex) -> RaftResult<Option<LogEntryRecord>> {
+            Ok(self.entries.lock().unwrap().get(idx.0 as usize).cloned())
+        }
+        fn term_at(&self, _idx: LogIndex) -> RaftResult<Option<Term>> {
+            Ok(Some(Term(1)))
+        }
+        fn pack(&self, _idx: LogIndex, _cnt: i32) -> RaftResult<Buffer> {
+            Buffer::from_bytes(&[])
+        }
+        fn apply_pack(&mut self, _idx: LogIndex, _pack: &[u8]) -> RaftResult<()> {
+            Ok(())
+        }
+        fn compact(&mut self, _last_log_index: LogIndex) -> RaftResult<bool> {
+            Ok(true)
+        }
+        fn compact_async(&mut self, _last_log_index: LogIndex) -> RaftResult<bool> {
+            Ok(true)
+        }
+        fn flush(&mut self) -> RaftResult<bool> {
+            Ok(true)
+        }
+        fn last_durable_index(&self) -> LogIndex {
+            LogIndex(0)
+        }
+    }
+
+    let state_machine = Box::new(MockStateMachine);
+    let state_manager = Box::new(MockStateManager);
+    let log_store = Box::new(MockLogStore::default());
+    let asio_service = unsafe { std::mem::MaybeUninit::<AsioService>::zeroed().assume_init() };
+    let params = RaftParams::default();
+
+    let _builder = RaftServerBuilder::new()
+        .asio_service(asio_service)
+        .params(params)
+        .state_machine(state_machine)
+        .state_manager(state_manager)
+        .log_store(log_store);
+
+    Ok(())
+}
