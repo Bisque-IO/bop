@@ -90,5 +90,37 @@ fn bench_append_flush(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_append_flush);
+fn bench_append_with_metrics(c: &mut Criterion) {
+    let mut group = c.benchmark_group("aof2_append_metrics");
+
+    group.bench_function("append_metrics", |b| {
+        let manager = AofManager::with_config(AofManagerConfig::default()).expect("create manager");
+        let handle = manager.handle();
+        let payload = vec![0u8; 512];
+
+        b.iter(|| {
+            let root = TempDir::new().expect("bench root");
+            let mut cfg = bench_config(root.path());
+            cfg.flush = FlushConfig {
+                flush_watermark_bytes: u64::MAX,
+                flush_interval_ms: u64::MAX,
+                max_unflushed_bytes: u64::MAX,
+            };
+            let aof = Aof::new(handle.clone(), cfg.clone()).expect("aof");
+
+            for _ in 0..BATCH {
+                aof.append_record(&payload).expect("append");
+            }
+
+            let metrics = aof.flush_metrics();
+            criterion::black_box(metrics.retry_attempts());
+        });
+
+        drop(manager);
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_append_flush, bench_append_with_metrics);
 criterion_main!(benches);

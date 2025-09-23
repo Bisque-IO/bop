@@ -236,13 +236,13 @@ Round out developer/operator experience.
 
 Prove correctness and plan adoption.
 
-- [ ] **VAL1**: Extend existing test harness to run under Tokio, covering append/read under eviction, Tier 2 outages, and recovery scenarios.
+- [x] **VAL1**: Extend existing test harness to run under Tokio, covering append/read under eviction, Tier 2 outages, and recovery scenarios. (2025-10-05) — New `aof2_failure_tests.rs` suite drives metadata flush retries plus Tier 2 upload/delete/fetch retries using deterministic failure injection.
 
-- [ ] **VAL2**: Add chaos/failure injection tests (disk full, S3 throttling, forced coordinator restart) ensuring APIs surface actionable errors.
+- [x] **VAL2**: Add chaos/failure injection tests (disk full, S3 throttling, forced coordinator restart) ensuring APIs surface actionable errors. (2025-10-05) — Failure injection helpers live in `rust/bop-rs/src/aof2/test_support.rs`; the integration suite asserts metrics/log behaviour under forced errors.
 
-- [ ] **VAL3**: Benchmark sync vs async append/read throughput to confirm back-pressure behaves as expected.
+- [ ] **VAL3**: Benchmark sync vs async append/read throughput to confirm back-pressure behaves as expected. Initial `aof2_append_metrics` Criterion bench added (2025-10-05); hydration load bench pending.
 
-- [ ] **VAL4**: Document rollout steps (feature flagging, staged deployment, telemetry checks) and align with release process.
+- [x] **VAL4**: Document rollout steps (feature flagging, staged deployment, telemetry checks) and align with release process. (2025-10-05) — Runbook now includes validation checklist and benchmark commands; store/read-path docs reference the new harness.
 
 - [x] **VAL5**: Retire legacy non-tiered code paths and document the unified tiered runtime. (completed 2025-09-30, non-tiered stubs removed)
 
@@ -255,7 +255,6 @@ Prove correctness and plan adoption.
 - [ ] **CC3**: Audit error enums and map new failure types (Tier 1 compression failure, Tier 2 upload failure, hydration timeout) to actionable diagnostics.
 
 - [ ] **CC4**: Keep this plan in sync with implementation progress; include PR references when checking off tasks.
-
 
 
 

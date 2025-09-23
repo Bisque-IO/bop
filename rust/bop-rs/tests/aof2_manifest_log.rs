@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
 use bop_rs::aof2::config::{AofConfig, FlushConfig, SegmentId};
 use bop_rs::aof2::error::{AofError, AofResult};
 use bop_rs::aof2::fs::Layout;
@@ -29,6 +28,7 @@ use bop_rs::aof2::store::{
     ManifestLogWriter, ManifestLogWriterConfig, Tier0Cache, Tier0CacheConfig, Tier1Cache,
     Tier1Config, Tier2Config, Tier2Manager,
 };
+use futures::future::BoxFuture;
 use tempfile::TempDir;
 use tokio::runtime::Handle;
 use tokio::time::sleep;
@@ -155,43 +155,56 @@ impl FlakyTier2Client {
     }
 }
 
-#[async_trait]
 impl Tier2Client for FlakyTier2Client {
-    async fn put_object(&self, request: PutObjectRequest) -> AofResult<PutObjectResult> {
-        let attempt = self.upload_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-        if attempt <= self.upload_failures_before_success {
-            return Err(AofError::RemoteStorage(format!(
-                "forced upload failure on attempt {attempt}"
-            )));
-        }
-        let size = tokio::fs::metadata(&request.source)
-            .await
-            .map_err(AofError::from)?
-            .len();
-        Ok(PutObjectResult {
-            etag: Some(format!("etag-{attempt}")),
-            size,
+    fn put_object(&self, request: PutObjectRequest) -> BoxFuture<'_, AofResult<PutObjectResult>> {
+        let attempts = self.upload_attempts.clone();
+        let failures = self.upload_failures_before_success;
+        Box::pin(async move {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt <= failures {
+                return Err(AofError::RemoteStorage(format!(
+                    "forced upload failure on attempt {attempt}"
+                )));
+            }
+            let size = tokio::fs::metadata(&request.source)
+                .await
+                .map_err(AofError::from)?
+                .len();
+            Ok(PutObjectResult {
+                etag: Some(format!("etag-{attempt}")),
+                size,
+            })
         })
     }
 
-    async fn get_object(&self, _request: GetObjectRequest) -> AofResult<GetObjectResult> {
-        Err(AofError::InvalidState(
-            "flaky client get_object not implemented".to_string(),
-        ))
+    fn get_object(&self, _request: GetObjectRequest) -> BoxFuture<'_, AofResult<GetObjectResult>> {
+        Box::pin(async {
+            Err(AofError::InvalidState(
+                "flaky client get_object not implemented".to_string(),
+            ))
+        })
     }
 
-    async fn delete_object(&self, _bucket: &str, _key: &str) -> AofResult<()> {
-        let attempt = self.delete_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-        if attempt <= self.delete_failures_before_success {
-            return Err(AofError::RemoteStorage(format!(
-                "forced delete failure on attempt {attempt}"
-            )));
-        }
-        Ok(())
+    fn delete_object(&self, _bucket: &str, _key: &str) -> BoxFuture<'_, AofResult<()>> {
+        let attempts = self.delete_attempts.clone();
+        let failures = self.delete_failures_before_success;
+        Box::pin(async move {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt <= failures {
+                return Err(AofError::RemoteStorage(format!(
+                    "forced delete failure on attempt {attempt}"
+                )));
+            }
+            Ok(())
+        })
     }
 
-    async fn head_object(&self, _bucket: &str, _key: &str) -> AofResult<Option<HeadObjectResult>> {
-        Ok(None)
+    fn head_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+    ) -> BoxFuture<'_, AofResult<Option<HeadObjectResult>>> {
+        Box::pin(async { Ok(None) })
     }
 }
 

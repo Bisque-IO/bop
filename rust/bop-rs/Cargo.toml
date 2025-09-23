@@ -81,7 +81,6 @@ bop-sys = { path = "../bop-sys", optional = false }
 # aws-sdk-s3 = "1.106.0"
 
 tracing = "0.1"
-async-trait = "0.1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

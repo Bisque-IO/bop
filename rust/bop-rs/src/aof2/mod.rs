@@ -33,6 +33,7 @@ pub mod metrics;
 pub mod reader;
 pub mod segment;
 pub mod store;
+pub mod test_support;
 
 pub use config::{
     AofConfig, CompactionPolicy, Compression, FlushConfig, IdStrategy, RecordId, RetentionPolicy,
@@ -389,7 +390,12 @@ impl AofManager {
         let tier0_cache = Tier0Cache::new(tier0);
         let tier1_cache = Tier1Cache::new(runtime.handle(), tier1)?;
         let tier2_manager = match tier2 {
-            Some(cfg) => Some(Tier2Manager::new(runtime.handle(), cfg)?),
+            Some(cfg) => {
+                match crate::aof2::test_support::tier2_manager_override(runtime.handle(), &cfg) {
+                    Some(result) => Some(result?),
+                    None => Some(Tier2Manager::new(runtime.handle(), cfg)?),
+                }
+            }
             None => None,
         };
         let coordinator = Arc::new(TieredCoordinator::new(

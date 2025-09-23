@@ -128,6 +128,10 @@ pub async fn tail_stream(mut stream: SealedSegmentStream<'_>) -> AofResult<()> {
 - Structured logs under `aof2::tier1` (`tier1_hydration_retry_*`, `tier1_hydration_failed`, `tier1_hydration_success`) provide a breadcrumb trail for hydration behaviour. Filter on these events when debugging cold reads.
 - `aof2-admin dump --root <path>` prints the same metrics and manifest residency on demand so operators can capture point-in-time state alongside log correlations.
 
+## Validation Coverage
+- `cargo test --manifest-path rust/bop-rs/Cargo.toml --test aof2_failure_tests -- tier2_fetch_retry_metrics` replays a cold-read scenario where the Tier 2 fetch fails once before succeeding. The test asserts that the deterministic failure injection clears `NeedsRecovery` and that fetched bytes land at the requested destination path.
+- The same suite includes upload/delete retry coverage for tiered storage and a metadata flush retry check. See `docs/aof2/aof2_store.md#validation-harness` for the full matrix.
+
 ## Migration Notes
 - Legacy callers that expected blocking IO must add retry loops or switch to the async helpers.
 - Integration tests should exercise both the happy path and `WouldBlock` returns to verify client behaviour.

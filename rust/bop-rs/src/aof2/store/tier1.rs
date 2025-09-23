@@ -1906,7 +1906,7 @@ mod tests {
         Tier2Client, Tier2Config, Tier2Event, Tier2FetchComplete, Tier2Manager, Tier2Metadata,
         Tier2UploadComplete,
     };
-    use async_trait::async_trait;
+    use futures::future::BoxFuture;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -2053,36 +2053,46 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl Tier2Client for RecordingTier2Client {
-        async fn put_object(&self, request: PutObjectRequest) -> AofResult<PutObjectResult> {
-            let size = tokio::fs::metadata(&request.source)
-                .await
-                .map_err(AofError::from)?
-                .len();
-            self.uploads.lock().unwrap().push(request.key.clone());
-            Ok(PutObjectResult {
-                etag: Some("mock-etag".to_string()),
-                size,
+        fn put_object(
+            &self,
+            request: PutObjectRequest,
+        ) -> BoxFuture<'_, AofResult<PutObjectResult>> {
+            let uploads = self.uploads.clone();
+            Box::pin(async move {
+                let size = tokio::fs::metadata(&request.source)
+                    .await
+                    .map_err(AofError::from)?
+                    .len();
+                uploads.lock().unwrap().push(request.key.clone());
+                Ok(PutObjectResult {
+                    etag: Some("mock-etag".to_string()),
+                    size,
+                })
             })
         }
 
-        async fn get_object(&self, _request: GetObjectRequest) -> AofResult<GetObjectResult> {
-            Err(AofError::InvalidState(
-                "recording tier2 client does not support get_object".to_string(),
-            ))
+        fn get_object(
+            &self,
+            _request: GetObjectRequest,
+        ) -> BoxFuture<'_, AofResult<GetObjectResult>> {
+            Box::pin(async {
+                Err(AofError::InvalidState(
+                    "recording tier2 client does not support get_object".to_string(),
+                ))
+            })
         }
 
-        async fn delete_object(&self, _bucket: &str, _key: &str) -> AofResult<()> {
-            Ok(())
+        fn delete_object(&self, _bucket: &str, _key: &str) -> BoxFuture<'_, AofResult<()>> {
+            Box::pin(async { Ok(()) })
         }
 
-        async fn head_object(
+        fn head_object(
             &self,
             _bucket: &str,
             _key: &str,
-        ) -> AofResult<Option<HeadObjectResult>> {
-            Ok(None)
+        ) -> BoxFuture<'_, AofResult<Option<HeadObjectResult>>> {
+            Box::pin(async { Ok(None) })
         }
     }
 

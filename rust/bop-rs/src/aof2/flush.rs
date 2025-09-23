@@ -9,6 +9,7 @@ use super::error::{AofError, AofResult, BackpressureKind};
 use super::segment::Segment;
 use super::{InstanceId, ResidentSegment, TieredRuntime};
 use crate::aof2::store::{DurabilityCursor, TieredInstance};
+use crate::aof2::test_support::{MetadataPersistContext, metadata_persist_override};
 use crossbeam::channel::{Receiver, Sender, TrySendError, unbounded};
 use tokio::sync::Notify;
 use tracing::{debug, error, warn};
@@ -344,7 +345,17 @@ pub(crate) fn persist_metadata_with_retry(
 ) -> AofResult<()> {
     let mut retries = 0u32;
     loop {
-        match tier.persist_durability_flush(segment_id, requested_bytes, durable_bytes) {
+        let ctx = MetadataPersistContext {
+            instance_id: tier.instance_id(),
+            segment_id,
+            attempt: retries,
+            requested_bytes,
+            durable_bytes,
+        };
+        let result = metadata_persist_override(&ctx).unwrap_or_else(|| {
+            tier.persist_durability_flush(segment_id, requested_bytes, durable_bytes)
+        });
+        match result {
             Ok(()) => {
                 if retries > 0 {
                     debug!(

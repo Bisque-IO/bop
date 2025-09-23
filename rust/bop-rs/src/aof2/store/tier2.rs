@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
@@ -414,12 +414,15 @@ pub struct HeadObjectResult {
     pub metadata: HashMap<String, String>,
 }
 
-#[async_trait]
 pub trait Tier2Client: Send + Sync {
-    async fn put_object(&self, request: PutObjectRequest) -> AofResult<PutObjectResult>;
-    async fn get_object(&self, request: GetObjectRequest) -> AofResult<GetObjectResult>;
-    async fn delete_object(&self, bucket: &str, key: &str) -> AofResult<()>;
-    async fn head_object(&self, bucket: &str, key: &str) -> AofResult<Option<HeadObjectResult>>;
+    fn put_object(&self, request: PutObjectRequest) -> BoxFuture<'_, AofResult<PutObjectResult>>;
+    fn get_object(&self, request: GetObjectRequest) -> BoxFuture<'_, AofResult<GetObjectResult>>;
+    fn delete_object(&self, bucket: &str, key: &str) -> BoxFuture<'_, AofResult<()>>;
+    fn head_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> BoxFuture<'_, AofResult<Option<HeadObjectResult>>>;
 }
 
 use minio::s3::builders::ObjectContent;
@@ -484,96 +487,111 @@ fn metadata_to_multimap(metadata: &HashMap<String, String>) -> Option<Multimap> 
     Some(map)
 }
 
-#[async_trait]
 impl Tier2Client for S3Tier2Client {
-    async fn put_object(&self, request: PutObjectRequest) -> AofResult<PutObjectResult> {
+    fn put_object(&self, request: PutObjectRequest) -> BoxFuture<'_, AofResult<PutObjectResult>> {
         let client = self.client.clone();
         let metadata = request.metadata.clone();
         let sse = self.to_sse(&request.security);
         let path = request.source.clone();
         let bucket = request.bucket.clone();
         let key = request.key.clone();
-        let mut builder =
-            client.put_object_content(&bucket, &key, ObjectContent::from(path.as_path()));
-        if let Some(meta) = metadata_to_multimap(&metadata) {
-            builder = builder.user_metadata(Some(meta));
-        }
-        if let Some(sse) = sse {
-            builder = builder.sse(Some(sse));
-        }
-        let response = builder.send().await.map_err(map_minio_error)?;
-        Ok(PutObjectResult {
-            etag: Some(response.etag),
-            size: response.object_size,
+        Box::pin(async move {
+            let mut builder =
+                client.put_object_content(&bucket, &key, ObjectContent::from(path.as_path()));
+            if let Some(meta) = metadata_to_multimap(&metadata) {
+                builder = builder.user_metadata(Some(meta));
+            }
+            if let Some(sse) = sse {
+                builder = builder.sse(Some(sse));
+            }
+            let response = builder.send().await.map_err(map_minio_error)?;
+            Ok(PutObjectResult {
+                etag: Some(response.etag),
+                size: response.object_size,
+            })
         })
     }
 
-    async fn get_object(&self, request: GetObjectRequest) -> AofResult<GetObjectResult> {
+    fn get_object(&self, request: GetObjectRequest) -> BoxFuture<'_, AofResult<GetObjectResult>> {
         let client = self.client.clone();
         let destination = request.destination.clone();
         let bucket = request.bucket.clone();
         let key = request.key.clone();
-        let response = client
-            .get_object(&bucket, &key)
-            .send()
-            .await
-            .map_err(map_minio_error)?;
-        if let Some(parent) = destination.parent() {
-            tokio::fs::create_dir_all(parent)
+        Box::pin(async move {
+            let response = client
+                .get_object(&bucket, &key)
+                .send()
+                .await
+                .map_err(map_minio_error)?;
+            if let Some(parent) = destination.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(AofError::from)?;
+            }
+            response
+                .content
+                .to_file(destination.as_path())
                 .await
                 .map_err(AofError::from)?;
-        }
-        response
-            .content
-            .to_file(destination.as_path())
-            .await
-            .map_err(AofError::from)?;
-        Ok(GetObjectResult {
-            etag: response.etag,
-            size: response.object_size,
+            Ok(GetObjectResult {
+                etag: response.etag,
+                size: response.object_size,
+            })
         })
     }
 
-    async fn delete_object(&self, bucket: &str, key: &str) -> AofResult<()> {
+    fn delete_object(&self, bucket: &str, key: &str) -> BoxFuture<'_, AofResult<()>> {
         let client = self.client.clone();
-        client
-            .delete_object(bucket, key)
-            .send()
-            .await
-            .map_err(map_minio_error)?;
-        Ok(())
+        let bucket = bucket.to_owned();
+        let key = key.to_owned();
+        Box::pin(async move {
+            client
+                .delete_object(&bucket, &key)
+                .send()
+                .await
+                .map_err(map_minio_error)?;
+            Ok(())
+        })
     }
 
-    async fn head_object(&self, bucket: &str, key: &str) -> AofResult<Option<HeadObjectResult>> {
+    fn head_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> BoxFuture<'_, AofResult<Option<HeadObjectResult>>> {
         let client = self.client.clone();
-        match client.stat_object(bucket, key).send().await {
-            Ok(resp) => {
-                let mut metadata = HashMap::new();
-                for (header, value) in resp.headers.iter() {
-                    let name = header.as_str();
-                    if name.starts_with("x-amz-meta-") {
-                        if let Ok(v) = value.to_str() {
-                            metadata.insert(
-                                name.trim_start_matches("x-amz-meta-").to_string(),
-                                v.to_string(),
-                            );
+        let bucket = bucket.to_owned();
+        let key = key.to_owned();
+        Box::pin(async move {
+            match client.stat_object(&bucket, &key).send().await {
+                Ok(resp) => {
+                    let mut metadata = HashMap::new();
+                    for (header, value) in resp.headers.iter() {
+                        let name = header.as_str();
+                        if name.starts_with("x-amz-meta-") {
+                            if let Ok(v) = value.to_str() {
+                                metadata.insert(
+                                    name.trim_start_matches("x-amz-meta-").to_string(),
+                                    v.to_string(),
+                                );
+                            }
                         }
                     }
+                    Ok(Some(HeadObjectResult {
+                        size: resp.size,
+                        etag: Some(resp.etag),
+                        metadata,
+                    }))
                 }
-                Ok(Some(HeadObjectResult {
-                    size: resp.size,
-                    etag: Some(resp.etag),
-                    metadata,
-                }))
+                Err(MinioError::S3Error(s3)) => match s3.code {
+                    ErrorCode::NoSuchKey
+                    | ErrorCode::NoSuchBucket
+                    | ErrorCode::ResourceNotFound => Ok(None),
+                    _ => Err(map_minio_error(MinioError::S3Error(s3))),
+                },
+                Err(other) => Err(map_minio_error(other)),
             }
-            Err(MinioError::S3Error(s3)) => match s3.code {
-                ErrorCode::NoSuchKey | ErrorCode::NoSuchBucket | ErrorCode::ResourceNotFound => {
-                    Ok(None)
-                }
-                _ => Err(map_minio_error(MinioError::S3Error(s3))),
-            },
-            Err(other) => Err(map_minio_error(other)),
-        }
+        })
     }
 }
 
@@ -1471,11 +1489,11 @@ mod tests {
         metadata: HashMap<String, String>,
     }
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct MockTier2Client {
-        store: StdMutex<StdHashMap<String, StoredObject>>,
-        put_calls: StdMutex<u32>,
-        get_calls: StdMutex<u32>,
+        store: Arc<StdMutex<StdHashMap<String, StoredObject>>>,
+        put_calls: Arc<StdMutex<u32>>,
+        get_calls: Arc<StdMutex<u32>>,
     }
 
     impl MockTier2Client {
@@ -1490,95 +1508,119 @@ mod tests {
 
     struct AlwaysFailTier2Client;
 
-    #[allow(async_fn_in_trait)]
-    #[async_trait]
     impl Tier2Client for MockTier2Client {
-        async fn put_object(&self, request: PutObjectRequest) -> AofResult<PutObjectResult> {
-            let bytes = tokio::fs::read(&request.source)
-                .await
-                .map_err(AofError::from)?;
-            let mut store = self.store.lock().unwrap();
-            store.insert(
-                request.key.clone(),
-                StoredObject {
-                    bytes: bytes.clone(),
-                    metadata: request.metadata.clone(),
-                },
-            );
-            *self.put_calls.lock().unwrap() += 1;
-            Ok(PutObjectResult {
-                etag: Some(format!("etag-{}", request.key)),
-                size: bytes.len() as u64,
-            })
-        }
-
-        async fn get_object(&self, request: GetObjectRequest) -> AofResult<GetObjectResult> {
-            let (bytes, size) = {
-                let store = self.store.lock().unwrap();
-                let object = store.get(&request.key).ok_or_else(|| {
-                    AofError::RemoteStorage(format!("missing object {}", request.key))
-                })?;
-                (object.bytes.clone(), object.bytes.len())
-            };
-            if let Some(parent) = request.destination.parent() {
-                tokio::fs::create_dir_all(parent)
+        fn put_object(
+            &self,
+            request: PutObjectRequest,
+        ) -> BoxFuture<'_, AofResult<PutObjectResult>> {
+            let store = &self.store;
+            let put_calls = &self.put_calls;
+            Box::pin(async move {
+                let bytes = tokio::fs::read(&request.source)
                     .await
                     .map_err(AofError::from)?;
-            }
-            tokio::fs::write(&request.destination, &bytes)
-                .await
-                .map_err(AofError::from)?;
-            *self.get_calls.lock().unwrap() += 1;
-            Ok(GetObjectResult {
-                etag: Some(format!("etag-{}", request.key)),
-                size: size as u64,
+                let mut guard = store.lock().unwrap();
+                guard.insert(
+                    request.key.clone(),
+                    StoredObject {
+                        bytes: bytes.clone(),
+                        metadata: request.metadata.clone(),
+                    },
+                );
+                *put_calls.lock().unwrap() += 1;
+                Ok(PutObjectResult {
+                    etag: Some(format!("etag-{}", request.key)),
+                    size: bytes.len() as u64,
+                })
             })
         }
 
-        async fn delete_object(&self, _bucket: &str, key: &str) -> AofResult<()> {
-            let mut store = self.store.lock().unwrap();
-            store.remove(key);
-            Ok(())
+        fn get_object(
+            &self,
+            request: GetObjectRequest,
+        ) -> BoxFuture<'_, AofResult<GetObjectResult>> {
+            let store = &self.store;
+            let get_calls = &self.get_calls;
+            Box::pin(async move {
+                let (bytes, size) = {
+                    let guard = store.lock().unwrap();
+                    let object = guard.get(&request.key).ok_or_else(|| {
+                        AofError::RemoteStorage(format!("missing object {}", request.key))
+                    })?;
+                    (object.bytes.clone(), object.bytes.len() as u64)
+                };
+                if let Some(parent) = request.destination.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(AofError::from)?;
+                }
+                tokio::fs::write(&request.destination, &bytes)
+                    .await
+                    .map_err(AofError::from)?;
+                *get_calls.lock().unwrap() += 1;
+                Ok(GetObjectResult {
+                    etag: Some(format!("etag-{}", request.key)),
+                    size,
+                })
+            })
         }
 
-        async fn head_object(
+        fn delete_object(&self, _bucket: &str, key: &str) -> BoxFuture<'_, AofResult<()>> {
+            let store = &self.store;
+            let key = key.to_owned();
+            Box::pin(async move {
+                store.lock().unwrap().remove(&key);
+                Ok(())
+            })
+        }
+
+        fn head_object(
             &self,
             _bucket: &str,
             key: &str,
-        ) -> AofResult<Option<HeadObjectResult>> {
-            let store = self.store.lock().unwrap();
-            match store.get(key) {
-                Some(object) => Ok(Some(HeadObjectResult {
-                    size: object.bytes.len() as u64,
-                    etag: Some(format!("etag-{key}")),
-                    metadata: object.metadata.clone(),
-                })),
-                None => Ok(None),
-            }
+        ) -> BoxFuture<'_, AofResult<Option<HeadObjectResult>>> {
+            let store = &self.store;
+            let key = key.to_owned();
+            Box::pin(async move {
+                let result = store
+                    .lock()
+                    .unwrap()
+                    .get(&key)
+                    .map(|object| HeadObjectResult {
+                        size: object.bytes.len() as u64,
+                        etag: Some(format!("etag-{key}")),
+                        metadata: object.metadata.clone(),
+                    });
+                Ok(result)
+            })
         }
     }
 
-    #[allow(async_fn_in_trait)]
-    #[async_trait]
     impl Tier2Client for AlwaysFailTier2Client {
-        async fn put_object(&self, _request: PutObjectRequest) -> AofResult<PutObjectResult> {
-            Err(AofError::RemoteStorage("put failed".to_string()))
+        fn put_object(
+            &self,
+            _request: PutObjectRequest,
+        ) -> BoxFuture<'_, AofResult<PutObjectResult>> {
+            Box::pin(async { Err(AofError::RemoteStorage("put failed".to_string())) })
         }
 
-        async fn get_object(&self, _request: GetObjectRequest) -> AofResult<GetObjectResult> {
-            Err(AofError::RemoteStorage("get failed".to_string()))
+        fn get_object(
+            &self,
+            _request: GetObjectRequest,
+        ) -> BoxFuture<'_, AofResult<GetObjectResult>> {
+            Box::pin(async { Err(AofError::RemoteStorage("get failed".to_string())) })
         }
 
-        async fn delete_object(&self, _bucket: &str, _key: &str) -> AofResult<()> {
-            Err(AofError::RemoteStorage("delete failed".to_string()))
+        fn delete_object(&self, _bucket: &str, _key: &str) -> BoxFuture<'_, AofResult<()>> {
+            Box::pin(async { Err(AofError::RemoteStorage("delete failed".to_string())) })
         }
 
-        async fn head_object(
+        fn head_object(
             &self,
             _bucket: &str,
             _key: &str,
-        ) -> AofResult<Option<HeadObjectResult>> {
-            Ok(None)
+        ) -> BoxFuture<'_, AofResult<Option<HeadObjectResult>>> {
+            Box::pin(async { Ok(None) })
         }
     }
 

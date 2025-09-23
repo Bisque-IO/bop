@@ -158,6 +158,27 @@ The tiered store now exposes a consolidated `TieredObservabilitySnapshot` via `A
 
 All counters use relaxed atomics; exporters can continue the existing pull loop without additional locking.
 
+### Validation Harness
+
+The targeted regression suite lives in `rust/bop-rs/tests/aof2_failure_tests.rs` and exercises failure injection on the hot path:
+
+- `metadata_retry_increments_metrics` forces two `persist_metadata_with_retry` failures and asserts the flush metrics record retry attempts before succeeding.
+- `tier2_upload_delete_retry_metrics` and `tier2_fetch_retry_metrics` drive the Tier 2 manager with deterministic upload/delete/fetch failures to ensure retry counters tick without flapping.
+
+Run the suite with:
+
+```bash
+cargo test --manifest-path rust/bop-rs/Cargo.toml --test aof2_failure_tests
+```
+
+Benchmarks under `rust/bop-rs/benches/aof_benchmarks.rs` include `aof2_append_metrics`, which measures append throughput while sampling `FlushMetricsSnapshot` to track retry overhead. Execute with:
+
+```bash
+cargo bench --manifest-path rust/bop-rs/Cargo.toml --bench aof_benchmarks -- --bench aof2_append_metrics
+```
+
+Hydration load benchmarks are planned as part of VAL3 (see `aof2_implementation_plan.md`).
+
 ### Structured Logs
 
 Structured `tracing::event!` calls accompany major state transitions. Each event carries `instance`, `segment`, and any relevant counters so it can be filtered downstream:
@@ -391,7 +412,6 @@ Delivering these milestones incrementally ensures the tiered store evolves from 
 - [ ] Pass tier handles through Aof::new/TieredInstance and ensure orderly shutdown.
 - [ ] Update APIs/tests to await async tier operations; migrate affected tests to Tokio.
 - [ ] Refresh documentation/examples describing async tier integration.
-
 
 
 
