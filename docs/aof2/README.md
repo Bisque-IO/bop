@@ -33,6 +33,8 @@ For log-based checks use the query `metric_name:"aof_manifest_replay_*" stream_i
 - [aof2_catalog_snapshots.md](aof2_catalog_snapshots.md) — catalog snapshot format, retention policy, and recovery usage.
 - [aof2_flush_metadata_note.md](aof2_flush_metadata_note.md) — flush pipeline metadata responsibilities and durability markers.
 - [aof2_python_test_runner.md](aof2_python_test_runner.md) — notes on the Python-based integration test harness.
-- `ManifestInspector` (see `rust/bop-rs/src/aof2/manifest/inspect.rs`) — developer helper to dump manifest chunk metadata for a stream.
+- `ManifestInspector` (see `crates/bop-aof/src/manifest/inspect.rs`) — developer helper to dump manifest chunk metadata for a stream.
+
+
 
 

@@ -80,3 +80,4 @@ lib/wamr/.devcontainer/
 lib/zstd/.github/
 
 lib/zlib/.github/
+target/

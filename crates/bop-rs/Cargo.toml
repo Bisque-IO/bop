@@ -1,0 +1,21 @@
+[package]
+name = "bop-rs"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+alloc-stats = ["bop-allocator/alloc-stats"]
+usockets-udp = ["bop-usockets/usockets-udp"]
+
+[dependencies]
+bop-allocator = { path = "../bop-allocator", default-features = false }
+bop-aof = { path = "../bop-aof" }
+bop-mdbx = { path = "../bop-mdbx" }
+bop-mpmc = { path = "../bop-mpmc" }
+bop-raft = { path = "../bop-raft" }
+bop-usockets = { path = "../bop-usockets", default-features = false }
+
+[dev-dependencies]
+bop-sys = { path = "../bop-sys" }
+

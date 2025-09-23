@@ -1,0 +1,8 @@
+[package]
+name = "bop-mdbx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bop-sys = { path = "../bop-sys" }
+bitflags = "2"

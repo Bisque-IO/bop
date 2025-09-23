@@ -1,0 +1,12 @@
+[package]
+name = "bop-usockets"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+usockets-udp = []
+
+[dependencies]
+bop-sys = { path = "../bop-sys" }
+thiserror = "1.0"

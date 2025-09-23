@@ -8,14 +8,14 @@
 
 ## Glossary
 - **ResidentSegment** - reference-counted handle returned by `TieredInstance`; provides access to the memory map and shared `SegmentFlushState`.
-- **Sealed Segment Stream** - async iterator over finalized segments (`rust/bop-rs/src/aof2/reader.rs:505`), used by long-lived tail readers.
-- **TailFollower** - wrapper around `TailSignal` updates (`rust/bop-rs/src/aof2/mod.rs:604`) that surfaces activation, sealing, and rollover events.
-- **BackpressureKind** - enum describing why an operation returned `WouldBlock` (`rust/bop-rs/src/aof2/error.rs:6`). Current values: `Admission`, `Rollover`, `Hydration`, `Flush`, `Tail`, `Unknown`.
+- **Sealed Segment Stream** - async iterator over finalized segments (`crates/bop-aof/src/reader.rs:505`), used by long-lived tail readers.
+- **TailFollower** - wrapper around `TailSignal` updates (`crates/bop-aof/src/mod.rs:604`) that surfaces activation, sealing, and rollover events.
+- **BackpressureKind** - enum describing why an operation returned `WouldBlock` (`crates/bop-aof/src/error.rs:6`). Current values: `Admission`, `Rollover`, `Hydration`, `Flush`, `Tail`, `Unknown`.
 - **Hydration Notifier** - per-instance `Notify` registered with the coordinator to wake waiters when a requested segment becomes resident.
 
 ## Synchronous Read Flow
 1. Callers invoke `Aof::open_reader(segment_id)`.
-2. The method checks the in-memory catalog (`rust/bop-rs/src/aof2/mod.rs:724`). If the `ResidentSegment` is still present, a `SegmentReader` is constructed immediately.
+2. The method checks the in-memory catalog (`crates/bop-aof/src/mod.rs:724`). If the `ResidentSegment` is still present, a `SegmentReader` is constructed immediately.
 3. On a cache miss, it delegates to `TieredInstance::checkout_sealed_segment`. Outcomes:
    - `SegmentCheckout::Ready(resident)` gives an immediate reader; the caller can iterate records at once.
    - `SegmentCheckout::Pending(waiter)` returns `AofError::WouldBlock(BackpressureKind::Hydration)`.
@@ -31,7 +31,7 @@
 - `AofError::WouldBlock(BackpressureKind::Flush)` - the flush worker exhausted retries and raised the shared failure flag. Watch `FlushMetricsSnapshot::flush_failures` and the `aof_flush_metadata_*` counters, wait for them to settle, or call `flush_until` on the stalled record before retrying.
 
 ## Async Read Flow
-1. `Aof::open_reader_async(segment_id)` follows the same steps but awaits hydration (`rust/bop-rs/src/aof2/mod.rs:769`).
+1. `Aof::open_reader_async(segment_id)` follows the same steps but awaits hydration (`crates/bop-aof/src/mod.rs:769`).
 2. `SegmentCheckout::Pending` is awaited inline; wakers are registered with the hydration notifier.
 3. Once a `SegmentReader` is available, the future resolves and the caller can iterate synchronously.
 4. `SealedSegmentStream::next_record_async` bridges sealed segments to async consumers, transparently awaiting hydration for each segment.
@@ -68,7 +68,7 @@
 use std::time::Duration;
 use tracing::instrument;
 
-use crate::aof2::{
+use crate::{
     Aof, AofError, AofResult, BackpressureKind, InstanceId, SegmentId, SegmentReader,
     TieredCoordinatorNotifiers,
 };
@@ -129,7 +129,7 @@ pub async fn tail_stream(mut stream: SealedSegmentStream<'_>) -> AofResult<()> {
 - `aof2-admin dump --root <path>` prints the same metrics and manifest residency on demand so operators can capture point-in-time state alongside log correlations.
 
 ## Validation Coverage
-- `cargo test --manifest-path rust/bop-rs/Cargo.toml --test aof2_failure_tests -- tier2_fetch_retry_metrics` replays a cold-read scenario where the Tier 2 fetch fails once before succeeding. The test asserts that the deterministic failure injection clears `NeedsRecovery` and that fetched bytes land at the requested destination path.
+- `cargo test --manifest-path crates/bop-aof/Cargo.toml --test aof2_failure_tests -- tier2_fetch_retry_metrics` replays a cold-read scenario where the Tier 2 fetch fails once before succeeding. The test asserts that the deterministic failure injection clears `NeedsRecovery` and that fetched bytes land at the requested destination path.
 - The same suite includes upload/delete retry coverage for tiered storage and a metadata flush retry check. See `docs/aof2/aof2_store.md#validation-harness` for the full matrix.
 
 ## Migration Notes
@@ -143,3 +143,6 @@ pub async fn tail_stream(mut stream: SealedSegmentStream<'_>) -> AofResult<()> {
 - [ ] Glossary terms align with the append/read diagrams in `aof2_design_next.md`.
 - [ ] Code examples compile (convert to doctests once tier metadata work lands).
 - [ ] Platform and recovery teams sign off before marking RD5 complete.
+
+
+

@@ -174,7 +174,7 @@ Snapshots live beside chunk files (`manifest/<stream_id>/snapshot_<snapshot_id>.
 - `manifest::reader`: chunk iterator, checksum verification, record decoding, bounded replay cursors.
 - `manifest::snapshot`: snapshot encoder/decoder plus glue that ties catalog checkpoints to chunk offsets.
 - `manifest::index`: in-memory map keyed by `SegmentId`, integrating with Tier 1 residency tracking.
-- All modules live under `rust/bop-rs/src/aof2/store/manifest/` with relative includes to existing CRC and mmap utilities.
+- All modules live under `crates/bop-aof/src/store/manifest/` with relative includes to existing CRC and mmap utilities.
 
 ## Integration Plan
 - Emit manifest log records from existing tier transitions (`seal_segment`, `Tier1Cache` compression completions, upload lifecycles, hydrations, evictions).
@@ -210,5 +210,7 @@ Snapshots live beside chunk files (`manifest/<stream_id>/snapshot_<snapshot_id>.
 - **Runtime toggle**: expose the flag through the runtime config API so we can flip it without restart. Coordinators cache the value but listen for change notifications to toggle append/replay accordingly.
 - **Testing hooks**: unit tests call `TestManager::with_manifest_log()` to force-enable the flag, while integration tests use the runtime toggle to simulate rollout sequences.
 - **Telemetry validation**: shadow mode double-writes to the log and legacy JSON, exporting `manifest_shadow_divergence` gauges; alerting fires on non-zero values. Once the flag is fully enabled we add a one-off SLO to ensure manifest replay latency stays within thresholds and that chunk CRC errors remain zero.
+
+
 
 

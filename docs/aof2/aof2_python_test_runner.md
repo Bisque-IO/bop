@@ -13,10 +13,11 @@ result = subprocess.run(
 sys.exit(result.returncode)
 ```
 
-Run from `rust/bop-rs/`:
+Run from `crates/bop-aof/`:
 
 ```bash
 python -c "import subprocess, sys; sys.exit(subprocess.run(['cargo','test','--lib','aof2::tests::recovery_reopens_existing_tail_segment'], check=False).returncode)"
 ```
 
 Update the test name in the list argument to exercise a different test case.
+

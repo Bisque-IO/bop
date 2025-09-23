@@ -79,15 +79,16 @@ Configure dashboards to chart the metrics above and add log-based alerts for the
 Run the targeted validation suite before enabling tiered mode in a new environment:
 
 ```bash
-cargo test --manifest-path rust/bop-rs/Cargo.toml --test aof2_failure_tests
+cargo test --manifest-path crates/bop-aof/Cargo.toml --test aof2_failure_tests
 ```
 
-The suite exercises metadata retry logic and Tier 2 upload/delete/fetch retry paths using deterministic failure injection (see `rust/bop-rs/tests/aof2_failure_tests.rs`).
+The suite exercises metadata retry logic and Tier 2 upload/delete/fetch retry paths using deterministic failure injection (see `crates/bop-aof/tests/aof2_failure_tests.rs`).
 
 To capture baseline append throughput with metrics enabled:
 
 ```bash
-cargo bench --manifest-path rust/bop-rs/Cargo.toml --bench aof_benchmarks -- --bench aof2_append_metrics
+cargo bench --manifest-path crates/bop-aof/Cargo.toml --bench aof_benchmarks -- --bench aof2_append_metrics
 ```
 
 Record the reported throughput and track deltas across releases. Hydration load generation is pending; follow the `VAL3` item in `aof2_implementation_plan.md` for updates.
+

@@ -1,0 +1,42 @@
+[package]
+name = "bop-aof"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arc-swap = "1.7"
+byteorder = "1.5"
+chrono = { version = "0.4", features = ["serde"] }
+crc64fast-nvme = "1.2"
+crossbeam = "0.8"
+futures = "0.3"
+hdrhistogram = "7.5"
+libc = "0.2"
+memmap2 = "0.9"
+minio = "0.3"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.8"
+thiserror = "1.0"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+    "sync",
+    "macros",
+    "signal"
+] }
+tokio-util = "0.7"
+tracing = "0.1"
+zstd = "0.13"
+
+[dev-dependencies]
+proptest = "1.0"
+tracing-subscriber = "0.3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "aof_benchmarks"
+harness = false

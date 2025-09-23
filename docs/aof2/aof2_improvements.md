@@ -43,8 +43,8 @@ The system implements a 3-tier storage hierarchy:
 ### 1. Lock Contention Issues
 
 **Problem**: Heavy use of `Mutex` in hot paths:
-- `TieredInstanceInner::waiters` - rust/bop-rs/src/aof2/store/mod.rs:98
-- `Tier1Manifest` operations - rust/bop-rs/src/aof2/store/tier1.rs:168
+- `TieredInstanceInner::waiters` - crates/bop-aof/src/store/mod.rs:98
+- `Tier1Manifest` operations - crates/bop-aof/src/store/tier1.rs:168
 
 **Optimization**:
 ```rust
@@ -59,7 +59,7 @@ struct TieredInstanceInner {
 
 ### 2. Inefficient Segment Scanning
 
-**Problem**: Linear directory scanning in `locate_segment_path` - rust/bop-rs/src/aof2/store/mod.rs:164
+**Problem**: Linear directory scanning in `locate_segment_path` - crates/bop-aof/src/store/mod.rs:164
 
 **Optimization**:
 ```rust
@@ -78,7 +78,7 @@ impl SegmentIndex {
 
 ### 3. Suboptimal Compression Strategy
 
-**Problem**: Fixed compression level (3) without workload adaptation - rust/bop-rs/src/aof2/store/tier1.rs:56
+**Problem**: Fixed compression level (3) without workload adaptation - crates/bop-aof/src/store/tier1.rs:56
 
 **Optimization**:
 ```rust
@@ -116,7 +116,7 @@ RECORD_POOL.push(header);
 
 ### 5. Inefficient Flush Coordination
 
-**Problem**: Single-threaded flush processing - rust/bop-rs/src/aof2/flush.rs
+**Problem**: Single-threaded flush processing - crates/bop-aof/src/flush.rs
 
 **Optimization**:
 ```rust
@@ -283,3 +283,4 @@ The AOF2 system demonstrates solid engineering with its tiered architecture and 
 4. **Enhancing observability** for production operations
 
 Implementing these optimizations should yield significant performance improvements while maintaining the system's robustness and flexibility.
+

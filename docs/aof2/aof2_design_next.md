@@ -137,7 +137,7 @@
 ## 7. Flush and Durability
 - Each segment exposes a `SegmentFlushState` describing its durability goal and providing async notifiers. The `AofManager` polls these states concurrently without touching the append lock.
 - `FlushConfig` thresholds still determine when to enqueue a flush, but enqueues happen via lock-free command queues so appenders never contend with background work.
-- `FlushManager::enqueue_segment` accepts a `FlushRequest` bundling `ResidentSegment` and `InstanceId` (`rust/bop-rs/src/aof2/flush.rs:30`), giving the worker everything it needs to flush the segment to disk and then persist the {requested, durable} pair to `warm/durability/<instance>.json`. `Segment::mark_durable` only runs after that persistence succeeds, keeping the tier snapshot, JSON metadata, and segment footer in lockstep.
+- `FlushManager::enqueue_segment` accepts a `FlushRequest` bundling `ResidentSegment` and `InstanceId` (`crates/bop-aof/src/flush.rs:30`), giving the worker everything it needs to flush the segment to disk and then persist the {requested, durable} pair to `warm/durability/<instance>.json`. `Segment::mark_durable` only runs after that persistence succeeds, keeping the tier snapshot, JSON metadata, and segment footer in lockstep.
 - Sealing consumes a flush-state handle: once durable bytes reach the logical size, `Segment::seal` writes the footer, marks the state finalized, and the manager moves on to the next segment.
 - `Aof::flush(record_id)` (future work) will map the record to its `SegmentFlushState` and await its notifier instead of blocking on a global mutex.
 
@@ -263,3 +263,5 @@ The explicit mapping documents the steady-state expectations for reviewers: admi
    - Policies for migrating sealed segments into `archive/`, pruning old data, and (eventually) packaging cold segments.
 10. **Observability and tooling** *(done)*  
     - Tiered metrics snapshot (queue depths, latency histogram, retry counters), structured log events for admissions/hydration/Tier2 transfers, and the `aof2-admin` CLI for residency dumps.
+
+

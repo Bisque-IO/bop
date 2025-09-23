@@ -87,7 +87,7 @@ Keep synchronous append semantics while delegating capacity decisions to the tie
 
     - [x] Capture the current flush lifecycle (`flush.rs`, `segment.rs`, catalog flush queue) in a short design note and annotate the entry points that must push tier metadata updates. (see `aof2_flush_metadata_note.md`)
 
-    - [x] Extend `SegmentFlushState`/`FlushManager` to carry the owning `ResidentSegment` and instance identifiers so tier metadata writes can happen when `mark_durable` advances. (implemented via `FlushRequest` in `rust/bop-rs/src/aof2/flush.rs:30` and `Aof::schedule_flush` wiring)
+    - [x] Extend `SegmentFlushState`/`FlushManager` to carry the owning `ResidentSegment` and instance identifiers so tier metadata writes can happen when `mark_durable` advances. (implemented via `FlushRequest` in `crates/bop-aof/src/flush.rs:30` and `Aof::schedule_flush` wiring)
 
     - [x] Introduce an in-memory durability cursor on `TieredInstance` that records requested vs durable bytes and exposes helpers to seed state from recovered segments.
 
@@ -134,8 +134,8 @@ Replace ad-hoc JSON manifests with the append-only manifest log.
 - [x] Close out crash-mid-commit follow-ups for MAN1/MAN3.
     - [x] Capture metrics/alerts expectations in the test assertions to prove replay surfaces chunk/journal lag stats.
         - [x] Inventory the replay metrics we expect (`aof_manifest_replay_chunk_lag_seconds`, `aof_manifest_replay_journal_lag_bytes`) and document pass/fail bounds.
-        - [x] Locate or add metric definitions under `rust/bop-rs/src/aof2/metrics/` so the test can read stable names.
-        - [x] Extend `manifest_crash_mid_commit` in `rust/bop-rs/tests/aof2_manifest_log.rs:116` to snapshot metrics and assert the counters before/after replay.
+        - [x] Locate or add metric definitions under `crates/bop-aof/src/metrics/` so the test can read stable names.
+        - [x] Extend `manifest_crash_mid_commit` in `crates/bop-aof/tests/aof2_manifest_log.rs:116` to snapshot metrics and assert the counters before/after replay.
         - [x] Ensure the test trims the chunk, triggers replay, and validates metric deltas reset when the test reruns.
         - [x] Add a quick reference to `docs/aof2/README.md` describing how the replay metrics appear in dashboards and alerting.
         - [x] Include Grafana panel IDs or log query examples with the expected replay SLA thresholds (warn vs critical).
@@ -168,12 +168,12 @@ Replace ad-hoc JSON manifests with the append-only manifest log.
     - [x] Surface corruption alerts by injecting a CRC failure in tests and asserting the error path increments the new counters.
 
 - [x] Round out MAN4 integration tests for Tier2 compaction and document the crash matrix (new retry flow covered by `manifest_tier2_retry_flow` and corresponding operator docs).
-    - [x] Extend the manifest log test matrix with a Tier2 retry scenario that forces delete/upload failures and confirms recovery (`rust/bop-rs/tests/aof2_manifest_log.rs` now exercises flaky uploads/deletes and validates manifest replay).
+    - [x] Extend the manifest log test matrix with a Tier2 retry scenario that forces delete/upload failures and confirms recovery (`crates/bop-aof/tests/aof2_manifest_log.rs` now exercises flaky uploads/deletes and validates manifest replay).
     - [x] Update `tests/README.md` with repro steps for the crash-mid-commit + Tier2 retry cases and link to `aof2_manifest_log.md` (see the MAN3 entry under *AOF2 Manifest Log Tests*).
     - [x] Add a short operator note to `aof2_store.md` summarising the new coverage and how to run the replay diagnostics (see the "Tier2 retry diagnostics" subsection).
 
 
-- [x] **MAN1**: Implement chunked manifest log writer/reader with crc64-nvme checksums and mmap-backed append path. (landed `aof2::manifest::{chunk, record, reader, writer}` modules with rotation + CRC validation; see `rust/bop-rs/src/aof2/manifest/`)
+- [x] **MAN1**: Implement chunked manifest log writer/reader with crc64-nvme checksums and mmap-backed append path. (landed `aof2::manifest::{chunk, record, reader, writer}` modules with rotation + CRC validation; see `crates/bop-aof/src/manifest/`)
 
     - [x] Support chunk rotation (16 KiB to 1 MiB configurable), sealing, and Tier 2 upload streaming hooks. (`ManifestLogWriter` handles rotation/ sealing and surfaces `SealedChunkHandle` for Tier 2 streaming)
 
@@ -187,9 +187,9 @@ Replace ad-hoc JSON manifests with the append-only manifest log.
 
 - [x] **MAN3**: Add recovery replay that loads the latest manifest snapshot then applies log chunks, reconciling Tier 0/Tier 1/Tier 2 state (Tier 1 bootstrap now replays the manifest log, seeds the in-memory index, and exposes replay metrics snapshots).
 
-    - [x] Provide tooling to inspect manifest chunks and verify Tier 2 object presence via the `ManifestInspector` helper in `rust/bop-rs/src/aof2/manifest/inspect.rs`, which reports chunk headers, record counts, CRC parity, and Tier 2 keys for developers and tests.
+    - [x] Provide tooling to inspect manifest chunks and verify Tier 2 object presence via the `ManifestInspector` helper in `crates/bop-aof/src/manifest/inspect.rs`, which reports chunk headers, record counts, CRC parity, and Tier 2 keys for developers and tests.
 
-    - [x] Emit metrics (chunk count, replay time, journal lag) and alerts for corruption using `ManifestReplayMetrics` (`rust/bop-rs/src/aof2/metrics/manifest_replay.rs`) wired through `Tier1InstanceState::replay_manifest_from_log` and validated by the crash/corruption scenarios in `rust/bop-rs/tests/aof2_manifest_log.rs`.
+    - [x] Emit metrics (chunk count, replay time, journal lag) and alerts for corruption using `ManifestReplayMetrics` (`crates/bop-aof/src/metrics/manifest_replay.rs`) wired through `Tier1InstanceState::replay_manifest_from_log` and validated by the crash/corruption scenarios in `crates/bop-aof/tests/aof2_manifest_log.rs`.
 
 - [x] **MAN4**: Update documentation (`aof2_manifest_log.md`, `aof2_store.md`) and integration tests to cover crash/restart with pending chunks and Tier 2 compaction (Tier2 retry flow captured in `manifest_tier2_retry_flow`, docs refreshed for operators).
 
@@ -238,7 +238,7 @@ Prove correctness and plan adoption.
 
 - [x] **VAL1**: Extend existing test harness to run under Tokio, covering append/read under eviction, Tier 2 outages, and recovery scenarios. (2025-10-05) — New `aof2_failure_tests.rs` suite drives metadata flush retries plus Tier 2 upload/delete/fetch retries using deterministic failure injection.
 
-- [x] **VAL2**: Add chaos/failure injection tests (disk full, S3 throttling, forced coordinator restart) ensuring APIs surface actionable errors. (2025-10-05) — Failure injection helpers live in `rust/bop-rs/src/aof2/test_support.rs`; the integration suite asserts metrics/log behaviour under forced errors.
+- [x] **VAL2**: Add chaos/failure injection tests (disk full, S3 throttling, forced coordinator restart) ensuring APIs surface actionable errors. (2025-10-05) — Failure injection helpers live in `crates/bop-aof/src/test_support.rs`; the integration suite asserts metrics/log behaviour under forced errors.
 
 - [ ] **VAL3**: Benchmark sync vs async append/read throughput to confirm back-pressure behaves as expected. Initial `aof2_append_metrics` Criterion bench added (2025-10-05); hydration load bench pending.
 
@@ -255,6 +255,8 @@ Prove correctness and plan adoption.
 - [ ] **CC3**: Audit error enums and map new failure types (Tier 1 compression failure, Tier 2 upload failure, hydration timeout) to actionable diagnostics.
 
 - [ ] **CC4**: Keep this plan in sync with implementation progress; include PR references when checking off tasks.
+
+
 
 
 
