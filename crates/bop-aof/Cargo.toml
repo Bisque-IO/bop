@@ -40,3 +40,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "aof_benchmarks"
 harness = false
+
+[lib]
+doctest = false

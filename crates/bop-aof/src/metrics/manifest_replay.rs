@@ -1,8 +1,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-/// Metrics names emitted during manifest replay. These constants keep the
-/// textual identifiers stable for dashboards and tests.
+/// Stable metric identifiers for manifest replay operations.
+///
+/// These constants ensure consistent naming across dashboards,
+/// monitoring systems, and test suites.
 pub const METRIC_MANIFEST_REPLAY_CHUNK_LAG_SECONDS: &str = "aof_manifest_replay_chunk_lag_seconds";
 pub const METRIC_MANIFEST_REPLAY_JOURNAL_LAG_BYTES: &str = "aof_manifest_replay_journal_lag_bytes";
 pub const METRIC_MANIFEST_REPLAY_CHUNK_COUNT: &str = "aof_manifest_replay_chunk_count";
@@ -10,19 +12,47 @@ pub const METRIC_MANIFEST_REPLAY_CORRUPTION_EVENTS: &str = "aof_manifest_replay_
 
 const MICROS_PER_SECOND: f64 = 1_000_000.0;
 
+/// Point-in-time snapshot of manifest replay metrics.
+///
+/// Captures recovery progress, data integrity status, and
+/// performance characteristics during manifest replay operations.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ManifestReplaySnapshot {
+    /// How far behind the chunks are (seconds)
     pub chunk_lag_seconds: f64,
+    /// Bytes of unprocessed manifest data
     pub journal_lag_bytes: u64,
+    /// Total number of chunks processed
     pub chunk_count: u64,
+    /// Number of corruption events detected
     pub corruption_events: u64,
 }
 
+/// Thread-safe metrics collection for manifest replay operations.
+///
+/// Tracks replay progress, latency, and data integrity issues
+/// during recovery and bootstrap operations using atomic counters.
+///
+/// ## Usage Pattern
+///
+/// ```ignore
+/// let metrics = ManifestReplayMetrics::new();
+/// metrics.record_chunk_count(processed_chunks);
+/// metrics.record_chunk_lag(lag_duration);
+///
+/// // Monitor progress
+/// let snapshot = metrics.snapshot();
+/// log_replay_progress(snapshot);
+/// ```
 #[derive(Default)]
 pub struct ManifestReplayMetrics {
+    /// Chunk processing lag in microseconds
     chunk_lag_micros: AtomicU64,
+    /// Unprocessed manifest journal bytes
     journal_lag_bytes: AtomicU64,
+    /// Total chunks processed during replay
     chunk_count: AtomicU64,
+    /// Count of corruption events detected
     corruption_events: AtomicU64,
 }
 

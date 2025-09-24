@@ -8,25 +8,46 @@ use crate::error::{AofError, AofResult};
 
 pub const RECORD_HEADER_LEN: usize = 40;
 
+/// Types of manifest records for tracking storage system events.
+///
+/// Each record type corresponds to a specific lifecycle event or
+/// operation within the tiered storage system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum RecordType {
+    /// Segment became active and ready for writes
     SegmentOpened = 0,
+    /// Segment sealed and made read-only
     SealSegment = 1,
+    /// Compression operation initiated
     CompressionStarted = 2,
+    /// Compression completed successfully
     CompressionDone = 3,
+    /// Compression operation failed
     CompressionFailed = 4,
+    /// Upload to Tier 2 storage initiated
     UploadStarted = 5,
+    /// Upload to Tier 2 storage completed
     UploadDone = 6,
+    /// Upload to Tier 2 storage failed
     UploadFailed = 7,
+    /// Deletion from Tier 2 storage queued
     Tier2DeleteQueued = 8,
+    /// Deletion from Tier 2 storage completed
     Tier2Deleted = 9,
+    /// Hydration from storage initiated
     HydrationStarted = 10,
+    /// Hydration completed successfully
     HydrationDone = 11,
+    /// Hydration operation failed
     HydrationFailed = 12,
+    /// Segment evicted from local cache
     LocalEvicted = 13,
+    /// Checkpoint marker for recovery
     SnapshotMarker = 14,
+    /// Custom application-defined event
     CustomEvent = 15,
+    /// Tier 1 cache state snapshot
     Tier1Snapshot = 16,
 }
 
@@ -63,6 +84,10 @@ impl TryFrom<u16> for RecordType {
 
 pub const SEAL_RESERVED_BYTES: usize = 8;
 
+/// Payload data for different manifest record types.
+///
+/// Each variant contains the specific data needed for that
+/// type of storage system event or operation.
 #[derive(Debug, Clone)]
 pub enum ManifestRecordPayload {
     SegmentOpened {
@@ -367,11 +392,19 @@ impl ManifestRecordPayload {
     }
 }
 
+/// Complete manifest record with header and payload data.
+///
+/// Represents a single event in the manifest log with timing,
+/// segment context, and operation-specific payload data.
 #[derive(Debug, Clone)]
 pub struct ManifestRecord {
+    /// Segment this record relates to
     pub segment_id: SegmentId,
+    /// Logical position in segment when event occurred
     pub logical_offset: u64,
+    /// Event timestamp in milliseconds
     pub timestamp_ms: u64,
+    /// Operation-specific payload data
     pub payload: ManifestRecordPayload,
 }
 
@@ -410,14 +443,25 @@ impl ManifestRecord {
     }
 }
 
+/// Binary header for manifest records on disk.
+///
+/// Fixed-size header containing metadata and integrity information
+/// for the variable-length payload that follows.
 #[derive(Debug, Clone)]
 pub struct ManifestRecordHeader {
+    /// Type of record/operation
     pub record_type: RecordType,
+    /// Reserved flags for future extensions
     pub flags: u16,
+    /// Length of payload data in bytes
     pub payload_len: u32,
+    /// Segment identifier
     pub segment_id: SegmentId,
+    /// Logical offset within segment
     pub logical_offset: u64,
+    /// Event timestamp in milliseconds
     pub timestamp_ms: u64,
+    /// CRC64 checksum of payload for integrity
     pub payload_crc64: u64,
 }
 

@@ -27,10 +27,32 @@ const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 const TIERED_SERVICE_IDLE_BACKOFF_MS: u64 = 10;
 
 /// Configures the capacity and behavior of each storage tier managed by the AOF.
+///
+/// The tiered storage system provides a hierarchy of caches with different
+/// performance and capacity characteristics. Each tier has specific roles:
+///
+/// - **Tier 0**: Fast in-memory cache for active segments
+/// - **Tier 1**: SSD-based cache for recently accessed segments
+/// - **Tier 2**: Remote storage for long-term persistence (optional)
+///
+/// # Example
+///
+/// ```rust
+/// use bop_aof::{TieredStoreConfig, Tier0CacheConfig, Tier1Config};
+///
+/// let config = TieredStoreConfig {
+///     tier0: Tier0CacheConfig::new(1 << 30, 256 << 20), // 1GB cluster, 256MB instance
+///     tier1: Tier1Config::new(8 << 30),                  // 8GB cache
+///     tier2: None,                                       // Disable remote tier
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct TieredStoreConfig {
+    /// Tier 0 (memory) cache configuration
     pub tier0: Tier0CacheConfig,
+    /// Tier 1 (SSD) cache configuration
     pub tier1: Tier1Config,
+    /// Tier 2 (remote) storage configuration (optional)
     pub tier2: Option<Tier2Config>,
 }
 
@@ -48,11 +70,39 @@ impl Default for TieredStoreConfig {
 }
 
 /// Top-level options for constructing an AofManager and its subsystems.
+///
+/// This configuration controls the shared infrastructure used by all AOF
+/// instances managed by a single AofManager, including the async runtime,
+/// tiered storage system, and flush pipeline behavior.
+///
+/// # Configuration Areas
+///
+/// - **Runtime**: Tokio runtime configuration for async operations
+/// - **Storage**: Tiered cache hierarchy settings
+/// - **Flush**: Durability and flush pipeline parameters
+///
+/// # Example
+///
+/// ```rust
+/// use bop_aof::{AofManagerConfig, TieredStoreConfig};
+/// use std::time::Duration;
+///
+/// let config = AofManagerConfig {
+///     runtime_worker_threads: Some(4),                    // 4 async worker threads
+///     runtime_shutdown_timeout: Duration::from_secs(10),  // 10 second shutdown timeout
+///     store: TieredStoreConfig::default(),               // Default tiered storage
+///     flush: Default::default(),                         // Default flush settings
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct AofManagerConfig {
+    /// Number of worker threads for the async runtime (None = automatic)
     pub runtime_worker_threads: Option<usize>,
+    /// Maximum time to wait for graceful runtime shutdown
     pub runtime_shutdown_timeout: Duration,
+    /// Flush pipeline configuration
     pub flush: FlushConfig,
+    /// Tiered storage system configuration
     pub store: TieredStoreConfig,
 }
 
@@ -85,34 +135,81 @@ impl AofManagerConfig {
 }
 
 /// Per-instance metadata tracked atomically for coordination and recovery.
+///
+/// Maintains critical per-instance state that needs to be shared across
+/// threads and persisted for recovery purposes. Uses atomic operations
+/// for lock-free access patterns.
+///
+/// # Thread Safety
+///
+/// All operations on this struct are lock-free and safe for concurrent
+/// access from multiple threads. The atomic fields ensure consistency
+/// without requiring explicit synchronization.
 #[derive(Debug)]
 pub struct InstanceMetadata {
+    /// Current external ID counter for the instance
     current_ext_id: AtomicU64,
 }
 
 impl InstanceMetadata {
+    /// Creates new instance metadata with default values.
     fn new() -> Self {
         Self {
             current_ext_id: AtomicU64::new(0),
         }
     }
 
+    /// Returns the current external ID for this instance.
+    ///
+    /// Uses acquire ordering to ensure visibility of any updates
+    /// made by other threads before the ID was set.
     pub fn current_ext_id(&self) -> u64 {
         self.current_ext_id.load(Ordering::Acquire)
     }
 
+    /// Sets the current external ID for this instance.
+    ///
+    /// Uses release ordering to ensure that any updates made
+    /// before this call are visible to subsequent acquire loads.
+    ///
+    /// # Arguments
+    ///
+    /// * `ext_id` - The new external ID value
     pub fn set_current_ext_id(&self, ext_id: u64) {
         self.current_ext_id.store(ext_id, Ordering::Release);
     }
 }
 
-#[derive(Default)]
 /// Registry that owns InstanceMetadata records keyed by InstanceId.
+///
+/// Provides centralized storage and access to per-instance metadata,
+/// enabling coordination across different subsystems. Uses reference
+/// counting to allow safe sharing of metadata between components.
+///
+/// # Thread Safety
+///
+/// This registry is thread-safe and supports concurrent access from
+/// multiple threads. Internal locking ensures consistency during
+/// registration and lookup operations.
+#[derive(Default)]
 pub struct CoordinatorMetadataRegistry {
+    /// Map of instance IDs to their metadata, protected by a mutex
     instances: Mutex<HashMap<InstanceId, Arc<InstanceMetadata>>>,
 }
 
 impl CoordinatorMetadataRegistry {
+    /// Registers an instance and returns its metadata.
+    ///
+    /// If the instance is already registered, returns the existing metadata.
+    /// Otherwise, creates new metadata and registers it.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_id` - The ID of the instance to register
+    ///
+    /// # Returns
+    ///
+    /// Reference-counted metadata for the instance
     pub fn register(&self, instance_id: InstanceId) -> Arc<InstanceMetadata> {
         let mut instances = self.instances.lock();
         Arc::clone(
@@ -122,11 +219,29 @@ impl CoordinatorMetadataRegistry {
         )
     }
 
+    /// Retrieves metadata for a registered instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_id` - The ID of the instance to look up
+    ///
+    /// # Returns
+    ///
+    /// Some(metadata) if the instance is registered, None otherwise
     pub fn get(&self, instance_id: InstanceId) -> Option<Arc<InstanceMetadata>> {
         let instances = self.instances.lock();
         instances.get(&instance_id).cloned()
     }
 
+    /// Removes an instance from the registry.
+    ///
+    /// After unregistration, the instance metadata will no longer be
+    /// accessible through this registry, though existing references
+    /// may continue to exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_id` - The ID of the instance to unregister
     pub fn unregister(&self, instance_id: InstanceId) {
         self.instances.lock().remove(&instance_id);
     }
@@ -195,6 +310,12 @@ impl TieredRuntime {
         self.shutdown_inner();
     }
 
+    /// Internal shutdown logic for graceful runtime termination.
+    ///
+    /// Cancels the shutdown token to signal all background tasks,
+    /// then attempts to shut down the Tokio runtime either via
+    /// background shutdown (if already within async context) or
+    /// with a timeout for synchronous contexts.
     fn shutdown_inner(&self) {
         if !self.shutdown_token.is_cancelled() {
             self.shutdown_token.cancel();
@@ -216,16 +337,72 @@ impl Drop for TieredRuntime {
     }
 }
 
-/// Boots the shared runtime, tiered caches, and flush pipeline used by Aof instances.
+/// Boots the shared runtime, tiered caches, and flush pipeline used by AOF instances.
+///
+/// The AofManager is the central orchestrator for the entire AOF system, managing:
+/// - Shared async runtime for all background tasks
+/// - Tiered storage coordinator and cache hierarchy
+/// - Background service tasks (eviction, hydration, etc.)
+/// - Coordinated shutdown and resource cleanup
+///
+/// # Lifecycle
+///
+/// 1. **Initialization**: Sets up runtime, storage tiers, and background services
+/// 2. **Operation**: Provides handles for creating and managing AOF instances
+/// 3. **Shutdown**: Coordinates graceful shutdown of all subsystems
+///
+/// # Resource Management
+///
+/// The manager owns expensive resources like the Tokio runtime and storage
+/// caches that are shared across all AOF instances. This amortizes setup
+/// costs and enables efficient resource utilization.
+///
+/// # Example
+///
+/// ```rust
+/// use bop_aof::{AofManager, AofManagerConfig};
+///
+/// // Create manager with default configuration
+/// let manager = AofManager::with_config(AofManagerConfig::default())?;
+/// let handle = manager.handle();
+///
+/// // Manager automatically shuts down when dropped
+/// ```
 pub struct AofManager {
+    /// Shared async runtime for all AOF operations
     runtime: Arc<TieredRuntime>,
+    /// Configuration for flush operations
     flush_config: FlushConfig,
+    /// Coordinator for the tiered storage system
     coordinator: Arc<TieredCoordinator>,
+    /// Cloneable handle for creating AOF instances
     handle: Arc<AofManagerHandle>,
+    /// Background task for tiered storage management
     tiered_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl AofManager {
+    /// Creates a new AofManager with the specified configuration.
+    ///
+    /// This is the primary constructor that sets up all shared infrastructure:
+    /// - Creates and configures the Tokio runtime
+    /// - Initializes the tiered storage system
+    /// - Starts background service tasks
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Configuration for the manager and its subsystems
+    ///
+    /// # Returns
+    ///
+    /// A configured AofManager ready to create AOF instances
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Runtime creation fails
+    /// - Storage tier initialization fails
+    /// - Background task spawning fails
     pub fn with_config(config: AofManagerConfig) -> AofResult<Self> {
         let AofManagerConfig {
             runtime_worker_threads,
@@ -250,6 +427,14 @@ impl AofManager {
         Self::from_parts(Arc::new(runtime), flush, store)
     }
 
+    /// Constructs AofManager from pre-configured components.
+    ///
+    /// Separates construction concerns by accepting already-configured
+    /// runtime, flush, and store components. This enables dependency
+    /// injection and simplifies testing scenarios.
+    ///
+    /// Initializes the tiered cache hierarchy, flush pipeline, and
+    /// background coordination services.
     fn from_parts(
         runtime: Arc<TieredRuntime>,
         flush: FlushConfig,
@@ -291,6 +476,13 @@ impl AofManager {
         })
     }
 
+    /// Spawns the background service for tiered storage management.
+    ///
+    /// Creates an async task that coordinates segment lifecycle operations
+    /// across the tiered storage hierarchy, including compression, upload,
+    /// hydration, and eviction processes.
+    ///
+    /// The service runs until the runtime shutdown token is cancelled.
     fn spawn_tiered_service(
         runtime: &Arc<TieredRuntime>,
         coordinator: Arc<TieredCoordinator>,

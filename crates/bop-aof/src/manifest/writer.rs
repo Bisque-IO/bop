@@ -12,11 +12,18 @@ use crate::error::{AofError, AofResult};
 const DEFAULT_GROWTH_STEP: usize = 64 * 1024; // 64 KiB
 
 /// Configuration for manifest log writers.
+///
+/// Controls chunking, rotation, and growth behavior for
+/// the manifest write-ahead log.
 #[derive(Debug, Clone)]
 pub struct ManifestLogWriterConfig {
+    /// Initial chunk capacity in bytes
     pub chunk_capacity_bytes: usize,
+    /// How often to rotate to new chunks
     pub rotation_period: Duration,
+    /// Growth increment when chunks need expansion
     pub growth_step_bytes: usize,
+    /// Whether manifest logging is enabled
     pub enabled: bool,
 }
 
@@ -31,20 +38,46 @@ impl Default for ManifestLogWriterConfig {
     }
 }
 
+/// Handle to a sealed (committed) chunk.
+///
+/// Provides metadata about a chunk that has been durably
+/// committed to storage with integrity verification.
 #[derive(Debug, Clone)]
 pub struct SealedChunkHandle {
+    /// Sequential chunk identifier
     pub chunk_index: u64,
+    /// Number of committed bytes
     pub committed_len: usize,
+    /// Integrity checksum of committed data
     pub chunk_crc64: u64,
+    /// Filesystem path to chunk file
     pub path: PathBuf,
 }
 
 /// RAII wrapper around an mmap-backed chunk file.
+///
+/// Provides efficient append operations with automatic growth
+/// and atomic commit semantics for durability.
+///
+/// ## Usage Pattern
+///
+/// ```ignore
+/// let mut chunk = ChunkHandle::create(dir, index, base_record, capacity)?;
+/// chunk.append_record(record1)?;
+/// chunk.append_record(record2)?;
+/// chunk.commit()?; // Atomic durability
+/// let sealed = chunk.seal()?; // Convert to sealed handle
+/// ```
 pub struct ChunkHandle {
+    /// Underlying file handle
     file: File,
+    /// Memory-mapped view for efficient access
     mmap: MmapMut,
+    /// Chunk metadata and state
     header: ChunkHeader,
+    /// Current file capacity in bytes
     capacity: usize,
+    /// Filesystem path to chunk file
     path: PathBuf,
 }
 
@@ -165,21 +198,44 @@ impl ChunkHandle {
     }
 }
 
+/// Position reference for a record within a chunk.
+///
+/// Provides addressing information for records after they
+/// have been appended to the manifest log.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkCursor {
+    /// Which chunk contains the record
     pub chunk_index: u64,
+    /// Byte offset within the chunk
     pub offset: usize,
+    /// Length of the record in bytes
     pub len: usize,
 }
 
-/// Chunked manifest writer that matches the MAN1 scaffolding plan.
+/// Chunked manifest writer providing durable metadata logging.
+///
+/// Manages chunk rotation, growth, and atomic commits for the
+/// manifest write-ahead log. Ensures durability through fsync
+/// and integrity verification.
+///
+/// ## Threading
+///
+/// Not thread-safe. Should be used from a single thread or
+/// protected by external synchronization.
 pub struct ManifestLogWriter {
+    /// Directory containing chunk files
     dir: PathBuf,
+    /// Writer configuration
     config: ManifestLogWriterConfig,
+    /// Next chunk index to allocate
     next_chunk_index: u64,
+    /// Next record sequence number
     next_record_ordinal: u64,
+    /// Last time chunks were committed
     last_commit: Instant,
+    /// Currently active chunk for appends
     active: Option<ChunkHandle>,
+    /// History of sealed chunks
     sealed_chunks: Vec<SealedChunkHandle>,
 }
 

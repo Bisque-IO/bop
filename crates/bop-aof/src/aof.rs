@@ -52,6 +52,13 @@ struct SegmentPreallocator {
 }
 
 impl SegmentPreallocator {
+    /// Creates new segment preallocator with concurrency limits.
+    ///
+    /// Establishes a semaphore-based system for controlling concurrent
+    /// segment preallocation operations. This prevents resource exhaustion
+    /// while enabling background preparation of segment files.
+    ///
+    /// Performance optimization to avoid blocking appends on file creation.
     fn new(handle: Handle, max_concurrent: usize) -> Arc<Self> {
         Arc::new(Self {
             handle,
@@ -74,6 +81,14 @@ impl SegmentPreallocator {
         self.inflight() > 0
     }
 
+    /// Schedules background segment preallocation job.
+    ///
+    /// Spawns an async task to create segment files in the background,
+    /// avoiding blocking the main append path. Uses semaphore to limit
+    /// concurrent preallocation operations.
+    ///
+    /// Async preallocation improves append latency by preparing segments
+    /// before they're needed.
     fn schedule(self: &Arc<Self>, job: PreallocationJob) {
         self.inflight.fetch_add(1, Ordering::AcqRel);
         let worker = Arc::clone(self);
@@ -152,6 +167,13 @@ impl PreallocationJob {
 }
 
 impl AppendState {
+    /// Creates new append state tracker.
+    ///
+    /// Initializes atomic counters for tracking append operations,
+    /// record counts, and unflushed data. The state coordinates
+    /// between append operations and flush pipeline.
+    ///
+    /// Core state management for append operations and durability tracking.
     fn new(metrics: Arc<FlushMetrics>) -> Self {
         let state = Self {
             tail: ArcSwapOption::from(None),
@@ -172,6 +194,11 @@ impl AppendState {
         self.unflushed_bytes.load(Ordering::Acquire)
     }
 
+    /// Atomically adds to unflushed byte counter.
+    ///
+    /// Tracks data that has been written to segments but not yet
+    /// durably persisted to storage. Updates flush metrics for
+    /// backpressure monitoring and system observability.
     fn add_unflushed(&self, bytes: u64) {
         if bytes > 0 {
             let updated = self.unflushed_bytes.fetch_add(bytes, Ordering::AcqRel) + bytes;
@@ -179,6 +206,11 @@ impl AppendState {
         }
     }
 
+    /// Atomically subtracts from unflushed byte counter.
+    ///
+    /// Called when data is successfully flushed to storage,
+    /// reducing the backlog counter and updating metrics.
+    /// Uses saturating subtraction to handle race conditions.
     fn sub_unflushed(&self, bytes: u64) {
         if bytes > 0 {
             let previous = self.unflushed_bytes.fetch_sub(bytes, Ordering::AcqRel);
@@ -193,12 +225,32 @@ impl AppendState {
     }
 }
 
+/// Handle for a successful admission into the append pipeline.
+///
+/// Represents a reserved slot for an append operation that has passed admission
+/// control. Contains the admission guard needed to access the segment and tracks
+/// the previous offset for ordering guarantees.
+///
+/// # Lifecycle
+///
+/// 1. **Reservation**: Created when admission control grants access
+/// 2. **Usage**: Used to create an AppendReservation for actual writing
+/// 3. **Completion**: Converted to guard or dropped to release resources
 pub struct AppendReserve {
+    /// Admission control guard granting access to the active segment
     guard: AdmissionGuard,
+    /// Previous offset in the segment for ordering
     previous_offset: u64,
 }
 
 impl AppendReserve {
+    /// Creates new append reserve with admission guard.
+    ///
+    /// Combines admission control authorization with offset tracking
+    /// for zero-copy append operations. The guard ensures exclusive
+    /// access to the active segment.
+    ///
+    /// Foundation of the zero-copy append reservation system.
     fn new(guard: AdmissionGuard, previous_offset: u64) -> Self {
         Self {
             guard,
@@ -223,8 +275,26 @@ impl AppendReserve {
     }
 }
 
+/// Zero-copy reservation for writing data to a segment.
+///
+/// Combines an admission reservation with a segment-level space reservation,
+/// enabling efficient zero-copy writes. The reservation guarantees exclusive
+/// access to a specific region of segment memory.
+///
+/// # Zero-Copy Design
+///
+/// The reservation provides direct access to the segment's memory-mapped region,
+/// allowing data to be written without intermediate copying. This is critical
+/// for high-performance append operations.
+///
+/// # Resource Management
+///
+/// Both the admission guard and segment reservation must be properly released
+/// to avoid resource leaks. The reservation is consumed when the write completes.
 pub struct AppendReservation {
+    /// Admission control reservation (consumed during use)
     reserve: Option<AppendReserve>,
+    /// Segment space reservation for zero-copy writing
     reservation: Option<SegmentReservation>,
 }
 
@@ -279,6 +349,13 @@ struct SegmentCatalog {
 }
 
 impl SegmentCatalog {
+    /// Adds resident segment to catalog.
+    ///
+    /// Maintains both lookup table and insertion order for segment
+    /// management operations. If segment already exists, updates
+    /// the entry without changing order.
+    ///
+    /// Core segment lifecycle tracking and access coordination.
     fn insert(&mut self, resident: ResidentSegment) {
         let segment_id = resident.segment().id();
         if self.entries.insert(segment_id, resident).is_none() {
@@ -331,6 +408,12 @@ impl SegmentQueue {
         self.members.is_empty()
     }
 
+    /// Adds segment to end of processing queue.
+    ///
+    /// Prevents duplicate entries by checking membership before insertion.
+    /// Returns true if segment was newly added, false if already present.
+    ///
+    /// Core work queue management for background processing coordination.
     fn push_back(&mut self, instance_id: InstanceId, segment_id: SegmentId) -> bool {
         let key = SegmentQueueKey::new(instance_id, segment_id);
         if self.members.insert(key) {
@@ -416,6 +499,13 @@ impl RolloverTracker {
         }
     }
 
+    /// Polls for segments ready for rollover processing.
+    ///
+    /// Scans pending rollovers to find the next segment ready for
+    /// transition. Cleans up stale entries and returns the segment
+    /// ID and rollover signal for coordination.
+    ///
+    /// Core segment lifecycle coordination during transitions.
     fn poll_pending(&mut self) -> Option<(SegmentId, Arc<RolloverSignal>)> {
         while let Some(&segment_id) = self.pending.front() {
             if !self.pending_set.contains(&segment_id) {
@@ -528,26 +618,62 @@ impl AofManagement {
 }
 
 /// Lightweight snapshot of a resident segment tracked in the in-memory catalog.
+///
+/// Provides essential metadata about a segment without requiring access to the
+/// full segment structure. Used for efficient lookups and status reporting.
+///
+/// # Fields
+///
+/// - **segment_id**: Unique identifier for the segment
+/// - **sealed**: Whether the segment is finalized (read-only)
+/// - **base_offset**: Starting byte offset for this segment in the global log
+/// - **base_record_count**: Number of records in all preceding segments
+/// - **current_size**: Current size in bytes including headers
+/// - **record_count**: Total number of records in this segment
 #[derive(Debug, Clone)]
 pub struct SegmentCatalogEntry {
+    /// Unique segment identifier
     pub segment_id: SegmentId,
+    /// True if segment is sealed (read-only)
     pub sealed: bool,
+    /// Starting byte offset in the global log
     pub base_offset: u64,
+    /// Cumulative record count from preceding segments
     pub base_record_count: u64,
+    /// Current segment size in bytes
     pub current_size: u32,
+    /// Total records in this segment
     pub record_count: u64,
 }
 
 /// Detailed status for a segment, used for observability and tooling.
+///
+/// Extends SegmentCatalogEntry with additional durability and lifecycle
+/// information. Particularly useful for monitoring, debugging, and
+/// administrative tooling.
+///
+/// # Additional Context
+///
+/// Unlike SegmentCatalogEntry, this includes durability tracking (durable_size),
+/// creation timestamps, and capacity limits. The extra detail comes at the cost
+/// of requiring access to the actual segment structure.
 #[derive(Debug, Clone)]
 pub struct SegmentStatusSnapshot {
+    /// Unique segment identifier
     pub segment_id: SegmentId,
+    /// Starting byte offset in the global log
     pub base_offset: u64,
+    /// Cumulative record count from preceding segments
     pub base_record_count: u64,
+    /// Current segment size in bytes
     pub current_size: u32,
+    /// Bytes confirmed as durable to storage
     pub durable_size: u32,
+    /// True if segment is sealed (read-only)
     pub sealed: bool,
+    /// Segment creation timestamp (Unix epoch)
     pub created_at: i64,
+    /// Maximum allowed size for this segment
     pub max_size: u32,
 }
 
@@ -567,11 +693,26 @@ impl SegmentStatusSnapshot {
 }
 
 /// High-level events describing state transitions for the writable tail segment.
+///
+/// These events enable tail followers and other consumers to track the lifecycle
+/// of the active segment without polling. Each event represents a significant
+/// state change that may affect read or write operations.
+///
+/// # Event Semantics
+///
+/// - **None**: No recent activity or initial state
+/// - **Activated**: A new segment became the active tail
+/// - **Sealing**: The current tail segment is being finalized
+/// - **Sealed**: The tail segment finalization completed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TailEvent {
+    /// No recent tail activity
     None,
+    /// New segment became active for writing
     Activated(SegmentId),
+    /// Current tail segment is being sealed
     Sealing(SegmentId),
+    /// Tail segment sealing completed
     Sealed(SegmentId),
 }
 
@@ -582,10 +723,24 @@ impl Default for TailEvent {
 }
 
 /// Lightweight snapshot of the active tail segment shared with followers.
+///
+/// Provides the minimal information needed by tail followers to track the
+/// current write head of the AOF. Designed for efficient broadcast via
+/// watch channels without copying large amounts of data.
+///
+/// # Usage
+///
+/// Tail followers use this state to determine:
+/// - Which segment is currently active for writes
+/// - How much data has been durably written
+/// - Whether the segment has been sealed (no more writes)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TailSegmentState {
+    /// ID of the active tail segment
     pub segment_id: SegmentId,
+    /// Bytes confirmed as durable to storage
     pub durable_size: u32,
+    /// True if segment is sealed (no more writes)
     pub sealed: bool,
 }
 
@@ -600,10 +755,30 @@ impl TailSegmentState {
 }
 
 /// Aggregate tail state broadcast to followers via the watch channel.
+///
+/// Combines the current tail segment state with event information and a
+/// version counter for change detection. This is the primary mechanism
+/// for coordinating between writers and tail followers.
+///
+/// # Versioning
+///
+/// The version field increments with each state change, allowing followers
+/// to detect updates efficiently. Version zero indicates initial state.
+///
+/// # Coordination
+///
+/// The combination of segment state and events enables followers to:
+/// - Track write progress in real-time
+/// - Detect segment transitions
+/// - Handle rollover coordination
+/// - Implement backpressure when needed
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TailState {
+    /// Monotonic version counter for change detection
     pub version: u64,
+    /// Current tail segment state (None if no active segment)
     pub tail: Option<TailSegmentState>,
+    /// Most recent tail lifecycle event
     pub last_event: TailEvent,
 }
 
@@ -637,27 +812,118 @@ impl TailSignal {
 }
 
 /// Append-only log backed by the tiered store and asynchronous flush pipeline.
+///
+/// The Aof struct is the primary interface for append-only log operations,
+/// coordinating between multiple subsystems to provide high-performance,
+/// durable write operations with multi-tier caching.
+///
+/// # Architecture Overview
+///
+/// - **Tiered Storage**: Integrates with the 3-tier cache hierarchy
+/// - **Flush Pipeline**: Asynchronous durability with configurable guarantees
+/// - **Segment Management**: Automatic rollover and preallocation
+/// - **Tail Coordination**: Real-time state sharing with followers
+/// - **Admission Control**: Backpressure management for resource protection
+///
+/// # Lifecycle
+///
+/// 1. **Creation**: Registers with shared manager and initializes subsystems
+/// 2. **Recovery**: Loads existing segments and rebuilds in-memory state
+/// 3. **Operation**: Handles append requests with full coordination
+/// 4. **Shutdown**: Graceful cleanup with pending operation completion
+///
+/// # Thread Safety
+///
+/// All public methods are safe for concurrent use. Internal synchronization
+/// uses a combination of atomic operations, channels, and strategic locking.
+///
+/// # Example
+///
+/// ```rust
+/// use bop_aof::{Aof, AofConfig, AofManager, AofManagerConfig};
+///
+/// // Create shared manager
+/// let manager = AofManager::with_config(AofManagerConfig::default())?;
+/// let handle = manager.handle();
+///
+/// // Create AOF instance
+/// let config = AofConfig::default();
+/// let aof = Aof::new(handle, config)?;
+///
+/// // Append data
+/// let record_id = aof.append(b"hello world").await?;
+/// ```
 pub struct Aof {
+    /// Handle to shared manager and runtime
     manager: Arc<AofManagerHandle>,
+    /// Instance configuration (normalized)
     config: AofConfig,
+    /// File system layout for this instance
     layout: Layout,
+    /// Tiered storage instance handle
     tier: TieredInstance,
+    /// Unique identifier for this AOF instance
     instance_id: InstanceId,
+    /// Coordination notifiers from tiered storage
     notifiers: Arc<TieredCoordinatorNotifiers>,
+    /// Admission control notification channel
     admission_notify: Arc<Notify>,
+    /// Segment rollover notification channel
     rollover_notify: Arc<Notify>,
+    /// Append operation state and coordination
     append: AppendState,
+    /// Segment catalog and lifecycle management
     management: Mutex<AofManagement>,
+    /// Flush pipeline metrics
     metrics: Arc<FlushMetrics>,
+    /// Flag indicating flush pipeline failures
     flush_failed: Arc<AtomicBool>,
+    /// Background flush task manager
     flush: Arc<FlushManager>,
+    /// Optional segment preallocation worker
     preallocator: Option<Arc<SegmentPreallocator>>,
+    /// Instance metadata for coordination
     metadata: Arc<InstanceMetadata>,
+    /// Tail state broadcast system
     tail_signal: TailSignal,
 }
 
 impl Aof {
     /// Opens or recovers an AOF instance backed by the shared manager runtime.
+    ///
+    /// This constructor handles both new AOF creation and recovery from existing
+    /// data. It performs complete initialization including:
+    ///
+    /// - Filesystem layout creation and validation
+    /// - Tiered storage registration and recovery
+    /// - Segment catalog reconstruction
+    /// - Flush pipeline initialization
+    /// - Background task startup
+    ///
+    /// # Recovery Process
+    ///
+    /// For existing AOFs, recovery involves:
+    /// 1. Scanning segment directory for existing files
+    /// 2. Loading segment metadata and building catalog
+    /// 3. Reconstructing append state from the tail segment
+    /// 4. Resuming background flush operations
+    ///
+    /// # Arguments
+    ///
+    /// * `manager` - Shared manager handle providing runtime and storage
+    /// * `config` - AOF configuration (will be normalized)
+    ///
+    /// # Returns
+    ///
+    /// A fully initialized AOF instance ready for operations
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Filesystem operations fail (permissions, disk full, etc.)
+    /// - Data corruption is detected during recovery
+    /// - Tiered storage registration fails
+    /// - Background task initialization fails
     pub fn new(manager: Arc<AofManagerHandle>, config: AofConfig) -> AofResult<Self> {
         let normalized = config.normalized();
         let layout = Layout::new(&normalized);
@@ -720,10 +986,18 @@ impl Aof {
         Ok(instance)
     }
 
+    /// Returns the configuration used to initialize this AOF instance.
+    ///
+    /// Provides access to retention policies, compression settings,
+    /// and storage tier configurations.
     pub fn config(&self) -> &AofConfig {
         &self.config
     }
 
+    /// Returns the filesystem layout manager.
+    ///
+    /// Provides access to directory paths, file naming conventions,
+    /// and storage organization details.
     pub fn layout(&self) -> &Layout {
         &self.layout
     }
@@ -1142,6 +1416,11 @@ impl Aof {
         }
     }
 
+    /// Seals the currently active writable segment, transitioning it to read-only.
+    ///
+    /// Returns the segment ID if a segment was sealed, or None if no active
+    /// segment exists. May return backpressure errors if rollover coordination
+    /// is still in progress.
     pub fn seal_active(&self) -> AofResult<Option<SegmentId>> {
         if let Some(segment_id) = self.take_ready_rollover() {
             return Ok(Some(segment_id));
@@ -1213,6 +1492,10 @@ impl Aof {
         }
     }
 
+    /// Forces a rollover to create a new active segment.
+    ///
+    /// Seals the current segment (if any) and immediately creates
+    /// a new writable segment. Returns the new segment reference.
     pub fn force_rollover(&self) -> AofResult<Arc<Segment>> {
         let _ = self.seal_active()?;
         let mut state = self.management.lock();
@@ -1225,10 +1508,18 @@ impl Aof {
         }
     }
 
+    /// Blocks until the specified record has been durably flushed to storage.
+    ///
+    /// Ensures data durability by waiting for the flush pipeline to complete
+    /// persistence of the target record and all preceding data.
     pub fn wait_for_flush(&self, record_id: RecordId) -> AofResult<()> {
         self.block_on_flush(record_id)
     }
 
+    /// Forces a flush operation and waits for the record to be durable.
+    ///
+    /// Similar to wait_for_flush but actively triggers flush scheduling
+    /// if the target record is not yet durable.
     pub fn flush_until(&self, record_id: RecordId) -> AofResult<()> {
         self.block_on_flush(record_id)
     }
@@ -1258,6 +1549,10 @@ impl Aof {
         Ok(())
     }
 
+    /// Callback invoked when a segment finalization operation completes.
+    ///
+    /// Updates internal state to reflect that the segment has been
+    /// successfully processed by the tiered storage coordinator.
     pub fn segment_finalized(&self, segment_id: SegmentId) -> AofResult<()> {
         let mut state = self.management.lock();
         if !state.remove_pending(segment_id) {

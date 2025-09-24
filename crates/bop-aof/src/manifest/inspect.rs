@@ -8,16 +8,28 @@ use super::chunk::{CHUNK_HEADER_LEN, ChunkHeader, crc64};
 use super::record::{ManifestRecordHeader, ManifestRecordPayload, RECORD_HEADER_LEN};
 
 /// Summary of a manifest chunk on disk.
+///
+/// Provides detailed information about chunk health,
+/// integrity, and content for debugging and verification.
 #[derive(Debug, Clone)]
 pub struct ChunkSummary {
+    /// Sequential chunk identifier
     pub chunk_index: u64,
+    /// First record index in this chunk
     pub base_record: u64,
+    /// Current tail position for appends
     pub tail_offset: usize,
+    /// Length of committed (durable) data
     pub committed_len: usize,
+    /// Number of records found in chunk
     pub record_count: usize,
+    /// Stored CRC64 checksum
     pub chunk_crc64: u64,
+    /// Computed CRC64 checksum for verification
     pub computed_crc64: u64,
+    /// Number of records with CRC failures
     pub payload_crc_failures: usize,
+    /// Bytes past committed boundary
     pub uncommitted_bytes: u64,
 }
 
@@ -28,15 +40,36 @@ impl ChunkSummary {
 }
 
 /// Aggregated inspection details for a manifest stream.
+///
+/// Contains summary information across all chunks in a stream
+/// for comprehensive health assessment.
 #[derive(Debug, Clone, Default)]
 pub struct ManifestInspection {
+    /// Stream identifier
     pub stream_id: u64,
+    /// Summary of each chunk in the stream
     pub chunks: Vec<ChunkSummary>,
+    /// All Tier 2 object keys referenced
     pub tier2_keys: Vec<String>,
+    /// Total records across all chunks
     pub total_records: usize,
 }
 
-/// Convenience wrapper for inspecting manifest chunk files in developer tooling/tests.
+/// Convenience wrapper for inspecting manifest chunk files.
+///
+/// Provides debugging and verification tools for manifest streams,
+/// useful in developer tooling, tests, and operational debugging.
+///
+/// ## Usage Pattern
+///
+/// ```ignore
+/// let inspection = ManifestInspector::inspect_stream(base_dir, stream_id)?;
+/// for chunk in &inspection.chunks {
+///     if !chunk.crc_ok() {
+///         eprintln!("Chunk {} has integrity issues", chunk.chunk_index);
+///     }
+/// }
+/// ```
 pub struct ManifestInspector;
 
 impl ManifestInspector {

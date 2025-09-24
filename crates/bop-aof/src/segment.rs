@@ -18,11 +18,31 @@ use super::error::{AofError, AofResult};
 use super::flush::SegmentFlushState;
 use super::fs::create_fixed_size_file;
 
+/// Size of the segment header in bytes.
+///
+/// The header contains metadata like segment ID, version, and base offsets.
+/// Fixed size enables efficient parsing and validation.
 pub(crate) const SEGMENT_HEADER_SIZE: u32 = 64;
+
+/// Size of the segment footer in bytes.
+///
+/// The footer contains finalization metadata like checksums and record counts.
+/// Written when the segment is sealed.
 pub(crate) const SEGMENT_FOOTER_SIZE: u32 = 96;
+
+/// Required alignment for records within segments (8 bytes).
+///
+/// Ensures efficient access and prevents alignment issues on various
+/// architectures. All records are padded to this boundary.
 const RECORD_ALIGNMENT: u32 = 8;
+
+/// Reserved bytes in the segment footer for future extensions.
 const FOOTER_RESERVED_BYTES: usize = 16;
 
+/// Aligns a value up to the specified alignment boundary.
+///
+/// Used to ensure records are properly aligned within segments for
+/// optimal memory access patterns and cross-platform compatibility.
 #[inline]
 const fn align_up(value: u32, alignment: u32) -> u32 {
     if alignment == 0 {
@@ -31,32 +51,99 @@ const fn align_up(value: u32, alignment: u32) -> u32 {
     let mask = alignment - 1;
     (value + mask) & !mask
 }
+
+/// Size of each record header in bytes.
+///
+/// Record headers contain metadata like length, type, and checksum.
+/// Consistent size enables efficient scanning and parsing.
 pub(crate) const RECORD_HEADER_SIZE: u32 = 24;
+
+/// Magic bytes identifying AOF2 format segments ("AOF2").
+///
+/// Used for format validation and corruption detection.
 const SEGMENT_MAGIC: u32 = 0x414F_4632; // "AOF2"
+
+/// Current segment format version.
+///
+/// Incremented when format changes require migration or compatibility handling.
 const SEGMENT_VERSION: u16 = 2;
+
+/// Magic bytes for segment footer identification ("FOOT").
+///
+/// Enables footer validation and helps detect truncation or corruption.
 const SEGMENT_FOOTER_MAGIC: u32 = 0x464F_4F54; // "FOOT"
 
+/// Status of a segment's lifecycle.
+///
+/// Segments progress through these states during their lifetime, affecting
+/// what operations are permitted and how they're handled by the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SegmentStatus {
+    /// Segment is actively accepting writes.
+    ///
+    /// Only one segment per AOF instance can be active at a time.
+    /// Active segments are not yet durable and may be incomplete.
     Active,
+
+    /// Segment is sealed and finalized.
+    ///
+    /// No more writes are accepted. The segment footer has been written
+    /// and the segment is eligible for compression and archiving.
     Finalized,
 }
 
+/// Result of a segment append operation.
+///
+/// Contains information about where the record was written and the
+/// resulting segment state. Used for updating indexes and managing
+/// segment lifecycle.
 #[derive(Debug, Clone, Copy)]
 pub struct SegmentAppendResult {
+    /// Offset within the segment where the record was written
     pub segment_offset: u32,
+    /// Global log offset after this append
     pub last_offset: u64,
+    /// New logical size of the segment
     pub logical_size: u32,
+    /// Whether the segment is now at capacity
     pub is_full: bool,
 }
 
+/// Zero-copy reservation for writing data to a specific segment location.
+///
+/// Provides exclusive access to a region of segment memory for efficient
+/// writing without intermediate copies. The reservation must be completed
+/// to finalize the write operation.
+///
+/// # Zero-Copy Design
+///
+/// The reservation exposes the raw memory-mapped region where data should
+/// be written, eliminating copy overhead for high-throughput scenarios.
+///
+/// # Resource Management
+///
+/// Reservations must be completed with `complete()` to:
+/// - Update segment metadata and size tracking
+/// - Enable flush operations to proceed
+/// - Free the reserved space for other operations
+///
+/// # Safety
+///
+/// The reservation provides unsafe access to memory-mapped regions.
+/// Callers must ensure data is written correctly and completely.
 #[must_use = "call complete() to finalize the reserved append"]
 pub struct SegmentReservation {
+    /// Reference to the segment being written
     segment: Arc<Segment>,
+    /// Starting offset for the reservation
     offset: u32,
+    /// Length of the payload data
     payload_len: u32,
+    /// Total entry length including headers
     entry_len: u32,
+    /// Padded length for alignment
     padded_len: u32,
+    /// New segment size after completion
     next_size: u32,
     timestamp: u64,
     completed: bool,
@@ -243,24 +330,75 @@ impl SegmentScan {
     }
 }
 
+/// A memory-mapped segment file containing records and metadata.
+///
+/// Segments are the fundamental storage unit in the AOF, representing a
+/// contiguous region of the log. Each segment is memory-mapped for efficient
+/// access and contains both user records and system metadata.
+///
+/// # Architecture
+///
+/// ```text
+/// ┌─────────────┬──────────────────────┬─────────────┐
+/// │   Header    │       Records        │   Footer    │
+/// │   (64B)     │    (variable)        │   (96B)     │
+/// └─────────────┴──────────────────────┴─────────────┘
+/// ```
+///
+/// # Thread Safety
+///
+/// Segments use atomic operations for size tracking, record counts, and state
+/// management. Multiple threads can safely read and write to different regions
+/// of the segment simultaneously.
+///
+/// # Lifecycle States
+///
+/// 1. **Active**: Accepting writes, header written, no footer
+/// 2. **Sealing**: Being finalized, no new writes accepted
+/// 3. **Finalized**: Read-only, footer written, eligible for caching
+///
+/// # Memory Mapping
+///
+/// Segments are backed by memory-mapped files for:
+/// - Zero-copy access to record data
+/// - Efficient I/O through page cache
+/// - Automatic dirty page writeback
+/// - Cross-process sharing capabilities
 pub struct Segment {
+    /// Segment index within the AOF instance
     index: u32,
+    /// Starting byte offset in the global log
     base_offset: u64,
+    /// Cumulative record count from preceding segments
     base_record_count: u64,
+    /// Maximum allowed size for this segment
     max_size: u32,
+    /// Creation timestamp (Unix epoch)
     created_at: i64,
+    /// External ID for coordination (atomic)
     ext_id: AtomicU64,
 
+    /// Whether segment header has been written
     header_written: AtomicBool,
+    /// Whether segment is sealed (read-only)
     sealed: AtomicBool,
+    /// Number of records in this segment
     record_count: AtomicU32,
+    /// Current logical size including header
     size: AtomicU32,
+    /// Bytes confirmed as durable to storage
     durable_size: AtomicU32,
+    /// Timestamp of most recent record
     last_timestamp: AtomicU64,
+    /// Offset of the last record within segment
     last_record_offset: AtomicU32,
 
+    /// Memory-mapped file data
     data: Arc<SegmentData>,
+    /// Flush coordination state
     flush_state: Arc<SegmentFlushState>,
+
+    /// Test-only flush failure injection counter
     #[cfg(test)]
     flush_fail_injections: AtomicU32,
 }
@@ -479,12 +617,21 @@ impl Segment {
         })
     }
 
+    /// Calculates the maximum usable space in segment excluding footer space.
+    ///
+    /// Returns the highest offset where data can be written, accounting for
+    /// the reserved footer space that contains segment metadata and checksums.
     #[inline]
     fn usable_limit(&self) -> u32 {
         debug_assert!(self.max_size > SEGMENT_FOOTER_SIZE);
         self.max_size - SEGMENT_FOOTER_SIZE
     }
 
+    /// Determines maximum payload size that can fit in segment.
+    ///
+    /// Calculates the theoretical maximum payload size by subtracting
+    /// header space from the usable data area. Actual capacity may be
+    /// lower due to record headers and alignment requirements.
     #[inline]
     fn max_payload_capacity(&self) -> u32 {
         self.usable_limit().saturating_sub(SEGMENT_HEADER_SIZE)
@@ -723,6 +870,13 @@ impl Segment {
         self.ext_id.load(Ordering::Acquire)
     }
 
+    /// Computes checksum over all payloads in segment up to specified limit.
+    ///
+    /// Walks through all records in the segment, extracting payload data
+    /// and computing a cumulative CRC64 checksum. Used during segment
+    /// sealing to create integrity verification data.
+    ///
+    /// Stops at the first zero-length record or when the limit is reached.
     fn compute_payload_checksum(&self, limit: usize) -> AofResult<u32> {
         let usable_limit = self.usable_limit() as usize;
         let boundary = limit.min(usable_limit);
@@ -949,6 +1103,14 @@ impl Segment {
         })
     }
 
+    /// Atomically writes segment header if not already written.
+    ///
+    /// Uses compare-and-swap to ensure header is written exactly once,
+    /// even under concurrent access. This is essential initialization
+    /// logic for segment lifecycle management.
+    ///
+    /// Header contains metadata like segment index, size limits, timestamps,
+    /// and base offsets needed for recovery and validation.
     fn ensure_header_written(&self) -> AofResult<()> {
         if self.header_written.load(Ordering::Acquire) {
             return Ok(());
@@ -1259,6 +1421,13 @@ unsafe impl Send for SegmentData {}
 unsafe impl Sync for SegmentData {}
 
 impl SegmentData {
+    /// Creates new memory-mapped segment file with specified size.
+    ///
+    /// Allocates a fixed-size file on disk and creates a mutable memory
+    /// mapping for zero-copy read/write operations. The file is initially
+    /// zeroed and ready for record appends.
+    ///
+    /// Returns error if file cannot be created or memory mapping fails.
     fn create(path: &Path, max_size: u32) -> AofResult<Self> {
         let file = create_fixed_size_file(path, max_size as u64)?;
         let mut mmap = unsafe { MmapMut::map_mut(&file).map_err(AofError::from)? };
@@ -1329,6 +1498,13 @@ impl SegmentData {
         })
     }
 
+    /// Writes data to memory-mapped segment at specified offset.
+    ///
+    /// Performs bounds checking and ensures segment is writable before
+    /// copying data directly to the memory-mapped region. This is the
+    /// fundamental write operation for all record data.
+    ///
+    /// Uses unsafe pointer operations for zero-copy performance.
     fn write_bytes(&self, offset: usize, bytes: &[u8]) -> AofResult<()> {
         if offset + bytes.len() > self.max_size as usize {
             return Err(AofError::SegmentFull(self.max_size as u64));
@@ -1350,6 +1526,13 @@ impl SegmentData {
         Ok(())
     }
 
+    /// Returns slice of memory-mapped data for specified range.
+    ///
+    /// Provides zero-copy access to segment data by returning a reference
+    /// directly to the memory-mapped region. Performs bounds checking
+    /// to ensure safe access.
+    ///
+    /// This is the core read operation for all segment data access.
     fn read_slice(&self, range: Range<usize>) -> AofResult<&[u8]> {
         if range.end > self.max_size as usize || range.start > range.end {
             return Err(AofError::SegmentFull(self.max_size as u64));
@@ -1399,6 +1582,11 @@ impl SegmentData {
         }
     }
 
+    /// Flushes memory-mapped data and syncs to storage.
+    ///
+    /// Ensures all modified pages are written to disk and durably
+    /// persisted. Critical for data durability guarantees, especially
+    /// during segment sealing and checkpoint operations.
     fn flush_and_sync(&self) -> AofResult<()> {
         self.flush()?;
         self.sync_file()

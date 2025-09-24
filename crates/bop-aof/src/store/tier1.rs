@@ -39,6 +39,11 @@ use super::tier2::{
     Tier2FetchRequest, Tier2Handle, Tier2Metadata, Tier2UploadComplete, Tier2UploadDescriptor,
 };
 
+/// Returns current time as milliseconds since Unix epoch.
+///
+/// Provides consistent timestamp generation for Tier 1 operations,
+/// including manifest entries and cache lifecycle tracking.
+/// Falls back to 0 if system time is unavailable.
 fn current_epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -48,14 +53,25 @@ fn current_epoch_ms() -> u64 {
 
 const HYDRATION_REASON_MISSING_WARM: u32 = 1;
 
+/// Configuration for the Tier 1 SSD-based cache.
+///
+/// Tier 1 provides compressed on-disk storage with background
+/// hydration and compression workers.
 #[derive(Debug, Clone)]
 pub struct Tier1Config {
+    /// Maximum bytes allowed for compressed storage
     pub max_bytes: u64,
+    /// Number of background worker threads
     pub worker_threads: usize,
+    /// Compression level (higher = better compression)
     pub compression_level: i32,
+    /// Maximum retries for failed operations
     pub max_retries: u32,
+    /// Backoff delay between retries
     pub retry_backoff: Duration,
+    /// Manifest log configuration
     pub manifest_log: ManifestLogWriterConfig,
+    /// Only use manifest log, skip actual storage
     pub manifest_log_only: bool,
 }
 
@@ -113,41 +129,78 @@ impl Tier1Config {
     }
 }
 
+/// Breakdown of segment residency across tiers.
+///
+/// Tracks where segments currently reside in the storage hierarchy.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Tier1ResidencyGauge {
+    /// Segments currently in Tier 0 (memory)
     pub resident_in_tier0: u64,
+    /// Segments staged for Tier 0 activation
     pub staged_for_tier0: u64,
+    /// Segments uploaded to Tier 2 (remote)
     pub uploaded_to_tier2: u64,
+    /// Segments requiring recovery operations
     pub needs_recovery: u64,
 }
 
+/// Point-in-time metrics snapshot for Tier 1 cache.
+///
+/// Provides comprehensive observability into cache performance,
+/// queue depths, latencies, and residency distribution.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Tier1MetricsSnapshot {
+    /// Total bytes stored in compressed form
     pub stored_bytes: u64,
+    /// Total compression jobs completed (lifetime)
     pub compression_jobs: u64,
+    /// Total compression failures (lifetime)
     pub compression_failures: u64,
+    /// Total hydration failures (lifetime)
     pub hydration_failures: u64,
+    /// Current compression queue depth
     pub compression_queue_depth: u32,
+    /// Current hydration queue depth
     pub hydration_queue_depth: u32,
+    /// Median hydration latency in milliseconds
     pub hydration_latency_p50_ms: u64,
+    /// 90th percentile hydration latency in milliseconds
     pub hydration_latency_p90_ms: u64,
+    /// 99th percentile hydration latency in milliseconds
     pub hydration_latency_p99_ms: u64,
+    /// Number of hydration latency samples
     pub hydration_latency_samples: u64,
+    /// Cross-tier residency breakdown
     pub residency: Tier1ResidencyGauge,
 }
 
+/// Thread-safe metrics collection for Tier 1 cache.
+///
+/// Uses atomic counters and protected histogram for concurrent
+/// metric updates from compression and hydration workers.
 #[derive(Debug)]
 pub struct Tier1Metrics {
+    /// Current compressed storage size
     stored_bytes: AtomicU64,
+    /// Total compression jobs completed
     compression_jobs: AtomicU64,
+    /// Total compression failures
     compression_failures: AtomicU64,
+    /// Total hydration failures
     hydration_failures: AtomicU64,
+    /// Current compression queue depth
     compression_queue_depth: AtomicU32,
+    /// Current hydration queue depth
     hydration_queue_depth: AtomicU32,
+    /// Segments currently in Tier 0
     residency_resident_in_tier0: AtomicU64,
+    /// Segments staged for Tier 0
     residency_staged_for_tier0: AtomicU64,
+    /// Segments uploaded to Tier 2
     residency_uploaded_to_tier2: AtomicU64,
+    /// Segments needing recovery
     residency_needs_recovery: AtomicU64,
+    /// Hydration latency distribution (protected by mutex)
     hydration_latency: Mutex<Histogram<u64>>,
 }
 
@@ -318,12 +371,20 @@ impl Tier1Metrics {
     }
 }
 
+/// Current residency state of a segment in the tiered storage system.
+///
+/// Tracks where segments currently exist and their availability status
+/// across the three-tier cache hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier1ResidencyState {
+    /// Segment is currently loaded in Tier 0 (memory cache)
     ResidentInTier0,
+    /// Segment is staged for activation to Tier 0
     StagedForTier0,
+    /// Segment has been uploaded to Tier 2 (remote storage)
     UploadedToTier2,
+    /// Segment requires recovery operations
     NeedsRecovery,
 }
 
@@ -333,31 +394,52 @@ impl Default for Tier1ResidencyState {
     }
 }
 
+/// Manifest entry tracking a compressed segment in Tier 1 storage.
+///
+/// Contains all metadata needed to locate, verify, and decompress
+/// segments stored in the Tier 1 compressed cache.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestEntry {
+    /// Unique segment identifier
     pub segment_id: SegmentId,
+    /// Base offset in the original AOF log
     pub base_offset: u64,
+    /// Number of records at compression time
     pub base_record_count: u64,
+    /// Segment creation timestamp (epoch millis)
     pub created_at: i64,
+    /// Segment sealing timestamp (epoch millis)
     pub sealed_at: i64,
+    /// CRC32 checksum for integrity verification
     pub checksum: u32,
+    /// Extended metadata identifier
     #[serde(default)]
     pub ext_id: u64,
+    /// Whether a flush operation failed for this segment
     #[serde(default)]
     pub flush_failure: bool,
+    /// Reserved bytes for future extensions
     #[serde(default)]
     pub reserved: [u8; SEAL_RESERVED_BYTES],
+    /// Uncompressed segment size in bytes
     pub original_bytes: u64,
+    /// Compressed segment size in bytes
     pub compressed_bytes: u64,
+    /// Path to the compressed segment file
     pub compressed_path: String,
+    /// Optional compression dictionary for better ratios
     #[serde(default)]
     pub dictionary: Option<String>,
+    /// Offset index for fast random access within segment
     #[serde(default)]
     pub offset_index: Vec<u32>,
+    /// Current residency state across storage tiers
     #[serde(default)]
     pub residency: Tier1ResidencyState,
+    /// Tier 2 remote storage metadata if uploaded
     #[serde(default)]
     pub tier2: Option<Tier2Metadata>,
+    /// Last access timestamp for LRU eviction
     #[serde(default)]
     pub last_access_epoch_ms: u64,
 }
@@ -368,10 +450,17 @@ impl ManifestEntry {
     }
 }
 
+/// In-memory manifest tracking all Tier 1 compressed segments.
+///
+/// Maintains segment metadata, compression paths, and residency state.
+/// Persisted as JSON for crash recovery.
 #[derive(Debug)]
 struct Tier1Manifest {
+    /// Filesystem path for manifest persistence
     path: PathBuf,
+    /// All tracked manifest entries by segment ID
     entries: HashMap<SegmentId, ManifestEntry>,
+    /// Whether to persist manifest to disk
     persist_json: bool,
 }
 
@@ -453,24 +542,41 @@ impl Tier1Manifest {
     }
 }
 
+/// Result of trimming operations on compressed storage.
 struct TrimResult {
+    /// Total bytes freed by trimming
     trimmed_bytes: u64,
+    /// Number of chunks/segments removed
     chunk_count: usize,
 }
 
+/// Per-instance state for Tier 1 operations.
+///
+/// Manages compressed storage, manifest tracking, and LRU eviction
+/// for a single AOF instance.
 struct Tier1InstanceState {
+    /// Unique instance identifier
     instance_id: InstanceId,
+    /// Filesystem layout for storage paths
     layout: Layout,
+    /// Manifest tracking compressed segments
     manifest: Tier1Manifest,
+    /// Optional manifest log writer for durability
     manifest_log: Option<ManifestLogWriter>,
+    /// Current bytes used by compressed segments
     used_bytes: u64,
+    /// LRU queue for eviction ordering
     lru: VecDeque<SegmentId>,
+    /// Metrics for manifest replay operations
     replay_metrics: Arc<ManifestReplayMetrics>,
 }
 
+/// Result of inserting a new segment into Tier 1 storage.
 #[derive(Debug)]
 struct InsertOutcome {
+    /// Previous entry that was replaced (if any)
     replaced: Option<ManifestEntry>,
+    /// Entries evicted to make space
     evicted: Vec<ManifestEntry>,
 }
 
@@ -525,12 +631,22 @@ impl Tier1InstanceState {
         })
     }
 
+    /// Persists manifest state to storage and write-ahead log.
+    ///
+    /// Serializes current manifest entries and writes to both
+    /// persistent storage and manifest write-ahead log for
+    /// durability and recovery purposes.
     fn persist_manifest(&mut self) -> AofResult<()> {
         let snapshot = self.manifest.save()?;
         self.log_manifest_snapshot(&snapshot);
         Ok(())
     }
 
+    /// Writes manifest snapshot to write-ahead log.
+    ///
+    /// Records Tier 1 manifest state changes in the manifest
+    /// log for recovery and debugging. Provides audit trail
+    /// of cache state transitions.
     fn log_manifest_snapshot(&mut self, snapshot: &[u8]) {
         if let Some(writer) = self.manifest_log.as_mut() {
             if let Err(err) = writer.append_now(
@@ -672,6 +788,11 @@ impl Tier1InstanceState {
         }
     }
 
+    /// Updates LRU order for segment access.
+    ///
+    /// Moves segment to most recently used position in LRU queue
+    /// and updates manifest entry timestamp. Called on segment
+    /// access to maintain proper eviction ordering.
     fn touch(&mut self, segment_id: SegmentId) {
         self.lru.retain(|id| *id != segment_id);
         self.lru.push_back(segment_id);
@@ -680,6 +801,13 @@ impl Tier1InstanceState {
         }
     }
 
+    /// Inserts manifest entry with capacity management.
+    ///
+    /// Adds compressed segment entry to manifest, enforcing
+    /// capacity limits through LRU eviction. Handles both
+    /// new entries and updates to existing entries.
+    ///
+    /// Core cache insertion logic with automatic eviction.
     fn insert_entry(&mut self, entry: ManifestEntry, budget: u64) -> AofResult<InsertOutcome> {
         let mut evicted = Vec::new();
         let replaced = if let Some(existing) = self.manifest.insert(entry.clone()) {
@@ -792,20 +920,61 @@ impl fmt::Debug for Tier1InstanceState {
 }
 
 #[derive(Debug, Clone)]
+/// Result of successfully hydrating a segment from Tier 1.
+///
+/// Contains all metadata and the path to the decompressed segment
+/// file ready for Tier 0 activation.
 pub struct HydrationOutcome {
+    /// Instance that requested the hydration
     pub instance_id: InstanceId,
+    /// Hydrated segment identifier
     pub segment_id: SegmentId,
+    /// Path to the decompressed segment file
     pub path: PathBuf,
+    /// Base offset in the original AOF log
     pub base_offset: u64,
+    /// Record count at compression time
     pub base_record_count: u64,
+    /// Segment creation timestamp
     pub created_at: i64,
+    /// Segment sealing timestamp
     pub sealed_at: i64,
+    /// Integrity checksum
     pub checksum: u32,
+    /// Logical segment size in bytes
     pub logical_size: u32,
 }
 
+/// The Tier 1 SSD-based compressed cache for the tiered storage system.
+///
+/// Tier 1 provides compressed on-disk storage with background compression
+/// workers and intelligent hydration based on Tier 0 activation requests.
+///
+/// ## Architecture
+///
+/// ```text
+/// ┌─────────────────────────────────────────────┐
+/// │              Tier1Cache                     │
+/// ├─────────────────────────────────────────────┤
+/// │ • Background Compression                    │
+/// │ • Intelligent Hydration                     │
+/// │ • LRU-based Eviction                        │
+/// │ • Manifest Durability                       │
+/// │ • Tier 2 Integration                        │
+/// └─────────────────────────────────────────────┘
+/// ```
+///
+/// ## Key Features
+///
+/// - **Compression**: Zstd compression with configurable levels
+/// - **Hydration**: Fast decompression for Tier 0 activation
+/// - **Manifest**: Durable metadata tracking with optional WAL
+/// - **Eviction**: LRU-based space management with capacity limits
+/// - **Integration**: Seamless coordination with Tier 0 and Tier 2
 pub struct Tier1Cache {
+    /// Core implementation and worker coordination
     inner: Arc<Tier1Inner>,
+    /// Background dispatcher task handle
     dispatcher: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -910,9 +1079,28 @@ impl Drop for Tier1Cache {
     }
 }
 
+/// Per-instance view of the Tier 1 cache.
+///
+/// Provides instance-isolated operations while sharing the underlying
+/// compression infrastructure and storage pool.
+///
+/// ## Usage Pattern
+///
+/// ```ignore
+/// // Schedule compression of a sealed segment
+/// instance.schedule_compression(segment)?;
+///
+/// // Update residency when segment moves between tiers
+/// instance.update_residency(segment_id, Tier1ResidencyState::UploadedToTier2)?;
+///
+/// // Retrieve manifest information
+/// let entry = instance.manifest_entry(segment_id)?;
+/// ```
 #[derive(Clone)]
 pub struct Tier1Instance {
+    /// Shared cache implementation
     inner: Arc<Tier1Inner>,
+    /// Unique instance identifier
     instance_id: InstanceId,
 }
 
@@ -960,14 +1148,23 @@ impl Tier1Instance {
     }
 }
 
+/// Background compression job for worker threads.
 struct CompressionJob {
+    /// Instance requesting compression
     instance_id: InstanceId,
+    /// Segment to compress
     segment: Arc<Segment>,
+    /// Optional acknowledgment channel
     ack: Option<oneshot::Sender<AofResult<()>>>,
 }
 
+/// Core implementation of Tier 1 cache operations.
+///
+/// Coordinates compression workers, manifest management, and
+/// integration with Tier 0 and Tier 2 systems.
 #[derive(Debug)]
 struct Tier1Inner {
+    /// Tokio runtime handle for async operations
     runtime: Handle,
     config: Tier1Config,
     compression_tx: mpsc::UnboundedSender<CompressionCommand>,
@@ -1775,8 +1972,11 @@ impl Tier1Inner {
     }
 }
 
+/// Commands sent to compression worker threads.
 enum CompressionCommand {
+    /// Compress a segment job
     Compress(CompressionJob),
+    /// Shutdown signal for clean termination
     Shutdown,
 }
 

@@ -15,10 +15,27 @@ const ROLLOVER_PENDING: u8 = 0;
 const ROLLOVER_SUCCESS: u8 = 1;
 const ROLLOVER_FAILED: u8 = 2;
 
+/// Signal for coordinating segment rollover operations.
+///
+/// Provides async coordination for segment transitions from active to sealed,
+/// allowing waiters to be notified when rollover completes or fails.
+///
+/// ## Usage Pattern
+///
+/// ```ignore
+/// // Register rollover and get signal
+/// let signal = notifiers.register_rollover(instance_id, segment_id);
+///
+/// // Wait for completion with cancellation support
+/// signal.wait(&shutdown_token).await?;
+/// ```
 #[derive(Debug)]
 pub struct RolloverSignal {
+    /// Atomic state tracking (pending/success/failed)
     state: AtomicU8,
+    /// Protected result storage for completed operations
     result: Mutex<Option<Result<(), String>>>,
+    /// Notification primitive for waiters
     notify: Notify,
 }
 
@@ -70,10 +87,17 @@ impl RolloverSignal {
     }
 }
 
+/// Notification infrastructure for a single AOF instance.
+///
+/// Manages admission control and rollover notifications,
+/// with per-segment rollover signal tracking.
 #[derive(Debug)]
 struct InstanceNotifiers {
+    /// Admission control notification
     admission: Arc<Notify>,
+    /// General rollover notifications
     rollover: Arc<Notify>,
+    /// Per-segment rollover signals
     signals: Mutex<HashMap<SegmentId, Arc<RolloverSignal>>>,
 }
 
@@ -99,8 +123,33 @@ impl InstanceNotifiers {
     }
 }
 
+/// Coordination notification system for the tiered storage architecture.
+///
+/// Manages async notifications across all AOF instances for admission control,
+/// segment rollover, and other coordination events. Provides cancellation-aware
+/// primitives for graceful system coordination.
+///
+/// ## Architecture
+///
+/// ```text
+/// ┌─────────────────────────────────────────┐
+/// │         TieredCoordinatorNotifiers      │
+/// ├─────────────────────────────────────────┤
+/// │ Instance A  │ Instance B  │ Instance C  │
+/// ├─────────────├─────────────├─────────────┤
+/// │ • Admission │ • Admission │ • Admission │
+/// │ • Rollover  │ • Rollover  │ • Rollover  │
+/// │ • Signals   │ • Signals   │ • Signals   │
+/// └─────────────┴─────────────┴─────────────┘
+/// ```
+///
+/// ## Thread Safety
+///
+/// All operations are thread-safe and can be called concurrently
+/// from multiple async tasks and threads.
 #[derive(Debug, Default)]
 pub struct TieredCoordinatorNotifiers {
+    /// Per-instance notification infrastructure
     instances: Mutex<HashMap<InstanceId, Arc<InstanceNotifiers>>>,
 }
 

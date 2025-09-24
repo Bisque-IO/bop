@@ -8,12 +8,30 @@ use super::config::{AofConfig, SegmentId};
 use super::error::{AofError, AofResult};
 
 /// Represents the canonical on-disk layout for an AOF instance.
+///
+/// Manages the directory structure and file organization for AOF data,
+/// including segments, manifests, warm storage, and archive locations.
+///
+/// # Directory Structure
+///
+/// ```text
+/// root/
+/// ├── segments/     # Active segment files (.seg)
+/// ├── warm/         # Compressed warm storage (.zst)
+/// ├── manifest/     # Metadata and recovery logs
+/// └── archive/      # Long-term archived segments
+/// ```
 #[derive(Debug, Clone)]
 pub struct Layout {
+    /// Root directory for this AOF instance
     root: PathBuf,
+    /// Directory containing active segment files
     segments: PathBuf,
+    /// Directory for warm/compressed storage
     warm: PathBuf,
+    /// Directory for manifest and metadata files
     manifest: PathBuf,
+    /// Directory for archived segments
     archive: PathBuf,
 }
 
@@ -258,6 +276,10 @@ impl Layout {
         self.archive_path(&name)
     }
 
+    /// Creates a directory and all parent directories as needed.
+    ///
+    /// Provides error handling and conversion to AofError for
+    /// consistent error propagation across the filesystem operations.
     fn create_dir(&self, path: &Path) -> AofResult<()> {
         fs::create_dir_all(path).map_err(AofError::from)?;
         Ok(())

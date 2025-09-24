@@ -1,4 +1,53 @@
-// Tiered segment store modules
+//! Tiered segment storage system implementation.
+//!
+//! This module implements a sophisticated 3-tier storage hierarchy that provides
+//! automatic data placement, caching, and lifecycle management for AOF segments.
+//!
+//! # Architecture Overview
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                    Tiered Storage System                        │
+//! ├─────────────────────────────────────────────────────────────────┤
+//! │ Tier 0: In-Memory Cache                                         │
+//! │ - Active segments and hot data                                  │
+//! │ - Admission control and backpressure                            │
+//! │ - Fast access, limited capacity                                 │
+//! ├─────────────────────────────────────────────────────────────────┤
+//! │ Tier 1: SSD/Local Storage                                       │
+//! │ - Recently accessed segments                                    │
+//! │ - Background hydration and eviction                             │
+//! │ - Balance of speed and capacity                                 │
+//! ├─────────────────────────────────────────────────────────────────┤
+//! │ Tier 2: Remote/Cloud Storage                                    │
+//! │ - Long-term archival storage                                    │
+//! │ - Compression and cost optimization                             │
+//! │ - Highest capacity, lowest speed                                │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Key Components
+//!
+//! - **TieredCoordinator**: Central orchestrator managing all tiers
+//! - **Tier0Cache**: Fast in-memory cache with admission control
+//! - **Tier1Cache**: SSD-based cache with background hydration
+//! - **Tier2Manager**: Remote storage integration and lifecycle
+//! - **DurabilityCursor**: Tracks flush progress across tiers
+//!
+//! # Data Flow
+//!
+//! 1. New segments start in Tier 0 (memory)
+//! 2. Cold segments get evicted to Tier 1 (SSD)
+//! 3. Archive segments move to Tier 2 (remote)
+//! 4. On-demand hydration brings data back up the hierarchy
+//!
+//! # Coordination
+//!
+//! The system uses async channels and notifications for coordination:
+//! - Admission notifications for backpressure
+//! - Rollover signals for segment transitions
+//! - Hydration requests for data movement
+//! - Metrics collection for observability
 
 mod durability;
 pub mod notifiers;
@@ -27,10 +76,30 @@ pub use tier2::{
     Tier2Metadata, Tier2Metrics, Tier2MetricsSnapshot, Tier2UploadDescriptor,
 };
 
+/// Comprehensive metrics snapshot across all storage tiers.
+///
+/// Provides a unified view of system performance and health across the entire
+/// tiered storage hierarchy. Used for monitoring, alerting, and capacity planning.
+///
+/// # Usage
+///
+/// This snapshot combines metrics from all active tiers, allowing operators to:
+/// - Monitor overall system health
+/// - Track data movement between tiers
+/// - Identify performance bottlenecks
+/// - Plan capacity and resource allocation
+///
+/// # Tier 2 Optionality
+///
+/// Tier 2 metrics are optional since remote storage may be disabled in some
+/// configurations. When present, they provide visibility into archival operations.
 #[derive(Debug, Clone)]
 pub struct TieredObservabilitySnapshot {
+    /// Metrics from the in-memory cache (Tier 0)
     pub tier0: Tier0MetricsSnapshot,
+    /// Metrics from the SSD cache (Tier 1)
     pub tier1: Tier1MetricsSnapshot,
+    /// Metrics from remote storage (Tier 2), if configured
     pub tier2: Option<Tier2MetricsSnapshot>,
 }
 
@@ -255,6 +324,11 @@ impl TieredInstanceInner {
         Ok(resident)
     }
 
+    /// Handles Tier 0 eviction events by updating Tier 1 state.
+    ///
+    /// When segments are evicted from Tier 0 (memory), updates
+    /// their residency status in Tier 1 to reflect the state
+    /// change and coordinate potential compression or upload.
     fn handle_tier0_evictions(&self, evictions: &[Tier0Eviction]) {
         if evictions.is_empty() {
             return;
@@ -331,6 +405,11 @@ impl TieredInstanceInner {
         self.tier1.manifest_entry(segment_id)
     }
 
+    /// Immediately hydrates a segment from Tier 1 storage.
+    ///
+    /// Performs synchronous segment hydration from compressed storage,
+    /// decompresses data, and admits the segment to Tier 0 cache.
+    /// Blocks until hydration completes or fails.
     fn hydrate_immediately(self: &Arc<Self>, entry: &ManifestEntry) -> AofResult<ResidentSegment> {
         let outcome = self
             .tier1
@@ -339,6 +418,11 @@ impl TieredInstanceInner {
         self.admit_hydrated(outcome)
     }
 
+    /// Schedules asynchronous segment activation from storage tiers.
+    ///
+    /// Initiates background hydration process for segment loading
+    /// from Tier 1 or Tier 2 storage. Returns checkout handle that
+    /// can wait for completion or provide immediate access if ready.
     fn schedule_activation(self: &Arc<Self>, entry: &ManifestEntry) -> AofResult<SegmentCheckout> {
         let required = entry.original_bytes.max(entry.compressed_bytes);
         let (outcome, evictions) = self.tier0.request_activation(ActivationRequest {
@@ -685,15 +769,52 @@ enum CoordinatorCommand {
     },
 }
 
+/// Central orchestrator for the tiered storage system.
+///
+/// The TieredCoordinator manages all three storage tiers and coordinates data
+/// movement, eviction policies, and admission control across the hierarchy.
+/// It serves as the single point of coordination for all tiered storage operations.
+///
+/// # Responsibilities
+///
+/// - **Tier Management**: Orchestrates operations across all storage tiers
+/// - **Admission Control**: Manages backpressure and resource allocation
+/// - **Data Movement**: Coordinates promotion, demotion, and hydration
+/// - **Instance Lifecycle**: Manages registration and cleanup of AOF instances
+/// - **Metrics Collection**: Aggregates performance data across tiers
+/// - **Notification System**: Provides coordination signals to instances
+///
+/// # Architecture
+///
+/// The coordinator operates as an event-driven system:
+/// 1. Receives commands from AOF instances
+/// 2. Makes placement and eviction decisions
+/// 3. Orchestrates data movement between tiers
+/// 4. Provides feedback through notification channels
+///
+/// # Thread Safety
+///
+/// All operations are thread-safe and designed for high concurrency.
+/// The coordinator uses async channels, atomic operations, and strategic
+/// locking to minimize contention while maintaining consistency.
 pub struct TieredCoordinator {
+    /// Fast in-memory cache (Tier 0)
     tier0: Tier0Cache,
+    /// SSD-based cache (Tier 1)
     tier1: Tier1Cache,
+    /// Remote storage manager (Tier 2), optional
     tier2: Option<Tier2Manager>,
+    /// Activity notification for background polling
     activity: Arc<Notify>,
+    /// Hydration request notification
     hydration: Arc<Notify>,
+    /// Registered AOF instances (weak references)
     instances: Mutex<HashMap<InstanceId, Weak<TieredInstanceInner>>>,
+    /// Pending coordination commands
     commands: Mutex<VecDeque<CoordinatorCommand>>,
+    /// Admission control metrics aggregation
     admission_metrics: AdmissionMetrics,
+    /// Notification channels for instances
     notifiers: Arc<TieredCoordinatorNotifiers>,
 }
 

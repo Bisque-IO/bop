@@ -9,7 +9,21 @@ use super::record::{
 };
 use crate::error::{AofError, AofResult};
 
+/// Reader for manifest logs during recovery and replay.
+///
+/// Provides sequential access to manifest records stored in chunks,
+/// with integrity verification and proper ordering.
+///
+/// ## Usage Pattern
+///
+/// ```ignore
+/// let reader = ManifestLogReader::open(base_dir, stream_id)?;
+/// for record in reader.iter() {
+///     process_manifest_record(record?)?;
+/// }
+/// ```
 pub struct ManifestLogReader {
+    /// Memory-mapped chunks in sequential order
     chunks: Vec<ReplayChunk>,
 }
 
@@ -85,14 +99,24 @@ impl ManifestLogReader {
     }
 }
 
+/// Memory-mapped chunk for efficient record replay.
 struct ReplayChunk {
+    /// Memory-mapped chunk file
     mmap: Mmap,
+    /// Parsed chunk header with metadata
     header: ChunkHeader,
 }
 
+/// Iterator over manifest records for sequential replay.
+///
+/// Maintains position across chunk boundaries and handles
+/// integrity verification for each record.
 pub struct ManifestRecordIter<'a> {
+    /// All chunks to iterate over
     chunks: &'a [ReplayChunk],
+    /// Current chunk being read
     chunk_index: usize,
+    /// Current offset within chunk
     offset: usize,
 }
 

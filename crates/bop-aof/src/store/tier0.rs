@@ -15,6 +15,10 @@ use crate::segment::Segment;
 /// Maximum number of pending activation requests tolerated before issuing warnings.
 const DEFAULT_ACTIVATION_QUEUE_WARN_THRESHOLD: usize = 1024;
 
+/// Unique identifier for AOF instances within the tiered storage system.
+///
+/// Each AOF instance gets a unique ID that is used for coordination,
+/// resource allocation, and metrics tracking across all storage tiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstanceId(u64);
 
@@ -28,15 +32,34 @@ impl InstanceId {
     }
 }
 
+/// Classification of segment residency in Tier 0 cache.
+///
+/// Different residency types have different eviction priorities and
+/// access patterns, influencing cache management decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidencyKind {
+    /// Active segment currently accepting writes
+    ///
+    /// Highest priority for cache retention. Active segments should
+    /// rarely be evicted as they are in active use.
     Active,
+
+    /// Sealed segment that is read-only
+    ///
+    /// Lower eviction priority than active segments but higher than
+    /// archived segments. May be evicted under memory pressure.
     Sealed,
 }
 
+/// Residency information for a segment in Tier 0 cache.
+///
+/// Tracks both the memory footprint and residency classification
+/// for cache management decisions.
 #[derive(Debug, Clone)]
 pub struct SegmentResidency {
+    /// Number of bytes the segment occupies in memory
     pub bytes: u64,
+    /// Classification determining eviction priority
     pub kind: ResidencyKind,
 }
 
@@ -46,70 +69,131 @@ impl SegmentResidency {
     }
 }
 
+/// Reasons why a segment activation was requested.
+///
+/// Different activation reasons may have different priorities
+/// and affect cache admission policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationReason {
+    /// Segment was accessed but not in cache
     ReadMiss,
+    /// Proactive loading based on access patterns
     Prefetch,
+    /// Follower node catching up to leader
     FollowerCatchUp,
+    /// Loading segments during crash recovery
     Recovery,
 }
 
+/// Request to activate (load) a segment into Tier 0 cache.
+///
+/// Activation requests may be queued if insufficient capacity exists.
+/// Higher priority values are serviced first.
 #[derive(Debug, Clone)]
 pub struct ActivationRequest {
+    /// Segment to activate
     pub segment_id: SegmentId,
+    /// Estimated memory requirement
     pub required_bytes: u64,
+    /// Activation priority (higher = more urgent)
     pub priority: u32,
+    /// Why the activation was requested
     pub reason: ActivationReason,
 }
 
+/// Result of submitting an activation request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationOutcome {
+    /// Request was immediately granted (sufficient capacity)
     Admitted,
+    /// Request was queued (insufficient capacity)
     Queued,
 }
 
+/// Grant authorizing segment activation.
+///
+/// Issued when a queued activation request can be satisfied.
+/// The recipient should load the segment into cache promptly.
 #[derive(Debug, Clone)]
 pub struct ActivationGrant {
+    /// Instance that requested the activation
     pub instance_id: InstanceId,
+    /// Segment approved for activation
     pub segment_id: SegmentId,
+    /// Approved memory allocation
     pub bytes: u64,
+    /// Original request priority
     pub priority: u32,
+    /// Original activation reason
     pub reason: ActivationReason,
 }
 
+/// Eviction notice for a segment scheduled to leave Tier 0.
+///
+/// The cache has decided this segment should be evicted to free space.
+/// The owning instance should handle the eviction gracefully.
 #[derive(Debug, Clone)]
 pub struct Tier0Eviction {
+    /// Instance owning the segment
     pub instance_id: InstanceId,
+    /// Segment to be evicted
     pub segment_id: SegmentId,
+    /// Memory that will be freed
     pub bytes: u64,
 }
 
+/// Event indicating a segment was dropped from Tier 0.
+///
+/// Fired when the last reference to a resident segment is dropped,
+/// either due to eviction or natural cleanup.
 #[derive(Clone)]
 pub struct Tier0DropEvent {
+    /// Instance that owned the segment
     pub instance_id: InstanceId,
+    /// Dropped segment ID
     pub segment_id: SegmentId,
+    /// Memory freed by the drop
     pub bytes: u64,
+    /// Whether the segment was sealed when dropped
     pub was_sealed: bool,
+    /// Optional reference to the dropped segment
     pub segment: Option<Arc<Segment>>,
 }
 
+/// Snapshot of pending activation requests.
+///
+/// Used for observability and debugging of queue state.
 #[derive(Debug, Clone)]
 pub struct PendingActivationSnapshot {
+    /// Currently queued activation requests
     pub queued: Vec<QueuedActivationInfo>,
 }
 
+/// Information about a queued activation request.
+///
+/// Subset of ActivationRequest data for observability.
 #[derive(Debug, Clone)]
 pub struct QueuedActivationInfo {
+    /// Segment waiting for activation
     pub segment_id: SegmentId,
+    /// Request priority
     pub priority: u32,
+    /// Why activation was requested
     pub reason: ActivationReason,
+    /// Memory requirement
     pub requested_bytes: u64,
 }
 
+/// Configuration for the Tier 0 in-memory cache.
+///
+/// Controls memory limits, quotas, and queue behavior.
 #[derive(Debug, Clone, Copy)]
 pub struct Tier0CacheConfig {
+    /// Maximum bytes allowed across all instances
     pub cluster_max_bytes: u64,
+    /// Default per-instance memory quota
     pub default_instance_quota: u64,
+    /// Queue depth that triggers warnings
     pub activation_queue_warn_threshold: usize,
 }
 
@@ -123,19 +207,34 @@ impl Tier0CacheConfig {
     }
 }
 
+/// Point-in-time metrics snapshot for Tier 0 cache.
+///
+/// Provides observability into cache behavior and performance.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Tier0MetricsSnapshot {
+    /// Total bytes currently cached
     pub total_bytes: u64,
+    /// Number of pending activation requests
     pub activation_queue_depth: u32,
+    /// Total evictions scheduled (lifetime)
     pub scheduled_evictions: u64,
+    /// Total segment drop events (lifetime)
     pub drop_events: u64,
 }
 
+/// Thread-safe metrics collection for Tier 0 cache.
+///
+/// Uses atomic operations for lock-free metric updates
+/// from concurrent cache operations.
 #[derive(Debug, Default)]
 pub struct Tier0Metrics {
+    /// Current bytes in cache
     total_bytes: AtomicU64,
+    /// Current activation queue depth
     activation_queue_depth: AtomicU32,
+    /// Lifetime count of scheduled evictions
     scheduled_evictions: AtomicU64,
+    /// Lifetime count of segment drops
     drop_events: AtomicU64,
 }
 
@@ -173,6 +272,32 @@ impl Tier0Metrics {
     }
 }
 
+/// The Tier 0 in-memory cache for the tiered storage system.
+///
+/// Tier 0 provides the fastest access tier, keeping frequently accessed
+/// segments in memory with LRU-based eviction. It coordinates admission
+/// control, eviction scheduling, and activation queuing.
+///
+/// ## Architecture
+///
+/// ```text
+/// ┌─────────────────────────────────────────────┐
+/// │              Tier0Cache                     │
+/// ├─────────────────────────────────────────────┤
+/// │ • Admission Control                         │
+/// │ • LRU Eviction                              │
+/// │ • Activation Queuing                        │
+/// │ • Instance Isolation                        │
+/// └─────────────────────────────────────────────┘
+/// ```
+///
+/// ## Thread Safety
+///
+/// All operations are thread-safe. Multiple instances can concurrently:
+/// - Admit new segments
+/// - Access existing segments
+/// - Request activations
+/// - Process evictions
 #[derive(Clone)]
 pub struct Tier0Cache {
     inner: Arc<Tier0Inner>,
@@ -250,6 +375,24 @@ impl Tier0Cache {
     }
 }
 
+/// Per-instance view of the Tier 0 cache.
+///
+/// Each AOF instance gets its own Tier0Instance for isolated
+/// cache operations while sharing the underlying memory pool.
+///
+/// ## Usage Pattern
+///
+/// ```ignore
+/// // Admit a segment to cache
+/// let (resident, evictions) = instance.admit_segment(segment, residency);
+///
+/// // Use an admission guard for automatic residency tracking
+/// let guard = instance.admission_guard(resident);
+///
+/// // Guard automatically updates residency as segment grows
+/// guard.record_append(new_bytes);
+/// guard.mark_sealed(); // When segment becomes read-only
+/// ```
 #[derive(Clone)]
 pub struct Tier0Instance {
     inner: Arc<Tier0Inner>,
@@ -295,12 +438,29 @@ impl Tier0Instance {
     }
 }
 
+/// A segment that is resident in Tier 0 cache.
+///
+/// Provides access to the underlying segment while tracking its
+/// residency in the cache. When dropped, automatically notifies
+/// the cache system for cleanup.
+///
+/// ## Lifecycle
+///
+/// 1. Created when a segment is admitted to cache
+/// 2. Can be wrapped in an AdmissionGuard for automatic tracking
+/// 3. Dropped when evicted or no longer needed
+/// 4. Drop triggers cache cleanup and potential activation grants
 #[derive(Clone)]
 pub struct ResidentSegment {
     inner: Arc<ResidentSegmentInner>,
 }
 
 impl ResidentSegment {
+    /// Creates new resident segment with drop tracking.
+    ///
+    /// Wraps segment with cleanup coordination to ensure proper
+    /// resource management when segments are evicted from Tier 0.
+    /// Drop guard handles cleanup notifications to parent cache.
     fn new(segment: Arc<Segment>, drop_guard: SegmentDropGuard) -> Self {
         Self {
             inner: Arc::new(ResidentSegmentInner {
@@ -315,15 +475,36 @@ impl ResidentSegment {
     }
 }
 
+/// Guard for automatic residency tracking of cache-resident segments.
+///
+/// Monitors segment size changes and residency state transitions,
+/// automatically updating the cache's accounting. Particularly useful
+/// for active segments that grow during writes.
+///
+/// ## Automatic Updates
+///
+/// - `record_append()`: Updates size for growing active segments
+/// - `mark_sealed()`: Transitions from Active to Sealed residency
+/// - `update_residency()`: Manual residency updates
+///
+/// ## Thread Safety
+///
+/// Uses atomic operations for lock-free residency tracking.
+/// Multiple threads can safely call update methods concurrently.
 #[derive(Clone)]
 pub struct AdmissionGuard {
     inner: Arc<AdmissionGuardInner>,
 }
 
+/// Internal state for admission guard tracking.
 struct AdmissionGuardInner {
+    /// Connection back to the cache instance
     tier0: Tier0Instance,
+    /// The guarded resident segment
     resident: ResidentSegment,
+    /// Current size tracking (atomic for thread safety)
     bytes: AtomicU64,
+    /// Current residency kind (atomic, encoded as u8)
     kind: AtomicU8,
 }
 
@@ -414,8 +595,11 @@ impl Deref for ResidentSegment {
     }
 }
 
+/// Internal state for resident segments.
 struct ResidentSegmentInner {
+    /// The actual segment data
     segment: Arc<Segment>,
+    /// Cleanup handler for when segment is dropped
     drop_guard: SegmentDropGuard,
 }
 
@@ -425,9 +609,16 @@ impl Drop for ResidentSegmentInner {
     }
 }
 
+/// Cleanup handler that fires when a resident segment is dropped.
+///
+/// Uses weak references to avoid circular dependencies while ensuring
+/// proper cache cleanup when segments are no longer referenced.
 struct SegmentDropGuard {
+    /// Cache key for the dropped segment
     key: ResidentKey,
+    /// Weak reference to cache internals
     inner: Weak<Tier0Inner>,
+    /// Weak reference to the segment (for drop events)
     segment: Weak<Segment>,
 }
 
@@ -460,42 +651,71 @@ impl SegmentDropGuard {
     }
 }
 
+/// Internal key for tracking resident segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ResidentKey {
+    /// Instance owning the segment
     instance_id: InstanceId,
+    /// Unique segment identifier
     segment_id: SegmentId,
 }
 
+/// Lifecycle phase of a resident segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResidentPhase {
+    /// Normal residency, accessible for reads/writes
     Resident,
+    /// Eviction scheduled, no longer accepting new references
     Evicting,
 }
 
+/// Internal tracking entry for cached segments.
 struct ResidentEntry {
+    /// Current memory footprint
     bytes: u64,
+    /// Residency classification
     kind: ResidencyKind,
+    /// Current lifecycle phase
     phase: ResidentPhase,
+    /// Last access timestamp for LRU tracking
     last_touch_tick: u64,
 }
 
+/// Per-instance cache state tracking.
 struct InstanceState {
+    /// Human-readable instance name
     #[allow(dead_code)]
     name: String,
+    /// Total bytes currently used by this instance
     bytes_used: u64,
 }
 
+/// Central state for the Tier 0 cache.
+///
+/// All mutable state is protected by a single mutex to ensure
+/// consistency across concurrent operations.
 struct Tier0State {
+    /// Total bytes across all resident segments
     total_bytes: u64,
+    /// Bytes in segments marked for eviction
     pending_evict_bytes: u64,
+    /// Monotonic clock for LRU tracking
     access_clock: u64,
+    /// Per-instance state tracking
     instances: HashMap<InstanceId, InstanceState>,
+    /// All currently resident segments
     residents: HashMap<ResidentKey, ResidentEntry>,
+    /// Weak references to segment handles
     handles: HashMap<ResidentKey, Weak<ResidentSegmentInner>>,
+    /// LRU queue for sealed segments (eviction candidates)
     lru: VecDeque<ResidentKey>,
+    /// Scheduled evictions waiting to be processed
     eviction_queue: VecDeque<Tier0Eviction>,
+    /// Drop events waiting to be processed
     drop_events: VecDeque<Tier0DropEvent>,
+    /// Activation requests waiting for capacity
     pending_activation: BinaryHeap<QueuedActivation>,
+    /// Approved activation grants ready for processing
     activation_grants: VecDeque<ActivationGrant>,
 }
 
@@ -517,11 +737,20 @@ impl Tier0State {
     }
 }
 
+/// Core implementation of Tier 0 cache.
+///
+/// Coordinates all cache operations including admission, eviction,
+/// activation queuing, and instance management.
 struct Tier0Inner {
+    /// Cache configuration and limits
     config: Tier0CacheConfig,
+    /// Performance and observability metrics
     metrics: Tier0Metrics,
+    /// Instance ID generation counter
     next_instance: AtomicU64,
+    /// Sequence number for activation queue ordering
     queue_seq: AtomicU64,
+    /// All mutable cache state (protected by mutex)
     state: Mutex<Tier0State>,
 }
 
@@ -796,6 +1025,13 @@ impl Tier0Inner {
         }
     }
 
+    /// Enforces capacity limits by selecting segments for eviction.
+    ///
+    /// When memory usage exceeds cluster limits, identifies segments
+    /// for eviction using LRU policy. Schedules eviction operations
+    /// and updates metrics for monitoring.
+    ///
+    /// Core capacity management to prevent memory exhaustion.
     fn enforce_capacity_locked(&self, state: &mut Tier0State) -> Vec<Tier0Eviction> {
         let mut scheduled = Vec::new();
         while state.total_bytes.saturating_sub(state.pending_evict_bytes)
@@ -835,6 +1071,13 @@ impl Tier0Inner {
         scheduled
     }
 
+    /// Selects next segment for eviction using LRU policy.
+    ///
+    /// Scans LRU queue to find sealed segments eligible for eviction.
+    /// Updates segment phase to prevent concurrent access and tracks
+    /// pending eviction bytes for capacity calculations.
+    ///
+    /// Implements LRU eviction strategy for memory management.
     fn select_evictable(&self, state: &mut Tier0State) -> Option<Tier0Eviction> {
         while let Some(key) = state.lru.pop_front() {
             if let Some(entry) = state.residents.get_mut(&key) {
@@ -874,6 +1117,13 @@ impl Tier0Inner {
         }
     }
 
+    /// Services pending activation requests when capacity is available.
+    ///
+    /// Processes queued segment activation requests, granting access
+    /// when sufficient memory capacity exists. Uses priority-based
+    /// ordering and accounts for pending evictions in capacity calculations.
+    ///
+    /// Core admission control logic for Tier 0 memory management.
     fn service_pending_locked(&self, state: &mut Tier0State) {
         let mut granted = Vec::new();
         loop {
@@ -914,13 +1164,23 @@ impl Tier0Inner {
     }
 }
 
+/// Internal representation of a queued activation request.
+///
+/// Ordered by priority (higher first), then by sequence number (FIFO).
+/// Used in a binary heap for efficient priority queue operations.
 #[derive(Clone)]
 struct QueuedActivation {
+    /// Instance that made the request
     instance_id: InstanceId,
+    /// Segment to activate
     segment_id: SegmentId,
+    /// Memory requirement
     requested_bytes: u64,
+    /// Request priority (higher = more urgent)
     priority: u32,
+    /// Why activation was requested
     reason: ActivationReason,
+    /// Sequence number for FIFO ordering within priority
     sequence: u64,
 }
 

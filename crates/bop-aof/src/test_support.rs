@@ -8,16 +8,27 @@ use crate::store::{InstanceId, Tier2Config, Tier2Manager};
 use tokio::runtime::Handle;
 
 /// Context passed to metadata persistence failure injection hooks.
+///
+/// Provides detailed information about the persistence operation
+/// being intercepted for test scenario control.
 #[derive(Debug, Clone, Copy)]
 pub struct MetadataPersistContext {
+    /// Instance performing the persistence operation
     pub instance_id: InstanceId,
+    /// Segment being persisted
     pub segment_id: SegmentId,
+    /// Retry attempt number (0 = first attempt)
     pub attempt: u32,
+    /// Bytes requested to be durable
     pub requested_bytes: u32,
+    /// Bytes confirmed as durable
     pub durable_bytes: u32,
 }
 
 /// Hook signature for metadata persistence overrides.
+///
+/// Return `Some(result)` to override default persistence behavior,
+/// or `None` to allow normal processing.
 pub type MetadataPersistHook =
     dyn Fn(&MetadataPersistContext) -> Option<AofResult<()>> + Send + Sync + 'static;
 
@@ -46,7 +57,11 @@ pub fn metadata_persist_override(ctx: &MetadataPersistContext) -> Option<AofResu
 }
 
 /// Guard that restores the previous metadata persistence hook when dropped.
+///
+/// Ensures test isolation by automatically reverting hook changes
+/// at the end of test scope.
 pub struct MetadataPersistHookGuard {
+    /// Previous hook to restore (debug builds only)
     #[cfg(debug_assertions)]
     previous: Option<Arc<MetadataPersistHook>>,
 }
@@ -102,6 +117,9 @@ pub fn clear_metadata_persist_hook() {
 pub fn clear_metadata_persist_hook() {}
 
 /// Factory signature for overriding Tier2 manager construction in tests.
+///
+/// Allows tests to substitute mock or instrumented Tier2 implementations
+/// for controlled testing scenarios.
 pub type Tier2ManagerFactory =
     dyn Fn(Handle, Tier2Config) -> AofResult<Tier2Manager> + Send + Sync + 'static;
 
@@ -132,7 +150,11 @@ pub fn tier2_manager_override(
 }
 
 /// Guard that restores the previous Tier2 manager factory when dropped.
+///
+/// Provides automatic cleanup of test mocks and overrides
+/// to ensure test isolation.
 pub struct Tier2ManagerFactoryGuard {
+    /// Previous factory to restore (debug builds only)
     #[cfg(debug_assertions)]
     previous: Option<Arc<Tier2ManagerFactory>>,
 }
@@ -186,6 +208,9 @@ pub fn clear_tier2_manager_factory() {
 pub fn clear_tier2_manager_factory() {}
 
 /// Create an `InstanceId` for tests.
+///
+/// Convenience helper for creating instance identifiers
+/// in test scenarios.
 pub fn make_instance_id(value: u64) -> InstanceId {
     InstanceId::new(value)
 }

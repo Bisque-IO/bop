@@ -17,6 +17,11 @@ use crate::error::{AofError, AofResult};
 
 use super::tier0::InstanceId;
 
+/// Returns current time as milliseconds since Unix epoch.
+///
+/// Provides timestamp generation for Tier 2 operations,
+/// upload metadata, and retry logic. Falls back to 0
+/// if system time is unavailable.
 fn current_epoch_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -25,9 +30,15 @@ fn current_epoch_ms() -> u64 {
         .unwrap_or_default()
 }
 
+/// Retry policy configuration for Tier 2 operations.
+///
+/// Controls backoff behavior for failed remote storage operations
+/// including uploads, downloads, and deletions.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
+    /// Maximum number of retry attempts
     pub max_attempts: u32,
+    /// Base delay between retries (exponential backoff)
     pub base_delay: Duration,
 }
 
@@ -57,44 +68,72 @@ impl Default for RetryPolicy {
     }
 }
 
+/// Types of operations that can be retried.
 #[derive(Debug, Clone, Copy)]
 enum RetryKind {
+    /// Uploading segments to remote storage
     Upload,
+    /// Deleting segments from remote storage
     Delete,
+    /// Fetching segments from remote storage
     Fetch,
 }
 
+/// Wrapper tracking retry attempts for an operation.
 #[derive(Debug)]
 struct RetryStats<T> {
+    /// The wrapped value/result
     value: T,
+    /// Number of attempts made
     attempts: u32,
 }
 
+/// Error that occurred after exhausting retry attempts.
 #[derive(Debug)]
 struct RetryError {
+    /// The final error that caused retry exhaustion
     error: AofError,
+    /// Total attempts made before giving up
     attempts: u32,
 }
 
+/// Security configuration for Tier 2 remote storage.
+///
+/// Supports various encryption options for data at rest
+/// in remote storage systems like S3.
 #[derive(Debug, Clone)]
 pub enum Tier2Security {
+    /// Server-side encryption with S3 managed keys
     SseS3,
+    /// Server-side encryption with AWS KMS
     SseKms {
+        /// KMS key identifier
         key_id: String,
+        /// Optional encryption context
         context: Option<String>,
     },
+    /// Customer-provided encryption keys
     CustomerKey {
+        /// Base64-encoded encryption key
         key: String,
     },
 }
 
+/// Metadata for a segment stored in Tier 2 remote storage.
+///
+/// Contains all information needed to retrieve and verify
+/// segments from remote storage systems.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Tier2Metadata {
+    /// Remote object key/path
     pub object_key: String,
+    /// Entity tag for version/change detection
     #[serde(default)]
     pub etag: Option<String>,
+    /// Size of the stored object in bytes
     #[serde(default)]
     pub size_bytes: u64,
+    /// Timestamp when upload completed
     #[serde(default)]
     pub uploaded_epoch_ms: u64,
 }
@@ -110,21 +149,39 @@ impl Tier2Metadata {
     }
 }
 
+/// Configuration for Tier 2 remote storage operations.
+///
+/// Configures connection parameters, concurrency limits, retry behavior,
+/// and security settings for remote object storage (e.g., S3).
 #[derive(Debug, Clone)]
 pub struct Tier2Config {
+    /// Remote storage endpoint URL
     pub endpoint: String,
+    /// AWS region or equivalent
     pub region: String,
+    /// Storage bucket name
     pub bucket: String,
+    /// Object key prefix for organization
     pub prefix: String,
+    /// Access key for authentication
     pub access_key: String,
+    /// Secret key for authentication
     pub secret_key: String,
+    /// Optional session token for temporary credentials
     pub session_token: Option<String>,
+    /// Maximum concurrent data transfers
     pub max_concurrent_transfers: usize,
+    /// Maximum concurrent upload operations
     pub max_concurrent_uploads: usize,
+    /// Maximum concurrent download operations
     pub max_concurrent_downloads: usize,
+    /// Maximum concurrent metadata operations
     pub max_concurrent_operations: usize,
+    /// Retry policy for failed operations
     pub retry: RetryPolicy,
+    /// Optional TTL for object retention
     pub retention_ttl: Option<Duration>,
+    /// Optional encryption configuration
     pub security: Option<Tier2Security>,
 }
 
@@ -231,35 +288,67 @@ impl Default for Tier2Config {
     }
 }
 
+/// Point-in-time metrics snapshot for Tier 2 remote storage.
+///
+/// Provides comprehensive observability into remote storage operations,
+/// including success rates, retry behavior, and queue depths.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Tier2MetricsSnapshot {
+    /// Total upload attempts (lifetime)
     pub upload_attempts: u64,
+    /// Total upload failures (lifetime)
     pub upload_failures: u64,
+    /// Total download operations (lifetime)
     pub downloads: u64,
+    /// Total download failures (lifetime)
     pub download_failures: u64,
+    /// Total delete operations (lifetime)
     pub deletes: u64,
+    /// Total delete failures (lifetime)
     pub delete_failures: u64,
+    /// Total upload retry attempts (lifetime)
     pub upload_retry_attempts: u64,
+    /// Total upload retry failures (lifetime)
     pub upload_retry_failures: u64,
+    /// Total delete retry attempts (lifetime)
     pub delete_retry_attempts: u64,
+    /// Total delete retry failures (lifetime)
     pub delete_retry_failures: u64,
+    /// Current upload queue depth
     pub upload_queue_depth: u32,
+    /// Current delete queue depth
     pub delete_queue_depth: u32,
 }
 
+/// Thread-safe metrics collection for Tier 2 operations.
+///
+/// Uses atomic counters for concurrent metric updates from
+/// upload, download, and delete worker threads.
 #[derive(Debug, Default)]
 pub struct Tier2Metrics {
+    /// Total upload attempts
     upload_attempts: AtomicU64,
+    /// Total upload failures
     upload_failures: AtomicU64,
+    /// Total download operations
     downloads: AtomicU64,
+    /// Total download failures
     download_failures: AtomicU64,
+    /// Total delete operations
     deletes: AtomicU64,
+    /// Total delete failures
     delete_failures: AtomicU64,
+    /// Total upload retry attempts
     upload_retry_attempts: AtomicU64,
+    /// Total upload retry failures
     upload_retry_failures: AtomicU64,
+    /// Total delete retry attempts
     delete_retry_attempts: AtomicU64,
+    /// Total delete retry failures
     delete_retry_failures: AtomicU64,
+    /// Current upload queue depth
     upload_queue_depth: AtomicU32,
+    /// Current delete queue depth
     delete_queue_depth: AtomicU32,
 }
 
@@ -368,71 +457,128 @@ impl Tier2Metrics {
     }
 }
 
+/// Descriptor for uploading a segment to Tier 2 storage.
+///
+/// Contains all metadata and file information needed for
+/// remote storage upload operations.
 #[derive(Debug, Clone)]
 pub struct Tier2UploadDescriptor {
+    /// Instance owning the segment
     pub instance_id: InstanceId,
+    /// Segment to upload
     pub segment_id: SegmentId,
+    /// Path to compressed segment file
     pub warm_path: PathBuf,
+    /// Timestamp when segment was sealed
     pub sealed_at: i64,
+    /// Base offset in original AOF log
     pub base_offset: u64,
+    /// Record count at sealing time
     pub base_record_count: u64,
+    /// Integrity checksum
     pub checksum: u32,
+    /// Compressed file size in bytes
     pub compressed_bytes: u64,
+    /// Original uncompressed size in bytes
     pub original_bytes: u64,
 }
 
+/// Request to fetch a segment from Tier 2 storage.
+///
+/// Used when Tier 1 cache miss requires retrieving segments
+/// from remote storage for hydration.
 #[derive(Debug, Clone)]
 pub struct Tier2FetchRequest {
+    /// Instance requesting the fetch
     pub instance_id: InstanceId,
+    /// Segment to fetch
     pub segment_id: SegmentId,
+    /// Timestamp when segment was sealed
     pub sealed_at: i64,
+    /// Local path where fetched data should be written
     pub destination: PathBuf,
 }
 
+/// Request to delete a segment from Tier 2 storage.
+///
+/// Used when segments are no longer needed in remote storage,
+/// typically due to retention policies or manual cleanup.
 #[derive(Debug, Clone)]
 pub struct Tier2DeleteRequest {
+    /// Instance owning the segment
     pub instance_id: InstanceId,
+    /// Segment to delete
     pub segment_id: SegmentId,
+    /// Remote object key for deletion
     pub object_key: String,
 }
 
+/// Low-level request for uploading objects to remote storage.
 #[derive(Clone)]
 pub struct PutObjectRequest {
+    /// Target bucket name
     pub bucket: String,
+    /// Object key/path
     pub key: String,
+    /// Local file to upload
     pub source: PathBuf,
+    /// Custom metadata to attach
     pub metadata: HashMap<String, String>,
+    /// Encryption configuration
     pub security: Option<Tier2Security>,
 }
 
+/// Result of a successful object upload.
 pub struct PutObjectResult {
+    /// Entity tag from remote storage
     pub etag: Option<String>,
+    /// Size of uploaded object
     pub size: u64,
 }
 
+/// Low-level request for downloading objects from remote storage.
 #[derive(Clone)]
 pub struct GetObjectRequest {
+    /// Source bucket name
     pub bucket: String,
+    /// Object key/path
     pub key: String,
+    /// Local path to write downloaded data
     pub destination: PathBuf,
+    /// Decryption configuration
     pub security: Option<Tier2Security>,
 }
 
+/// Result of a successful object download.
 pub struct GetObjectResult {
+    /// Entity tag from remote storage
     pub etag: Option<String>,
+    /// Size of downloaded object
     pub size: u64,
 }
 
+/// Result of object metadata query.
 pub struct HeadObjectResult {
+    /// Object size in bytes
     pub size: u64,
+    /// Entity tag for version detection
     pub etag: Option<String>,
+    /// Custom metadata attached to object
     pub metadata: HashMap<String, String>,
 }
 
+/// Trait for remote storage client implementations.
+///
+/// Abstracts over different remote storage backends (S3, MinIO, etc.)
+/// with async operations for object management.
 pub trait Tier2Client: Send + Sync {
+    /// Upload an object to remote storage
     fn put_object(&self, request: PutObjectRequest) -> BoxFuture<'_, AofResult<PutObjectResult>>;
+    /// Download an object from remote storage
     fn get_object(&self, request: GetObjectRequest) -> BoxFuture<'_, AofResult<GetObjectResult>>;
+    /// Delete an object from remote storage
     fn delete_object(&self, bucket: &str, key: &str) -> BoxFuture<'_, AofResult<()>>;
+    /// Query object metadata without downloading
     fn head_object(
         &self,
         bucket: &str,
@@ -611,12 +757,22 @@ impl Tier2Client for S3Tier2Client {
 }
 
 #[derive(Debug)]
+/// Events generated by Tier 2 storage operations.
+///
+/// Used to notify other tiers about the completion or failure
+/// of remote storage operations.
 pub enum Tier2Event {
+    /// Upload operation completed successfully
     UploadCompleted(Tier2UploadComplete),
+    /// Upload operation failed
     UploadFailed(Tier2UploadFailed),
+    /// Delete operation completed successfully
     DeleteCompleted(Tier2DeleteComplete),
+    /// Delete operation failed
     DeleteFailed(Tier2DeleteFailed),
+    /// Fetch operation completed successfully
     FetchCompleted(Tier2FetchComplete),
+    /// Fetch operation failed
     FetchFailed(Tier2FetchFailed),
 }
 
@@ -1331,15 +1487,42 @@ impl Tier2Inner {
     }
 }
 
+/// The Tier 2 remote storage manager.
+///
+/// Coordinates all remote storage operations including uploads,
+/// downloads, deletions, and event processing.
+///
+/// ## Architecture
+///
+/// ```text
+/// ┌─────────────────────────────────────────────┐
+/// │              Tier2Manager                   │
+/// ├─────────────────────────────────────────────┤
+/// │ • Upload/Download Coordination              │
+/// │ • Retry Logic & Error Handling              │
+/// │ • Concurrency Control                       │
+/// │ • Event Generation                          │
+/// │ • Client Abstraction                        │
+/// └─────────────────────────────────────────────┘
+/// ```
 pub struct Tier2Manager {
+    /// Core implementation and worker coordination
     inner: Arc<Tier2Inner>,
+    /// Event receiver for operation results
     events_rx: Mutex<mpsc::UnboundedReceiver<Tier2Event>>,
+    /// Background dispatcher task handle
     dispatcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+/// Handle for submitting operations to Tier 2 storage.
+///
+/// Provides a cloneable interface for submitting upload, download,
+/// and delete requests to the remote storage system.
 #[derive(Clone)]
 pub struct Tier2Handle {
+    /// Shared implementation
     inner: Arc<Tier2Inner>,
+    /// Runtime handle for async operations
     runtime: Handle,
 }
 

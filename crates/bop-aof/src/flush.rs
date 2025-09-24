@@ -16,16 +16,30 @@ use tokio::runtime::Handle;
 use tokio::sync::{Notify, Semaphore, mpsc};
 use tracing::{debug, error, warn};
 
+/// Commands sent to the background flush manager.
+///
+/// The flush manager processes these commands to coordinate durability
+/// operations across all AOF instances.
 pub enum FlushCommand {
+    /// Register a segment for background flushing
     RegisterSegment { request: FlushRequest },
+    /// Shutdown the flush manager gracefully
     Shutdown,
 }
 
+/// Request to flush a segment to durable storage.
+///
+/// Contains all information needed to perform background flush operations
+/// including durability tracking and tiered storage coordination.
 #[derive(Clone)]
 pub struct FlushRequest {
+    /// ID of the AOF instance requesting the flush
     instance_id: InstanceId,
+    /// Tiered storage instance handle
     tier: TieredInstance,
+    /// Durability cursor for tracking flush progress
     durability: Arc<DurabilityCursor>,
+    /// Resident segment to be flushed
     resident: ResidentSegment,
 }
 
@@ -165,6 +179,13 @@ impl SegmentFlushState {
     }
 }
 
+/// Atomically updates cell to maximum of current and provided value.
+///
+/// Uses compare-exchange loop to ensure the cell always contains
+/// the maximum value seen so far. Returns the previous value.
+///
+/// This provides lock-free progress tracking for flush operations,
+/// allowing multiple threads to update progress counters safely.
 fn store_max(cell: &AtomicU32, value: u32) -> u32 {
     let mut current = cell.load(Ordering::Acquire);
     while current < value {
@@ -400,6 +421,13 @@ pub(crate) fn persist_metadata_with_retry(
     }
 }
 
+/// Calculates exponential backoff delay with jitter for retries.
+///
+/// Implements exponential backoff starting from base delay, with
+/// randomized jitter to prevent thundering herd effects.
+///
+/// Critical for robust error recovery and system stability during
+/// transient failures like I/O congestion or temporary unavailability.
 fn retry_backoff_delay(retries: u32) -> Duration {
     if retries == 0 {
         return Duration::from_millis(FLUSH_RETRY_BASE_DELAY_MS.min(FLUSH_RETRY_MAX_DELAY_MS));
@@ -417,6 +445,12 @@ fn is_retryable_metadata_error(err: &AofError) -> bool {
     matches!(err, AofError::Io(_) | AofError::FileSystem(_))
 }
 
+/// Determines if error is transient and worth retrying.
+///
+/// Distinguishes between recoverable errors (like temporary I/O failures)
+/// and permanent errors (like corruption or invalid state).
+///
+/// Essential for distinguishing recoverable vs fatal errors in flush operations.
 fn is_retryable_error(err: &AofError) -> bool {
     match err {
         AofError::Io(io_err) => is_retryable_io_error(io_err),
@@ -424,6 +458,11 @@ fn is_retryable_error(err: &AofError) -> bool {
     }
 }
 
+/// Checks if I/O error represents transient condition.
+///
+/// Analyzes I/O error kinds to determine if the operation should
+/// be retried. Handles platform-specific error conditions and
+/// temporary resource unavailability.
 fn is_retryable_io_error(err: &io::Error) -> bool {
     match err.kind() {
         io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {

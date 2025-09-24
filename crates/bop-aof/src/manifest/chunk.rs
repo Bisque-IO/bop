@@ -3,20 +3,36 @@ use crc64fast_nvme::Digest;
 
 use crate::error::{AofError, AofResult};
 
-pub const CHUNK_MAGIC: u64 = 0x414F46324D4C4F47; // "AOF2MLOG"
+/// Magic number identifying manifest chunks ("AOF2MLOG")
+pub const CHUNK_MAGIC: u64 = 0x414F46324D4C4F47;
+/// Current manifest chunk format version
 pub const CHUNK_VERSION: u32 = 1;
+/// Size of chunk header in bytes
 pub const CHUNK_HEADER_LEN: usize = 64;
 
+/// Header for manifest chunks containing batched records.
+///
+/// Chunks provide the unit of atomicity for manifest operations.
+/// All records in a chunk are committed together or not at all.
 #[derive(Debug, Clone)]
 pub struct ChunkHeader {
+    /// Chunk flags (sealed, etc.)
     pub flags: u64,
+    /// Sequential chunk identifier
     pub chunk_index: u64,
+    /// Index of first record in this chunk
     pub base_record: u64,
+    /// Current tail position for appends
     pub tail_offset: usize,
+    /// Length of committed (durable) data
     pub committed_len: usize,
+    /// CRC64 checksum for integrity verification
     pub chunk_crc64: u64,
 }
 
+/// Compute CRC64 checksum for integrity verification.
+///
+/// Uses the NVMe polynomial for hardware acceleration compatibility.
 pub fn crc64(bytes: &[u8]) -> u64 {
     if bytes.is_empty() {
         return 0;

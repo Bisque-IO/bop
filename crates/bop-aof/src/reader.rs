@@ -340,6 +340,13 @@ impl<'a> SealedSegmentStream<'a> {
         }
     }
 
+    /// Retrieves next sealed segment cursor from queue.
+    ///
+    /// Opens segment readers and creates cursors for sequential segment
+    /// reading. Handles hydration backpressure and aligns cursors for
+    /// resume operations when needed.
+    ///
+    /// Core streaming logic for sequential segment reading.
     fn pop_sealed_cursor(&mut self) -> AofResult<Option<SegmentCursor>> {
         while let Some(&segment_id) = self.sealed_queue.front() {
             let reader = match self.aof.open_reader(segment_id) {
@@ -360,6 +367,12 @@ impl<'a> SealedSegmentStream<'a> {
         Ok(None)
     }
 
+    /// Positions cursor at correct starting position for resume operations.
+    ///
+    /// When resuming from a specific record ID, seeks the cursor past
+    /// the resume point to continue reading from the next record.
+    ///
+    /// Essential for resumable stream processing after interruptions.
     fn align_cursor(&mut self, segment_id: SegmentId, cursor: &mut SegmentCursor) -> AofResult<()> {
         if let Some(resume) = self.resume_from {
             if resume.segment_index() == segment_id.as_u32() {
@@ -628,12 +641,22 @@ impl SegmentCursor {
     }
 }
 
+/// Computes CRC64 checksum folded to 32 bits.
+///
+/// Creates a 32-bit checksum from payload data for integrity
+/// verification during record reading. Uses CRC64 internally
+/// then folds to 32 bits for consistency with storage format.
 fn checksum32(payload: &[u8]) -> u32 {
     let mut digest = Digest::new();
     digest.write(payload);
     fold_crc64(digest.sum64())
 }
 
+/// Folds 64-bit CRC to 32-bit via XOR operation.
+///
+/// Combines upper and lower 32-bit halves using XOR to create
+/// a 32-bit checksum value. Provides consistent checksum format
+/// across readers and segment operations.
 fn fold_crc64(value: u64) -> u32 {
     let upper = (value >> 32) as u32;
     let lower = value as u32;

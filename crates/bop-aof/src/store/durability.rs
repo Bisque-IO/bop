@@ -9,14 +9,38 @@ use crate::config::SegmentId;
 
 use super::tier0::InstanceId;
 
+/// Tracks durability state for a specific segment.
+///
+/// Records how many bytes have been requested for persistence
+/// versus how many bytes are actually durable (flushed to storage).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DurabilityEntry {
+    /// Total bytes requested to be durable
     pub requested_bytes: u32,
+    /// Bytes confirmed as durable (flushed)
     pub durable_bytes: u32,
 }
 
+/// Tracks durability state across all segments for an AOF instance.
+///
+/// Maintains a cursor of durability progress, tracking which bytes have
+/// been requested for persistence and which have been confirmed as durable.
+/// Provides atomic updates with rollback capability for persistence failures.
+///
+/// ## Thread Safety
+///
+/// All operations are thread-safe using internal locking. Multiple threads
+/// can concurrently update durability state for different segments.
+///
+/// ## Durability Guarantees
+///
+/// - `requested_bytes`: Monotonically increasing, tracks flush requests
+/// - `durable_bytes`: Never exceeds requested_bytes, tracks confirmed flushes
+/// - Updates are atomic with rollback on persistence failures
 pub struct DurabilityCursor {
+    /// Instance identifier for logging and debugging
     instance_id: InstanceId,
+    /// Protected durability state for all segments
     state: Mutex<HashMap<SegmentId, DurabilityEntry>>,
 }
 
