@@ -61,6 +61,7 @@ fn metadata_retry_increments_metrics() {
         flush_watermark_bytes: u64::MAX,
         flush_interval_ms: u64::MAX,
         max_unflushed_bytes: u64::MAX,
+        max_concurrent_flushes: 1,
     };
 
     let aof = Aof::new(handle.clone(), cfg).expect("aof");

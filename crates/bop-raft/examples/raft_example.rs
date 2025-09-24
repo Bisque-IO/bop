@@ -4,10 +4,17 @@
 
 use bop_raft::buffer::Buffer;
 use bop_raft::error::RaftResult;
-use bop_raft::traits::{LogStoreInterface, StateMachine, StateManagerInterface};
-use bop_raft::{LogEntryRecord, LogEntryView, LogIndex, RaftParams, RaftServerBuilder, Term};
+use bop_raft::traits::{
+    AdjustCommitIndex, LogStoreInterface, SnapshotChunk, SnapshotCreation, SnapshotMetadata,
+    SnapshotReadResult, SnapshotReader, StateMachine, StateManagerInterface,
+};
+use bop_raft::{
+    LogEntryRecord, LogEntryView, LogIndex, RaftParams, RaftServerBuilder, SnapshotRef, Term,
+};
 
-fn main() {}
+fn main() {
+    mocked_launch_example().unwrap();
+}
 
 #[allow(dead_code)]
 fn mocked_launch_example() -> RaftResult<()> {
@@ -16,7 +23,7 @@ fn mocked_launch_example() -> RaftResult<()> {
 
     struct MockStateMachine;
     impl StateMachine for MockStateMachine {
-        fn apply(&mut self, _log_idx: LogIndex, _data: &[u8]) -> RaftResult<Option<Vec<u8>>> {
+        fn apply(&mut self, _log_idx: LogIndex, _data: &[u8]) -> RaftResult<Option<Buffer>> {
             Ok(None)
         }
         fn take_snapshot(&self) -> RaftResult<Buffer> {
@@ -27,6 +34,43 @@ fn mocked_launch_example() -> RaftResult<()> {
         }
         fn last_applied_index(&self) -> LogIndex {
             LogIndex(0)
+        }
+
+        fn save_snapshot_chunk(&mut self, _chunk: SnapshotChunk<'_>) -> RaftResult<()> {
+            Ok(())
+        }
+
+        fn apply_snapshot(&mut self, _snapshot: SnapshotMetadata<'_>) -> RaftResult<bool> {
+            Ok(true)
+        }
+
+        fn snapshot_reader(&mut self) -> RaftResult<Box<dyn SnapshotReader>> {
+            Ok(Box::new(MockSnapshotReader::default()))
+        }
+
+        fn finalize_snapshot_reader(&mut self, _reader: Box<dyn SnapshotReader>) -> RaftResult<()> {
+            Ok(())
+        }
+
+        fn last_snapshot(&self) -> RaftResult<Option<SnapshotRef>> {
+            Ok(None)
+        }
+
+        fn create_snapshot(&mut self, _snapshot: SnapshotCreation<'_>) -> RaftResult<()> {
+            Ok(())
+        }
+
+        fn adjust_commit_index(&mut self, info: AdjustCommitIndex) -> RaftResult<LogIndex> {
+            Ok(info.expected)
+        }
+    }
+
+    #[derive(Default)]
+    struct MockSnapshotReader;
+
+    impl SnapshotReader for MockSnapshotReader {
+        fn next(&mut self, _object_id: u64) -> RaftResult<SnapshotReadResult> {
+            Ok(SnapshotReadResult::End)
         }
     }
 

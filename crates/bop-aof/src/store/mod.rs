@@ -198,7 +198,6 @@ struct TieredInstanceInner {
     layout: Layout,
     tier0: Tier0Instance,
     tier1: Tier1Instance,
-    tier2: Option<Tier2Handle>,
     durability: Arc<DurabilityCursor>,
     metadata: DurabilityMetadataStore,
     waiters: Mutex<HashMap<SegmentId, Vec<Arc<Notify>>>>,
@@ -210,7 +209,6 @@ impl TieredInstanceInner {
         layout: Layout,
         tier0: Tier0Instance,
         tier1: Tier1Instance,
-        tier2: Option<Tier2Handle>,
     ) -> AofResult<Arc<Self>> {
         let instance_id = tier0.instance_id();
         let durability = Arc::new(DurabilityCursor::new(instance_id));
@@ -221,7 +219,6 @@ impl TieredInstanceInner {
             layout,
             tier0,
             tier1,
-            tier2,
             durability,
             metadata,
             waiters: Mutex::new(HashMap::new()),
@@ -798,14 +795,8 @@ impl TieredCoordinator {
         let tier1_instance = self
             .tier1
             .register_instance(tier0_instance.instance_id(), layout.clone())?;
-        let tier2_handle = self.tier2.as_ref().map(|manager| manager.handle());
-        let inner = TieredInstanceInner::new(
-            Arc::clone(self),
-            layout,
-            tier0_instance,
-            tier1_instance,
-            tier2_handle,
-        )?;
+        let inner =
+            TieredInstanceInner::new(Arc::clone(self), layout, tier0_instance, tier1_instance)?;
         self.notifiers.register_instance(inner.instance_id());
         self.instances
             .lock()

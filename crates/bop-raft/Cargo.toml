@@ -11,7 +11,13 @@ tracing = ["dep:tracing"]
 
 [dependencies]
 bop-sys = { path = "../bop-sys" }
+bop-aof = { path = "../bop-aof" }
+crc64fast-nvme = "1.2"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
 tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
+
+[dev-dependencies]
+tempfile = "3.8"
+

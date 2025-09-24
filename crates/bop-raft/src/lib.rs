@@ -4,6 +4,7 @@
 //! wrapped by BOP. The API is being modularised; Phase 2 focuses on wiring the
 //! server- and async-facing FFI surfaces while the higher-level ergonomics mature.
 
+pub mod aof_state_manager;
 pub mod async_result;
 pub mod buffer;
 pub(crate) mod callbacks;
@@ -25,6 +26,7 @@ pub mod mdbx;
 #[cfg(feature = "mdbx")]
 pub use mdbx::{MdbxLogStore, MdbxOptions, MdbxStateManager, MdbxStorage};
 
+pub use aof_state_manager::{AofStateManager, AofStateManagerConfig};
 pub use async_result::{AsyncBool, AsyncBuffer, AsyncU64};
 pub use buffer::Buffer;
 pub use config::{
@@ -46,7 +48,11 @@ pub use server::{AsioService, RaftServer, RaftServerBuilder};
 pub use snapshot::Snapshot;
 pub use state::{PeerInfo, ServerState};
 pub use storage::{LogStoreBuild, StateManagerBuild, StorageBackendKind, StorageComponents};
-pub use traits::{LogStoreInterface, Logger, ServerCallbacks, StateMachine, StateManagerInterface};
+pub use traits::{
+    AdjustCommitIndex, LogStoreInterface, Logger, ServerCallbacks, SnapshotChunk, SnapshotCreation,
+    SnapshotMetadata, SnapshotReadResult, SnapshotReader, SnapshotRef, SnapshotType, StateMachine,
+    StateManagerInterface,
+};
 pub use types::{
     CallbackAction, CallbackContext, CallbackParam, CallbackType, DataCenterId, LogEntryType,
     LogIndex, LogLevel, PrioritySetResult, ServerId, Term,

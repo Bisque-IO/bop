@@ -1,0 +1,10 @@
+flowchart TD
+    Dev[Developer Workstation] -->|clone repo| Repo[bisque-io/bop]
+    Dev -->|run scripts| Tooling[bake / xmake]
+    Tooling -->|build binaries| LocalTier0[Tier 0 (mmap)]
+    Tooling -->|configure| LocalTier1[Tier 1 cache]
+    LocalTier1 -->|upload| Tier2[(Tier 2 Object Store)]
+    Dev -->|execute demos| CLI[aof2-admin / demos]
+    CLI -->|inspect| LocalTier0
+    CLI -->|hydrate| LocalTier1
+    Tier2 -->|rehydrate| LocalTier1

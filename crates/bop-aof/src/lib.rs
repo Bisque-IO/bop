@@ -1,8 +1,16 @@
+//! Utilities for building and orchestrating BOP's tiered append-only file (AOF) store.
+//!
+//! The crate wires together the runtime, multi-tier cache, and durability pipeline
+//! that back the AOF service, and exposes helper types for metrics, metadata, and
+//! read/write APIs consumed by higher-level components such as Raft integration.
+
 #[cfg(test)]
 use crate::store::DurabilityEntry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,11 +26,11 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use tokio::{
     runtime::{Builder, Handle, Runtime},
-    sync::{Notify, watch},
+    sync::{Notify, Semaphore, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{trace, warn};
+use tracing::{error, trace, warn};
 
 pub mod config;
 pub mod error;
@@ -52,12 +60,14 @@ pub use reader::{RecordBounds, SegmentReader, SegmentRecord, TailFollower};
 
 use self::fs::CurrentSealedPointer;
 
+/// Named metric sample produced by the flush pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlushMetricSample {
     pub name: &'static str,
     pub value: u64,
 }
 
+/// Helper for exporting flush metrics snapshots with stable metric names.
 #[derive(Debug, Clone, Copy)]
 pub struct FlushMetricsExporter {
     snapshot: FlushMetricsSnapshot,
@@ -133,7 +143,7 @@ use flush::{
     FlushManager, FlushMetrics, FlushMetricsSnapshot, FlushRequest, flush_with_retry,
     persist_metadata_with_retry,
 };
-use segment::{Segment, SegmentAppendResult, SegmentFooter};
+use segment::{Segment, SegmentAppendResult, SegmentFooter, SegmentReservation};
 
 const DEFAULT_TIER0_CLUSTER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 const DEFAULT_TIER0_INSTANCE_QUOTA_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
@@ -141,6 +151,7 @@ const DEFAULT_TIER1_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
 const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 const TIERED_SERVICE_IDLE_BACKOFF_MS: u64 = 10;
 
+/// Configures the capacity and behavior of each storage tier managed by the AOF.
 #[derive(Debug, Clone)]
 pub struct TieredStoreConfig {
     pub tier0: Tier0CacheConfig,
@@ -161,6 +172,7 @@ impl Default for TieredStoreConfig {
     }
 }
 
+/// Top-level options for constructing an AofManager and its subsystems.
 #[derive(Debug, Clone)]
 pub struct AofManagerConfig {
     pub runtime_worker_threads: Option<usize>,
@@ -197,6 +209,7 @@ impl AofManagerConfig {
     }
 }
 
+/// Per-instance metadata tracked atomically for coordination and recovery.
 #[derive(Debug)]
 pub struct InstanceMetadata {
     coordinator_watermark: AtomicU64,
@@ -211,10 +224,12 @@ impl InstanceMetadata {
         }
     }
 
+    /// Reads the current coordinator watermark captured for this instance.
     pub fn coordinator_watermark(&self) -> u64 {
         self.coordinator_watermark.load(Ordering::Acquire)
     }
 
+    /// Updates the coordinator watermark that will be published with the next seal.
     pub fn set_coordinator_watermark(&self, watermark: u64) {
         self.coordinator_watermark
             .store(watermark, Ordering::Release);
@@ -230,6 +245,7 @@ impl InstanceMetadata {
 }
 
 #[derive(Default)]
+/// Registry that owns InstanceMetadata records keyed by InstanceId.
 pub struct CoordinatorMetadataRegistry {
     instances: Mutex<HashMap<InstanceId, Arc<InstanceMetadata>>>,
 }
@@ -254,6 +270,7 @@ impl CoordinatorMetadataRegistry {
     }
 }
 
+/// Cloneable handle that exposes safe accessors for InstanceMetadata.
 #[derive(Clone)]
 pub struct InstanceMetadataHandle {
     metadata: Arc<InstanceMetadata>,
@@ -281,6 +298,7 @@ impl InstanceMetadataHandle {
     }
 }
 
+/// Wrapper around the Tokio runtime used by tiered workers with coordinated shutdown.
 pub(crate) struct TieredRuntime {
     runtime: Mutex<Option<Runtime>>,
     handle: Handle,
@@ -344,6 +362,7 @@ impl Drop for TieredRuntime {
     }
 }
 
+/// Boots the shared runtime, tiered caches, and flush pipeline used by Aof instances.
 pub struct AofManager {
     runtime: Arc<TieredRuntime>,
     flush_config: FlushConfig,
@@ -500,6 +519,7 @@ impl Drop for AofManager {
     }
 }
 
+/// Cloneable handle that Aof instances use to reach shared runtime facilities.
 pub struct AofManagerHandle {
     runtime: Arc<TieredRuntime>,
     coordinator: Arc<TieredCoordinator>,
@@ -521,7 +541,7 @@ impl AofManagerHandle {
         }
     }
 
-    pub fn runtime(&self) -> Arc<TieredRuntime> {
+    pub(crate) fn runtime(&self) -> Arc<TieredRuntime> {
         self.runtime.clone()
     }
 
@@ -603,6 +623,114 @@ struct AppendState {
     metrics: Arc<FlushMetrics>,
 }
 
+struct SegmentPreallocator {
+    handle: Handle,
+    semaphore: Arc<Semaphore>,
+    queue: Arc<StdMutex<VecDeque<Arc<Segment>>>>,
+    condvar: Arc<Condvar>,
+    inflight: AtomicUsize,
+}
+
+impl SegmentPreallocator {
+    fn new(handle: Handle, max_concurrent: usize) -> Arc<Self> {
+        Arc::new(Self {
+            handle,
+            semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
+            queue: Arc::new(StdMutex::new(VecDeque::new())),
+            condvar: Arc::new(Condvar::new()),
+            inflight: AtomicUsize::new(0),
+        })
+    }
+
+    fn ready_len(&self) -> usize {
+        self.queue.lock().unwrap().len()
+    }
+
+    fn inflight(&self) -> usize {
+        self.inflight.load(Ordering::Acquire)
+    }
+
+    fn has_inflight(&self) -> bool {
+        self.inflight() > 0
+    }
+
+    fn schedule(self: &Arc<Self>, job: PreallocationJob) {
+        self.inflight.fetch_add(1, Ordering::AcqRel);
+        let worker = Arc::clone(self);
+        let handle = worker.handle.clone();
+        handle.spawn(async move {
+            let permit = match worker.semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    worker.inflight.fetch_sub(1, Ordering::AcqRel);
+                    worker.condvar.notify_all();
+                    return;
+                }
+            };
+
+            let segment_id = job.segment_id;
+            let result = tokio::task::spawn_blocking(move || job.run()).await;
+            drop(permit);
+
+            match result {
+                Ok(Ok(segment)) => {
+                    let mut guard = worker.queue.lock().unwrap();
+                    guard.push_back(segment);
+                    worker.condvar.notify_one();
+                }
+                Ok(Err(err)) => {
+                    error!(
+                        segment = segment_id.as_u64(),
+                        error = %err,
+                        "segment preallocation failed"
+                    );
+                    worker.condvar.notify_all();
+                }
+                Err(join_err) => {
+                    error!(
+                        segment = segment_id.as_u64(),
+                        error = %join_err,
+                        "segment preallocation task panicked"
+                    );
+                    worker.condvar.notify_all();
+                }
+            }
+
+            worker.inflight.fetch_sub(1, Ordering::AcqRel);
+            worker.condvar.notify_all();
+        });
+    }
+
+    fn try_take_ready(&self) -> Option<Arc<Segment>> {
+        self.queue.lock().unwrap().pop_front()
+    }
+}
+
+struct PreallocationJob {
+    segment_id: SegmentId,
+    base_offset: u64,
+    base_record_count: u64,
+    created_at: i64,
+    segment_bytes: u64,
+    path: PathBuf,
+    ext_id: u64,
+}
+
+impl PreallocationJob {
+    fn run(self) -> AofResult<Arc<Segment>> {
+        let segment = Arc::new(Segment::create_active(
+            self.segment_id,
+            self.base_offset,
+            self.base_record_count,
+            self.created_at,
+            self.segment_bytes,
+            &self.path,
+        )?);
+        segment.set_ext_id(self.ext_id)?;
+        Ok(segment)
+    }
+}
+
 impl AppendState {
     fn new(metrics: Arc<FlushMetrics>) -> Self {
         let state = Self {
@@ -645,12 +773,307 @@ impl AppendState {
     }
 }
 
+pub struct AppendReserve {
+    guard: AdmissionGuard,
+    previous_offset: u64,
+}
+
+impl AppendReserve {
+    fn new(guard: AdmissionGuard, previous_offset: u64) -> Self {
+        Self {
+            guard,
+            previous_offset,
+        }
+    }
+
+    fn previous_offset(&self) -> u64 {
+        self.previous_offset
+    }
+
+    fn update_previous_offset(&mut self, value: u64) {
+        self.previous_offset = value;
+    }
+
+    fn guard(&self) -> &AdmissionGuard {
+        &self.guard
+    }
+
+    fn into_guard(self) -> AdmissionGuard {
+        self.guard
+    }
+}
+
+pub struct AppendReservation {
+    reserve: Option<AppendReserve>,
+    reservation: Option<SegmentReservation>,
+}
+
+impl AppendReservation {
+    fn new(reserve: AppendReserve, reservation: SegmentReservation) -> Self {
+        Self {
+            reserve: Some(reserve),
+            reservation: Some(reservation),
+        }
+    }
+
+    pub fn payload_len(&self) -> usize {
+        self.reservation
+            .as_ref()
+            .expect("reservation consumed")
+            .payload_len()
+    }
+
+    pub fn payload_mut(&mut self) -> AofResult<&mut [u8]> {
+        self.reservation
+            .as_mut()
+            .ok_or_else(|| {
+                AofError::InvalidState("append reservation already completed".to_string())
+            })?
+            .payload_mut()
+    }
+
+    fn into_parts(mut self) -> AofResult<(AppendReserve, SegmentReservation)> {
+        let reserve = self.reserve.take().ok_or_else(|| {
+            AofError::InvalidState("append reservation missing reusable handle".to_string())
+        })?;
+        let reservation = self.reservation.take().ok_or_else(|| {
+            AofError::InvalidState("append reservation missing segment allocation".to_string())
+        })?;
+        Ok((reserve, reservation))
+    }
+}
+
+impl Drop for AppendReservation {
+    fn drop(&mut self) {
+        debug_assert!(
+            self.reservation.is_none(),
+            "append reservation dropped without completion"
+        );
+    }
+}
+
+#[derive(Default)]
+struct SegmentCatalog {
+    order: VecDeque<SegmentId>,
+    entries: HashMap<SegmentId, ResidentSegment>,
+}
+
+impl SegmentCatalog {
+    fn insert(&mut self, resident: ResidentSegment) {
+        let segment_id = resident.segment().id();
+        if self.entries.insert(segment_id, resident).is_none() {
+            self.order.push_back(segment_id);
+        }
+    }
+
+    fn get(&self, segment_id: SegmentId) -> Option<&ResidentSegment> {
+        self.entries.get(&segment_id)
+    }
+
+    fn get_by_segment(&self, segment: &Arc<Segment>) -> Option<&ResidentSegment> {
+        self.get(segment.id())
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &ResidentSegment> {
+        self.order
+            .iter()
+            .filter_map(|segment_id| self.entries.get(segment_id))
+    }
+}
+
+#[derive(Default)]
+struct SegmentQueue {
+    order: VecDeque<SegmentId>,
+    members: HashSet<SegmentId>,
+}
+
+impl SegmentQueue {
+    fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    fn push_back(&mut self, segment_id: SegmentId) -> bool {
+        if self.members.insert(segment_id) {
+            self.order.push_back(segment_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove(&mut self, segment_id: SegmentId) -> bool {
+        self.members.remove(&segment_id)
+    }
+
+    fn iter_ids(&self) -> impl Iterator<Item = SegmentId> + '_ {
+        self.order
+            .iter()
+            .filter_map(|segment_id| self.members.contains(segment_id).then_some(*segment_id))
+    }
+
+    fn snapshot(&self, catalog: &SegmentCatalog) -> Vec<SegmentStatusSnapshot> {
+        self.iter_ids()
+            .filter_map(|segment_id| catalog.get(segment_id))
+            .map(|resident| SegmentStatusSnapshot::from_segment(resident.segment().as_ref()))
+            .collect()
+    }
+
+    fn collect_residents(&self, catalog: &SegmentCatalog) -> Vec<ResidentSegment> {
+        self.iter_ids()
+            .filter_map(|segment_id| catalog.get(segment_id))
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct RolloverTracker {
+    entries: HashMap<SegmentId, RolloverAwaiter>,
+    pending: VecDeque<SegmentId>,
+    pending_set: HashSet<SegmentId>,
+    ready: VecDeque<SegmentId>,
+    ready_set: HashSet<SegmentId>,
+}
+
+impl RolloverTracker {
+    fn contains(&self, segment_id: SegmentId) -> bool {
+        self.entries.contains_key(&segment_id)
+    }
+
+    fn insert_pending(&mut self, segment_id: SegmentId, signal: Arc<RolloverSignal>) {
+        self.entries
+            .insert(segment_id, RolloverAwaiter::Pending(signal));
+        if self.pending_set.insert(segment_id) {
+            self.pending.push_back(segment_id);
+        }
+        self.ready_set.remove(&segment_id);
+    }
+
+    fn remove(&mut self, segment_id: SegmentId) -> Option<RolloverAwaiter> {
+        self.pending_set.remove(&segment_id);
+        self.ready_set.remove(&segment_id);
+        self.entries.remove(&segment_id)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.pending.clear();
+        self.pending_set.clear();
+        self.ready.clear();
+        self.ready_set.clear();
+    }
+
+    fn mark_ready(&mut self, segment_id: SegmentId) {
+        if let Some(RolloverAwaiter::Pending(signal)) = self.entries.get(&segment_id) {
+            if signal.is_ready() {
+                self.entries.insert(segment_id, RolloverAwaiter::Ready);
+                self.pending_set.remove(&segment_id);
+                if self.ready_set.insert(segment_id) {
+                    self.ready.push_back(segment_id);
+                }
+            }
+        }
+    }
+
+    fn promote_ready(&mut self, segment_id: SegmentId) {
+        self.pending_set.remove(&segment_id);
+        if self.ready_set.insert(segment_id) {
+            self.ready.push_back(segment_id);
+        }
+    }
+
+    fn poll_pending(&mut self) -> Option<(SegmentId, Arc<RolloverSignal>)> {
+        while let Some(&segment_id) = self.pending.front() {
+            if !self.pending_set.contains(&segment_id) {
+                self.pending.pop_front();
+                continue;
+            }
+            match self.entries.get(&segment_id) {
+                Some(RolloverAwaiter::Pending(signal)) => {
+                    return Some((segment_id, Arc::clone(signal)));
+                }
+                _ => {
+                    self.pending.pop_front();
+                    self.pending_set.remove(&segment_id);
+                }
+            }
+        }
+        None
+    }
+
+    fn has_pending(&mut self) -> bool {
+        while let Some(&segment_id) = self.pending.front() {
+            if !self.pending_set.contains(&segment_id) {
+                self.pending.pop_front();
+                continue;
+            }
+            if matches!(
+                self.entries.get(&segment_id),
+                Some(RolloverAwaiter::Pending(_))
+            ) {
+                return true;
+            }
+            self.pending.pop_front();
+            self.pending_set.remove(&segment_id);
+        }
+        false
+    }
+
+    fn take_ready(&mut self) -> Option<SegmentId> {
+        while let Some(segment_id) = self.ready.pop_front() {
+            if !self.ready_set.remove(&segment_id) {
+                continue;
+            }
+            if matches!(self.entries.get(&segment_id), Some(RolloverAwaiter::Ready)) {
+                self.entries.remove(&segment_id);
+                self.pending_set.remove(&segment_id);
+                return Some(segment_id);
+            }
+        }
+        None
+    }
+
+    fn keys(&self) -> impl Iterator<Item = SegmentId> + '_ {
+        self.entries.keys().copied()
+    }
+
+    fn poll_signal_result(&mut self, segment_id: SegmentId) -> Option<Result<(), String>> {
+        match self.entries.get_mut(&segment_id) {
+            Some(RolloverAwaiter::Pending(signal)) => {
+                let result = signal.result();
+                if let Some(ref outcome) = result {
+                    match outcome {
+                        Ok(()) => {
+                            self.entries.insert(segment_id, RolloverAwaiter::Ready);
+                            self.promote_ready(segment_id);
+                        }
+                        Err(_) => {
+                            self.remove(segment_id);
+                        }
+                    }
+                }
+                result
+            }
+            Some(RolloverAwaiter::Ready) => Some(Ok(())),
+            None => Some(Ok(())),
+        }
+    }
+
+    fn is_ready(&self, segment_id: SegmentId) -> bool {
+        matches!(self.entries.get(&segment_id), Some(RolloverAwaiter::Ready))
+    }
+}
+
 struct AofManagement {
-    catalog: Vec<ResidentSegment>,
-    pending_finalize: VecDeque<ResidentSegment>,
+    catalog: SegmentCatalog,
+    pending_finalize: SegmentQueue,
     next_segment_index: u32,
-    flush_queue: VecDeque<ResidentSegment>,
-    rollovers: HashMap<SegmentId, RolloverAwaiter>,
+    flush_queue: SegmentQueue,
+    rollovers: RolloverTracker,
 }
 
 #[derive(Debug)]
@@ -660,40 +1083,20 @@ enum RolloverAwaiter {
 }
 
 impl AofManagement {
-    fn resident_for(&self, segment: &Arc<Segment>) -> Option<ResidentSegment> {
-        self.catalog
-            .iter()
-            .find(|resident| Arc::ptr_eq(resident.segment(), segment))
-            .cloned()
+    fn resident_for_segment(&self, segment: &Arc<Segment>) -> Option<ResidentSegment> {
+        self.catalog.get_by_segment(segment).cloned()
     }
 
-    fn remove_pending(&mut self, segment: &Arc<Segment>) -> bool {
-        if let Some(pos) = self
-            .pending_finalize
-            .iter()
-            .position(|pending| Arc::ptr_eq(pending.segment(), segment))
-        {
-            self.pending_finalize.remove(pos);
-            true
-        } else {
-            false
-        }
+    fn remove_pending(&mut self, segment_id: SegmentId) -> bool {
+        self.pending_finalize.remove(segment_id)
     }
 
-    fn remove_flush(&mut self, segment: &Arc<Segment>) -> bool {
-        if let Some(pos) = self
-            .flush_queue
-            .iter()
-            .position(|queued| Arc::ptr_eq(queued.segment(), segment))
-        {
-            self.flush_queue.remove(pos);
-            true
-        } else {
-            false
-        }
+    fn remove_flush(&mut self, segment_id: SegmentId) -> bool {
+        self.flush_queue.remove(segment_id)
     }
 }
 
+/// Lightweight snapshot of a resident segment tracked in the in-memory catalog.
 #[derive(Debug, Clone)]
 pub struct SegmentCatalogEntry {
     pub segment_id: SegmentId,
@@ -704,6 +1107,7 @@ pub struct SegmentCatalogEntry {
     pub record_count: u64,
 }
 
+/// Detailed status for a segment, used for observability and tooling.
 #[derive(Debug, Clone)]
 pub struct SegmentStatusSnapshot {
     pub segment_id: SegmentId,
@@ -731,6 +1135,7 @@ impl SegmentStatusSnapshot {
     }
 }
 
+/// High-level events describing state transitions for the writable tail segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TailEvent {
     None,
@@ -745,6 +1150,7 @@ impl Default for TailEvent {
     }
 }
 
+/// Aggregate tail state broadcast to followers via the watch channel.
 #[derive(Debug, Clone, Default)]
 pub struct TailState {
     pub version: u64,
@@ -785,15 +1191,9 @@ impl TailSignal {
         state.version = state.version.wrapping_add(1);
         let _ = self.tx.send(state.clone());
     }
-
-    fn snapshot_pending(queue: &VecDeque<ResidentSegment>) -> Vec<SegmentStatusSnapshot> {
-        queue
-            .iter()
-            .map(|seg| SegmentStatusSnapshot::from_segment(seg.segment().as_ref()))
-            .collect()
-    }
 }
 
+/// Append-only log backed by the tiered store and asynchronous flush pipeline.
 pub struct Aof {
     manager: Arc<AofManagerHandle>,
     config: AofConfig,
@@ -808,11 +1208,13 @@ pub struct Aof {
     metrics: Arc<FlushMetrics>,
     flush_failed: Arc<AtomicBool>,
     flush: Arc<FlushManager>,
+    preallocator: Option<Arc<SegmentPreallocator>>,
     metadata: Arc<InstanceMetadata>,
     tail_signal: TailSignal,
 }
 
 impl Aof {
+    /// Opens or recovers an AOF instance backed by the shared manager runtime.
     pub fn new(manager: Arc<AofManagerHandle>, config: AofConfig) -> AofResult<Self> {
         let normalized = config.normalized();
         let layout = Layout::new(&normalized);
@@ -833,7 +1235,16 @@ impl Aof {
             append.unflushed_handle(),
             metrics.clone(),
             flush_failed.clone(),
+            normalized.flush.max_concurrent_flushes,
         );
+        let preallocator = if normalized.preallocate_segments > 0 {
+            Some(SegmentPreallocator::new(
+                manager.runtime_handle(),
+                usize::from(normalized.preallocate_concurrency.max(1)),
+            ))
+        } else {
+            None
+        };
         let metadata = manager.register_instance_metadata(instance_id);
         let instance = Self {
             manager,
@@ -846,15 +1257,16 @@ impl Aof {
             rollover_notify,
             append,
             management: Mutex::new(AofManagement {
-                catalog: Vec::new(),
-                pending_finalize: VecDeque::new(),
+                catalog: SegmentCatalog::default(),
+                pending_finalize: SegmentQueue::default(),
                 next_segment_index: 0,
-                flush_queue: VecDeque::new(),
-                rollovers: HashMap::new(),
+                flush_queue: SegmentQueue::default(),
+                rollovers: RolloverTracker::default(),
             }),
             metrics,
             flush_failed,
             flush,
+            preallocator,
             metadata,
             tail_signal: TailSignal::new(),
         };
@@ -872,6 +1284,7 @@ impl Aof {
         &self.layout
     }
 
+    /// Returns a point-in-time catalog of resident segments.
     pub fn catalog_snapshot(&self) -> Vec<SegmentCatalogEntry> {
         let state = self.management.lock();
         state
@@ -888,6 +1301,7 @@ impl Aof {
             .collect()
     }
 
+    /// Captures detailed status for each resident segment.
     pub fn segment_snapshot(&self) -> Vec<SegmentStatusSnapshot> {
         let state = self.management.lock();
         state
@@ -907,14 +1321,11 @@ impl Aof {
         self.flush_failed.load(Ordering::Acquire)
     }
 
+    /// Returns a reader for a sealed segment, hydrating it if necessary.
     pub fn open_reader(&self, segment_id: SegmentId) -> AofResult<SegmentReader> {
         if let Some(resident) = {
             let state = self.management.lock();
-            state
-                .catalog
-                .iter()
-                .find(|segment| segment.id() == segment_id)
-                .cloned()
+            state.catalog.get(segment_id).cloned()
         } {
             return SegmentReader::new(resident);
         }
@@ -928,14 +1339,11 @@ impl Aof {
         }
     }
 
+    /// Async variant of open_reader that waits for hydration to finish.
     pub async fn open_reader_async(&self, segment_id: SegmentId) -> AofResult<SegmentReader> {
         if let Some(resident) = {
             let state = self.management.lock();
-            state
-                .catalog
-                .iter()
-                .find(|segment| segment.id() == segment_id)
-                .cloned()
+            state.catalog.get(segment_id).cloned()
         } {
             return SegmentReader::new(resident);
         }
@@ -945,6 +1353,7 @@ impl Aof {
         SegmentReader::new(resident)
     }
 
+    /// Exposes the latest counters and gauges from the flush pipeline.
     pub fn flush_metrics(&self) -> FlushMetricsSnapshot {
         self.metrics.snapshot()
     }
@@ -957,6 +1366,7 @@ impl Aof {
         self.metadata.set_coordinator_watermark(watermark);
     }
 
+    /// Associates the provided external identifier with the active writable segment.
     pub fn set_current_ext_id(&self, ext_id: u64) -> AofResult<()> {
         self.metadata.set_current_ext_id(ext_id);
         if let Some(guard) = self.current_tail() {
@@ -965,18 +1375,81 @@ impl Aof {
         Ok(())
     }
 
+    /// Produces a shareable handle for manipulating this instance's metadata.
     pub fn metadata_handle(&self) -> InstanceMetadataHandle {
         InstanceMetadataHandle::new(self.metadata.clone())
     }
 
+    /// Subscribes to tail state changes via the watch channel.
     pub fn tail_events(&self) -> watch::Receiver<TailState> {
         self.tail_signal.subscribe()
     }
 
+    /// Creates a TailFollower stream over tail updates.
     pub fn tail_follower(&self) -> TailFollower {
         TailFollower::new(self.tail_signal.subscribe())
     }
 
+    /// Reserves capacity for a new record and returns a handle for in-place payload writes.
+    ///
+    /// Callers must populate the returned buffer and finish the append via
+    /// [`append_reserve_complete`](Self::append_reserve_complete) to publish the record.
+    pub fn append_reserve(&self, payload_len: usize) -> AofResult<AppendReservation> {
+        if payload_len == 0 {
+            return Err(AofError::InvalidState(
+                "record payload is empty".to_string(),
+            ));
+        }
+
+        if self.flush_failed.load(Ordering::Acquire) {
+            self.record_would_block(BackpressureKind::Flush);
+            return Err(AofError::would_block(BackpressureKind::Flush));
+        }
+
+        let timestamp = Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
+        let timestamp_u64 = if timestamp < 0 { 0 } else { timestamp as u64 };
+
+        let guard = match self.try_get_writable_segment()? {
+            Some(guard) => guard,
+            None => {
+                self.record_would_block(BackpressureKind::Admission);
+                return Err(AofError::would_block(BackpressureKind::Admission));
+            }
+        };
+
+        self.append_reserve_with_guard(payload_len, timestamp_u64, guard)
+    }
+
+    /// Reserves capacity using a previously returned [`AppendReserve`], allowing zero-copy
+    /// appends to reuse the same segment admission guard when it remains active.
+    pub fn append_reserve_with(
+        &self,
+        reserve: AppendReserve,
+        payload_len: usize,
+    ) -> AofResult<AppendReservation> {
+        if payload_len == 0 {
+            return Err(AofError::InvalidState(
+                "record payload is empty".to_string(),
+            ));
+        }
+
+        if self.flush_failed.load(Ordering::Acquire) {
+            self.record_would_block(BackpressureKind::Flush);
+            return Err(AofError::would_block(BackpressureKind::Flush));
+        }
+
+        let timestamp = Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
+        let timestamp_u64 = if timestamp < 0 { 0 } else { timestamp as u64 };
+
+        let guard = reserve.into_guard();
+        self.append_reserve_with_guard(payload_len, timestamp_u64, guard)
+    }
+
+    /// Attempts to append without blocking, returning AofError::WouldBlock when backpressure applies.
     pub fn append_record(&self, payload: &[u8]) -> AofResult<RecordId> {
         if payload.is_empty() {
             return Err(AofError::InvalidState(
@@ -1005,6 +1478,7 @@ impl Aof {
         self.append_with_guard(payload, timestamp_u64, guard)
     }
 
+    /// Waits up to the provided timeout for admission before returning a backpressure error.
     pub fn append_record_with_timeout(
         &self,
         payload: &[u8],
@@ -1051,6 +1525,7 @@ impl Aof {
         }
     }
 
+    /// Async helper that awaits admission and rollover signals before retrying appends.
     pub async fn append_record_async(&self, payload: &[u8]) -> AofResult<RecordId> {
         let shutdown = self.manager.shutdown_token();
         loop {
@@ -1071,6 +1546,41 @@ impl Aof {
                 Err(err) => return Err(err),
             }
         }
+    }
+
+    /// Completes a previously reserved append, publishing the record and updating durability state.
+    ///
+    /// Returns both the newly assigned [`RecordId`] and an [`AppendReserve`] that can be reused
+    /// to reserve additional payloads on the same segment when space remains.
+    pub fn append_reserve_complete(
+        &self,
+        reservation: AppendReservation,
+    ) -> AofResult<(RecordId, AppendReserve)> {
+        let (mut reserve, segment_reservation) = reservation.into_parts()?;
+        let previous_offset = reserve.previous_offset();
+        let segment = Arc::clone(segment_reservation.segment());
+        let result = segment_reservation.complete()?;
+
+        self.append
+            .next_offset
+            .store(result.last_offset, Ordering::Release);
+        self.append.record_count.fetch_add(1, Ordering::AcqRel);
+        let appended_bytes = result.last_offset.saturating_sub(previous_offset);
+        self.append.add_unflushed(appended_bytes);
+
+        reserve.guard().record_append(result.logical_size);
+        self.maybe_schedule_flush(&segment, &result)?;
+        self.enforce_backpressure(&segment, result.logical_size)?;
+
+        let record_id = RecordId::from_parts(segment.id().as_u32(), result.segment_offset);
+
+        reserve.update_previous_offset(result.last_offset);
+
+        if result.is_full {
+            self.handle_segment_full(&segment)?;
+        }
+
+        Ok((record_id, reserve))
     }
 
     async fn await_admission(&self, shutdown: &CancellationToken) -> AofResult<()> {
@@ -1117,6 +1627,7 @@ impl Aof {
         }
     }
 
+    /// Polls until a writable segment becomes available or the timeout elapses.
     pub fn wait_for_writable_segment(&self, timeout: Duration) -> AofResult<AdmissionGuard> {
         if let Some(guard) = self.current_tail() {
             return Ok(guard);
@@ -1210,9 +1721,9 @@ impl Aof {
         guard.mark_sealed();
 
         let mut state = self.management.lock();
-        state.remove_pending(segment);
-        state.remove_flush(segment);
-        let pending_snapshot = TailSignal::snapshot_pending(&state.pending_finalize);
+        state.remove_pending(segment_id);
+        state.remove_flush(segment_id);
+        let pending_snapshot = state.pending_finalize.snapshot(&state.catalog);
         drop(state);
         let tail_snapshot = self
             .append
@@ -1273,81 +1784,77 @@ impl Aof {
 
     pub fn segment_finalized(&self, segment_id: SegmentId) -> AofResult<()> {
         let mut state = self.management.lock();
-        if let Some(segment) = state
-            .pending_finalize
-            .iter()
-            .find(|segment| segment.id() == segment_id)
-            .cloned()
-        {
-            if state.remove_pending(segment.segment()) {
-                state.remove_flush(segment.segment());
-                let removed_rollover = state.rollovers.remove(&segment_id).is_some();
+        if !state.remove_pending(segment_id) {
+            return Err(AofError::InvalidState(format!(
+                "segment {} not pending finalization",
+                segment_id
+            )));
+        }
 
-                let tail_matches_segment = self
-                    .append
-                    .tail
-                    .load_full()
-                    .map(|guard| Arc::ptr_eq(guard.segment(), segment.segment()))
-                    .unwrap_or(false);
-                if tail_matches_segment {
-                    self.append.tail.store(None);
+        state.remove_flush(segment_id);
+        let removed_rollover = state.rollovers.remove(segment_id).is_some();
+
+        let tail_matches_segment = self
+            .append
+            .tail
+            .load_full()
+            .map(|guard| guard.segment().id() == segment_id)
+            .unwrap_or(false);
+        if tail_matches_segment {
+            self.append.tail.store(None);
+        }
+
+        let mut activated_guard = None;
+        if self.append.tail.load_full().is_none() {
+            if let Some(next_id) = state.pending_finalize.iter_ids().find(|candidate| {
+                state
+                    .catalog
+                    .get(*candidate)
+                    .map(|resident| !resident.segment().is_sealed())
+                    .unwrap_or(false)
+            }) {
+                if let Some(resident) = state.catalog.get(next_id) {
+                    let guard = self.tier.admission_guard(resident);
+                    self.append.tail.store(Some(Arc::new(guard.clone())));
+                    activated_guard = Some(guard);
                 }
-
-                let mut activated_guard = None;
-                if self.append.tail.load_full().is_none() {
-                    if let Some(resident) = state
-                        .pending_finalize
-                        .iter()
-                        .find(|resident| !resident.segment().is_sealed())
-                        .cloned()
-                    {
-                        let guard = self.tier.admission_guard(&resident);
-                        self.append.tail.store(Some(Arc::new(guard.clone())));
-                        activated_guard = Some(guard);
-                    }
-                }
-
-                let pending_snapshot = TailSignal::snapshot_pending(&state.pending_finalize);
-                drop(state);
-
-                if removed_rollover {
-                    self.notifiers.remove_rollover(self.instance_id, segment_id);
-                }
-
-                let tail_snapshot = self
-                    .append
-                    .tail
-                    .load_full()
-                    .map(|guard| SegmentStatusSnapshot::from_segment(guard.segment().as_ref()));
-                self.tail_signal.replace(
-                    tail_snapshot,
-                    pending_snapshot.clone(),
-                    TailEvent::Sealed(segment_id),
-                );
-                self.notifiers.notify_admission(self.instance_id);
-
-                if let Some(guard) = activated_guard {
-                    let pending_snapshot = {
-                        let state = self.management.lock();
-                        TailSignal::snapshot_pending(&state.pending_finalize)
-                    };
-                    let activated_snapshot =
-                        SegmentStatusSnapshot::from_segment(guard.segment().as_ref());
-                    self.tail_signal.replace(
-                        Some(activated_snapshot),
-                        pending_snapshot,
-                        TailEvent::Activated(guard.segment().id()),
-                    );
-                    self.notifiers.notify_admission(self.instance_id);
-                }
-
-                return Ok(());
             }
         }
-        Err(AofError::InvalidState(format!(
-            "segment {} not pending finalization",
-            segment_id
-        )))
+
+        let pending_snapshot = state.pending_finalize.snapshot(&state.catalog);
+        drop(state);
+
+        if removed_rollover {
+            self.notifiers.remove_rollover(self.instance_id, segment_id);
+        }
+
+        let tail_snapshot = self
+            .append
+            .tail
+            .load_full()
+            .map(|guard| SegmentStatusSnapshot::from_segment(guard.segment().as_ref()));
+        self.tail_signal.replace(
+            tail_snapshot,
+            pending_snapshot.clone(),
+            TailEvent::Sealed(segment_id),
+        );
+        self.notifiers.notify_admission(self.instance_id);
+
+        if let Some(guard) = activated_guard {
+            let pending_snapshot = {
+                let state = self.management.lock();
+                state.pending_finalize.snapshot(&state.catalog)
+            };
+            let activated_snapshot = SegmentStatusSnapshot::from_segment(guard.segment().as_ref());
+            self.tail_signal.replace(
+                Some(activated_snapshot),
+                pending_snapshot,
+                TailEvent::Activated(guard.segment().id()),
+            );
+            self.notifiers.notify_admission(self.instance_id);
+        }
+
+        Ok(())
     }
 
     fn append_with_guard(
@@ -1375,6 +1882,53 @@ impl Aof {
                     };
                 }
             }
+        }
+    }
+
+    fn append_reserve_with_guard(
+        &self,
+        payload_len: usize,
+        timestamp: u64,
+        mut guard: AdmissionGuard,
+    ) -> AofResult<AppendReservation> {
+        loop {
+            match self.append_reserve_once(payload_len, timestamp, &guard)? {
+                ReserveOutcome::Reserved {
+                    reservation,
+                    previous_offset,
+                } => {
+                    let reserve = AppendReserve::new(guard, previous_offset);
+                    return Ok(AppendReservation::new(reserve, reservation));
+                }
+                ReserveOutcome::SegmentFull => {
+                    self.handle_segment_full(guard.segment())?;
+                    guard = match self.try_get_writable_segment()? {
+                        Some(next) => next,
+                        None => {
+                            self.record_would_block(BackpressureKind::Admission);
+                            return Err(AofError::would_block(BackpressureKind::Admission));
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    fn append_reserve_once(
+        &self,
+        payload_len: usize,
+        timestamp: u64,
+        guard: &AdmissionGuard,
+    ) -> AofResult<ReserveOutcome> {
+        let segment = guard.segment();
+        let previous_offset = self.append.next_offset.load(Ordering::Acquire);
+        match segment.append_reserve(payload_len, timestamp) {
+            Ok(reservation) => Ok(ReserveOutcome::Reserved {
+                reservation,
+                previous_offset,
+            }),
+            Err(AofError::SegmentFull(_)) => Ok(ReserveOutcome::SegmentFull),
+            Err(err) => Err(err),
         }
     }
 
@@ -1458,9 +2012,9 @@ impl Aof {
 
         let request = {
             let mut state = self.management.lock();
-            state.remove_flush(segment);
-            state.resident_for(segment).map(|resident| {
-                state.flush_queue.push_back(resident.clone());
+            state.remove_flush(segment.id());
+            state.resident_for_segment(segment).map(|resident| {
+                state.flush_queue.push_back(segment.id());
                 FlushRequest::new(
                     self.instance_id,
                     self.tier.clone(),
@@ -1518,7 +2072,7 @@ impl Aof {
                 flush_state.finish_flush();
                 {
                     let mut state = self.management.lock();
-                    state.remove_flush(segment);
+                    state.remove_flush(segment.id());
                 }
                 match flush_with_retry(segment, &self.metrics) {
                     Ok(()) => {
@@ -1559,7 +2113,7 @@ impl Aof {
                 flush_state.finish_flush();
                 {
                     let mut state = self.management.lock();
-                    state.remove_flush(segment);
+                    state.remove_flush(segment.id());
                 }
                 self.flush_failed.store(true, Ordering::Release);
                 self.record_would_block(BackpressureKind::Flush);
@@ -1572,8 +2126,7 @@ impl Aof {
         let state = self.management.lock();
         state
             .catalog
-            .iter()
-            .find(|segment| segment.id() == segment_id)
+            .get(segment_id)
             .map(|segment| segment.segment().clone())
     }
 
@@ -1641,38 +2194,23 @@ impl Aof {
     }
 
     fn has_pending_rollover(&self) -> bool {
-        let state = self.management.lock();
-        state
-            .rollovers
-            .values()
-            .any(|awaiter| matches!(awaiter, RolloverAwaiter::Pending(_)))
+        let mut state = self.management.lock();
+        state.rollovers.has_pending()
     }
 
     fn pending_rollover_signal(&self) -> Option<(SegmentId, Arc<RolloverSignal>)> {
-        let state = self.management.lock();
-        state
-            .rollovers
-            .iter()
-            .find_map(|(segment_id, awaiter)| match awaiter {
-                RolloverAwaiter::Pending(signal) => Some((*segment_id, Arc::clone(signal))),
-                RolloverAwaiter::Ready => None,
-            })
+        let mut state = self.management.lock();
+        state.rollovers.poll_pending()
     }
 
     fn mark_rollover_ready(&self, segment_id: SegmentId) {
         let mut state = self.management.lock();
-        if let Some(entry) = state.rollovers.get_mut(&segment_id) {
-            if let RolloverAwaiter::Pending(signal) = entry {
-                if signal.is_ready() {
-                    *entry = RolloverAwaiter::Ready;
-                }
-            }
-        }
+        state.rollovers.mark_ready(segment_id);
     }
 
     fn remove_rollover_entry(&self, segment_id: SegmentId) {
         let mut state = self.management.lock();
-        if state.rollovers.remove(&segment_id).is_some() {
+        if state.rollovers.remove(segment_id).is_some() {
             self.notifiers.remove_rollover(self.instance_id, segment_id);
         }
     }
@@ -1701,7 +2239,8 @@ impl Aof {
 
         let unsealed_pending = state
             .pending_finalize
-            .iter()
+            .iter_ids()
+            .filter_map(|segment_id| state.catalog.get(segment_id))
             .filter(|resident| !resident.segment().is_sealed())
             .count();
         if unsealed_pending >= 2 {
@@ -1710,6 +2249,15 @@ impl Aof {
 
         if state.pending_finalize.len() >= 2 {
             return Ok(None);
+        }
+
+        if let Some(preallocator) = &self.preallocator {
+            if let Some(segment) = preallocator.try_take_ready() {
+                return self.activate_preallocated_segment(state, segment);
+            }
+            if preallocator.has_inflight() {
+                return Ok(None);
+            }
         }
 
         let segment_index = state.next_segment_index;
@@ -1738,11 +2286,11 @@ impl Aof {
         let guard = self.tier.admission_guard(&resident);
 
         state.next_segment_index = segment_index.saturating_add(1);
-        state.catalog.push(resident);
+        state.catalog.insert(resident);
         self.append.tail.store(Some(Arc::new(guard.clone())));
         self.notifiers.notify_admission(self.instance_id);
         let tail_snapshot = SegmentStatusSnapshot::from_segment(guard.segment().as_ref());
-        let pending_snapshot = TailSignal::snapshot_pending(&state.pending_finalize);
+        let pending_snapshot = state.pending_finalize.snapshot(&state.catalog);
         self.tail_signal.replace(
             Some(tail_snapshot),
             pending_snapshot,
@@ -1754,11 +2302,11 @@ impl Aof {
     fn queue_rollover(&self, segment: &Arc<Segment>) -> AofResult<()> {
         let mut state = self.management.lock();
         let segment_id = segment.id();
-        if state.rollovers.contains_key(&segment_id) {
+        if state.rollovers.contains(segment_id) {
             return Ok(());
         }
         let resident = state
-            .resident_for(segment)
+            .resident_for_segment(segment)
             .ok_or_else(|| {
                 AofError::InvalidState(format!(
                     "segment {} missing from catalog during rollover",
@@ -1783,57 +2331,33 @@ impl Aof {
             };
             notifiers.complete_rollover(instance_id, segment_id, result);
         });
-        state
-            .rollovers
-            .insert(segment_id, RolloverAwaiter::Pending(signal));
+        state.rollovers.insert_pending(segment_id, signal);
         Ok(())
     }
 
     fn is_rollover_ack_ready(&self, segment_id: SegmentId) -> AofResult<bool> {
         let mut state = self.management.lock();
-        let Some(entry) = state.rollovers.get_mut(&segment_id) else {
-            return Ok(true);
-        };
-        match entry {
-            RolloverAwaiter::Ready => Ok(true),
-            RolloverAwaiter::Pending(signal) => {
-                if let Some(result) = signal.result() {
-                    match result {
-                        Ok(()) => {
-                            *entry = RolloverAwaiter::Ready;
-                            Ok(true)
-                        }
-                        Err(err) => {
-                            state.rollovers.remove(&segment_id);
-                            Err(AofError::rollover_failed(err))
-                        }
-                    }
-                } else {
-                    Ok(false)
-                }
+        match state.rollovers.poll_signal_result(segment_id) {
+            Some(Ok(())) => Ok(true),
+            Some(Err(err)) => {
+                self.notifiers.remove_rollover(self.instance_id, segment_id);
+                Err(AofError::rollover_failed(err))
             }
+            None => Ok(false),
         }
     }
 
     fn remove_ready_rollover(&self, segment_id: SegmentId) {
         let mut state = self.management.lock();
-        if matches!(
-            state.rollovers.get(&segment_id),
-            Some(RolloverAwaiter::Ready)
-        ) {
-            state.rollovers.remove(&segment_id);
+        if state.rollovers.is_ready(segment_id) {
+            state.rollovers.remove(segment_id);
             self.notifiers.remove_rollover(self.instance_id, segment_id);
         }
     }
 
     fn take_ready_rollover(&self) -> Option<SegmentId> {
         let mut state = self.management.lock();
-        let ready_id = state
-            .rollovers
-            .iter()
-            .find_map(|(id, awaiter)| matches!(awaiter, RolloverAwaiter::Ready).then_some(*id));
-        if let Some(id) = ready_id {
-            state.rollovers.remove(&id);
+        if let Some(id) = state.rollovers.take_ready() {
             self.notifiers.remove_rollover(self.instance_id, id);
             Some(id)
         } else {
@@ -1844,7 +2368,7 @@ impl Aof {
     fn poll_pending_rollovers(&self) -> AofResult<Option<SegmentId>> {
         let ids: Vec<_> = {
             let state = self.management.lock();
-            state.rollovers.keys().copied().collect()
+            state.rollovers.keys().collect()
         };
 
         for segment_id in ids {
@@ -1873,16 +2397,11 @@ impl Aof {
             let pending_snapshot;
             {
                 let mut state = self.management.lock();
-                if let Some(resident) = state.resident_for(segment) {
-                    if !state
-                        .pending_finalize
-                        .iter()
-                        .any(|pending| Arc::ptr_eq(pending.segment(), segment))
-                    {
-                        state.pending_finalize.push_back(resident);
-                    }
+                if state.resident_for_segment(segment).is_some() {
+                    state.pending_finalize.push_back(segment.id());
                 }
-                pending_snapshot = TailSignal::snapshot_pending(&state.pending_finalize);
+                self.maybe_schedule_preallocation_locked(&mut state);
+                pending_snapshot = state.pending_finalize.snapshot(&state.catalog);
             }
             self.schedule_flush(segment)?;
             let tail_snapshot = self
@@ -1901,6 +2420,84 @@ impl Aof {
             self.queue_rollover(segment)?;
         }
         Ok(())
+    }
+
+    fn maybe_schedule_preallocation_locked(&self, state: &mut AofManagement) {
+        let Some(preallocator) = &self.preallocator else {
+            return;
+        };
+        let target = self.config.preallocate_segments as usize;
+        if target == 0 {
+            return;
+        }
+        if self.append.tail.load_full().is_some() {
+            return;
+        }
+
+        let unsealed_pending = state
+            .pending_finalize
+            .iter_ids()
+            .filter_map(|segment_id| state.catalog.get(segment_id))
+            .filter(|resident| !resident.segment().is_sealed())
+            .count();
+        if unsealed_pending >= 2 {
+            return;
+        }
+
+        if state.pending_finalize.len() >= 2 {
+            return;
+        }
+        let ready = preallocator.ready_len();
+        let inflight = preallocator.inflight();
+        if ready + inflight >= target {
+            return;
+        }
+
+        let segment_index = state.next_segment_index;
+        let segment_id = SegmentId::new(segment_index as u64);
+        let base_offset = self.append.next_offset.load(Ordering::Acquire);
+        let base_record_count = self.append.record_count.load(Ordering::Acquire);
+        let created_at = current_timestamp_nanos();
+        let segment_bytes = self.select_segment_bytes(state);
+        let file_name = SegmentFileName::format(segment_id, base_offset, created_at);
+        let path = self.layout.segment_path(&file_name);
+
+        state.next_segment_index = segment_index.saturating_add(1);
+
+        preallocator.schedule(PreallocationJob {
+            segment_id,
+            base_offset,
+            base_record_count,
+            created_at,
+            segment_bytes,
+            path,
+            ext_id: self.metadata.current_ext_id(),
+        });
+    }
+
+    fn activate_preallocated_segment(
+        &self,
+        state: &mut AofManagement,
+        segment: Arc<Segment>,
+    ) -> AofResult<Option<AdmissionGuard>> {
+        segment.set_ext_id(self.metadata.current_ext_id())?;
+        let resident = self.tier.admit_segment(
+            segment.clone(),
+            SegmentResidency::new(segment.current_size() as u64, ResidencyKind::Active),
+        )?;
+        let guard = self.tier.admission_guard(&resident);
+
+        state.catalog.insert(resident);
+        self.append.tail.store(Some(Arc::new(guard.clone())));
+        self.notifiers.notify_admission(self.instance_id);
+        let tail_snapshot = SegmentStatusSnapshot::from_segment(guard.segment().as_ref());
+        let pending_snapshot = state.pending_finalize.snapshot(&state.catalog);
+        self.tail_signal.replace(
+            Some(tail_snapshot),
+            pending_snapshot,
+            TailEvent::Activated(guard.segment().id()),
+        );
+        Ok(Some(guard))
     }
 
     fn select_segment_bytes(&self, state: &AofManagement) -> u64 {
@@ -1930,9 +2527,9 @@ impl Aof {
             }
         };
 
-        let mut catalog = Vec::with_capacity(recovered.len());
-        let mut pending_finalize = VecDeque::new();
-        let mut flush_queue = VecDeque::new();
+        let mut catalog = SegmentCatalog::default();
+        let mut pending_finalize = SegmentQueue::default();
+        let mut flush_queue = SegmentQueue::default();
         let mut tail: Option<Arc<Segment>> = None;
         let mut next_offset = pointer.as_ref().map(|p| p.durable_bytes).unwrap_or(0);
         let mut total_records = 0u64;
@@ -1986,15 +2583,15 @@ impl Aof {
                     )));
                 }
                 if tail.is_some() {
-                    pending_finalize.push_back(resident.clone());
-                    flush_queue.push_back(resident.clone());
+                    pending_finalize.push_back(segment_id);
+                    flush_queue.push_back(segment_id);
                 } else {
-                    flush_queue.push_back(resident.clone());
+                    flush_queue.push_back(segment_id);
                     tail = Some(segment.clone());
                 }
             }
 
-            catalog.push(resident);
+            catalog.insert(resident);
         }
         if let Some(ptr) = pointer.as_ref() {
             if !pointer_matched {
@@ -2007,15 +2604,14 @@ impl Aof {
 
         let tail_guard_arc = tail.as_ref().and_then(|segment| {
             catalog
-                .iter()
-                .find(|resident| Arc::ptr_eq(resident.segment(), segment))
+                .get_by_segment(segment)
                 .map(|resident| Arc::new(self.tier.admission_guard(resident)))
         });
 
         let tail_snapshot = tail_guard_arc
             .as_ref()
             .map(|guard| SegmentStatusSnapshot::from_segment(guard.segment().as_ref()));
-        let pending_snapshot = TailSignal::snapshot_pending(&pending_finalize);
+        let pending_snapshot = pending_finalize.snapshot(&catalog);
         let event = if let Some(snapshot) = tail_snapshot.as_ref() {
             TailEvent::Activated(snapshot.segment_id)
         } else if let Some(first_pending) = pending_snapshot.first() {
@@ -2032,7 +2628,7 @@ impl Aof {
             state.next_segment_index = next_segment_index;
             state.flush_queue = flush_queue;
             state.rollovers.clear();
-            pending_for_flush = state.flush_queue.iter().cloned().collect();
+            pending_for_flush = state.flush_queue.collect_residents(&state.catalog);
         }
 
         self.append.set_unflushed(total_unflushed);
@@ -2087,6 +2683,14 @@ fn current_timestamp_nanos() -> i64 {
 
 enum AppendOutcome {
     Completed(RecordId, bool),
+    SegmentFull,
+}
+
+enum ReserveOutcome {
+    Reserved {
+        reservation: SegmentReservation,
+        previous_offset: u64,
+    },
     SegmentFull,
 }
 
@@ -2185,6 +2789,8 @@ mod tests {
         cfg.segment_min_bytes = 4096;
         cfg.segment_max_bytes = 4096;
         cfg.segment_target_bytes = 4096;
+        cfg.preallocate_segments = 0;
+        cfg.preallocate_concurrency = 0;
         cfg
     }
 
@@ -2196,12 +2802,6 @@ mod tests {
 
     async fn drain_rollover_async(manager: &AofManager) {
         manager.tiered().poll().await;
-    }
-
-    fn drain_rollover(manager: &AofManager) {
-        manager
-            .runtime_handle()
-            .block_on(drain_rollover_async(manager));
     }
 
     async fn seal_active_until_ready_async(
@@ -2250,16 +2850,16 @@ mod tests {
             .unwrap();
         let seg1 = guard1.segment().clone();
         aof.append.tail.store(None);
-        let res1 = state.resident_for(&seg1).expect("resident seg1");
-        state.pending_finalize.push_back(res1);
+        let _res1 = state.resident_for_segment(&seg1).expect("resident seg1");
+        state.pending_finalize.push_back(seg1.id());
         let guard2 = aof
             .ensure_segment_locked(&mut state, created_at)
             .unwrap()
             .unwrap();
         let seg2 = guard2.segment().clone();
         aof.append.tail.store(None);
-        let res2 = state.resident_for(&seg2).expect("resident seg2");
-        state.pending_finalize.push_back(res2);
+        let _res2 = state.resident_for_segment(&seg2).expect("resident seg2");
+        state.pending_finalize.push_back(seg2.id());
         drop(state);
         drop(guard1);
         drop(guard2);
@@ -2397,6 +2997,8 @@ mod tests {
         cfg.segment_min_bytes = 128;
         cfg.segment_max_bytes = 128;
         cfg.segment_target_bytes = 128;
+        cfg.preallocate_segments = 0;
+        cfg.preallocate_concurrency = 0;
 
         let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
@@ -2442,6 +3044,103 @@ mod tests {
         assert_eq!(record_id.segment_index() as u64, 2);
     }
 
+    #[test]
+    fn append_reserve_supports_zero_copy_payloads() {
+        let tmp = TempDir::new().expect("tempdir");
+
+        let mut cfg = AofConfig::default();
+        cfg.root_dir = tmp.path().join("aof");
+        cfg.segment_min_bytes = 4096;
+        cfg.segment_max_bytes = 4096;
+        cfg.segment_target_bytes = 4096;
+        cfg.preallocate_segments = 0;
+        cfg.preallocate_concurrency = 0;
+
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, cfg).expect("aof");
+        aof.flush.shutdown_worker_for_tests();
+
+        let payload = b"reserve me".to_vec();
+        let mut reservation = aof
+            .append_reserve(payload.len())
+            .expect("reservation acquired");
+        reservation
+            .payload_mut()
+            .expect("payload buffer")
+            .copy_from_slice(&payload);
+
+        let (record_id, _reserve) = aof
+            .append_reserve_complete(reservation)
+            .expect("reservation completed");
+
+        let guard = aof
+            .try_get_writable_segment()
+            .expect("guard result")
+            .expect("guard");
+        let segment = guard.segment().clone();
+        drop(guard);
+
+        let segment_offset = segment
+            .segment_offset_for(record_id)
+            .expect("segment offset");
+        let record = segment
+            .read_record_slice(segment_offset)
+            .expect("record slice");
+
+        assert_eq!(record.header.length as usize, payload.len());
+        assert_eq!(record.payload, payload.as_slice());
+    }
+
+    #[test]
+    fn append_reserve_reuses_handle_for_same_segment() {
+        let tmp = TempDir::new().expect("tempdir");
+
+        let mut cfg = AofConfig::default();
+        cfg.root_dir = tmp.path().join("aof");
+        cfg.segment_min_bytes = 4096;
+        cfg.segment_max_bytes = 4096;
+        cfg.segment_target_bytes = 4096;
+
+        let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
+        let aof = Aof::new(handle, cfg).expect("aof");
+        aof.flush.shutdown_worker_for_tests();
+
+        let mut reservation = aof.append_reserve(8).expect("initial reservation");
+        reservation
+            .payload_mut()
+            .expect("payload")
+            .copy_from_slice(b"payload1");
+        let (first_id, reserve) = aof
+            .append_reserve_complete(reservation)
+            .expect("complete first");
+
+        let mut reservation = aof
+            .append_reserve_with(reserve, 8)
+            .expect("reuse reservation");
+        reservation
+            .payload_mut()
+            .expect("payload")
+            .copy_from_slice(b"payload2");
+        let (second_id, reserve) = aof
+            .append_reserve_complete(reservation)
+            .expect("complete second");
+
+        assert_eq!(first_id.segment_index(), second_id.segment_index());
+
+        let mut reservation = aof
+            .append_reserve_with(reserve, 8)
+            .expect("reuse reservation again");
+        reservation
+            .payload_mut()
+            .expect("payload")
+            .copy_from_slice(b"payload3");
+        let (third_id, _reserve) = aof
+            .append_reserve_complete(reservation)
+            .expect("complete third");
+
+        assert_eq!(third_id.segment_index(), first_id.segment_index());
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn append_record_async_waits_for_admission_release() {
         use std::time::Duration;
@@ -2467,8 +3166,8 @@ mod tests {
             .expect("guard1");
         let seg1 = guard1.segment().clone();
         aof.append.tail.store(None);
-        let res1 = state.resident_for(&seg1).expect("resident seg1");
-        state.pending_finalize.push_back(res1);
+        let _res1 = state.resident_for_segment(&seg1).expect("resident seg1");
+        state.pending_finalize.push_back(seg1.id());
 
         let guard2 = aof
             .ensure_segment_locked(&mut state, created_at)
@@ -2476,8 +3175,8 @@ mod tests {
             .expect("guard2");
         let seg2 = guard2.segment().clone();
         aof.append.tail.store(None);
-        let res2 = state.resident_for(&seg2).expect("resident seg2");
-        state.pending_finalize.push_back(res2);
+        let _res2 = state.resident_for_segment(&seg2).expect("resident seg2");
+        state.pending_finalize.push_back(seg2.id());
         drop(state);
         drop(guard1);
         drop(guard2);
@@ -2510,6 +3209,8 @@ mod tests {
         cfg.segment_min_bytes = 256;
         cfg.segment_max_bytes = 256;
         cfg.segment_target_bytes = 256;
+        cfg.preallocate_segments = 0;
+        cfg.preallocate_concurrency = 0;
         let (manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
         aof.flush.shutdown_worker_for_tests();

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use bop_sys::*;
 
+use crate::aof_state_manager::{AofStateManager, AofStateManagerConfig};
 use crate::async_result::{AsyncBool, AsyncBuffer, AsyncU64};
 use crate::buffer::Buffer;
 use crate::callbacks::events::ServerCallbacksHandle;
@@ -649,6 +650,24 @@ impl RaftServerBuilder {
         self.state_manager = Some(state_manager);
         self.log_store = Some(log_store);
         self
+    }
+
+    /// Configure the builder to use the AOF-backed state manager stored at `root_dir`.
+    pub fn try_aof_state_manager<P>(self, root_dir: P, server_id: ServerId) -> RaftResult<Self>
+    where
+        P: Into<PathBuf>,
+    {
+        let config = AofStateManagerConfig::new(root_dir.into(), server_id);
+        self.try_aof_state_manager_with(config)
+    }
+
+    /// Configure the builder with an explicit AOF state manager configuration.
+    pub fn try_aof_state_manager_with(mut self, config: AofStateManagerConfig) -> RaftResult<Self> {
+        let manager = AofStateManager::new(config)?;
+        let manager = Box::new(manager) as Box<dyn StateManagerInterface>;
+        let backend = manager.storage_backend();
+        self.state_manager = Some(StateManagerBuild::Callbacks { backend, manager });
+        Ok(self)
     }
 
     #[cfg(feature = "mdbx")]

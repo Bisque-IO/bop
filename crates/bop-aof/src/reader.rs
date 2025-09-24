@@ -55,6 +55,7 @@ pub struct SegmentRecord<'a> {
     record_id: RecordId,
     bounds: RecordBounds,
     timestamp: u64,
+    ext_id: u64,
     payload: &'a [u8],
 }
 
@@ -69,6 +70,10 @@ impl<'a> SegmentRecord<'a> {
 
     pub fn timestamp(&self) -> u64 {
         self.timestamp
+    }
+
+    pub fn ext_id(&self) -> u64 {
+        self.ext_id
     }
 
     pub fn payload(&self) -> &'a [u8] {
@@ -177,6 +182,7 @@ impl ActiveSegmentCursor {
             record_id,
             bounds,
             timestamp: slice.header.timestamp,
+            ext_id: slice.header.ext_id,
             payload,
         }))
     }
@@ -543,6 +549,7 @@ impl SegmentReader {
             record_id,
             bounds,
             timestamp: header.timestamp,
+            ext_id: header.ext_id,
             payload,
         })
     }

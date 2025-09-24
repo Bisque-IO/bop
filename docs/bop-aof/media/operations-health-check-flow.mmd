@@ -1,0 +1,10 @@
+flowchart TD
+    Alert[Alert Fired] --> Detect[Confirm metrics/logs]
+    Detect --> Identify[Identify impacted tier]
+    Identify --> Mitigate[Apply tier-specific mitigation]
+    Mitigate --> Validate[Validate metrics recovered]
+    Validate --> PostMortem[Log follow-ups & updates]
+    Mitigate --> Escalate{Need escalation?}
+    Escalate -- Yes --> StorageOnCall[Storage Platform On-Call]
+    Escalate -- No --> Validate
+    StorageOnCall --> Validate

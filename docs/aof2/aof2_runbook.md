@@ -1,94 +1,94 @@
 # AOF2 Operational Runbook
 
-This guide aggregates the knobs, metrics, and procedures operators need to keep the tiered AOF2 store healthy. Pair it with the design notes in `aof2_store.md` and the read-path guidance in `aof2_read_path.md` for deeper context.
+# Summary
+The runbook guides operators through detecting, triaging, and resolving incidents in the tiered bop-aof (AOF2) store. Use it alongside the public operations guide for routine tasks and the architecture notes (`aof2_store.md`, `aof2_read_path.md`) when deeper context is needed.
 
-## 1. Configuration Knobs
+> Quick reference: see `runbooks/tiered-operations.md` for a condensed checklist used during paging.
 
-| Setting | Where | Guidance |
-| ------- | ----- | -------- |
-| `Tier0CacheConfig::cluster_max_bytes` | `AofManagerConfig::store.tier0` | Global hot cache budget. Size it so two full segments per writer plus 20–30% headroom fit without paging. Low values surface `WouldBlock(Admission)` frequently. |
-| `Tier0CacheConfig::activation_queue_warn_threshold` | same | Warn threshold for the activation queue. Tune to the number of concurrent readers that may hydrate at once. |
-| `Tier1Config::max_bytes` | `AofManagerConfig::store.tier1` | Warm cache budget. Should cover the working set of sealed segments. When the residency gauge spends time in `NeedsRecovery`, increase this before raising Tier 0. |
-| `Tier1Config::max_retries`, `retry_backoff` | same | Governs compression and hydration retries inside Tier 1. Defaults are 3 attempts with a 50 ms backoff. Increase if Tier 2 is eventually consistent; decrease to surface failures faster. |
-| `Tier2Config::retry` (`RetryPolicy`) | `AofManagerConfig::store.tier2` | Controls upload/delete/get retries. Default is 3 attempts with a 100 ms base delay. Increase for flaky object stores; decrease if latency budgets cannot absorb repeated retries. |
 
-## 2. Monitoring Checklist
+# Preconditions
+- BOP deployment with tiered storage enabled and the `aof2-admin` CLI installed on admin hosts.
+- Access to Grafana dashboards for Tier 0/1/2 metrics and log aggregation for structured `aof2::*` events.
+- Credentials for the backing object store (Tier 2) and SSH access to affected nodes.
+- Awareness of current capacity targets (Tier 0/1 budgets, retry policies) and change approvals for scaling.
 
-### Metrics
+# Detection
+- **Metrics**
+  - `Tier0MetricsSnapshot.activation_queue_depth` > 0 for ≥60s indicates hot cache exhaustion.
+  - `Tier0MetricsSnapshot.total_bytes` trending toward `cluster_max_bytes` suggests runaway writers.
+  - `Tier1MetricsSnapshot.hydration_queue_depth` spikes or sustained `hydration_latency_p99_ms` > 2s imply hydration backlog.
+  - `Tier1MetricsSnapshot.residency.needs_recovery` > 0 after hydration completes points to missing warm files.
+  - `Tier2MetricsSnapshot.upload_retry_attempts` / `delete_retry_attempts` increasing alongside queue depth highlights Tier 2 instability.
+  - `FlushMetricsSnapshot.flush_failures` / `metadata_failures` non-zero means writers are blocked.
+- **Logs**
+  - `aof2::tiered` `tiered_admit_segment` for rollover pacing.
+  - `aof2::tier0` `tier0_eviction_scheduled`, `tier0_segment_dropped` for churn diagnostics.
+  - `aof2::tier1` `tier1_hydration_retry_*`, `tier1_hydration_failed` for warm-cache health.
+  - `aof2::tier2` upload/delete/fetch events to correlate with object-store behavior.
+- **Alerts**
+  - Tier 0 exhaustion: `activation_queue_depth > 0` sustained 60s.
+  - Hydration regression: `hydration_latency_p99_ms > 2000` or `needs_recovery > 0` for 5 minutes.
+  - Tier 2 instability: retry attempts +10/min or queue depth > worker count.
+  - Flush failure: any increment to `flush_failures` or `metadata_failures`.
+  - Tier 2 fetch failures: more than two `tier2_fetch_failed` events within 5 minutes.
 
-- **Tier 0** (`Tier0MetricsSnapshot`)
-  - `activation_queue_depth` — sustained values > 0 indicate hot cache exhaustion. Alert if depth ≥4 for more than 60 seconds.
-  - `total_bytes` — should hover below `cluster_max_bytes`. Trending to the limit signals runaway writers or stalled evictions.
+# Triage Checklist
+1. Confirm which tier is degraded by reviewing the dashboard and scraping the latest `aof2-admin dump` (command below).
+2. Check for recent configuration changes in Tier 0/1 budgets or retry policies; roll back unsafe adjustments.
+3. Inspect structured logs to correlate with metric spikes (hydration retries, flush failures, Tier 2 errors).
+4. Determine backpressure mode by sampling error responses from clients or service logs.
+5. If Tier 2 instability is suspected, validate object-store availability and credentials immediately.
+6. Document findings in the incident timeline and notify the on-call Storage Platform owner.
 
-- **Tier 1** (`Tier1MetricsSnapshot`)
-  - `hydration_queue_depth` — spikes correlate with `WouldBlock(Hydration)` responses. Alert if depth exceeds the number of reader workers for more than one minute.
-  - `hydration_latency_p99_ms` — track the long tail. Alert if p99 exceeds twice the expected fetch latency (e.g. >2 s for local warm cache, >5 s when Tier 2 fetches dominate).
-  - Residency gauge — investigate when `needs_recovery` is non-zero after hydration should have succeeded; typically indicates missing warm files or Tier 2 fetch failures.
+# Mitigation
+## Configuration Adjustments
+| Setting | Location | Guidance |
+| --- | --- | --- |
+| `Tier0CacheConfig::cluster_max_bytes` | `AofManagerConfig::store.tier0` | Increase if admission backpressure is sustained; ensure headroom for two full segments per writer. |
+| `Tier0CacheConfig::activation_queue_warn_threshold` | same | Tune to match expected concurrent hydrations; raise temporarily during load-tests. |
+| `Tier1Config::max_bytes` | `AofManagerConfig::store.tier1` | Expand when residency regularly hits recovery state; adjust before scaling Tier 0. |
+| `Tier1Config::max_retries` / `retry_backoff` | same | Increase for eventually consistent storage, decrease to surface failures faster. |
+| `Tier2Config::retry` (`RetryPolicy`) | `AofManagerConfig::store.tier2` | Tune retry attempts/delay to balance durability vs. latency budgets. |
 
-- **Tier 2** (`Tier2MetricsSnapshot`)
-  - `upload_retry_attempts` / `delete_retry_attempts` — baseline near zero. Alert if attempts increase while queue depth grows; this surfaces S3 instability.
-  - `upload_queue_depth` / `delete_queue_depth` — sustained depth greater than the semaphore limit means workers are overwhelmed. Consider increasing concurrency or backoffs.
-  - `download_failures` — increments mean hydration fetches failed even after retries; expect `NeedsRecovery` residency until corrected.
+## Backpressure Response Matrix
+| BackpressureKind | Likely Cause | Immediate Action |
+| --- | --- | --- |
+| `Admission` | Tier 0 is full | Inspect `tier0_eviction_scheduled` logs, increase Tier 0 budget, seal segments sooner, or rate-limit writers. |
+| `Hydration` | Warm files missing or backlog | Check `hydration_queue_depth` and Tier 1 retries, free Tier 1 space, ensure Tier 2 availability, rerun admin dump to verify residency. |
+| `Rollover` | Coordinator sealing segments | Observe `tiered_admit_segment` events, confirm flush backlog is steady; usually transient. |
+| `Flush` | Flush worker retries exhausted | Investigate filesystem latency, disk saturation, and `flush_failures`; consider throttling writers. |
+| `Tail` | Reader outran durability | Compare append vs flush rate; issue resolves after backlog drains. |
 
-- **Flush** (`FlushMetricsSnapshot`)
-  - `flush_failures` / `metadata_failures` — any non-zero value requires intervention; appenders are likely blocked.
+## Operational Actions
+- Run `aof2-admin` snapshot to capture current residency and queue depths for escalation:
+  ```bash
+  cargo run --bin aof2-admin -- dump --root /var/lib/bop/aof2 > /tmp/aof2_dump.txt
+  ```
+  Archive the emitted JSON for offline analysis.
+- For Tier 2 instability, shift traffic to a healthy region or object-store bucket if available, then rehydrate impacted segments once the store stabilizes.
+- When flush failures persist, rotate logs, verify disk IO, and restart the flush worker after ensuring capacity is available.
 
-### Logs
+# Escalation
+- **Primary:** Storage Platform on-call engineer (check paging rotation).
+- **Secondary:** Site Reliability Engineering for sustained Tier 2/object-store outages.
+- **Additional:** Docs Lead for updates required in public/internal guides when new mitigation steps emerge.
+Provide the `aof2-admin` dump, recent dashboard screenshots, and timeline segments when escalating.
 
-Enable `INFO` level for the following targets and feed them into your log aggregator:
+# Validation
+- Re-run targeted failure tests:
+  ```bash
+  cargo test --manifest-path crates/bop-aof/Cargo.toml --test aof2_failure_tests
+  ```
+  Confirms retry paths and metadata consistency.
+- Benchmark append throughput to ensure pipeline recovered:
+  ```bash
+  cargo bench --manifest-path crates/bop-aof/Cargo.toml --bench aof_benchmarks -- --bench aof2_append_metrics
+  ```
+  Track throughput deltas against pre-incident baselines.
+- Verify dashboards show queues drained and alerts cleared; confirm clients receive normal responses for 10+ minutes.
 
-- `aof2::tiered` — `tiered_admit_segment` admissions.
-- `aof2::tier0` — `tier0_eviction_scheduled`, `tier0_segment_dropped` for churn diagnostics.
-- `aof2::tier1` — hydration retry/failure events (`tier1_hydration_retry_*`, `tier1_hydration_failed`).
-- `aof2::tier2` — upload/delete/fetch successes or failures with attempt counts.
-
-Use these events to correlate with metric spikes when diagnosing latency or data-movement issues.
-
-## 3. Troubleshooting by BackpressureKind
-
-| BackpressureKind | Likely Cause | Action |
-| ---------------- | ----------- | ------ |
-| `Admission` | Tier 0 full (activation queue depth > 0) | Inspect `tier0_eviction_scheduled` logs, increase Tier 0 budget, seal active segments sooner, or slow writers. |
-| `Hydration` | Warm file missing or hydrator backlog | Check `hydration_queue_depth` and `tier1_hydration_retry_*` logs. Ensure Tier 1 has space, confirm Tier 2 availability, and rerun the admin dump to verify residency. |
-| `Rollover` | Coordinator still processing seal/rollover | Watch `tiered_admit_segment` events; ensure the flush backlog is not growing. Usually transient. |
-| `Flush` | Flush worker exhausted retries | Investigate `flush_failures`, filesystem latency, and disk saturation. Consider throttling writers until the backlog clears. |
-| `Tail` | Tail follower outran durability | Check append rate vs flush rate; improves once the flush backlog drains. |
-
-## 4. Admin Tooling
-
-Use the `aof2-admin` helper to capture residency snapshots:
-
-```bash
-cargo run --bin aof2-admin -- dump --root /var/lib/bop/aof2 > /tmp/aof2_dump.txt
-```
-
-The command prints a table summarising Tier 0/1/2 state and emits a JSON payload at the end. Archive the JSON when escalating incidents; it contains the manifest residency (including Tier 2 object keys) and queue depths required for offline analysis.
-
-## 5. Alerts
-
-- **Tier 0 exhaustion:** `activation_queue_depth > 0` for 60 seconds.
-- **Hydration regression:** `hydration_latency_p99_ms > 2000` or `needs_recovery > 0` for five minutes.
-- **Tier 2 instability:** `upload_retry_attempts` or `delete_retry_attempts` increase by more than 10 per minute, or queue depth exceeds the worker count.
-- **Flush failure:** `flush_failures > 0` or `metadata_failures > 0`.
-- **Tier 2 fetch failures:** presence of `tier2_fetch_failed` events more than twice within five minutes.
-
-Configure dashboards to chart the metrics above and add log-based alerts for the structured event names. Combine the alerts with the admin dump to speed triage.
-
-## 6. Validation Checklist
-
-Run the targeted validation suite before enabling tiered mode in a new environment:
-
-```bash
-cargo test --manifest-path crates/bop-aof/Cargo.toml --test aof2_failure_tests
-```
-
-The suite exercises metadata retry logic and Tier 2 upload/delete/fetch retry paths using deterministic failure injection (see `crates/bop-aof/tests/aof2_failure_tests.rs`).
-
-To capture baseline append throughput with metrics enabled:
-
-```bash
-cargo bench --manifest-path crates/bop-aof/Cargo.toml --bench aof_benchmarks -- --bench aof2_append_metrics
-```
-
-Record the reported throughput and track deltas across releases. Hydration load generation is pending; follow the `VAL3` item in `aof2_implementation_plan.md` for updates.
-
+# Post-Incident Tasks
+- Update incident log and file follow-up tickets for configuration or automation changes.
+- Capture any new mitigations in this runbook and notify Docs Lead for documentation sync.
+- Review capacity targets and adjust Tier 0/1 budgets if usage trends changed.
+- Schedule retrospective with Storage Platform and SRE teams within two business days.

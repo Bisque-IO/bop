@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
@@ -36,6 +37,113 @@ pub struct SegmentAppendResult {
     pub last_offset: u64,
     pub logical_size: u32,
     pub is_full: bool,
+}
+
+#[must_use = "call complete() to finalize the reserved append"]
+pub struct SegmentReservation {
+    segment: Arc<Segment>,
+    offset: u32,
+    payload_len: u32,
+    next_size: u32,
+    timestamp: u64,
+    completed: bool,
+}
+
+impl SegmentReservation {
+    fn new(
+        segment: Arc<Segment>,
+        offset: u32,
+        payload_len: u32,
+        next_size: u32,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            segment,
+            offset,
+            payload_len,
+            next_size,
+            timestamp,
+            completed: false,
+        }
+    }
+
+    pub fn segment(&self) -> &Arc<Segment> {
+        &self.segment
+    }
+
+    pub fn payload_len(&self) -> usize {
+        self.payload_len as usize
+    }
+
+    pub fn payload_mut(&mut self) -> AofResult<&mut [u8]> {
+        if self.completed {
+            return Err(AofError::InvalidState(
+                "segment reservation already completed".to_string(),
+            ));
+        }
+        let start = (self.offset + RECORD_HEADER_SIZE) as usize;
+        let end = start + self.payload_len as usize;
+        self.segment.data.slice_mut(start..end)
+    }
+
+    pub fn complete(mut self) -> AofResult<SegmentAppendResult> {
+        if self.completed {
+            return Err(AofError::InvalidState(
+                "segment reservation already completed".to_string(),
+            ));
+        }
+
+        let start = (self.offset + RECORD_HEADER_SIZE) as usize;
+        let end = start + self.payload_len as usize;
+        let payload = self.segment.data.read_slice(start..end)?;
+
+        let mut digest = Digest::new();
+        digest.write(payload);
+        let checksum = fold_crc64(digest.sum64());
+
+        let mut header = [0u8; RECORD_HEADER_SIZE as usize];
+        header[0..4].copy_from_slice(&self.payload_len.to_le_bytes());
+        header[4..8].copy_from_slice(&checksum.to_le_bytes());
+        header[8..16].copy_from_slice(&self.timestamp.to_le_bytes());
+        let record_ext_id = self.segment.ext_id.load(Ordering::Acquire);
+        header[16..24].copy_from_slice(&record_ext_id.to_le_bytes());
+
+        self.segment
+            .data
+            .write_bytes(self.offset as usize, &header)?;
+
+        self.segment.data.update_size(self.next_size as u64);
+        self.segment.record_count.fetch_add(1, Ordering::AcqRel);
+        self.segment
+            .last_timestamp
+            .store(self.timestamp, Ordering::Release);
+        self.segment
+            .last_record_offset
+            .store(self.offset, Ordering::Release);
+        self.segment.size.store(self.next_size, Ordering::Release);
+        self.segment.flush_state.request_flush(self.next_size);
+
+        let last_offset = self.segment.base_offset + self.next_size as u64;
+        let is_full = self.next_size >= self.segment.usable_limit();
+
+        self.completed = true;
+
+        Ok(SegmentAppendResult {
+            segment_offset: self.offset,
+            last_offset,
+            logical_size: self.next_size,
+            is_full,
+        })
+    }
+}
+
+impl Drop for SegmentReservation {
+    fn drop(&mut self) {
+        debug_assert!(
+            self.completed,
+            "segment reservation dropped without completing the append"
+        );
+    }
 }
 
 pub(crate) struct RecordHeader {
@@ -427,6 +535,60 @@ impl Segment {
         })
     }
 
+    pub fn append_reserve(
+        self: &Arc<Self>,
+        payload_len: usize,
+        timestamp: u64,
+    ) -> AofResult<SegmentReservation> {
+        let segment = self.as_ref();
+        if segment.is_sealed() {
+            return Err(AofError::InvalidState(
+                "cannot append to sealed segment".to_string(),
+            ));
+        }
+        if payload_len == 0 {
+            return Err(AofError::InvalidState(
+                "record payload is empty".to_string(),
+            ));
+        }
+
+        let usable_limit = segment.usable_limit();
+        let max_payload_capacity = segment.max_payload_capacity() as u64;
+        if (payload_len as u64) + (RECORD_HEADER_SIZE as u64) > max_payload_capacity {
+            return Err(AofError::SegmentFull(max_payload_capacity));
+        }
+
+        segment.ensure_header_written()?;
+
+        let entry_len = RECORD_HEADER_SIZE + payload_len as u32;
+        let offset =
+            match segment
+                .size
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    let next = current + entry_len;
+                    if next > usable_limit {
+                        None
+                    } else {
+                        Some(next)
+                    }
+                }) {
+                Ok(prev) => prev,
+                Err(_) => return Err(AofError::SegmentFull(max_payload_capacity)),
+            };
+
+        let next_size = offset + entry_len;
+        segment.data.update_size(next_size as u64);
+        segment.size.store(next_size, Ordering::Release);
+
+        Ok(SegmentReservation::new(
+            Arc::clone(self),
+            offset,
+            payload_len as u32,
+            next_size,
+            timestamp,
+        ))
+    }
+
     pub fn seal(
         &self,
         sealed_at: i64,
@@ -782,10 +944,6 @@ impl Segment {
         Ok(())
     }
 
-    fn make_record_id(&self, segment_offset: u32) -> RecordId {
-        RecordId::from_parts(self.index, segment_offset)
-    }
-
     pub(crate) fn flush_to_disk(&self) -> AofResult<()> {
         #[cfg(test)]
         {
@@ -1041,6 +1199,7 @@ enum SegmentMmap {
 }
 
 impl SegmentMmap {
+    #[cfg(test)]
     fn len(&self) -> usize {
         match self {
             SegmentMmap::Read(m) => m.len(),
@@ -1153,7 +1312,7 @@ impl SegmentData {
         Ok(())
     }
 
-    fn read_slice(&self, range: std::ops::Range<usize>) -> AofResult<&[u8]> {
+    fn read_slice(&self, range: Range<usize>) -> AofResult<&[u8]> {
         if range.end > self.max_size as usize || range.start > range.end {
             return Err(AofError::SegmentFull(self.max_size as u64));
         }
@@ -1164,6 +1323,24 @@ impl SegmentData {
             ));
         }
         unsafe { Ok(slice::from_raw_parts(ptr.add(range.start), range.len())) }
+    }
+
+    fn slice_mut(&self, range: Range<usize>) -> AofResult<&mut [u8]> {
+        if range.end > self.max_size as usize || range.start > range.end {
+            return Err(AofError::SegmentFull(self.max_size as u64));
+        }
+        if !self.is_writable() {
+            return Err(AofError::InvalidState(
+                "attempted to write to read-only segment".to_string(),
+            ));
+        }
+        let ptr = self.data.load(Ordering::Acquire);
+        if ptr.is_null() {
+            return Err(AofError::InvalidState(
+                "segment memory unmapped".to_string(),
+            ));
+        }
+        unsafe { Ok(slice::from_raw_parts_mut(ptr.add(range.start), range.len())) }
     }
 
     fn update_size(&self, logical_size: u64) {
@@ -1177,7 +1354,10 @@ impl SegmentData {
                 map.flush().map_err(AofError::from)?;
                 Ok(())
             }
-            SegmentMmap::Read(_) => Ok(()),
+            SegmentMmap::Read(map) => {
+                let _ = map.len();
+                Ok(())
+            }
         }
     }
 
@@ -1209,14 +1389,17 @@ impl SegmentData {
         self.writable.store(false, Ordering::Release);
     }
 
+    #[cfg(test)]
     fn remap_read_only(&self) -> AofResult<()> {
         self.remap(false)
     }
 
+    #[cfg(test)]
     fn remap_writable(&self) -> AofResult<()> {
         self.remap(true)
     }
 
+    #[cfg(test)]
     fn remap(&self, writable: bool) -> AofResult<()> {
         if self.writable.load(Ordering::Acquire) == writable {
             return Ok(());
@@ -1289,6 +1472,7 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom};
     use tempfile::TempDir;
 
+    #[test]
     fn header_emitted_on_first_append() {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("segment.seg");
@@ -1654,6 +1838,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn scan_tail_without_footer() {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("segment.seg");

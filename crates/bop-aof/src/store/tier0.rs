@@ -301,7 +301,7 @@ pub struct ResidentSegment {
 }
 
 impl ResidentSegment {
-    pub(crate) fn new(segment: Arc<Segment>, drop_guard: SegmentDropGuard) -> Self {
+    fn new(segment: Arc<Segment>, drop_guard: SegmentDropGuard) -> Self {
         Self {
             inner: Arc::new(ResidentSegmentInner {
                 segment,
@@ -477,7 +477,6 @@ struct ResidentEntry {
 struct InstanceState {
     #[allow(dead_code)]
     name: String,
-    quota_bytes: u64,
     bytes_used: u64,
 }
 
@@ -532,15 +531,13 @@ impl Tier0Inner {
         }
     }
 
-    fn register_instance(&self, name: String, quota_override: Option<u64>) -> InstanceId {
+    fn register_instance(&self, name: String, _quota_override: Option<u64>) -> InstanceId {
         let instance_id = InstanceId::new(self.next_instance.fetch_add(1, AtomicOrdering::Relaxed));
         let mut state = self.state.lock();
-        let quota = quota_override.unwrap_or(self.config.default_instance_quota);
         state.instances.insert(
             instance_id,
             InstanceState {
                 name,
-                quota_bytes: quota,
                 bytes_used: 0,
             },
         );

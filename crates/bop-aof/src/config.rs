@@ -219,6 +219,8 @@ pub struct FlushConfig {
     pub flush_interval_ms: u64,
     /// Maximum number of bytes that may be acknowledged but not yet durable.
     pub max_unflushed_bytes: u64,
+    /// Maximum number of concurrent flush tasks dispatched to the blocking pool.
+    pub max_concurrent_flushes: usize,
 }
 
 impl Default for FlushConfig {
@@ -227,6 +229,7 @@ impl Default for FlushConfig {
             flush_watermark_bytes: DEFAULT_FLUSH_WATERMARK_BYTES,
             flush_interval_ms: DEFAULT_FLUSH_INTERVAL_MS,
             max_unflushed_bytes: DEFAULT_MAX_UNFLUSHED_BYTES,
+            max_concurrent_flushes: 1,
         }
     }
 }
@@ -245,6 +248,8 @@ pub struct AofConfig {
     pub segment_target_bytes: u64,
     /// Number of segments to keep preallocated for fast rollover.
     pub preallocate_segments: u16,
+    /// Maximum number of concurrent segment preallocation tasks.
+    pub preallocate_concurrency: u16,
     /// Strategy for assigning record identifiers.
     pub id_strategy: IdStrategy,
     /// Compression applied when finalizing segments.
@@ -267,6 +272,7 @@ impl Default for AofConfig {
             segment_max_bytes: DEFAULT_SEGMENT_MAX_BYTES,
             segment_target_bytes: DEFAULT_SEGMENT_TARGET_BYTES,
             preallocate_segments: DEFAULT_PREALLOCATE_SEGMENTS,
+            preallocate_concurrency: 1,
             id_strategy: IdStrategy::default(),
             compression: Compression::default(),
             retention: RetentionPolicy::default(),
@@ -309,7 +315,18 @@ impl AofConfig {
             clamp_power_of_two(target_raw, self.segment_min_bytes, self.segment_max_bytes);
 
         if self.preallocate_segments == 0 {
-            self.preallocate_segments = 1;
+            self.preallocate_concurrency = 0;
+        } else {
+            if self.preallocate_concurrency == 0 {
+                self.preallocate_concurrency = 1;
+            }
+            if self.preallocate_concurrency > self.preallocate_segments {
+                self.preallocate_concurrency = self.preallocate_segments;
+            }
+        }
+
+        if self.flush.max_concurrent_flushes == 0 {
+            self.flush.max_concurrent_flushes = 1;
         }
 
         self
@@ -320,12 +337,13 @@ impl Display for AofConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "AofConfig(root_dir={:?}, segment_min_bytes={}, segment_max_bytes={}, segment_target_bytes={}, preallocate_segments={}, id_strategy={:?}, compression={:?}, retention={:?}, compaction={:?}, flush_watermark_bytes={}, flush_interval_ms={}, max_unflushed_bytes={}, enable_sparse_index={})",
+            "AofConfig(root_dir={:?}, segment_min_bytes={}, segment_max_bytes={}, segment_target_bytes={}, preallocate_segments={}, preallocate_concurrency={}, id_strategy={:?}, compression={:?}, retention={:?}, compaction={:?}, flush_watermark_bytes={}, flush_interval_ms={}, max_unflushed_bytes={}, max_concurrent_flushes={}, enable_sparse_index={})",
             self.root_dir,
             self.segment_min_bytes,
             self.segment_max_bytes,
             self.segment_target_bytes,
             self.preallocate_segments,
+            self.preallocate_concurrency,
             self.id_strategy,
             self.compression,
             self.retention,
@@ -333,6 +351,7 @@ impl Display for AofConfig {
             self.flush.flush_watermark_bytes,
             self.flush.flush_interval_ms,
             self.flush.max_unflushed_bytes,
+            self.flush.max_concurrent_flushes,
             self.enable_sparse_index
         )
     }

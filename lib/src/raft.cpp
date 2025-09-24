@@ -305,8 +305,15 @@ static nuraft::buffer *bop_raft_snapshot_serialize_by_ref(const nuraft::snapshot
 }
 
 BOP_API bop_raft_snapshot *bop_raft_snapshot_deserialize(bop_raft_buffer *buf) {
-    nuraft::buffer_serializer bs(*reinterpret_cast<nuraft::buffer *>(buf));
-    return bop_raft_snapshot_deserialize0(bs);
+    if (!buf) return nullptr;
+    try {
+        nuraft::buffer_serializer bs(*reinterpret_cast<nuraft::buffer *>(buf));
+        return bop_raft_snapshot_deserialize0(bs);
+    } catch (const std::exception &) {
+        return nullptr;
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -412,8 +419,15 @@ static nuraft::cluster_config *bop_raft_cluster_config_deserialize0(nuraft::buff
 }
 
 BOP_API bop_raft_cluster_config *bop_raft_cluster_config_deserialize(bop_raft_buffer *buf) {
-    nuraft::buffer_serializer bs(*reinterpret_cast<nuraft::buffer *>(buf));
-    return reinterpret_cast<bop_raft_cluster_config *>(bop_raft_cluster_config_deserialize0(bs));
+    if (!buf) return nullptr;
+    try {
+        nuraft::buffer_serializer bs(*reinterpret_cast<nuraft::buffer *>(buf));
+        return reinterpret_cast<bop_raft_cluster_config *>(bop_raft_cluster_config_deserialize0(bs));
+    } catch (const std::exception &) {
+        return nullptr;
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 // Log index number of current config.
@@ -639,26 +653,33 @@ BOP_API bop_raft_buffer *bop_raft_srv_state_serialize(bop_raft_srv_state *state)
 }
 
 BOP_API bop_raft_srv_state *bop_raft_srv_state_deserialize(bop_raft_buffer *buf) {
-    nuraft::buffer_serializer bs(*reinterpret_cast<nuraft::buffer *>(buf));
-    uint8_t ver = bs.get_u8();
+    if (!buf) return nullptr;
+    try {
+        nuraft::buffer_serializer bs(*reinterpret_cast<nuraft::buffer *>(buf));
+        uint8_t ver = bs.get_u8();
 
-    uint64_t term = bs.get_u64();
-    int voted_for = bs.get_i32();
-    bool et_allowed = (bs.get_u8() == 1);
+        uint64_t term = bs.get_u64();
+        int voted_for = bs.get_i32();
+        bool et_allowed = (bs.get_u8() == 1);
 
-    bool catching_up = false;
-    if (ver >= 2 && bs.pos() < reinterpret_cast<nuraft::buffer *>(buf)->size()) {
-        catching_up = (bs.get_u8() == 1);
+        bool catching_up = false;
+        if (ver >= 2 && bs.pos() < reinterpret_cast<nuraft::buffer *>(buf)->size()) {
+            catching_up = (bs.get_u8() == 1);
+        }
+
+        bool receiving_snapshot = false;
+        if (ver >= 2 && bs.pos() < reinterpret_cast<nuraft::buffer *>(buf)->size()) {
+            receiving_snapshot = (bs.get_u8() == 1);
+        }
+
+        return reinterpret_cast<bop_raft_srv_state *>(
+            new nuraft::srv_state(term, voted_for, et_allowed, catching_up, receiving_snapshot)
+        );
+    } catch (const std::exception &) {
+        return nullptr;
+    } catch (...) {
+        return nullptr;
     }
-
-    bool receiving_snapshot = false;
-    if (ver >= 2 && bs.pos() < reinterpret_cast<nuraft::buffer *>(buf)->size()) {
-        receiving_snapshot = (bs.get_u8() == 1);
-    }
-
-    return reinterpret_cast<bop_raft_srv_state *>(
-        new nuraft::srv_state(term, voted_for, et_allowed, catching_up, receiving_snapshot)
-    );
 }
 
 BOP_API void bop_raft_srv_state_delete(const bop_raft_srv_state *state) {
@@ -903,10 +924,14 @@ BOP_API bop_raft_asio_service_ptr *bop_raft_asio_service_make(
     } else {
         effective_logger = nuraft::cs_new<bop_raft_null_logger>();
     }
-    auto result = new bop_raft_asio_service_ptr(
-        std::make_shared<nuraft::asio_service>(opts, effective_logger), opts
-    );
-    return result;
+    try {
+        auto service = std::make_shared<nuraft::asio_service>(opts, effective_logger);
+        return new bop_raft_asio_service_ptr(service, opts);
+    } catch (const std::exception &) {
+        return nullptr;
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 BOP_API void bop_raft_asio_service_delete(const bop_raft_asio_service_ptr *asio_service) {
@@ -2802,39 +2827,47 @@ BOP_API bop_raft_server_ptr *bop_raft_server_launch(
     nuraft::ptr<nuraft::delayed_task_scheduler> scheduler = asio_service->service;
     nuraft::ptr<nuraft::rpc_client_factory> rpc_client_factory = asio_service->service;
 
-    auto *ctx = new nuraft::context(
-        state_mgr->state_mgr,
-        fsm->sm,
-        asio_listener,
-        effective_logger,
-        rpc_client_factory,
-        scheduler,
-        *reinterpret_cast<nuraft::raft_params *>(params_given)
-    );
+    std::unique_ptr<nuraft::context> ctx_holder;
+    try {
+        ctx_holder.reset(new nuraft::context(
+            state_mgr->state_mgr,
+            fsm->sm,
+            asio_listener,
+            effective_logger,
+            rpc_client_factory,
+            scheduler,
+            *reinterpret_cast<nuraft::raft_params *>(params_given)
+        ));
 
-    nuraft::raft_server::init_options init_options;
-    init_options.skip_initial_election_timeout_ = skip_initial_election_timeout;
-    init_options.start_server_in_constructor_ = start_server_in_constructor;
-    init_options.test_mode_flag_ = test_mode_flag;
-    if (cb_func) {
-        init_options.raft_callback_ = [user_data, cb_func](
-            nuraft::cb_func::Type type, nuraft::cb_func::Param *param
-        ) -> nuraft::cb_func::ReturnCode {
-                    return static_cast<nuraft::cb_func::ReturnCode>(cb_func(
-                        user_data,
-                        static_cast<bop_raft_cb_type>(type),
-                        reinterpret_cast<bop_raft_cb_param *>(param)
-                    ));
-                };
+        nuraft::raft_server::init_options init_options;
+        init_options.skip_initial_election_timeout_ = skip_initial_election_timeout;
+        init_options.start_server_in_constructor_ = start_server_in_constructor;
+        init_options.test_mode_flag_ = test_mode_flag;
+        if (cb_func) {
+            init_options.raft_callback_ = [user_data, cb_func](
+                nuraft::cb_func::Type type, nuraft::cb_func::Param *param
+            ) -> nuraft::cb_func::ReturnCode {
+                        return static_cast<nuraft::cb_func::ReturnCode>(cb_func(
+                            user_data,
+                            static_cast<bop_raft_cb_type>(type),
+                            reinterpret_cast<bop_raft_cb_param *>(param)
+                        ));
+                    };
+        }
+
+        nuraft::ptr<nuraft::raft_server> raft_server =
+                nuraft::cs_new<nuraft::raft_server>(ctx_holder.get(), init_options);
+        ctx_holder.release();
+        asio_listener->listen(raft_server);
+
+        return new bop_raft_server_ptr(
+            raft_server, asio_service->service, asio_listener, raft_server->get_log_store()
+        );
+    } catch (const std::exception &) {
+        return nullptr;
+    } catch (...) {
+        return nullptr;
     }
-
-    nuraft::ptr<nuraft::raft_server> raft_server =
-            nuraft::cs_new<nuraft::raft_server>(ctx, init_options);
-    asio_listener->listen(raft_server);
-
-    return new bop_raft_server_ptr(
-        raft_server, asio_service->service, asio_listener, raft_server->get_log_store()
-    );
 }
 
 BOP_API bool bop_raft_server_stop(bop_raft_server_ptr *server, size_t time_limit_sec) {
@@ -4655,7 +4688,26 @@ static nuraft::ptr<State_Mgr> raft_mdbx_state_mgr_open(
         nuraft::ptr<nuraft::buffer> buf = nuraft::buffer::alloc(value.iov_len);
         memcpy((void *) buf->data(), value.iov_base, value.iov_len);
         nuraft::buffer_serializer bs(buf);
-        cluster_config = nuraft::cluster_config::deserialize(bs);
+        try {
+            cluster_config = nuraft::cluster_config::deserialize(bs);
+        } catch (const std::exception &e) {
+            mdbx_txn_abort(tx);
+            mdbx_env_close(env);
+            BISQUE_CRITICAL(
+                logger,
+                "cluster_config::deserialize() threw: {}",
+                e.what()
+            );
+            return nullptr;
+        } catch (...) {
+            mdbx_txn_abort(tx);
+            mdbx_env_close(env);
+            BISQUE_CRITICAL(
+                logger,
+                "cluster_config::deserialize() threw an unknown exception"
+            );
+            return nullptr;
+        }
     }
 
     id = SRV_STATE_KEY;
@@ -4683,7 +4735,26 @@ static nuraft::ptr<State_Mgr> raft_mdbx_state_mgr_open(
         // deserialize srv_state
         nuraft::ptr<nuraft::buffer> buf = nuraft::buffer::alloc(value.iov_len);
         memcpy((void *) buf->data(), value.iov_base, value.iov_len);
-        srv_state = nuraft::srv_state::deserialize_v1p(*buf);
+        try {
+            srv_state = nuraft::srv_state::deserialize_v1p(*buf);
+        } catch (const std::exception &e) {
+            mdbx_txn_abort(tx);
+            mdbx_env_close(env);
+            BISQUE_CRITICAL(
+                logger,
+                "srv_state::deserialize_v1p() threw: {}",
+                e.what()
+            );
+            return nullptr;
+        } catch (...) {
+            mdbx_txn_abort(tx);
+            mdbx_env_close(env);
+            BISQUE_CRITICAL(
+                logger,
+                "srv_state::deserialize_v1p() threw an unknown exception"
+            );
+            return nullptr;
+        }
     }
 
     err = mdbx_txn_commit(tx);

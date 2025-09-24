@@ -3,7 +3,6 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crc64fast_nvme::Digest;
 use memmap2::MmapMut;
 
 use super::chunk::{CHUNK_HEADER_LEN, ChunkHeader, crc64};
@@ -173,39 +172,10 @@ pub struct ChunkCursor {
     pub len: usize,
 }
 
-#[derive(Clone)]
-pub struct CrcAccumulator {
-    digest: Digest,
-}
-
-impl Default for CrcAccumulator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CrcAccumulator {
-    pub fn new() -> Self {
-        Self {
-            digest: Digest::new(),
-        }
-    }
-
-    pub fn fold_bytes(&mut self, bytes: &[u8]) {
-        self.digest.write(bytes);
-    }
-
-    pub fn finalize(&self) -> u64 {
-        let digest = self.digest.clone();
-        digest.sum64()
-    }
-}
-
 /// Chunked manifest writer that matches the MAN1 scaffolding plan.
 pub struct ManifestLogWriter {
     dir: PathBuf,
     config: ManifestLogWriterConfig,
-    stream_id: u64,
     next_chunk_index: u64,
     next_record_ordinal: u64,
     last_commit: Instant,
@@ -225,7 +195,6 @@ impl ManifestLogWriter {
         Ok(Self {
             dir: stream_dir,
             config,
-            stream_id,
             next_chunk_index: 0,
             next_record_ordinal: 0,
             last_commit: Instant::now(),

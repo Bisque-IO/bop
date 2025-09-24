@@ -18,6 +18,7 @@ fn bench_config(root: &Path) -> AofConfig {
         flush_watermark_bytes: 1 * 1024 * 1024,
         flush_interval_ms: 5,
         max_unflushed_bytes: 16 * 1024 * 1024,
+        max_concurrent_flushes: 1,
     };
     cfg
 }
@@ -105,6 +106,7 @@ fn bench_append_with_metrics(c: &mut Criterion) {
                 flush_watermark_bytes: u64::MAX,
                 flush_interval_ms: u64::MAX,
                 max_unflushed_bytes: u64::MAX,
+                max_concurrent_flushes: 1,
             };
             let aof = Aof::new(handle.clone(), cfg.clone()).expect("aof");
 

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -10,8 +11,9 @@ use super::segment::Segment;
 use super::{InstanceId, ResidentSegment, TieredRuntime};
 use crate::store::{DurabilityCursor, TieredInstance};
 use crate::test_support::{MetadataPersistContext, metadata_persist_override};
-use crossbeam::channel::{Receiver, Sender, TrySendError, unbounded};
-use tokio::sync::Notify;
+use parking_lot::Mutex;
+use tokio::runtime::Handle;
+use tokio::sync::{Notify, Semaphore, mpsc};
 use tracing::{debug, error, warn};
 
 pub enum FlushCommand {
@@ -444,78 +446,41 @@ fn is_retryable_io_error(err: &io::Error) -> bool {
 }
 pub struct FlushManager {
     _runtime: Arc<TieredRuntime>,
-    command_tx: Sender<FlushCommand>,
-    total_unflushed: Arc<AtomicU64>,
-    metrics: Arc<FlushMetrics>,
-    flush_failed: Arc<AtomicBool>,
+    command_tx: mpsc::UnboundedSender<FlushCommand>,
 }
 
 impl FlushManager {
-    pub fn new(
+    pub(crate) fn new(
         runtime: Arc<TieredRuntime>,
         total_unflushed: Arc<AtomicU64>,
         metrics: Arc<FlushMetrics>,
         flush_failed: Arc<AtomicBool>,
+        max_concurrent: usize,
     ) -> Arc<Self> {
-        let (tx, rx) = unbounded();
-        let manager = Arc::new(Self {
-            _runtime: runtime.clone(),
+        let (tx, rx) = mpsc::unbounded_channel();
+        let worker = FlushWorker::new(
+            runtime.handle(),
+            total_unflushed.clone(),
+            metrics.clone(),
+            flush_failed.clone(),
+            max_concurrent,
+        );
+        FlushWorker::spawn(worker, rx);
+        Arc::new(Self {
+            _runtime: runtime,
             command_tx: tx,
-            total_unflushed: total_unflushed.clone(),
-            metrics: metrics.clone(),
-            flush_failed: flush_failed.clone(),
-        });
-        Self::spawn_worker(rx, total_unflushed, metrics, flush_failed);
-        manager
+        })
     }
 
     pub fn enqueue_segment(&self, request: FlushRequest) -> AofResult<()> {
         self.command_tx
-            .try_send(FlushCommand::RegisterSegment { request })
-            .map_err(|err| match err {
-                TrySendError::Full(_) | TrySendError::Disconnected(_) => AofError::Backpressure,
-            })
+            .send(FlushCommand::RegisterSegment { request })
+            .map_err(|_| AofError::Backpressure)
     }
 
     #[cfg(test)]
     pub(crate) fn shutdown_worker_for_tests(&self) {
         let _ = self.command_tx.send(FlushCommand::Shutdown);
-    }
-
-    fn spawn_worker(
-        rx: Receiver<FlushCommand>,
-        total_unflushed: Arc<AtomicU64>,
-        metrics: Arc<FlushMetrics>,
-        flush_failed: Arc<AtomicBool>,
-    ) {
-        let _ = thread::Builder::new()
-            .name("aof-flush".to_string())
-            .spawn(move || Self::worker_loop(rx, total_unflushed, metrics, flush_failed));
-    }
-
-    fn worker_loop(
-        rx: Receiver<FlushCommand>,
-        total_unflushed: Arc<AtomicU64>,
-        metrics: Arc<FlushMetrics>,
-        flush_failed: Arc<AtomicBool>,
-    ) {
-        while let Ok(cmd) = rx.recv() {
-            match cmd {
-                FlushCommand::RegisterSegment { request } => {
-                    if let Err(err) =
-                        Self::flush_segment(&request, &total_unflushed, &metrics, &flush_failed)
-                    {
-                        error!(
-                            instance = request.instance_id().get(),
-                            segment = request.segment().id().as_u64(),
-                            error = %err,
-                            "flush manager failed to persist segment"
-                        );
-                    }
-                }
-                FlushCommand::Shutdown => break,
-            }
-        }
     }
 
     fn flush_segment(
@@ -584,6 +549,121 @@ impl FlushManager {
 impl Drop for FlushManager {
     fn drop(&mut self) {
         let _ = self.command_tx.send(FlushCommand::Shutdown);
+    }
+}
+
+struct FlushWorker {
+    handle: Handle,
+    total_unflushed: Arc<AtomicU64>,
+    metrics: Arc<FlushMetrics>,
+    flush_failed: Arc<AtomicBool>,
+    semaphore: Arc<Semaphore>,
+    pending: Mutex<VecDeque<FlushRequest>>,
+}
+
+impl FlushWorker {
+    fn new(
+        handle: Handle,
+        total_unflushed: Arc<AtomicU64>,
+        metrics: Arc<FlushMetrics>,
+        flush_failed: Arc<AtomicBool>,
+        max_concurrent: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            handle,
+            total_unflushed,
+            metrics,
+            flush_failed,
+            semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
+            pending: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    fn spawn(worker: Arc<Self>, rx: mpsc::UnboundedReceiver<FlushCommand>) {
+        let handle = worker.handle.clone();
+        handle.spawn(async move {
+            worker.run(rx).await;
+        });
+    }
+
+    async fn run(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<FlushCommand>) {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                FlushCommand::RegisterSegment { request } => {
+                    self.enqueue(request);
+                    self.try_dispatch();
+                }
+                FlushCommand::Shutdown => break,
+            }
+        }
+    }
+
+    fn enqueue(&self, request: FlushRequest) {
+        let mut pending = self.pending.lock();
+        pending.push_back(request);
+    }
+
+    fn try_dispatch(self: &Arc<Self>) {
+        while self.try_dispatch_once() {}
+    }
+
+    fn try_dispatch_once(self: &Arc<Self>) -> bool {
+        let request = {
+            let mut pending = self.pending.lock();
+            pending.pop_front()
+        };
+
+        let Some(request) = request else {
+            return false;
+        };
+
+        let permit = match self.semaphore.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let mut pending = self.pending.lock();
+                pending.push_front(request);
+                return false;
+            }
+        };
+
+        let worker = Arc::clone(self);
+        let instance = request.instance_id();
+        let segment_id = request.segment().id();
+        self.handle.spawn(async move {
+            let total_unflushed = Arc::clone(&worker.total_unflushed);
+            let metrics = Arc::clone(&worker.metrics);
+            let flush_failed = Arc::clone(&worker.flush_failed);
+            let req = request;
+            let result = tokio::task::spawn_blocking(move || {
+                FlushManager::flush_segment(&req, &total_unflushed, &metrics, &flush_failed)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    error!(
+                        instance = instance.get(),
+                        segment = segment_id.as_u64(),
+                        error = %err,
+                        "flush manager failed to persist segment"
+                    );
+                }
+                Err(join_err) => {
+                    error!(
+                        instance = instance.get(),
+                        segment = segment_id.as_u64(),
+                        error = %join_err,
+                        "flush task panicked"
+                    );
+                }
+            }
+
+            drop(permit);
+            worker.try_dispatch();
+        });
+
+        true
     }
 }
 
@@ -671,6 +751,7 @@ mod tests {
         assert_eq!(snapshot.metadata_failures, 1);
     }
 
+    #[test]
     fn backlog_snapshot_records_bytes() {
         let metrics = FlushMetrics::default();
         metrics.record_backlog(123);

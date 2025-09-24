@@ -362,9 +362,12 @@ dependencies = [
 name = "bop-raft"
 version = "0.1.0"
 dependencies = [
+ "bop-aof",
  "bop-sys",
+ "crc64fast-nvme",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tracing",
 ]

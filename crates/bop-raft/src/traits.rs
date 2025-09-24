@@ -1,19 +1,158 @@
+use std::collections::HashMap;
+use std::fmt;
+
 use crate::buffer::Buffer;
 use crate::config::{ClusterConfig, ClusterConfigView};
-use crate::error::RaftResult;
+use crate::error::{RaftError, RaftResult};
 use crate::log_entry::{LogEntryRecord, LogEntryView};
 use crate::state::{ServerState, ServerStateView};
 use crate::storage::StorageBackendKind;
 use crate::types::{CallbackAction, CallbackContext, LogIndex, LogLevel, ServerId, Term};
+use bop_sys::bop_raft_snapshot;
+
+/// Snapshot type forwarded from the NuRaft layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotType(pub u8);
+
+/// Chunk of snapshot data streamed by NuRaft.
+#[derive(Clone, Copy)]
+pub struct SnapshotMetadata<'a> {
+    pub log_idx: LogIndex,
+    pub log_term: Term,
+    pub cluster_config: Option<ClusterConfigView<'a>>,
+    pub snapshot_size: u64,
+    pub snapshot_type: SnapshotType,
+}
+
+impl<'a> fmt::Debug for SnapshotMetadata<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let config_summary = self.cluster_config.map(|cfg| {
+            (
+                cfg.log_idx(),
+                cfg.prev_log_idx(),
+                cfg.servers_size(),
+                cfg.is_async_replication(),
+            )
+        });
+        f.debug_struct("SnapshotMetadata")
+            .field("log_idx", &self.log_idx)
+            .field("log_term", &self.log_term)
+            .field("snapshot_size", &self.snapshot_size)
+            .field("snapshot_type", &self.snapshot_type)
+            .field("cluster_config", &config_summary)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotChunk<'a> {
+    pub metadata: SnapshotMetadata<'a>,
+    pub is_first_chunk: bool,
+    pub is_last_chunk: bool,
+    pub data: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotCreation<'a> {
+    pub metadata: SnapshotMetadata<'a>,
+    pub data: &'a [u8],
+    pub snapshot: Option<SnapshotRef>,
+}
+
+/// Handle returned to NuRaft when it requests the most recent snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotRef {
+    ptr: *mut bop_raft_snapshot,
+}
+
+impl SnapshotRef {
+    /// Create a borrowed snapshot reference from a raw pointer.
+    ///
+    /// # Safety
+    /// Caller must guarantee the pointer is valid for the duration required by NuRaft.
+    pub unsafe fn new(ptr: *mut bop_raft_snapshot) -> Option<Self> {
+        if ptr.is_null() {
+            None
+        } else {
+            Some(SnapshotRef { ptr })
+        }
+    }
+
+    pub fn as_ptr(self) -> *mut bop_raft_snapshot {
+        self.ptr
+    }
+}
+
+/// Streaming result for snapshot reads.
+#[derive(Debug)]
+pub enum SnapshotReadResult {
+    Chunk { data: Vec<u8>, is_last: bool },
+    End,
+}
+
+/// Snapshot reader returned by the state machine implementation.
+pub trait SnapshotReader: Send {
+    fn next(&mut self, object_id: u64) -> RaftResult<SnapshotReadResult>;
+}
+
+/// Collected commit index adjustment data passed from NuRaft.
+#[derive(Debug, Clone)]
+pub struct AdjustCommitIndex {
+    pub current: LogIndex,
+    pub expected: LogIndex,
+    pub peer_indexes: HashMap<ServerId, LogIndex>,
+}
+
+impl AdjustCommitIndex {
+    pub fn new(
+        current: LogIndex,
+        expected: LogIndex,
+        peer_indexes: HashMap<ServerId, LogIndex>,
+    ) -> Self {
+        Self {
+            current,
+            expected,
+            peer_indexes,
+        }
+    }
+}
 
 /// State Machine Interface for Raft.
 /// Applications must implement this trait to integrate with the consensus engine.
 pub trait StateMachine: Send {
     /// Apply a log entry to the state machine.
     ///
-    /// Returning `Ok(Some(Vec<u8>))` delivers a result payload back to the
+    /// Returning `Ok(Some(Buffer))` delivers a result payload back to the
     /// caller. Returning `Ok(None)` indicates no payload should be sent.
-    fn apply(&mut self, log_idx: LogIndex, data: &[u8]) -> RaftResult<Option<Vec<u8>>>;
+    fn apply(&mut self, log_idx: LogIndex, data: &[u8]) -> RaftResult<Option<Buffer>>;
+
+    /// Notification that a cluster configuration entry was committed.
+    fn commit_config(
+        &mut self,
+        _log_idx: LogIndex,
+        _new_config: ClusterConfigView<'_>,
+    ) -> RaftResult<()> {
+        Ok(())
+    }
+
+    /// Pre-commit stage invoked before replication quorum is reached.
+    fn pre_commit(&mut self, _log_idx: LogIndex, _data: &[u8]) -> RaftResult<Option<Buffer>> {
+        Ok(None)
+    }
+
+    /// Roll back an uncommitted entry.
+    fn rollback(&mut self, _log_idx: LogIndex, _data: &[u8]) -> RaftResult<()> {
+        Ok(())
+    }
+
+    /// Roll back a pending configuration change.
+    fn rollback_config(
+        &mut self,
+        _log_idx: LogIndex,
+        _config: ClusterConfigView<'_>,
+    ) -> RaftResult<()> {
+        Ok(())
+    }
 
     /// Create a snapshot of the current state.
     fn take_snapshot(&self) -> RaftResult<Buffer>;
@@ -24,9 +163,56 @@ pub trait StateMachine: Send {
     /// Get the last applied log index.
     fn last_applied_index(&self) -> LogIndex;
 
+    /// Preferred outbound log batch size hint.
+    fn next_batch_size_hint(&self) -> i64 {
+        0
+    }
+
+    /// Persist a snapshot chunk supplied by NuRaft.
+    fn save_snapshot_chunk(&mut self, _chunk: SnapshotChunk<'_>) -> RaftResult<()> {
+        Ok(())
+    }
+
+    /// Apply a received snapshot.
+    fn apply_snapshot(&mut self, _snapshot: SnapshotMetadata<'_>) -> RaftResult<bool> {
+        Ok(true)
+    }
+
+    /// Provide a snapshot reader for streaming snapshot data.
+    fn snapshot_reader(&mut self) -> RaftResult<Box<dyn SnapshotReader>> {
+        Err(RaftError::StateMachineError(
+            "snapshot streaming not implemented".to_string(),
+        ))
+    }
+
+    /// Clean up resources associated with a previously created snapshot reader.
+    fn finalize_snapshot_reader(&mut self, _reader: Box<dyn SnapshotReader>) -> RaftResult<()> {
+        Ok(())
+    }
+
+    /// Return the last durable snapshot, if available.
+    fn last_snapshot(&self) -> RaftResult<Option<SnapshotRef>> {
+        Ok(None)
+    }
+
+    /// Execute snapshot creation for the provided snapshot data.
+    fn create_snapshot(&mut self, _snapshot: SnapshotCreation<'_>) -> RaftResult<()> {
+        Ok(())
+    }
+
+    /// Whether NuRaft should attempt to create a snapshot now.
+    fn should_create_snapshot(&self) -> bool {
+        true
+    }
+
     /// Whether this state machine allows the server to transfer leadership.
     fn allow_leadership_transfer(&self) -> bool {
         true
+    }
+
+    /// Adjust the commit index before NuRaft finalizes it.
+    fn adjust_commit_index(&mut self, info: AdjustCommitIndex) -> RaftResult<LogIndex> {
+        Ok(info.expected)
     }
 }
 

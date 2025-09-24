@@ -64,16 +64,6 @@ enum RetryKind {
     Fetch,
 }
 
-impl RetryKind {
-    fn as_str(&self) -> &'static str {
-        match self {
-            RetryKind::Upload => "upload",
-            RetryKind::Delete => "delete",
-            RetryKind::Fetch => "fetch",
-        }
-    }
-}
-
 #[derive(Debug)]
 struct RetryStats<T> {
     value: T,
@@ -130,6 +120,9 @@ pub struct Tier2Config {
     pub secret_key: String,
     pub session_token: Option<String>,
     pub max_concurrent_transfers: usize,
+    pub max_concurrent_uploads: usize,
+    pub max_concurrent_downloads: usize,
+    pub max_concurrent_operations: usize,
     pub retry: RetryPolicy,
     pub retention_ttl: Option<Duration>,
     pub security: Option<Tier2Security>,
@@ -152,6 +145,9 @@ impl Tier2Config {
             secret_key: secret_key.into(),
             session_token: None,
             max_concurrent_transfers: 2,
+            max_concurrent_uploads: 2,
+            max_concurrent_downloads: 2,
+            max_concurrent_operations: 2,
             retry: RetryPolicy::default(),
             retention_ttl: None,
             security: None,
@@ -169,7 +165,26 @@ impl Tier2Config {
     }
 
     pub fn with_concurrency(mut self, workers: usize) -> Self {
-        self.max_concurrent_transfers = workers.max(1);
+        let workers = workers.max(1);
+        self.max_concurrent_transfers = workers;
+        self.max_concurrent_uploads = workers;
+        self.max_concurrent_downloads = workers;
+        self.max_concurrent_operations = workers;
+        self
+    }
+
+    pub fn with_upload_concurrency(mut self, workers: usize) -> Self {
+        self.max_concurrent_uploads = workers.max(1);
+        self
+    }
+
+    pub fn with_download_concurrency(mut self, workers: usize) -> Self {
+        self.max_concurrent_downloads = workers.max(1);
+        self
+    }
+
+    pub fn with_operation_concurrency(mut self, workers: usize) -> Self {
+        self.max_concurrent_operations = workers.max(1);
         self
     }
 
@@ -694,7 +709,9 @@ struct Tier2Inner {
     inflight_uploads: Mutex<HashSet<(InstanceId, SegmentId)>>,
     inflight_fetches: Mutex<HashSet<(InstanceId, SegmentId)>>,
     metrics: Tier2Metrics,
-    semaphore: Arc<Semaphore>,
+    ops_semaphore: Arc<Semaphore>,
+    upload_semaphore: Arc<Semaphore>,
+    download_semaphore: Arc<Semaphore>,
 }
 
 impl Tier2Inner {
@@ -837,22 +854,58 @@ impl Tier2Inner {
 
     async fn run(self: Arc<Self>, mut commands: mpsc::UnboundedReceiver<Tier2Command>) {
         while let Some(command) = commands.recv().await {
-            let inner = Arc::clone(&self);
-            let permit = inner
-                .semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("tier2 semaphore");
-            tokio::spawn(async move {
-                let _permit = permit;
-                match command {
-                    Tier2Command::Upload(job) => inner.handle_upload(job).await,
-                    Tier2Command::Delete(job) => inner.handle_delete(job).await,
-                    Tier2Command::Fetch(job) => inner.handle_fetch(job).await,
-                }
-            });
+            match command {
+                Tier2Command::Upload(job) => self.spawn_upload(job),
+                Tier2Command::Delete(job) => self.spawn_delete(job),
+                Tier2Command::Fetch(job) => self.spawn_fetch(job),
+            }
         }
+    }
+
+    fn spawn_upload(self: &Arc<Self>, job: UploadJob) {
+        let inner = Arc::clone(self);
+        self.runtime.spawn(async move {
+            let ops_permit = match inner.ops_semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            let upload_permit = match inner.upload_semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            let _ops = ops_permit;
+            let _upload = upload_permit;
+            inner.handle_upload(job).await;
+        });
+    }
+
+    fn spawn_delete(self: &Arc<Self>, job: DeleteJob) {
+        let inner = Arc::clone(self);
+        self.runtime.spawn(async move {
+            let ops_permit = match inner.ops_semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            let _ops = ops_permit;
+            inner.handle_delete(job).await;
+        });
+    }
+
+    fn spawn_fetch(self: &Arc<Self>, job: FetchJob) {
+        let inner = Arc::clone(self);
+        self.runtime.spawn(async move {
+            let ops_permit = match inner.ops_semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            let download_permit = match inner.download_semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            let _ops = ops_permit;
+            let _download = download_permit;
+            inner.handle_fetch(job).await;
+        });
     }
 
     async fn handle_upload(self: Arc<Self>, job: UploadJob) {
@@ -1309,7 +1362,9 @@ impl Tier2Manager {
     ) -> AofResult<Self> {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent_transfers.max(1)));
+        let ops_semaphore = Arc::new(Semaphore::new(config.max_concurrent_operations.max(1)));
+        let upload_semaphore = Arc::new(Semaphore::new(config.max_concurrent_uploads.max(1)));
+        let download_semaphore = Arc::new(Semaphore::new(config.max_concurrent_downloads.max(1)));
         let inner = Arc::new(Tier2Inner {
             runtime: runtime.clone(),
             config: config.clone(),
@@ -1321,7 +1376,9 @@ impl Tier2Manager {
             inflight_uploads: Mutex::new(HashSet::new()),
             inflight_fetches: Mutex::new(HashSet::new()),
             metrics: Tier2Metrics::default(),
-            semaphore,
+            ops_semaphore,
+            upload_semaphore,
+            download_semaphore,
         });
         let dispatcher_inner = Arc::clone(&inner);
         let dispatcher = runtime.spawn(async move {
@@ -1412,8 +1469,6 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct CapturedEvent {
-        target: String,
-        name: String,
         fields: StdHashMap<String, String>,
     }
 
@@ -1430,6 +1485,15 @@ mod tests {
 
     struct FieldVisitor<'a> {
         fields: &'a mut StdHashMap<String, String>,
+    }
+
+    impl<'a> FieldVisitor<'a> {
+        fn normalize_debug_value(value: &str) -> Option<String> {
+            if !value.starts_with('"') || !value.ends_with('"') {
+                return None;
+            }
+            serde_json::from_str::<String>(value).ok()
+        }
     }
 
     impl<'a> Visit for FieldVisitor<'a> {
@@ -1459,8 +1523,11 @@ mod tests {
         }
 
         fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-            self.fields
-                .insert(field.name().to_string(), format!("{:?}", value));
+            let mut rendered = format!("{:?}", value);
+            if let Some(unescaped) = FieldVisitor::normalize_debug_value(&rendered) {
+                rendered = unescaped;
+            }
+            self.fields.insert(field.name().to_string(), rendered);
         }
     }
 
@@ -1470,8 +1537,6 @@ mod tests {
     {
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
             let mut captured = CapturedEvent {
-                target: event.metadata().target().to_string(),
-                name: event.metadata().name().to_string(),
                 fields: StdHashMap::new(),
             };
             event.record(&mut FieldVisitor {

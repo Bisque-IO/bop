@@ -1,0 +1,9 @@
+graph LR
+    Client[Client / Service] -->|append| Tier0[Tier 0 (mmap)]
+    Tier0 -->|seal & compress| Tier1[Tier 1 (Zstd cache)]
+    Tier1 -->|upload| Tier2[Tier 2 (Object Store)]
+    Tier1 -->|hydrate| Tier0
+    Tier0 -->|manifest events| Manifest[Manifest Log]
+    Tier1 -->|manifest events| Manifest
+    Tier2 -->|manifest events| Manifest
+    Manifest -->|replay| Followers[Followers / Readers]

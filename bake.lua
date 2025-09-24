@@ -167,6 +167,8 @@ function main(...)
         print()
         print("toolchains:")
         os.exec("xmake show -l toolchains")
+    elseif vararg[1] == "docs-lint" then
+        os.exec("bash scripts/docs_markdownlint.sh")
     elseif vararg[1] == "ls" then
         local debug_dir = "build/" .. os.host() .. "/" .. os.arch() .. "/debug"
         local release_dir = "build/" .. os.host() .. "/" .. os.arch() .. "/release"

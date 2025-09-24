@@ -463,7 +463,6 @@ struct Tier1InstanceState {
     layout: Layout,
     manifest: Tier1Manifest,
     manifest_log: Option<ManifestLogWriter>,
-    manifest_log_only: bool,
     used_bytes: u64,
     lru: VecDeque<SegmentId>,
     replay_metrics: Arc<ManifestReplayMetrics>,
@@ -520,7 +519,6 @@ impl Tier1InstanceState {
             layout,
             manifest,
             manifest_log,
-            manifest_log_only: config.manifest_log_only,
             used_bytes,
             lru,
             replay_metrics,
@@ -776,30 +774,6 @@ impl Tier1InstanceState {
         }
     }
 
-    fn remove_entry(&mut self, segment_id: SegmentId) -> Option<ManifestEntry> {
-        self.lru.retain(|id| *id != segment_id);
-        if let Some(entry) = self.manifest.remove(segment_id) {
-            self.used_bytes = self.used_bytes.saturating_sub(entry.compressed_bytes);
-            let path = self.layout.warm_dir().join(&entry.compressed_path);
-            if let Err(err) = fs::remove_file(&path) {
-                warn!(path = %path.display(), "failed to remove warm file: {err}");
-            }
-            let base_offset = entry.base_offset;
-            let reclaimed_bytes = entry.compressed_bytes;
-            if let Err(err) = self.persist_manifest() {
-                warn!("manifest persist failed: {err}");
-            }
-            self.log_manifest_record(
-                segment_id,
-                base_offset,
-                ManifestRecordPayload::LocalEvicted { reclaimed_bytes },
-            );
-            Some(entry)
-        } else {
-            None
-        }
-    }
-
     fn used_bytes(&self) -> u64 {
         self.used_bytes
     }
@@ -929,6 +903,7 @@ impl Tier1Cache {
 
 impl Drop for Tier1Cache {
     fn drop(&mut self) {
+        let _ = self.inner.compression_tx.send(CompressionCommand::Shutdown);
         if let Some(handle) = self.dispatcher.lock().take() {
             handle.abort();
         }
