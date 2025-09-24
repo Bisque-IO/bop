@@ -9,40 +9,40 @@ repository = "https://github.com/bisque-io/bop"
 
 [dependencies]
 # Local dependencies
-bop-rs = { path = "../bop-rs" }
-bop-sys = { path = "../bop-sys" }
+bop-rs = { workspace = true }
+bop-sys = { workspace = true }
 
 # Serialization and data handling
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-base64 = "0.21"
-byteorder = "1.5"
-crc32fast = "1.4"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+byteorder = { workspace = true }
+crc32fast = { workspace = true }
 
 # Time handling
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true, features = ["serde"] }
 
 # Error handling
-thiserror = "1.0"
+thiserror = { workspace = true }
 
 # Collections
-multimap = "0.8"
+multimap = { workspace = true }
 
 # Async support (optional dependencies)
-tokio = { version = "1.0", features = ["full"], optional = true }
+tokio = { workspace = true, features = ["full"], optional = true }
 
 # Networking dependencies  
-compio = { version = "0.12", features = ["runtime", "macros", "time"] }
-compio-tls = { version = "0.3", features = ["rustls"] }
-futures = "0.3"
-futures-util = "0.3"
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
-aws-lc-rs = { version = "1.8" }
-rustls-pemfile = "2.0"
-log = "0.4"
+compio = { workspace = true }
+compio-tls = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+rustls = { workspace = true, features = ["aws-lc-rs", "std"] }
+aws-lc-rs = { workspace = true }
+rustls-pemfile = { workspace = true }
+log = { workspace = true }
 
 # Distributed consensus (optional dependency)
-openraft = { version = "0.9", optional = true }
+openraft = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -56,4 +56,4 @@ name = "vertx-cluster"
 path = "src/main.rs"
 
 [dev-dependencies]
-tokio-test = "0.4"
+tokio-test = { workspace = true }

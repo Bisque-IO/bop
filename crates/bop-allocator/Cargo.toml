@@ -8,4 +8,4 @@ default = []
 alloc-stats = []
 
 [dependencies]
-bop-sys = { path = "../bop-sys" }
+bop-sys = { workspace = true }

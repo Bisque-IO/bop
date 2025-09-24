@@ -14,6 +14,65 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+allocator-api2 = "0.3"
+anyhow = "1"
+arc-swap = "1.7"
+aws-lc-rs = "1.8"
+base64 = "0.22"
+bindgen = "0.72"
+bitflags = "2"
+bop-allocator = { path = "crates/bop-allocator", version = "0.1.0", default-features = false }
+bop-aof = { path = "crates/bop-aof", version = "0.1.0" }
+bop-compiler = { path = "crates/bop-protoc", version = "0.1.0" }
+bop-mdbx = { path = "crates/bop-mdbx", version = "0.1.0" }
+bop-mpmc = { path = "crates/bop-mpmc", version = "0.1.0" }
+bop-raft = { path = "crates/bop-raft", version = "0.1.0" }
+bop-rs = { path = "crates/bop-rs", version = "0.1.0" }
+bop-runtime = { path = "crates/bop-proto", version = "0.1.0" }
+bop-sys = { path = "crates/bop-sys", version = "0.1.0" }
+bop-usockets = { path = "crates/bop-usockets", version = "0.1.0", default-features = false }
+bumpalo = { version = "3.17.0", features = ["collections", "boxed"] }
+byteorder = "1.5"
+cc = "1.2"
+chrono = "0.4"
+compio = { version = "0.16", features = ["runtime", "macros", "time"] }
+compio-tls = { version = "0.7", features = ["rustls"] }
+crc32fast = "1.4"
+crc64fast-nvme = "1.2"
+criterion = { version = "0.7", features = ["html_reports"] }
+crossbeam = "0.8"
+futures = "0.3"
+futures-util = "0.3"
+ghost-cell = "0.2.6"
+hdrhistogram = "7.5"
+libc = "0.2"
+log = "0.4"
+memmap2 = "0.9"
+minio = "0.3"
+multimap = "0.10"
+openraft = "0.9"
+parking_lot = "0.12"
+proc-macro2 = "1.0.60"
+proptest = "1.0"
+rand = "0.9"
+rlsf = "0.2"
+rustls = { version = "0.23", default-features = false }
+rustls-pemfile = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+snmalloc-rs = "0.3"
+tempfile = "3.8"
+thiserror = "2.0"
+tokio = "1"
+tokio-test = "0.4"
+tokio-util = "0.7"
+tracing = { version = "0.1", default-features = false }
+tracing-subscriber = "0.3"
+vertx-cluster = { path = "crates/vertx-cluster", version = "0.1.0" }
+zstd = "0.13"
 
 [profile.dev]
 opt-level = 0

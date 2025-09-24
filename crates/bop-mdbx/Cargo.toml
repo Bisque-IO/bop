@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bop-sys = { path = "../bop-sys" }
-bitflags = "2"
+bop-sys = { workspace = true }
+bitflags = { workspace = true }

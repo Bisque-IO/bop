@@ -13,20 +13,20 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1"
-thiserror = "1"
-rlsf = "0.2"
-futures = "0.3"
-proc-macro2 = "1.0.60"
-allocator-api2 = "0.2.21"
-ghost-cell = "0.2.6"
-bumpalo = { version = "3.17.0", features = ["collections", "boxed"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+rlsf = { workspace = true }
+futures = { workspace = true }
+proc-macro2 = { workspace = true }
+allocator-api2 = { workspace = true }
+ghost-cell = { workspace = true }
+bumpalo = { workspace = true }
 
 [target.'cfg(target_os = "wasi")'.dependencies]
-rlsf = "0.2"
+rlsf = { workspace = true }
 
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
-snmalloc-rs = "0.3"
+snmalloc-rs = { workspace = true }
 
 #[profile.release]
 #opt-level = 2

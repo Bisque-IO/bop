@@ -12,9 +12,9 @@ path = "src/lib.rs"
 
 
 [dev-dependencies]
-rand = "0.8"
-criterion = "0.5"
-proc-macro2 = "1.0.60"
+rand = { workspace = true }
+criterion = { workspace = true }
+proc-macro2 = { workspace = true }
 
 #[[bench]]
 #name = "art_bench"

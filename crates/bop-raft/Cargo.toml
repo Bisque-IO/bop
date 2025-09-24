@@ -10,14 +10,14 @@ serde = ["dep:serde", "dep:serde_json"]
 tracing = ["dep:tracing"]
 
 [dependencies]
-bop-sys = { path = "../bop-sys" }
-bop-aof = { path = "../bop-aof" }
-crc64fast-nvme = "1.2"
-thiserror = "1.0"
-serde = { version = "1.0", features = ["derive"], optional = true }
-serde_json = { version = "1.0", optional = true }
-tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
+bop-sys = { workspace = true }
+bop-aof = { workspace = true }
+crc64fast-nvme = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+tracing = { workspace = true, default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
-tempfile = "3.8"
+tempfile = { workspace = true }
 

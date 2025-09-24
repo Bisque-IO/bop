@@ -9,13 +9,13 @@ alloc-stats = ["bop-allocator/alloc-stats"]
 usockets-udp = ["bop-usockets/usockets-udp"]
 
 [dependencies]
-bop-allocator = { path = "../bop-allocator", default-features = false }
-bop-aof = { path = "../bop-aof" }
-bop-mdbx = { path = "../bop-mdbx" }
-bop-mpmc = { path = "../bop-mpmc" }
-bop-raft = { path = "../bop-raft" }
-bop-usockets = { path = "../bop-usockets", default-features = false }
+bop-allocator = { workspace = true, default-features = false }
+bop-aof = { workspace = true }
+bop-mdbx = { workspace = true }
+bop-mpmc = { workspace = true }
+bop-raft = { workspace = true }
+bop-usockets = { workspace = true, default-features = false }
 
 [dev-dependencies]
-bop-sys = { path = "../bop-sys" }
+bop-sys = { workspace = true }
 

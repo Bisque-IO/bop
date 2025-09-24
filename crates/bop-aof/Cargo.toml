@@ -4,22 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-arc-swap = "1.7"
-byteorder = "1.5"
-chrono = { version = "0.4", features = ["serde"] }
-crc64fast-nvme = "1.2"
-crossbeam = "0.8"
-futures = "0.3"
-hdrhistogram = "7.5"
-libc = "0.2"
-memmap2 = "0.9"
-minio = "0.3"
-parking_lot = "0.12"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tempfile = "3.8"
-thiserror = "1.0"
-tokio = { version = "1", features = [
+arc-swap = { workspace = true }
+byteorder = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+crc64fast-nvme = { workspace = true }
+crossbeam = { workspace = true }
+futures = { workspace = true }
+hdrhistogram = { workspace = true }
+libc = { workspace = true }
+memmap2 = { workspace = true }
+minio = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
     "rt-multi-thread",
     "net",
     "io-util",
@@ -28,14 +28,14 @@ tokio = { version = "1", features = [
     "macros",
     "signal"
 ] }
-tokio-util = "0.7"
-tracing = "0.1"
-zstd = "0.13"
+tokio-util = { workspace = true }
+tracing = { workspace = true, features = ["std"] }
+zstd = { workspace = true }
 
 [dev-dependencies]
-proptest = "1.0"
-tracing-subscriber = "0.3"
-criterion = { version = "0.5", features = ["html_reports"] }
+proptest = { workspace = true }
+tracing-subscriber = { workspace = true }
+criterion = { workspace = true }
 
 [[bench]]
 name = "aof_benchmarks"
