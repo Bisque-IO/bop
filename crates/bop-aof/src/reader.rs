@@ -3,11 +3,11 @@ use std::{collections::VecDeque, fmt, sync::Arc};
 use crc64fast_nvme::Digest;
 use tokio::{pin, select, sync::watch};
 
-use super::{
-    Aof, ResidentSegment, SegmentStatusSnapshot, TailEvent, TailState,
-    config::{RecordId, SegmentId},
-    error::{AofError, AofResult, BackpressureKind},
-    segment::{SEGMENT_HEADER_SIZE, Segment},
+use crate::error::{AofError, AofResult, BackpressureKind};
+use crate::segment::{SEGMENT_HEADER_SIZE, Segment};
+use crate::store::ResidentSegment;
+use crate::{
+    Aof, RecordId, SegmentId, SegmentStatusSnapshot, TailEvent, TailSegmentState, TailState,
 };
 
 /// Logical bounds for a record within a segment.
@@ -387,16 +387,13 @@ impl<'a> SealedSegmentStream<'a> {
 
     fn record_tail_update(&mut self, state: TailState) {
         self.enqueue_sealed(state.tail);
-        for pending in state.pending {
-            self.enqueue_sealed(Some(pending));
-        }
         if let TailEvent::Sealed(segment_id) = state.last_event {
             self.push_sealed(segment_id);
         }
     }
 
-    fn enqueue_sealed(&mut self, snapshot: Option<SegmentStatusSnapshot>) {
-        if let Some(snapshot) = snapshot {
+    fn enqueue_sealed(&mut self, tail: Option<TailSegmentState>) {
+        if let Some(snapshot) = tail {
             if snapshot.sealed {
                 self.push_sealed(snapshot.segment_id);
             }
@@ -698,7 +695,7 @@ mod tests {
         let sealed_at = Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
-        segment.seal(sealed_at, 0, false).expect("seal");
+        segment.seal(sealed_at, false).expect("seal");
 
         let reader =
             SegmentReader::new(ResidentSegment::new_for_tests(segment.clone())).expect("reader");
@@ -740,7 +737,7 @@ mod tests {
         let sealed_at = Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
-        segment.seal(sealed_at, 0, false).expect("seal");
+        segment.seal(sealed_at, false).expect("seal");
 
         let reader =
             SegmentReader::new(ResidentSegment::new_for_tests(segment.clone())).expect("reader");
@@ -783,7 +780,7 @@ mod tests {
         let sealed_at = Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
-        segment.seal(sealed_at, 0, false).expect("seal");
+        segment.seal(sealed_at, false).expect("seal");
 
         let reader =
             SegmentReader::new(ResidentSegment::new_for_tests(segment.clone())).expect("reader");
@@ -871,7 +868,7 @@ mod tests {
         let sealed_at = Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
-        segment.seal(sealed_at, 0, false).expect("seal");
+        segment.seal(sealed_at, false).expect("seal");
 
         let reader =
             SegmentReader::new(ResidentSegment::new_for_tests(segment.clone())).expect("reader");
@@ -907,7 +904,7 @@ mod tests {
         let sealed_at = Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| Utc::now().timestamp() * 1_000_000_000);
-        segment.seal(sealed_at, 0, false).expect("seal");
+        segment.seal(sealed_at, false).expect("seal");
 
         let reader =
             SegmentReader::new(ResidentSegment::new_for_tests(segment.clone())).expect("reader");
@@ -1111,7 +1108,7 @@ mod tests {
         let (_manager, handle) = build_manager(AofManagerConfig::for_tests());
         let aof = Aof::new(handle, cfg).expect("aof");
 
-        aof.flush.shutdown_worker_for_tests();
+        aof.flush_manager_for_tests().shutdown_worker_for_tests();
 
         let first = aof.append_record(b"active-0").expect("append first");
         let segment_id = SegmentId::new(first.segment_index() as u64);

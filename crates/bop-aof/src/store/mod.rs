@@ -1006,7 +1006,7 @@ mod tests {
         segment.append_record(b"payload", 1).expect("append record");
         let size = segment.current_size();
         let _ = segment.mark_durable(size);
-        segment.seal(created_at, 0, false).expect("seal");
+        segment.seal(created_at, false).expect("seal");
         let segment = Arc::new(segment);
 
         let resident = tiered_instance

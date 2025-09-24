@@ -61,6 +61,8 @@ impl TryFrom<u16> for RecordType {
     }
 }
 
+pub const SEAL_RESERVED_BYTES: usize = 8;
+
 #[derive(Debug, Clone)]
 pub enum ManifestRecordPayload {
     SegmentOpened {
@@ -71,8 +73,8 @@ pub enum ManifestRecordPayload {
         durable_bytes: u64,
         segment_crc64: u64,
         ext_id: u64,
-        coordinator_watermark: u64,
         flush_failure: bool,
+        reserved: [u8; SEAL_RESERVED_BYTES],
     },
     CompressionStarted {
         job_id: u32,
@@ -161,14 +163,14 @@ impl ManifestRecordPayload {
                 durable_bytes,
                 segment_crc64,
                 ext_id,
-                coordinator_watermark,
                 flush_failure,
+                reserved,
             } => {
                 buf.write_u64::<LittleEndian>(*durable_bytes)?;
                 buf.write_u64::<LittleEndian>(*segment_crc64)?;
                 buf.write_u64::<LittleEndian>(*ext_id)?;
-                buf.write_u64::<LittleEndian>(*coordinator_watermark)?;
                 buf.write_u8(if *flush_failure { 1 } else { 0 })?;
+                buf.extend_from_slice(reserved);
             }
             ManifestRecordPayload::CompressionStarted { job_id } => {
                 buf.write_u32::<LittleEndian>(*job_id)?;
@@ -251,14 +253,17 @@ impl ManifestRecordPayload {
                 let durable_bytes = cursor.read_u64::<LittleEndian>()?;
                 let segment_crc64 = cursor.read_u64::<LittleEndian>()?;
                 let ext_id = cursor.read_u64::<LittleEndian>()?;
-                let coordinator_watermark = cursor.read_u64::<LittleEndian>()?;
                 let flush_failure = cursor.read_u8()? != 0;
+                let mut reserved = [0u8; SEAL_RESERVED_BYTES];
+                if cursor.get_ref().len() >= cursor.position() as usize + reserved.len() {
+                    cursor.read_exact(&mut reserved)?;
+                }
                 ManifestRecordPayload::SealSegment {
                     durable_bytes,
                     segment_crc64,
                     ext_id,
-                    coordinator_watermark,
                     flush_failure,
+                    reserved,
                 }
             }
             RecordType::CompressionStarted => {

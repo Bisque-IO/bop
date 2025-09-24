@@ -373,8 +373,13 @@ impl AdmissionGuard {
             .inner
             .bytes
             .swap(residency.bytes, AtomicOrdering::AcqRel);
-        if prev_kind == new_kind && prev_bytes == residency.bytes {
-            return;
+        if prev_kind == new_kind {
+            if prev_bytes == residency.bytes {
+                return;
+            }
+            if new_kind == encode_kind(ResidencyKind::Active) {
+                return;
+            }
         }
         self.inner
             .tier0

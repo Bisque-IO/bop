@@ -12,6 +12,7 @@ use bop_aof::fs::Layout;
 use bop_aof::manifest::{CHUNK_HEADER_LEN, ChunkHeader};
 use bop_aof::manifest::{
     ManifestLogReader, ManifestRecord, ManifestRecordPayload, RECORD_HEADER_LEN,
+    SEAL_RESERVED_BYTES,
 };
 use bop_aof::metrics::manifest_replay::{
     METRIC_MANIFEST_REPLAY_CHUNK_COUNT, METRIC_MANIFEST_REPLAY_CHUNK_LAG_SECONDS,
@@ -83,7 +84,7 @@ fn create_sealed_segment(layout: &Layout, id: u64, payload: &[u8]) -> Arc<Segmen
     flush_state.mark_durable(append.logical_size);
     flush_state.finish_flush();
     segment.mark_durable(append.logical_size);
-    segment.seal(now as i64, 0, false).expect("seal segment");
+    segment.seal(now as i64, false).expect("seal segment");
     Arc::new(segment)
 }
 
@@ -237,8 +238,8 @@ async fn manifest_rotation_boundaries() {
             durable_bytes: 1024,
             segment_crc64: 0xAABBCCDDu64,
             ext_id: 77,
-            coordinator_watermark: 555,
             flush_failure: false,
+            reserved: [0u8; SEAL_RESERVED_BYTES],
         },
     );
     writer.append(&seal_record).expect("append seal");
@@ -282,14 +283,14 @@ async fn manifest_rotation_boundaries() {
             durable_bytes,
             segment_crc64,
             ext_id,
-            coordinator_watermark,
             flush_failure,
+            reserved,
         } => {
             assert_eq!(*durable_bytes, 1024);
             assert_eq!(*segment_crc64, 0xAABBCCDDu64);
             assert_eq!(*ext_id, 77);
-            assert_eq!(*coordinator_watermark, 555);
             assert!(!*flush_failure);
+            assert_eq!(*reserved, [0u8; SEAL_RESERVED_BYTES]);
         }
         other => panic!("unexpected second payload: {other:?}"),
     }

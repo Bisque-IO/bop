@@ -92,6 +92,16 @@ pub enum AofError {
     /// Backpressure - system overloaded.
     #[error("backpressure")]
     Backpressure,
+    /// Flush is pending durability and the append cannot proceed without waiting.
+    #[error(
+        "flush backpressure for record {record_id}: unflushed {pending_bytes} exceeds limit {limit}"
+    )]
+    FlushBackpressure {
+        record_id: RecordId,
+        pending_bytes: u64,
+        limit: u64,
+        target_logical: u32,
+    },
     /// Flush request is already in flight.
     #[error("flush already in flight")]
     FlushInFlight,

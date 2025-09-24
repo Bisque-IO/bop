@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::config::SegmentId;
-use super::error::{AofError, AofResult, BackpressureKind};
-use super::segment::Segment;
-use super::{InstanceId, ResidentSegment, TieredRuntime};
-use crate::store::{DurabilityCursor, TieredInstance};
+use crate::config::SegmentId;
+use crate::error::{AofError, AofResult, BackpressureKind};
+use crate::manager::TieredRuntime;
+use crate::segment::Segment;
+use crate::store::{DurabilityCursor, InstanceId, ResidentSegment, TieredInstance};
 use crate::test_support::{MetadataPersistContext, metadata_persist_override};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;

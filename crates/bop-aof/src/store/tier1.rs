@@ -26,7 +26,7 @@ use crate::error::{AofError, AofResult};
 use crate::fs::Layout;
 use crate::manifest::{
     CHUNK_HEADER_LEN, ChunkHeader, ManifestLogReader, ManifestLogWriter, ManifestLogWriterConfig,
-    ManifestRecordPayload,
+    ManifestRecordPayload, SEAL_RESERVED_BYTES,
 };
 use crate::metrics::manifest_replay::{ManifestReplayMetrics, ManifestReplaySnapshot};
 use crate::segment::{
@@ -344,9 +344,9 @@ pub struct ManifestEntry {
     #[serde(default)]
     pub ext_id: u64,
     #[serde(default)]
-    pub coordinator_watermark: u64,
-    #[serde(default)]
     pub flush_failure: bool,
+    #[serde(default)]
+    pub reserved: [u8; SEAL_RESERVED_BYTES],
     pub original_bytes: u64,
     pub compressed_bytes: u64,
     pub compressed_path: String,
@@ -1372,8 +1372,8 @@ impl Tier1Inner {
                     durable_bytes: footer.durable_bytes,
                     segment_crc64: footer.checksum as u64,
                     ext_id: entry.ext_id,
-                    coordinator_watermark: entry.coordinator_watermark,
                     flush_failure: entry.flush_failure,
+                    reserved: [0u8; SEAL_RESERVED_BYTES],
                 },
             );
             let new_residency = entry.residency;
@@ -1489,8 +1489,8 @@ impl Tier1Inner {
                 sealed_at,
                 checksum: footer.checksum,
                 ext_id: footer.ext_id,
-                coordinator_watermark: footer.coordinator_watermark,
                 flush_failure: footer.flush_failure,
+                reserved: [0u8; SEAL_RESERVED_BYTES],
                 original_bytes: segment.current_size() as u64,
                 compressed_bytes: metadata.len(),
                 compressed_path: warm_file_name,
@@ -1947,8 +1947,8 @@ mod tests {
                 sealed_at,
                 checksum: 0xDEAD ^ idx as u32,
                 ext_id: 0,
-                coordinator_watermark: 0,
                 flush_failure: false,
+                reserved: [0u8; SEAL_RESERVED_BYTES],
                 original_bytes: 2048,
                 compressed_bytes: std::fs::metadata(&warm_path).expect("warm metadata").len(),
                 compressed_path,
@@ -2013,7 +2013,7 @@ mod tests {
         flush_state.finish_flush();
         segment.mark_durable(append.logical_size);
         assert_eq!(segment.durable_size(), append.logical_size);
-        segment.seal(now as i64, 0, false).expect("seal segment");
+        segment.seal(now as i64, false).expect("seal segment");
         Arc::new(segment)
     }
 
@@ -2357,8 +2357,8 @@ mod tests {
                 sealed_at: 0,
                 checksum: 0,
                 ext_id: 0,
-                coordinator_watermark: 0,
                 flush_failure: false,
+                reserved: [0u8; SEAL_RESERVED_BYTES],
                 original_bytes: 0,
                 compressed_bytes: 512,
                 compressed_path: missing_name.clone(),
@@ -2417,8 +2417,8 @@ mod tests {
                 sealed_at: 0,
                 checksum: 0,
                 ext_id: 0,
-                coordinator_watermark: 0,
                 flush_failure: false,
+                reserved: [0u8; SEAL_RESERVED_BYTES],
                 original_bytes: 0,
                 compressed_bytes: warm_path.metadata().unwrap().len(),
                 compressed_path: warm_name.clone(),
@@ -2480,8 +2480,8 @@ mod tests {
                 sealed_at: 0,
                 checksum: 0,
                 ext_id: 0,
-                coordinator_watermark: 0,
                 flush_failure: false,
+                reserved: [0u8; SEAL_RESERVED_BYTES],
                 original_bytes: 0,
                 compressed_bytes: 256,
                 compressed_path: "needs-recovery.zst".to_string(),

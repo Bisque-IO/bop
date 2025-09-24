@@ -25,12 +25,13 @@ const SEGMENT_FILE_PAD: usize = 20;
 const CURRENT_POINTER_MAGIC: u32 = 0x43505332; // "CPS2"
 const CURRENT_POINTER_VERSION: u16 = 1;
 const CURRENT_POINTER_SIZE: usize = 32;
+pub(crate) const CURRENT_POINTER_RESERVED_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CurrentSealedPointer {
     pub segment_id: SegmentId,
-    pub coordinator_watermark: u64,
     pub durable_bytes: u64,
+    pub reserved: [u8; CURRENT_POINTER_RESERVED_BYTES],
 }
 
 /// Parsed components of a segment filename.
@@ -170,16 +171,15 @@ impl Layout {
         let mut segment_bytes = [0u8; 8];
         segment_bytes.copy_from_slice(&buf[8..16]);
         let segment_id = SegmentId::new(u64::from_le_bytes(segment_bytes));
-        let mut watermark_bytes = [0u8; 8];
-        watermark_bytes.copy_from_slice(&buf[16..24]);
-        let coordinator_watermark = u64::from_le_bytes(watermark_bytes);
         let mut durable_bytes_bytes = [0u8; 8];
-        durable_bytes_bytes.copy_from_slice(&buf[24..32]);
+        durable_bytes_bytes.copy_from_slice(&buf[16..24]);
         let durable_bytes = u64::from_le_bytes(durable_bytes_bytes);
+        let mut reserved = [0u8; CURRENT_POINTER_RESERVED_BYTES];
+        reserved.copy_from_slice(&buf[24..24 + CURRENT_POINTER_RESERVED_BYTES]);
         Ok(Some(CurrentSealedPointer {
             segment_id,
-            coordinator_watermark,
             durable_bytes,
+            reserved,
         }))
     }
 
@@ -190,8 +190,8 @@ impl Layout {
         buf[4..6].copy_from_slice(&CURRENT_POINTER_VERSION.to_le_bytes());
         buf[6..8].fill(0);
         buf[8..16].copy_from_slice(&pointer.segment_id.as_u64().to_le_bytes());
-        buf[16..24].copy_from_slice(&pointer.coordinator_watermark.to_le_bytes());
-        buf[24..32].copy_from_slice(&pointer.durable_bytes.to_le_bytes());
+        buf[16..24].copy_from_slice(&pointer.durable_bytes.to_le_bytes());
+        buf[24..24 + CURRENT_POINTER_RESERVED_BYTES].copy_from_slice(&pointer.reserved);
         guard.file_mut().write_all(&buf).map_err(AofError::from)?;
         let path = self.current_sealed_pointer_path();
         guard.persist(&path)?;
@@ -412,8 +412,8 @@ mod tests {
 
         let pointer = CurrentSealedPointer {
             segment_id: SegmentId::new(7),
-            coordinator_watermark: 42,
             durable_bytes: 9_999,
+            reserved: [0u8; CURRENT_POINTER_RESERVED_BYTES],
         };
 
         layout
@@ -426,8 +426,8 @@ mod tests {
             .expect("pointer present");
 
         assert_eq!(loaded.segment_id, pointer.segment_id);
-        assert_eq!(loaded.coordinator_watermark, pointer.coordinator_watermark);
         assert_eq!(loaded.durable_bytes, pointer.durable_bytes);
+        assert_eq!(loaded.reserved, pointer.reserved);
     }
 
     #[test]
@@ -462,8 +462,8 @@ mod tests {
 
         let initial = CurrentSealedPointer {
             segment_id: SegmentId::new(1),
-            coordinator_watermark: 10,
             durable_bytes: 512,
+            reserved: [0u8; CURRENT_POINTER_RESERVED_BYTES],
         };
         layout
             .store_current_sealed_pointer(initial)
@@ -471,8 +471,8 @@ mod tests {
 
         let updated = CurrentSealedPointer {
             segment_id: SegmentId::new(2),
-            coordinator_watermark: 20,
             durable_bytes: 1024,
+            reserved: [0u8; CURRENT_POINTER_RESERVED_BYTES],
         };
         layout
             .store_current_sealed_pointer(updated)
@@ -491,7 +491,7 @@ mod tests {
             .expect("load pointer")
             .expect("pointer present");
         assert_eq!(loaded.segment_id, updated.segment_id);
-        assert_eq!(loaded.coordinator_watermark, updated.coordinator_watermark);
         assert_eq!(loaded.durable_bytes, updated.durable_bytes);
+        assert_eq!(loaded.reserved, updated.reserved);
     }
 }

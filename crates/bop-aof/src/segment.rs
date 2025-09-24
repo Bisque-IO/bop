@@ -20,6 +20,17 @@ use super::fs::create_fixed_size_file;
 
 pub(crate) const SEGMENT_HEADER_SIZE: u32 = 64;
 pub(crate) const SEGMENT_FOOTER_SIZE: u32 = 96;
+const RECORD_ALIGNMENT: u32 = 8;
+const FOOTER_RESERVED_BYTES: usize = 16;
+
+#[inline]
+const fn align_up(value: u32, alignment: u32) -> u32 {
+    if alignment == 0 {
+        return value;
+    }
+    let mask = alignment - 1;
+    (value + mask) & !mask
+}
 pub(crate) const RECORD_HEADER_SIZE: u32 = 24;
 const SEGMENT_MAGIC: u32 = 0x414F_4632; // "AOF2"
 const SEGMENT_VERSION: u16 = 2;
@@ -44,6 +55,8 @@ pub struct SegmentReservation {
     segment: Arc<Segment>,
     offset: u32,
     payload_len: u32,
+    entry_len: u32,
+    padded_len: u32,
     next_size: u32,
     timestamp: u64,
     completed: bool,
@@ -54,14 +67,17 @@ impl SegmentReservation {
         segment: Arc<Segment>,
         offset: u32,
         payload_len: u32,
-        next_size: u32,
+        entry_len: u32,
+        padded_len: u32,
         timestamp: u64,
     ) -> Self {
         Self {
             segment,
             offset,
             payload_len,
-            next_size,
+            entry_len,
+            padded_len,
+            next_size: offset + padded_len,
             timestamp,
             completed: false,
         }
@@ -111,6 +127,17 @@ impl SegmentReservation {
         self.segment
             .data
             .write_bytes(self.offset as usize, &header)?;
+
+        if self.padded_len > self.entry_len {
+            let padding_len = (self.padded_len - self.entry_len) as usize;
+            if padding_len > 0 {
+                let zeros = [0u8; RECORD_ALIGNMENT as usize];
+                self.segment.data.write_bytes(
+                    (self.offset + self.entry_len) as usize,
+                    &zeros[..padding_len],
+                )?;
+            }
+        }
 
         self.segment.data.update_size(self.next_size as u64);
         self.segment.record_count.fetch_add(1, Ordering::AcqRel);
@@ -487,10 +514,11 @@ impl Segment {
         self.ensure_header_written()?;
 
         let entry_len = RECORD_HEADER_SIZE + payload.len() as u32;
+        let padded_len = align_up(entry_len, RECORD_ALIGNMENT);
         let offset = match self
             .size
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                let next = current + entry_len;
+                let next = current + padded_len;
                 if next > usable_limit {
                     None
                 } else {
@@ -515,8 +543,14 @@ impl Segment {
         self.data.write_bytes(write_offset, &header)?;
         self.data
             .write_bytes(write_offset + RECORD_HEADER_SIZE as usize, payload)?;
+        let padding_len = (padded_len - entry_len) as usize;
+        if padding_len > 0 {
+            let zeros = [0u8; RECORD_ALIGNMENT as usize];
+            self.data
+                .write_bytes(write_offset + entry_len as usize, &zeros[..padding_len])?;
+        }
 
-        let next_size = offset + entry_len;
+        let next_size = offset + padded_len;
         self.data.update_size(next_size as u64);
         self.record_count.fetch_add(1, Ordering::AcqRel);
         self.last_timestamp.store(timestamp, Ordering::Release);
@@ -561,11 +595,12 @@ impl Segment {
         segment.ensure_header_written()?;
 
         let entry_len = RECORD_HEADER_SIZE + payload_len as u32;
+        let padded_len = align_up(entry_len, RECORD_ALIGNMENT);
         let offset =
             match segment
                 .size
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                    let next = current + entry_len;
+                    let next = current + padded_len;
                     if next > usable_limit {
                         None
                     } else {
@@ -576,7 +611,7 @@ impl Segment {
                 Err(_) => return Err(AofError::SegmentFull(max_payload_capacity)),
             };
 
-        let next_size = offset + entry_len;
+        let next_size = offset + padded_len;
         segment.data.update_size(next_size as u64);
         segment.size.store(next_size, Ordering::Release);
 
@@ -584,17 +619,13 @@ impl Segment {
             Arc::clone(self),
             offset,
             payload_len as u32,
-            next_size,
+            entry_len,
+            padded_len,
             timestamp,
         ))
     }
 
-    pub fn seal(
-        &self,
-        sealed_at: i64,
-        coordinator_watermark: u64,
-        flush_failure: bool,
-    ) -> AofResult<SegmentFooter> {
+    pub fn seal(&self, sealed_at: i64, flush_failure: bool) -> AofResult<SegmentFooter> {
         if self
             .sealed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -638,8 +669,8 @@ impl Segment {
                 sealed_at,
                 checksum,
                 ext_id: self.ext_id.load(Ordering::Acquire),
-                coordinator_watermark,
                 flush_failure,
+                reserved: [0u8; FOOTER_RESERVED_BYTES],
             };
 
             let mut buf = [0u8; SEGMENT_FOOTER_SIZE as usize];
@@ -828,8 +859,12 @@ impl Segment {
                 "record length cannot be zero".to_string(),
             ));
         }
-        let end_offset = header_end
+        let logical_total = RECORD_HEADER_SIZE
             .checked_add(length)
+            .ok_or_else(|| AofError::CorruptedRecord("record length overflow".to_string()))?;
+        let padded_total = align_up(logical_total, RECORD_ALIGNMENT);
+        let end_offset = segment_offset
+            .checked_add(padded_total)
             .ok_or_else(|| AofError::CorruptedRecord("record length overflow".to_string()))?;
         if end_offset > self.current_size() {
             return Err(AofError::CorruptedRecord(
@@ -883,9 +918,10 @@ impl Segment {
                 .map_err(|_| AofError::CorruptedRecord("record ext id corrupt".to_string()))?,
         );
 
-        let total_len = RECORD_HEADER_SIZE
+        let logical_total = RECORD_HEADER_SIZE
             .checked_add(length)
             .ok_or_else(|| AofError::CorruptedRecord("record length overflow".to_string()))?;
+        let total_len = align_up(logical_total, RECORD_ALIGNMENT);
         let end_offset = segment_offset
             .checked_add(total_len)
             .ok_or_else(|| AofError::CorruptedRecord("record length overflow".to_string()))?;
@@ -1045,8 +1081,8 @@ pub struct SegmentFooter {
     pub sealed_at: i64,
     pub checksum: u32,
     pub ext_id: u64,
-    pub coordinator_watermark: u64,
     pub flush_failure: bool,
+    pub reserved: [u8; FOOTER_RESERVED_BYTES],
 }
 
 impl SegmentFooter {
@@ -1064,8 +1100,8 @@ impl SegmentFooter {
         buf[52..60].copy_from_slice(&self.sealed_at.to_le_bytes());
         buf[60..64].copy_from_slice(&self.checksum.to_le_bytes());
         buf[64..72].copy_from_slice(&self.ext_id.to_le_bytes());
-        buf[72..80].copy_from_slice(&self.coordinator_watermark.to_le_bytes());
-        buf[80] = if self.flush_failure { 1 } else { 0 };
+        buf[72..72 + FOOTER_RESERVED_BYTES].copy_from_slice(&self.reserved);
+        buf[72 + FOOTER_RESERVED_BYTES] = if self.flush_failure { 1 } else { 0 };
     }
 
     pub fn decode(buf: &[u8]) -> Option<Self> {
@@ -1089,8 +1125,10 @@ impl SegmentFooter {
         let sealed_at = i64::from_le_bytes(buf[52..60].try_into().ok()?);
         let checksum = u32::from_le_bytes(buf[60..64].try_into().ok()?);
         let ext_id = u64::from_le_bytes(buf[64..72].try_into().ok()?);
-        let coordinator_watermark = u64::from_le_bytes(buf[72..80].try_into().ok()?);
-        let flush_failure = matches!(buf.get(80), Some(&1));
+        let mut reserved = [0u8; FOOTER_RESERVED_BYTES];
+        reserved.copy_from_slice(&buf[72..72 + FOOTER_RESERVED_BYTES]);
+        let flag_index = 72 + FOOTER_RESERVED_BYTES;
+        let flush_failure = matches!(buf.get(flag_index), Some(&1));
         Some(SegmentFooter {
             segment_index,
             base_record_count,
@@ -1101,8 +1139,8 @@ impl SegmentFooter {
             sealed_at,
             checksum,
             ext_id,
-            coordinator_watermark,
             flush_failure,
+            reserved,
         })
     }
 }
@@ -1572,9 +1610,10 @@ mod tests {
 
             for payload in payloads {
                 let append = segment.append_record(&payload, 1).expect("append");
+                let logical_total = RECORD_HEADER_SIZE + payload.len() as u32;
                 let expected_end = append
                     .segment_offset
-                    .checked_add(RECORD_HEADER_SIZE + payload.len() as u32)
+                    .checked_add(align_up(logical_total, RECORD_ALIGNMENT))
                     .expect("offset overflow");
                 let end_offset = segment
                     .record_end_offset(append.segment_offset)
@@ -1667,7 +1706,6 @@ mod tests {
             sealed_at in any::<i64>(),
             checksum in any::<u32>(),
             ext_id in any::<u64>(),
-            coordinator_watermark in any::<u64>(),
             flush_failure in any::<bool>(),
         ) {
             let record_count = base_record_count.saturating_add(record_delta);
@@ -1681,8 +1719,8 @@ mod tests {
                 sealed_at,
                 checksum,
                 ext_id,
-                coordinator_watermark,
                 flush_failure,
+                reserved: [0u8; FOOTER_RESERVED_BYTES],
             };
 
             let mut buf = [0u8; SEGMENT_FOOTER_SIZE as usize];
@@ -1698,7 +1736,7 @@ mod tests {
             prop_assert_eq!(decoded.sealed_at, footer.sealed_at);
             prop_assert_eq!(decoded.checksum, footer.checksum);
             prop_assert_eq!(decoded.ext_id, footer.ext_id);
-            prop_assert_eq!(decoded.coordinator_watermark, footer.coordinator_watermark);
+            prop_assert_eq!(decoded.reserved, footer.reserved);
             prop_assert_eq!(decoded.flush_failure, footer.flush_failure);
         }
 
@@ -1713,7 +1751,6 @@ mod tests {
             sealed_at in any::<i64>(),
             checksum in any::<u32>(),
             ext_id in any::<u64>(),
-            coordinator_watermark in any::<u64>(),
             flush_failure in any::<bool>(),
             flip_index in 0usize..4,
         ) {
@@ -1728,8 +1765,8 @@ mod tests {
                 sealed_at,
                 checksum,
                 ext_id,
-                coordinator_watermark,
                 flush_failure,
+                reserved: [0u8; FOOTER_RESERVED_BYTES],
             };
 
             let mut buf = [0u8; SEGMENT_FOOTER_SIZE as usize];
@@ -1761,14 +1798,14 @@ mod tests {
             sealed_at: 777,
             checksum: 0xDEAD_BEEF,
             ext_id: 42,
-            coordinator_watermark: 123,
             flush_failure: false,
+            reserved: [0u8; FOOTER_RESERVED_BYTES],
         };
         let scan = SegmentScan::from_trusted_footer(header.clone(), footer).expect("scan");
         assert_eq!(scan.logical_size, 512);
         assert_eq!(scan.record_count, 8);
         assert_eq!(scan.last_timestamp, 9_876);
-        assert_eq!(scan.footer.unwrap().coordinator_watermark, 123);
+        assert_eq!(scan.footer.unwrap().reserved, [0u8; FOOTER_RESERVED_BYTES]);
         assert!(!scan.truncated);
         assert_eq!(scan.header.segment_index, 11);
         assert_eq!(scan.header.ext_id, 42);
@@ -1795,8 +1832,8 @@ mod tests {
             sealed_at: 0,
             checksum: 0,
             ext_id: 0,
-            coordinator_watermark: 0,
             flush_failure: false,
+            reserved: [0u8; FOOTER_RESERVED_BYTES],
         };
         let err = SegmentScan::from_trusted_footer(header, footer)
             .expect_err("durable before base offset");
@@ -1827,8 +1864,8 @@ mod tests {
             sealed_at: 0,
             checksum: 0,
             ext_id: 0,
-            coordinator_watermark: 0,
             flush_failure: false,
+            reserved: [0u8; FOOTER_RESERVED_BYTES],
         };
         let err =
             SegmentScan::from_trusted_footer(header, footer).expect_err("durable beyond segment");
@@ -1877,7 +1914,7 @@ mod tests {
         let size = segment.current_size();
         let _ = segment.mark_durable(size);
 
-        let footer = segment.seal(456, 0, false).expect("seal");
+        let footer = segment.seal(456, false).expect("seal");
 
         let scan = Segment::scan_tail(&path).expect("scan");
         let scanned_footer = scan.footer.expect("footer");
@@ -1910,7 +1947,7 @@ mod tests {
 
         let before_ptr = segment.data.data.load(Ordering::Acquire);
 
-        segment.seal(999, 0, false).expect("seal segment");
+        segment.seal(999, false).expect("seal segment");
         let after_ptr = segment.data.data.load(Ordering::Acquire);
         assert_eq!(
             before_ptr, after_ptr,
@@ -1950,10 +1987,10 @@ mod tests {
 
         segment.append_record(b"payload", 1).expect("append record");
         let _ = segment.mark_durable(segment.current_size());
-        let footer = segment.seal(123, 7, true).expect("seal with ext id");
+        let footer = segment.seal(123, true).expect("seal with ext id");
         assert_eq!(footer.ext_id, 42);
-        assert_eq!(footer.coordinator_watermark, 7);
         assert!(footer.flush_failure);
+        assert_eq!(footer.reserved, [0u8; FOOTER_RESERVED_BYTES]);
 
         let reloaded = Segment::load_header(&path).expect("header");
         assert_eq!(reloaded.ext_id, 42);
