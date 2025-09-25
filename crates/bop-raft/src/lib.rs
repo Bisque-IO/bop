@@ -13,6 +13,7 @@ pub mod error;
 pub mod log_entry;
 pub mod metrics;
 pub mod observability;
+pub mod segmented;
 pub mod server;
 pub mod snapshot;
 pub mod state;
@@ -44,10 +45,20 @@ pub use observability::{
     MetricDescriptor, MetricKind, ObservabilityError, ObservabilityResult, PrometheusExporter,
     metric_descriptor_by_rust_name, metric_descriptors,
 };
+pub use segmented::{
+    AdmissionError, CoordinatorError, CoordinatorResult, PartitionDispatcher,
+    PartitionDispatcherConfig, PartitionLogStore, PartitionManifest, PartitionManifestStore,
+    PartitionManifestUpdate, PartitionMasterPolicy, PartitionPointer, PartitionQueueConfig,
+    PartitionQuorumRule, QuorumDecision, QuorumEvaluation, QuorumStatus, ReplicaId,
+    SegmentedCoordinator, SegmentedLogStore, SegmentedLogStoreConfig,
+};
 pub use server::{AsioService, RaftServer, RaftServerBuilder};
 pub use snapshot::Snapshot;
 pub use state::{PeerInfo, ServerState};
-pub use storage::{LogStoreBuild, StateManagerBuild, StorageBackendKind, StorageComponents};
+pub use storage::{
+    LogStoreBuild, SegmentedStorageRuntime, SegmentedStorageSettings, StateManagerBuild,
+    StorageBackendKind, StorageComponents, segmented_manifest_store, segmented_storage_components,
+};
 pub use traits::{
     AdjustCommitIndex, LogStoreInterface, Logger, ServerCallbacks, SnapshotChunk, SnapshotCreation,
     SnapshotMetadata, SnapshotReadResult, SnapshotReader, SnapshotRef, SnapshotType, StateMachine,

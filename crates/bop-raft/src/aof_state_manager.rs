@@ -165,6 +165,11 @@ impl AofStateManager {
             .append_record_with_timeout(&payload, self.append_timeout)
             .map_err(map_aof_err)?;
         self.aof.flush_until(record_id).map_err(map_aof_err)?;
+        if let Err(err) = self.aof.force_rollover() {
+            if !matches!(err, AofError::WouldBlock(_)) {
+                return Err(map_aof_err(err));
+            }
+        }
         Ok(data)
     }
 
@@ -197,7 +202,15 @@ impl AofStateManager {
             if !snapshot.sealed {
                 continue;
             }
-            let reader = aof.open_reader(snapshot.segment_id).map_err(map_aof_err)?;
+            let reader = match aof.open_reader(snapshot.segment_id) {
+                Ok(reader) => reader,
+                Err(AofError::CorruptedRecord(ref msg))
+                    if msg.contains("record extends beyond logical segment size") =>
+                {
+                    continue;
+                }
+                Err(err) => return Err(map_aof_err(err)),
+            };
             let mut cursor = SegmentCursor::new(reader);
             Self::replay_cursor(
                 &mut cursor,
@@ -216,11 +229,38 @@ impl AofStateManager {
         last_state: &mut Option<Vec<u8>>,
         last_config: &mut Option<Vec<u8>>,
     ) -> RaftResult<()> {
-        while let Some(record) = cursor.next().map_err(map_aof_err)? {
-            let entry = decode_entry(record.payload())?;
-            match entry.kind {
-                EntryKind::State => *last_state = Some(entry.data),
-                EntryKind::Config => *last_config = Some(entry.data),
+        loop {
+            let record_opt = match cursor.next() {
+                Ok(record) => record,
+                Err(err) => {
+                    if matches!(
+                        err,
+                        AofError::CorruptedRecord(ref msg)
+                            if msg.contains("record extends beyond logical segment size")
+                    ) {
+                        break;
+                    }
+                    return Err(map_aof_err(err));
+                }
+            };
+
+            let Some(record) = record_opt else { break };
+
+            match decode_entry(record.payload()) {
+                Ok(entry) => match entry.kind {
+                    EntryKind::State => *last_state = Some(entry.data),
+                    EntryKind::Config => *last_config = Some(entry.data),
+                },
+                Err(err) => {
+                    if matches!(
+                        &err,
+                        RaftError::StateMachineError(msg)
+                        if msg.contains("payload truncated")
+                    ) {
+                        break;
+                    }
+                    return Err(err);
+                }
             }
         }
 

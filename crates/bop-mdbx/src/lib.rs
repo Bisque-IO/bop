@@ -426,6 +426,29 @@ impl Env {
         check(rc).map(|_| out)
     }
 
+    pub fn set_geometry(
+        &self,
+        size_lower: isize,
+        size_now: isize,
+        size_upper: isize,
+        growth_step: isize,
+        shrink_threshold: isize,
+        pagesize: isize,
+    ) -> Result<()> {
+        let rc = unsafe {
+            sys::mdbx_env_set_geometry(
+                self.ptr,
+                size_lower,
+                size_now,
+                size_upper,
+                growth_step,
+                shrink_threshold,
+                pagesize,
+            )
+        } as i32;
+        check(rc)
+    }
+
     pub fn open<P: AsRef<Path>>(&self, path: P, flags: EnvFlags, mode: u16) -> Result<()> {
         let cpath = CString::new(path.as_ref().as_os_str().to_string_lossy().into_owned())
             .map_err(|_| mk_error(sys::MDBX_error_MDBX_EINVAL))?;

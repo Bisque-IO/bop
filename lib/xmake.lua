@@ -252,7 +252,7 @@ local target_of = function(kind, use_openssl)
     if not is_plat("windows") then
         add_files("snmalloc/src/snmalloc/override/malloc.cc")
     end
-    -- add_files("snmalloc/src/snmalloc/override/new.cc")
+    add_files("snmalloc/src/snmalloc/override/new.cc")
 
     --add_deps("snmalloc")
     --add_deps("sqlite")

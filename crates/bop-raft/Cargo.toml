@@ -12,7 +12,9 @@ tracing = ["dep:tracing"]
 [dependencies]
 bop-sys = { workspace = true }
 bop-aof = { workspace = true }
+bop-storage = { workspace = true }
 crc64fast-nvme = { workspace = true }
+crc32fast = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }
@@ -20,4 +22,5 @@ tracing = { workspace = true, default-features = false, features = ["std"], opti
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
 

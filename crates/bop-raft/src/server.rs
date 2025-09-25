@@ -18,7 +18,10 @@ use crate::config::{ClusterConfig, ClusterMembershipSnapshot, RaftParams, Server
 use crate::error::{RaftError, RaftResult};
 use crate::metrics::{Counter, Gauge, Histogram};
 use crate::state::PeerInfo;
-use crate::storage::{LogStoreBuild, StateManagerBuild, StorageComponents};
+use crate::storage::{
+    LogStoreBuild, SegmentedStorageRuntime, SegmentedStorageSettings, StateManagerBuild,
+    StorageComponents,
+};
 use crate::traits::{
     LogStoreInterface, Logger, ServerCallbacks, StateMachine, StateManagerInterface,
 };
@@ -33,6 +36,7 @@ pub struct RaftServer {
     _callbacks: Option<ServerCallbacksHandle>,
     _asio_service: AsioService,
     _params: RaftParams,
+    _storage_runtime: Option<SegmentedStorageRuntime>,
 }
 
 /// Launch configuration for a Raft server instance.
@@ -48,6 +52,7 @@ pub struct LaunchConfig {
     pub skip_initial_election_timeout: bool,
     pub start_immediately: bool,
     pub test_mode: bool,
+    pub storage_runtime: Option<SegmentedStorageRuntime>,
 }
 
 impl RaftServer {
@@ -65,6 +70,7 @@ impl RaftServer {
             skip_initial_election_timeout,
             start_immediately,
             test_mode,
+            storage_runtime,
         } = config;
 
         let state_machine_handle = StateMachineHandle::new(state_machine)?;
@@ -130,6 +136,7 @@ impl RaftServer {
             _callbacks: callbacks_handle,
             _asio_service: asio_service,
             _params: params,
+            _storage_runtime: storage_runtime,
         })
     }
 
@@ -580,6 +587,7 @@ pub struct RaftServerBuilder {
     state_machine: Option<Box<dyn StateMachine>>,
     state_manager: Option<StateManagerBuild>,
     log_store: Option<LogStoreBuild>,
+    storage_runtime: Option<SegmentedStorageRuntime>,
     logger: Option<Arc<dyn Logger>>,
     callbacks: Option<Arc<dyn ServerCallbacks>>,
     port: i32,
@@ -597,6 +605,7 @@ impl RaftServerBuilder {
             state_machine: None,
             state_manager: None,
             log_store: None,
+            storage_runtime: None,
             logger: None,
             callbacks: None,
             port: 0,
@@ -644,11 +653,26 @@ impl RaftServerBuilder {
         self
     }
 
-    /// Provide both state manager and log store as a single storage bundle.
-    pub fn storage(mut self, components: StorageComponents) -> Self {
-        let (state_manager, log_store) = components.into_parts();
+    /// Configure a segmented storage backend using bop-aof.
+    pub fn segmented_storage_settings(
+        mut self,
+        start_index: LogIndex,
+        settings: SegmentedStorageSettings,
+    ) -> RaftResult<Self> {
+        let components = settings.build(start_index)?;
+        let (state_manager, log_store, storage_runtime) = components.into_parts();
         self.state_manager = Some(state_manager);
         self.log_store = Some(log_store);
+        self.storage_runtime = storage_runtime;
+        Ok(self)
+    }
+
+    /// Provide both state manager and log store as a single storage bundle.
+    pub fn storage(mut self, components: StorageComponents) -> Self {
+        let (state_manager, log_store, storage_runtime) = components.into_parts();
+        self.state_manager = Some(state_manager);
+        self.log_store = Some(log_store);
+        self.storage_runtime = storage_runtime;
         self
     }
 
@@ -771,6 +795,7 @@ impl RaftServerBuilder {
             skip_initial_election_timeout: self.skip_initial_election_timeout,
             start_immediately: self.start_immediately,
             test_mode: self.test_mode,
+            storage_runtime: self.storage_runtime,
         };
 
         RaftServer::launch(config)

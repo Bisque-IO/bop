@@ -6,3 +6,12 @@ edition = "2024"
 [dependencies]
 bop-sys = { workspace = true }
 bitflags = { workspace = true }
+libmdbx = "0.6.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+heed = "0.22"
+
+[[example]]
+name = "sync_durable"
+harness = false

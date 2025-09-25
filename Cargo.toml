@@ -9,6 +9,8 @@ members = [
     "crates/bop-rs",
     "crates/bop-usockets",
     "crates/vertx-cluster",
+    "crates/bop-executor",
+    "crates/bop-storage",
 ]
 resolver = "2"
 
@@ -34,6 +36,7 @@ bop-rs = { path = "crates/bop-rs", version = "0.1.0" }
 bop-runtime = { path = "crates/bop-proto", version = "0.1.0" }
 bop-sys = { path = "crates/bop-sys", version = "0.1.0" }
 bop-usockets = { path = "crates/bop-usockets", version = "0.1.0", default-features = false }
+bop-storage = { path = "crates/bop-storage", version = "0.1.0" }
 bumpalo = { version = "3.17.0", features = ["collections", "boxed"] }
 byteorder = "1.5"
 cc = "1.2"

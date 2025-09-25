@@ -216,7 +216,7 @@ mod tests {
 
         let storage = crate::mdbx::MdbxStorage::new(config, dir.clone());
         let components = storage.into_components();
-        let (state_manager, log_store) = components.into_parts();
+        let (state_manager, log_store, _runtime) = components.into_parts();
 
         matches!(state_manager, StateManagerBuild::Mdbx(_))
             .then_some(())
