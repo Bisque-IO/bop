@@ -9,6 +9,7 @@ members = [
     "crates/bop-rs",
     "crates/bop-usockets",
     "crates/vertx-cluster",
+    "crates/bop-executor",
 ]
 resolver = "2"
 

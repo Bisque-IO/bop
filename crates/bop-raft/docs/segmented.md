@@ -124,6 +124,145 @@ Recovery must be deterministic: followers must reach the same partition manifest
 - **Node crash**: manifests plus `bop-aof` logs guarantee reconstruction. Unapplied but durable entries replay via the apply path after restart.
 - **Leader change**: followers already possess durable partition metadata via `bop-aof`; the new leader resumes admission after re-establishing per-partition indices from manifests and Raft commit state.
 
+## Prototype Sketches
+These sketches outline minimal data structures and helper logic that we can exercise in isolation tests before wiring the runtime. They are intentionally lightweight but enforce the critical invariants described above.
+
+### Partition Manifest Prototype
+```rust
+type PartitionId = u64;
+type PartitionLogIndex = u64;
+type GlobalLogIndex = u64;
+
+#[derive(Debug, Clone)]
+struct PartitionManifest {
+    partition_id: PartitionId,
+    durable_index: PartitionLogIndex,
+    applied_index: PartitionLogIndex,
+    applied_global: GlobalLogIndex,
+    snapshot_index: Option<PartitionLogIndex>,
+}
+
+impl PartitionManifest {
+    fn new(partition_id: PartitionId) -> Self {
+        Self {
+            partition_id,
+            durable_index: 0,
+            applied_index: 0,
+            applied_global: 0,
+            snapshot_index: None,
+        }
+    }
+
+    fn update_durable(&mut self, log_index: PartitionLogIndex, global: GlobalLogIndex) {
+        assert!(log_index >= self.durable_index);
+        self.durable_index = log_index;
+        self.applied_global = self.applied_global.max(global);
+        self.check_invariants();
+    }
+
+    fn update_applied(&mut self, log_index: PartitionLogIndex, global: GlobalLogIndex) {
+        assert!(log_index <= self.durable_index);
+        assert!(global >= self.applied_global);
+        self.applied_index = log_index;
+        self.applied_global = global;
+        self.check_invariants();
+    }
+
+    fn set_snapshot(&mut self, log_index: PartitionLogIndex) {
+        assert!(log_index <= self.applied_index);
+        self.snapshot_index = Some(log_index);
+        self.check_invariants();
+    }
+
+    fn check_invariants(&self) {
+        if let Some(snapshot) = self.snapshot_index {
+            assert!(snapshot <= self.applied_index);
+        }
+        assert!(self.applied_index <= self.durable_index);
+    }
+}
+```
+
+A thin property-test harness that repeatedly applies random `update_durable`, `update_applied`, and `set_snapshot` calls can validate that invariants hold even under interleaved operations and dynamic partition lifecycle events.
+
+### Dispatcher Prototype
+```rust
+use std::collections::HashMap;
+
+#[derive(Debug)]
+enum AdmissionError {
+    PartitionMissing,
+    Backpressure,
+}
+
+struct PartitionContext {
+    manifest: PartitionManifest,
+    next_partition_index: PartitionLogIndex,
+    backlog_len: usize,
+    max_backlog: usize,
+}
+
+impl PartitionContext {
+    fn new(partition_id: PartitionId, max_backlog: usize) -> Self {
+        Self {
+            manifest: PartitionManifest::new(partition_id),
+            next_partition_index: 1,
+            backlog_len: 0,
+            max_backlog,
+        }
+    }
+}
+
+struct Dispatcher {
+    partitions: HashMap<PartitionId, PartitionContext>,
+}
+
+impl Dispatcher {
+    fn admit(&mut self, partition_id: PartitionId) -> Result<PartitionLogIndex, AdmissionError> {
+        let ctx = self.partitions.get_mut(&partition_id).ok_or(AdmissionError::PartitionMissing)?;
+        if ctx.backlog_len >= ctx.max_backlog {
+            return Err(AdmissionError::Backpressure);
+        }
+        let index = ctx.next_partition_index;
+        ctx.next_partition_index += 1;
+        ctx.backlog_len += 1;
+        Ok(index)
+    }
+
+    fn record_durable(
+        &mut self,
+        partition_id: PartitionId,
+        partition_index: PartitionLogIndex,
+        global_index: GlobalLogIndex,
+    ) {
+        let ctx = self.partitions.get_mut(&partition_id).expect("partition exists");
+        ctx.manifest.update_durable(partition_index, global_index);
+        ctx.backlog_len = ctx.backlog_len.saturating_sub(1);
+        ctx.next_partition_index = ctx.next_partition_index.max(partition_index + 1);
+    }
+
+    fn record_applied(
+        &mut self,
+        partition_id: PartitionId,
+        partition_index: PartitionLogIndex,
+        global_index: GlobalLogIndex,
+    ) {
+        let ctx = self.partitions.get_mut(&partition_id).expect("partition exists");
+        ctx.manifest.update_applied(partition_index, global_index);
+    }
+
+    fn global_applied_floor(&self) -> GlobalLogIndex {
+        self.partitions
+            .values()
+            .map(|ctx| ctx.manifest.applied_global)
+            .min()
+            .unwrap_or(0)
+    }
+}
+```
+
+This dispatcher skeleton makes it straightforward to write targeted tests for admission control, backlog enforcement, and the relationship between global and partition-local indices. We can evolve it into the production dispatcher once the invariants are thoroughly validated.
+
 ## Observability & Metrics
 Expose per-partition and aggregate metrics:
 - `partition_enqueued_ops`, `partition_enqueued_bytes`, `partition_backlog_age_ms`.
@@ -141,8 +280,15 @@ Tracing hooks should annotate stages of the write/apply pipeline per partition t
 - **Performance benchmarks** measuring ingest latency under mixed partition workloads and verifying isolation.
 - **Replay tests** ensuring logs plus manifests restore identical state across restarts.
 
-## Open Questions
-- Do we require dynamic partition creation/destruction at runtime, and how does that interact with manifest lifecycle?
-- Should we allow configurable ordering guarantees (e.g., strict commit after apply) for select partitions that need linearizable visibility?
-- How do we authenticate barrier waiters and enforce quotas so they cannot DoS the system with long waits?
-- What policy governs leader-driven rebalancing if a partition chronically lags (e.g., automatic throttling vs. eviction)?
+## Open Questions w/ Answers
+- **Do we require dynamic partition creation/destruction at runtime, and how does that interact with manifest lifecycle?**  
+  Yes. Partition manifests must support creation on first write, persistence of metadata alongside `bop-aof`, and garbage collection when the partition is torn down so that disk state tracks the dynamic roster.
+
+- **Should we allow configurable ordering guarantees (e.g., strict commit after apply) for select partitions that need linearizable visibility?**  
+  No. Higher layers that need stricter visibility can build atop the exposed watermarks, keeping the core segmented storage simple.
+
+- **How do we authenticate barrier waiters and enforce quotas so they cannot DoS the system with long waits?**  
+  Barrier waiting will be asynchronous and implemented as a lightweight pub/sub channel so listeners register interest cheaply; admission to that channel can be rate-limited per client to avoid abuse.
+
+- **What policy governs leader-driven rebalancing if a partition chronically lags (e.g., automatic throttling vs. eviction)?**  
+  Each partition configuration supplies a maximum tolerated lag; once exceeded, the dispatcher rejects new entries for that partition until it catches up or operators intervene.
