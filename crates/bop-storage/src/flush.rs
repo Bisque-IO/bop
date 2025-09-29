@@ -463,172 +463,176 @@ fn spawn_flush_worker(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>)
     thread::Builder::new()
         .name("bop-storage-flush".into())
         .spawn(move || {
-            let mut backlog: VecDeque<QueuedFlush> = VecDeque::new();
-            let mut active = 0usize;
-            let mut shutting_down = false;
-            let max_concurrent = state.max_concurrent;
+            flush_worker_main(receiver, state);
+        })
+        .expect("failed to spawn flush controller thread")
+}
 
-            loop {
+fn flush_worker_main(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>) {
+    let mut backlog: VecDeque<QueuedFlush> = VecDeque::new();
+    let mut active = 0usize;
+    let mut shutting_down = false;
+    let max_concurrent = state.max_concurrent;
+
+    loop {
+        if shutting_down && active == 0 {
+            break;
+        }
+
+        match receiver.recv() {
+            Ok(FlushTask::Segment { segment, attempt }) => {
+                if shutting_down {
+                    segment.clear_flush_queue();
+                    continue;
+                }
+
+                let previous = state.pending.fetch_sub(1, Ordering::AcqRel);
+                let depth = previous.saturating_sub(1);
+                segment.update_flush_queue_depth(depth);
+
+                if state.runtime.is_shutdown() {
+                    state
+                        .metrics
+                        .record_failure(&FlushProcessError::RuntimeClosed);
+                    segment.clear_flush_queue();
+                    continue;
+                }
+
+                if active < max_concurrent {
+                    active += 1;
+                    spawn_flush_job(&state, segment, attempt);
+                } else {
+                    backlog.push_back(QueuedFlush { segment, attempt });
+                    if let Some(last) = backlog.back() {
+                        last.segment.update_flush_queue_depth(backlog.len());
+                    }
+                }
+            }
+            Ok(FlushTask::Completion {
+                segment,
+                attempt,
+                result,
+            }) => {
+                if active > 0 {
+                    active -= 1;
+                }
+
+                let mut clear_queue = true;
+
+                if shutting_down {
+                    segment.clear_flush_queue();
+                    clear_queue = false;
+                } else {
+                    match result {
+                        Ok(ProcessOutcome::Completed) | Ok(ProcessOutcome::Idle) => {
+                            state.metrics.record_completed();
+                        }
+                        Ok(ProcessOutcome::Reschedule) => {
+                            state.metrics.record_completed();
+                            if !state.runtime.is_shutdown() {
+                                let depth_hint = backlog.len();
+                                let _ = segment.try_enqueue_flush(depth_hint);
+                                backlog.push_front(QueuedFlush {
+                                    segment: segment.clone(),
+                                    attempt: 0,
+                                });
+                                segment.update_flush_queue_depth(backlog.len());
+                            }
+                        }
+                        Ok(ProcessOutcome::AwaitAck) => {
+                            clear_queue = false;
+                        }
+                        Err(ref error) => {
+                            state.metrics.record_failure(error);
+                            if !state.runtime.is_shutdown() {
+                                let retry_attempt = attempt.saturating_add(1);
+                                state.schedule_retry(segment.clone(), retry_attempt);
+                            }
+                        }
+                    }
+                }
+
+                if clear_queue {
+                    segment.clear_flush_queue();
+                }
+
+                drain_flush_backlog(
+                    &state,
+                    &mut backlog,
+                    &mut active,
+                    max_concurrent,
+                    shutting_down,
+                );
+
                 if shutting_down && active == 0 {
                     break;
                 }
-
-                match receiver.recv() {
-                    Ok(FlushTask::Segment { segment, attempt }) => {
-                        if shutting_down {
+            }
+            Ok(FlushTask::SinkAck {
+                segment,
+                attempt,
+                target,
+                result,
+            }) => {
+                match result {
+                    Ok(()) => match segment.mark_durable(target) {
+                        Ok(()) => {
+                            state.metrics.record_completed();
                             segment.clear_flush_queue();
-                            continue;
-                        }
-
-                        let previous = state.pending.fetch_sub(1, Ordering::AcqRel);
-                        let depth = previous.saturating_sub(1);
-                        segment.update_flush_queue_depth(depth);
-
-                        if state.runtime.is_shutdown() {
-                            state
-                                .metrics
-                                .record_failure(&FlushProcessError::RuntimeClosed);
-                            segment.clear_flush_queue();
-                            continue;
-                        }
-
-                        if active < max_concurrent {
-                            active += 1;
-                            spawn_flush_job(&state, segment, attempt);
-                        } else {
-                            backlog.push_back(QueuedFlush { segment, attempt });
-                            if let Some(last) = backlog.back() {
-                                last.segment.update_flush_queue_depth(backlog.len());
+                            if !state.runtime.is_shutdown()
+                                && segment.pending_flush_target() > 0
+                            {
+                                let _ = state.push_task(segment.clone(), 0);
                             }
                         }
-                    }
-                    Ok(FlushTask::Completion {
-                        segment,
-                        attempt,
-                        result,
-                    }) => {
-                        if active > 0 {
-                            active -= 1;
-                        }
-
-                        let mut clear_queue = true;
-
-                        if shutting_down {
+                        Err(err) => {
+                            let process_error = FlushProcessError::from(err);
+                            state.metrics.record_failure(&process_error);
+                            segment.restore_flush_target(target);
                             segment.clear_flush_queue();
-                            clear_queue = false;
-                        } else {
-                            match result {
-                                Ok(ProcessOutcome::Completed) | Ok(ProcessOutcome::Idle) => {
-                                    state.metrics.record_completed();
-                                }
-                                Ok(ProcessOutcome::Reschedule) => {
-                                    state.metrics.record_completed();
-                                    if !state.runtime.is_shutdown() {
-                                        let depth_hint = backlog.len();
-                                        let _ = segment.try_enqueue_flush(depth_hint);
-                                        backlog.push_front(QueuedFlush {
-                                            segment: segment.clone(),
-                                            attempt: 0,
-                                        });
-                                        segment.update_flush_queue_depth(backlog.len());
-                                    }
-                                }
-                                Ok(ProcessOutcome::AwaitAck) => {
-                                    clear_queue = false;
-                                }
-                                Err(ref error) => {
-                                    state.metrics.record_failure(error);
-                                    if !state.runtime.is_shutdown() {
-                                        let retry_attempt = attempt.saturating_add(1);
-                                        state.schedule_retry(segment.clone(), retry_attempt);
-                                    }
-                                }
+                            if !state.runtime.is_shutdown() {
+                                let retry_attempt = attempt.saturating_add(1);
+                                state.schedule_retry(segment.clone(), retry_attempt);
                             }
                         }
-
-                        if clear_queue {
-                            segment.clear_flush_queue();
-                        }
-
-                        drain_flush_backlog(
-                            &state,
-                            &mut backlog,
-                            &mut active,
-                            max_concurrent,
-                            shutting_down,
-                        );
-
-                        if shutting_down && active == 0 {
-                            break;
+                    },
+                    Err(error) => {
+                        state
+                            .metrics
+                            .record_failure(&FlushProcessError::Sink(error.to_string()));
+                        segment.restore_flush_target(target);
+                        segment.clear_flush_queue();
+                        if !state.runtime.is_shutdown() {
+                            let retry_attempt = attempt.saturating_add(1);
+                            state.schedule_retry(segment.clone(), retry_attempt);
                         }
                     }
-                    Ok(FlushTask::SinkAck {
-                        segment,
-                        attempt,
-                        target,
-                        result,
-                    }) => {
-                        match result {
-                            Ok(()) => match segment.mark_durable(target) {
-                                Ok(()) => {
-                                    state.metrics.record_completed();
-                                    segment.clear_flush_queue();
-                                    if !state.runtime.is_shutdown()
-                                        && segment.pending_flush_target() > 0
-                                    {
-                                        let _ = state.push_task(segment.clone(), 0);
-                                    }
-                                }
-                                Err(err) => {
-                                    let process_error = FlushProcessError::from(err);
-                                    state.metrics.record_failure(&process_error);
-                                    segment.restore_flush_target(target);
-                                    segment.clear_flush_queue();
-                                    if !state.runtime.is_shutdown() {
-                                        let retry_attempt = attempt.saturating_add(1);
-                                        state.schedule_retry(segment.clone(), retry_attempt);
-                                    }
-                                }
-                            },
-                            Err(error) => {
-                                state
-                                    .metrics
-                                    .record_failure(&FlushProcessError::Sink(error.to_string()));
-                                segment.restore_flush_target(target);
-                                segment.clear_flush_queue();
-                                if !state.runtime.is_shutdown() {
-                                    let retry_attempt = attempt.saturating_add(1);
-                                    state.schedule_retry(segment.clone(), retry_attempt);
-                                }
-                            }
-                        }
+                }
 
-                        drain_flush_backlog(
-                            &state,
-                            &mut backlog,
-                            &mut active,
-                            max_concurrent,
-                            shutting_down,
-                        );
+                drain_flush_backlog(
+                    &state,
+                    &mut backlog,
+                    &mut active,
+                    max_concurrent,
+                    shutting_down,
+                );
 
-                        if shutting_down && active == 0 {
-                            break;
-                        }
-                    }
-                    Ok(FlushTask::Shutdown) => {
-                        shutting_down = true;
-                        while let Some(item) = backlog.pop_front() {
-                            item.segment.clear_flush_queue();
-                        }
-                        if active == 0 {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+                if shutting_down && active == 0 {
+                    break;
                 }
             }
-        })
-        .expect("failed to spawn flush controller thread")
+            Ok(FlushTask::Shutdown) => {
+                shutting_down = true;
+                while let Some(item) = backlog.pop_front() {
+                    item.segment.clear_flush_queue();
+                }
+                if active == 0 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -843,6 +847,42 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct AsyncAckFlushSink {
+        calls: Mutex<Vec<u64>>,
+        responders: Mutex<Vec<FlushSinkResponder>>,
+    }
+
+    impl AsyncAckFlushSink {
+        fn pending_count(&self) -> usize {
+            self.responders.lock().unwrap().len()
+        }
+
+        fn ack_next(&self) -> bool {
+            match self.responders.lock().unwrap().pop() {
+                Some(responder) => {
+                    responder.succeed();
+                    true
+                }
+                None => false,
+            }
+        }
+
+        fn calls(&self) -> Vec<u64> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl FlushSink for AsyncAckFlushSink {
+        fn apply_flush(&self, request: FlushSinkRequest) -> Result<(), FlushSinkError> {
+            let FlushSinkRequest {
+                target, responder, ..
+            } = request;
+            self.calls.lock().unwrap().push(target);
+            self.responders.lock().unwrap().push(responder);
+            Ok(())
+        }
+    }
     fn runtime() -> Arc<StorageRuntime> {
         StorageRuntime::create(StorageRuntimeOptions::default()).expect("create runtime")
     }
@@ -870,6 +910,12 @@ mod tests {
         assert_eq!(segment.durable_size(), 512);
         assert_eq!(io.flush_count(), 1);
         assert_eq!(sink.calls(), vec![512]);
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.enqueued, 1);
+        assert_eq!(snapshot.completed, 1);
+        assert_eq!(snapshot.failed, 0);
+        assert_eq!(snapshot.retries, 0);
+        assert_eq!(snapshot.pending_queue_depth, 0);
 
         controller.shutdown();
     }
@@ -924,6 +970,47 @@ mod tests {
         assert_eq!(io.flush_count(), 2);
         assert_eq!(sink.calls(), vec![300]);
         assert!(controller.snapshot().failed >= 1);
+
+        controller.shutdown();
+    }
+
+    #[test]
+    fn awaits_sink_ack_before_marking_durable() {
+        let runtime = runtime();
+        let io = Arc::new(MockIoFile::default());
+        let sink = Arc::new(AsyncAckFlushSink::default());
+        let controller =
+            FlushController::new(runtime, sink.clone(), FlushControllerConfig::default());
+        let segment = wal_segment(io.clone(), 1024);
+
+        segment.mark_written(512).unwrap();
+        assert!(segment.request_flush(512).unwrap());
+
+        controller.enqueue(segment.clone()).unwrap();
+
+        wait_for(|| sink.pending_count() == 1, Duration::from_secs(1));
+
+        assert_eq!(segment.durable_size(), 0);
+        let snapshot_before_ack = controller.snapshot();
+        assert_eq!(snapshot_before_ack.enqueued, 1);
+        assert_eq!(snapshot_before_ack.completed, 0);
+
+        assert!(sink.ack_next());
+
+        wait_for(|| segment.durable_size() == 512, Duration::from_secs(1));
+        wait_for(
+            || controller.snapshot().completed == 1,
+            Duration::from_secs(1),
+        );
+
+        let snapshot = controller.snapshot();
+        assert_eq!(snapshot.enqueued, 1);
+        assert_eq!(snapshot.completed, 1);
+        assert_eq!(snapshot.failed, 0);
+        assert_eq!(snapshot.retries, 0);
+        assert_eq!(snapshot.pending_queue_depth, 0);
+        assert_eq!(io.flush_count(), 1);
+        assert_eq!(sink.calls(), vec![512]);
 
         controller.shutdown();
     }

@@ -21,11 +21,12 @@
 | T3 | Write controller implementation | DONE | Added `WriteTask` queue, write controller, blocking I/O pipeline, and tests covering success/failure paths. |
 | T4 | Flush controller implementation | DONE | Added `FlushController` with `FlushTask` queue, runtime-backed fsync + manifest sink handling, exponential backoff, and regression tests (`flush::tests::flushes_segment_to_durable`, `flush_failure_retries_until_success`, `sink_failure_triggers_retry`). |
 | T5 | Integration and diagnostics wiring | DONE | Controllers wired through DB/Manager, manifest-backed sink, diagnostics/tests updated. |
-| T6 | Verification and documentation | TODO | Add unit/integration tests, metrics assertions, finalize docs and release notes. |
+| T6 | Verification and documentation | DONE | Added async ack regression coverage (`flush::tests::awaits_sink_ack_before_marking_durable`), extended metrics assertions, ran `cargo fmt` + `cargo test -p bop-storage`; docs updated to close out verification. |
 
 ## Rules
 - After completing any task, update the Task Tracking table (status and notes) before beginning new work.
 - Maintain ASCII-only edits in controller modules and documentation unless existing files prove otherwise.
 - Keep queues and buffering logic in sync with the naming defined in `write_design.md` (use `WriteChunk`, `WriteTask`, `FlushTask`).
 - Ensure each code change includes corresponding test coverage or an explicit rationale recorded in the Notes column.
+
 
