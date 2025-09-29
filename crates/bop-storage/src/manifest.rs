@@ -1,5 +1,5 @@
-use std::collections::{HashMap, VecDeque};
-use std::convert::TryInto;
+use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -7,11 +7,13 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bytemuck::{Pod, Zeroable, bytes_of, pod_read_unaligned};
-use heed::types::{Bytes, SerdeBincode, U32, U64};
+use bincode::serde::{decode_from_slice, encode_to_vec};
+use heed::types::{SerdeBincode, U32, U64, U128};
 use heed::{Database, Env, EnvOpenOptions, RoTxn, RwTxn};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::page_cache::{PageCache, PageCacheKey, PageCacheMetricsSnapshot};
 
 pub type DbId = u32;
 pub type ChunkId = u32;
@@ -40,6 +42,7 @@ const CHUNK_REFCOUNT_VERSION: u16 = 1;
 const REMOTE_NAMESPACE_VERSION: u16 = 1;
 const CHANGE_RECORD_VERSION: u16 = 1;
 const CURSOR_RECORD_VERSION: u16 = 1;
+const CHANGE_LOG_CACHE_PREFILL_LIMIT: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum ManifestError {
@@ -55,6 +58,8 @@ pub enum ManifestError {
     CommitFailed(String),
     #[error("manifest invariant violated: {0}")]
     InvariantViolation(String),
+    #[error("page cache serialization failed: {0}")]
+    CacheSerialization(String),
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +68,8 @@ pub struct ManifestOptions {
     pub max_dbs: u32,
     pub queue_capacity: usize,
     pub commit_latency: Duration,
+    pub page_cache: Option<Arc<PageCache<PageCacheKey>>>,
+    pub change_log_cache_object_id: Option<u64>,
 }
 
 impl Default for ManifestOptions {
@@ -72,8 +79,16 @@ impl Default for ManifestOptions {
             max_dbs: 16,
             queue_capacity: 128,
             commit_latency: Duration::from_millis(5),
+            page_cache: None,
+            change_log_cache_object_id: None,
         }
     }
+}
+
+fn compute_change_log_cache_id(path: &Path) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    path.to_string_lossy().hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +127,8 @@ pub struct Manifest {
     job_id_counter: Arc<AtomicU64>,
     change_state: Arc<Mutex<ChangeLogState>>,
     change_signal: Arc<ChangeSignal>,
+    page_cache: Option<Arc<PageCache<PageCacheKey>>>,
+    change_log_cache_object_id: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -122,6 +139,10 @@ struct ManifestDiagnostics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ManifestDiagnosticsSnapshot {
     pub committed_batches: u64,
+    pub page_cache_hits: u64,
+    pub page_cache_misses: u64,
+    pub page_cache_insertions: u64,
+    pub page_cache_evictions: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -270,82 +291,92 @@ impl Drop for WorkerHandle {
 
 #[derive(Debug)]
 pub(crate) struct ManifestTables {
-    db: Database<U64<heed::byteorder::LittleEndian>, SerdeBincode<DbDescriptorRecord>>,
-    wal_state: Database<Bytes, SerdeBincode<WalStateRecord>>,
-    chunk_catalog: Database<Bytes, SerdeBincode<ChunkEntryRecord>>,
-    chunk_delta_index: Database<Bytes, SerdeBincode<ChunkDeltaRecord>>,
-    snapshot_index: Database<Bytes, SerdeBincode<SnapshotRecord>>,
-    wal_catalog: Database<Bytes, SerdeBincode<WalArtifactRecord>>,
-    job_queue: Database<U64<heed::byteorder::LittleEndian>, SerdeBincode<JobRecord>>,
-    job_pending_index: Database<Bytes, U64<heed::byteorder::LittleEndian>>,
-    metrics: Database<Bytes, SerdeBincode<MetricRecord>>,
+    db: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<DbDescriptorRecord>>,
+    wal_state: Database<U32<heed::byteorder::BigEndian>, SerdeBincode<WalStateRecord>>,
+    chunk_catalog: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<ChunkEntryRecord>>,
+    chunk_delta_index: Database<U128<heed::byteorder::BigEndian>, SerdeBincode<ChunkDeltaRecord>>,
+    snapshot_index: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<SnapshotRecord>>,
+    wal_catalog: Database<U128<heed::byteorder::BigEndian>, SerdeBincode<WalArtifactRecord>>,
+    job_queue: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<JobRecord>>,
+    job_pending_index: Database<U64<heed::byteorder::BigEndian>, U64<heed::byteorder::BigEndian>>,
+    metrics: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<MetricRecord>>,
     generation_watermarks:
-        Database<U64<heed::byteorder::LittleEndian>, SerdeBincode<GenerationRecord>>,
-    gc_refcounts: Database<U64<heed::byteorder::LittleEndian>, SerdeBincode<ChunkRefcountRecord>>,
+        Database<U64<heed::byteorder::BigEndian>, SerdeBincode<GenerationRecord>>,
+    gc_refcounts: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<ChunkRefcountRecord>>,
     remote_namespaces:
-        Database<U32<heed::byteorder::LittleEndian>, SerdeBincode<RemoteNamespaceRecord>>,
-    change_log: Database<U64<heed::byteorder::LittleEndian>, SerdeBincode<ManifestChangeRecord>>,
-    change_cursors:
-        Database<U64<heed::byteorder::LittleEndian>, SerdeBincode<ManifestCursorRecord>>,
+        Database<U32<heed::byteorder::BigEndian>, SerdeBincode<RemoteNamespaceRecord>>,
+    change_log: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<ManifestChangeRecord>>,
+    change_cursors: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<ManifestCursorRecord>>,
 }
 
 impl Manifest {
     pub fn open(path: impl AsRef<Path>, options: ManifestOptions) -> Result<Self, ManifestError> {
-        std::fs::create_dir_all(path.as_ref())?;
+        let path_ref = path.as_ref();
+        std::fs::create_dir_all(path_ref)?;
 
         let env = unsafe {
             EnvOpenOptions::new()
                 .map_size(options.map_size)
                 .max_dbs(options.max_dbs)
-                .open(path.as_ref())?
+                .open(path_ref)?
         };
 
         let tables = {
             let mut txn = env.write_txn()?;
-            let db = env.create_database::<U64<heed::byteorder::LittleEndian>, SerdeBincode<DbDescriptorRecord>>(&mut txn, Some("db"))?;
-            let wal_state = env.create_database::<Bytes, SerdeBincode<WalStateRecord>>(
-                &mut txn,
-                Some("wal_state"),
-            )?;
-            let chunk_catalog = env.create_database::<Bytes, SerdeBincode<ChunkEntryRecord>>(
-                &mut txn,
-                Some("chunk_catalog"),
-            )?;
-            let chunk_delta_index = env.create_database::<Bytes, SerdeBincode<ChunkDeltaRecord>>(
+            let db = env.create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<DbDescriptorRecord>>(&mut txn, Some("db"))?;
+            let wal_state = env
+                .create_database::<U32<heed::byteorder::BigEndian>, SerdeBincode<WalStateRecord>>(
+                    &mut txn,
+                    Some("wal_state"),
+                )?;
+            let chunk_catalog = env
+                .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<ChunkEntryRecord>>(
+                    &mut txn,
+                    Some("chunk_catalog"),
+                )?;
+            let chunk_delta_index = env.create_database::<U128<heed::byteorder::BigEndian>, SerdeBincode<ChunkDeltaRecord>>(
                 &mut txn,
                 Some("chunk_delta_index"),
             )?;
-            let snapshot_index = env.create_database::<Bytes, SerdeBincode<SnapshotRecord>>(
-                &mut txn,
-                Some("snapshot_index"),
-            )?;
-            let wal_catalog = env.create_database::<Bytes, SerdeBincode<WalArtifactRecord>>(
+            let snapshot_index = env
+                .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<SnapshotRecord>>(
+                    &mut txn,
+                    Some("snapshot_index"),
+                )?;
+            let wal_catalog = env.create_database::<U128<heed::byteorder::BigEndian>, SerdeBincode<WalArtifactRecord>>(
                 &mut txn,
                 Some("wal_catalog"),
             )?;
             let job_queue = env
-                .create_database::<U64<heed::byteorder::LittleEndian>, SerdeBincode<JobRecord>>(
+                .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<JobRecord>>(
                     &mut txn,
                     Some("job_queue"),
                 )?;
             let job_pending_index = env
-                .create_database::<Bytes, U64<heed::byteorder::LittleEndian>>(
+                .create_database::<U64<heed::byteorder::BigEndian>, U64<heed::byteorder::BigEndian>>(
                     &mut txn,
                     Some("job_pending_index"),
                 )?;
             let metrics = env
-                .create_database::<Bytes, SerdeBincode<MetricRecord>>(&mut txn, Some("metrics"))?;
-            let generation_watermarks = env.create_database::<U64<heed::byteorder::LittleEndian>, SerdeBincode<GenerationRecord>>(&mut txn, Some("generation_watermarks"))?;
-            let gc_refcounts = env.create_database::<U64<heed::byteorder::LittleEndian>, SerdeBincode<ChunkRefcountRecord>>(&mut txn, Some("gc_refcounts"))?;
-            let remote_namespaces = env.create_database::<U32<heed::byteorder::LittleEndian>, SerdeBincode<RemoteNamespaceRecord>>(&mut txn, Some("remote_namespaces"))?;
+                .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<MetricRecord>>(
+                    &mut txn,
+                    Some("metrics"),
+                )?;
+            let generation_watermarks = env
+                .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<GenerationRecord>>(
+                    &mut txn,
+                    Some("generation_watermarks"),
+                )?;
+            let gc_refcounts = env.create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<ChunkRefcountRecord>>(&mut txn, Some("gc_refcounts"))?;
+            let remote_namespaces = env.create_database::<U32<heed::byteorder::BigEndian>, SerdeBincode<RemoteNamespaceRecord>>(&mut txn, Some("remote_namespaces"))?;
             let change_log = env
                 .create_database::<
-                    U64<heed::byteorder::LittleEndian>,
+                    U64<heed::byteorder::BigEndian>,
                     SerdeBincode<ManifestChangeRecord>,
                 >(&mut txn, Some("change_log"))?;
             let change_cursors = env
                 .create_database::<
-                    U64<heed::byteorder::LittleEndian>,
+                    U64<heed::byteorder::BigEndian>,
                     SerdeBincode<ManifestCursorRecord>,
                 >(&mut txn, Some("change_cursors"))?;
             txn.commit()?;
@@ -368,6 +399,13 @@ impl Manifest {
             })
         };
 
+        let page_cache = options.page_cache.clone();
+        let change_log_cache_object_id = options.change_log_cache_object_id.or_else(|| {
+            page_cache
+                .as_ref()
+                .map(|_| compute_change_log_cache_id(path_ref))
+        });
+
         let generation_cache = Arc::new(Mutex::new(load_generations(&env, &tables)?));
         let job_seed = generation_cache
             .lock()
@@ -378,6 +416,16 @@ impl Manifest {
         let diagnostics = Arc::new(ManifestDiagnostics::default());
         let mut change_bootstrap = load_change_state(&env, &tables)?;
         apply_startup_truncation(&env, &tables, &mut change_bootstrap.state)?;
+        if let (Some(cache), Some(object_id)) = (page_cache.as_ref(), change_log_cache_object_id) {
+            hydrate_change_log_cache(
+                &env,
+                &tables,
+                cache,
+                object_id,
+                change_bootstrap.state.oldest_sequence,
+                change_bootstrap.state.latest_sequence(),
+            )?;
+        }
         let initial_change_state = change_bootstrap.state.clone();
         let change_state = Arc::new(Mutex::new(change_bootstrap.state));
         let change_signal = Arc::new(ChangeSignal::new(initial_change_state.latest_sequence()));
@@ -399,6 +447,8 @@ impl Manifest {
         let worker_cursor_counter = cursor_id_counter.clone();
         let worker_initial_change_state = initial_change_state.clone();
         let commit_latency = options.commit_latency;
+        let worker_page_cache = page_cache.clone();
+        let worker_cache_object_id = change_log_cache_object_id;
 
         let join = thread::Builder::new()
             .name("bop-manifest-writer".into())
@@ -416,6 +466,8 @@ impl Manifest {
                     initial_generations,
                     worker_initial_change_state,
                     commit_latency,
+                    worker_page_cache,
+                    worker_cache_object_id,
                 )
             })
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
@@ -430,6 +482,8 @@ impl Manifest {
             job_id_counter,
             change_state,
             change_signal,
+            page_cache,
+            change_log_cache_object_id,
         })
     }
 
@@ -493,23 +547,45 @@ impl Manifest {
         let mut remaining = page_size;
         let mut changes = Vec::new();
 
-        if remaining > 0 {
+        let change_log_cache = self.change_log_cache();
+        let latest_sequence = state.latest_sequence();
+
+        if remaining > 0 && start_sequence <= latest_sequence {
             let txn = self.env.read_txn()?;
-            {
-                let mut iter = self.tables.change_log.iter(&txn)?;
-                while remaining > 0 {
-                    match iter.next().transpose()? {
-                        Some((seq, record)) => {
-                            if seq < start_sequence {
-                                continue;
-                            }
-                            changes.push(record);
-                            remaining -= 1;
-                        }
-                        None => break,
+            let mut sequence = start_sequence;
+            let config = bincode::config::standard();
+
+            while remaining > 0 && sequence <= latest_sequence {
+                if let Some((cache, object_id)) = change_log_cache.as_ref() {
+                    if let Some(frame) = cache.get(&PageCacheKey::manifest(*object_id, sequence)) {
+                        let (record, _len) = decode_from_slice(frame.as_slice(), config)
+                            .map_err(|err| ManifestError::CacheSerialization(err.to_string()))?;
+                        changes.push(record);
+                        remaining -= 1;
+                        sequence = sequence.saturating_add(1);
+                        continue;
                     }
                 }
+
+                match self.tables.change_log.get(&txn, &sequence)? {
+                    Some(record) => {
+                        if let Some((cache, object_id)) = change_log_cache.as_ref() {
+                            if let Ok(bytes) = encode_to_vec(&record, config) {
+                                cache.insert(
+                                    PageCacheKey::manifest(*object_id, sequence),
+                                    Arc::from(bytes.into_boxed_slice()),
+                                );
+                            }
+                        }
+                        changes.push(record);
+                        remaining -= 1;
+                    }
+                    None => break,
+                }
+
+                sequence = sequence.saturating_add(1);
             }
+
             txn.commit()?;
         }
 
@@ -536,6 +612,13 @@ impl Manifest {
 
     pub fn latest_change_sequence(&self) -> ChangeSequence {
         self.change_signal.current()
+    }
+
+    fn change_log_cache(&self) -> Option<(Arc<PageCache<PageCacheKey>>, u64)> {
+        self.page_cache.as_ref().and_then(|cache| {
+            self.change_log_cache_object_id
+                .map(|id| (cache.clone(), id))
+        })
     }
 
     pub(crate) fn read<T, F>(&self, f: F) -> Result<T, ManifestError>
@@ -593,8 +676,8 @@ impl Manifest {
 
             let mut chunk_entries = Vec::new();
             let mut chunk_cursor = tables.chunk_catalog.iter(txn)?;
-            while let Some((key_bytes, value)) = chunk_cursor.next().transpose()? {
-                let key = ChunkKey::decode(key_bytes.as_ref());
+            while let Some((raw_key, value)) = chunk_cursor.next().transpose()? {
+                let key = ChunkKey::decode(raw_key);
                 if key.db_id == source_db {
                     chunk_entries.push((key, value));
                 }
@@ -602,8 +685,8 @@ impl Manifest {
 
             let mut chunk_deltas = Vec::new();
             let mut delta_cursor = tables.chunk_delta_index.iter(txn)?;
-            while let Some((key_bytes, value)) = delta_cursor.next().transpose()? {
-                let key = ChunkDeltaKey::decode(key_bytes.as_ref());
+            while let Some((raw_key, value)) = delta_cursor.next().transpose()? {
+                let key = ChunkDeltaKey::decode(raw_key);
                 if key.db_id == source_db {
                     chunk_deltas.push((key, value));
                 }
@@ -611,8 +694,8 @@ impl Manifest {
 
             let mut wal_states = Vec::new();
             let mut wal_cursor = tables.wal_state.iter(txn)?;
-            while let Some((key_bytes, value)) = wal_cursor.next().transpose()? {
-                let key = WalStateKey::decode(key_bytes.as_ref());
+            while let Some((raw_key, value)) = wal_cursor.next().transpose()? {
+                let key = WalStateKey::decode(raw_key);
                 if key.db_id == source_db {
                     wal_states.push((key, value));
                 }
@@ -620,8 +703,8 @@ impl Manifest {
 
             let mut wal_artifacts = Vec::new();
             let mut artifact_cursor = tables.wal_catalog.iter(txn)?;
-            while let Some((key_bytes, value)) = artifact_cursor.next().transpose()? {
-                let key = WalArtifactKey::decode(key_bytes.as_ref());
+            while let Some((raw_key, value)) = artifact_cursor.next().transpose()? {
+                let key = WalArtifactKey::decode(raw_key);
                 if key.db_id == source_db {
                     wal_artifacts.push((key, value));
                 }
@@ -685,8 +768,8 @@ impl Manifest {
         self.read(|tables, txn| {
             let mut out = Vec::new();
             let mut cursor = tables.wal_catalog.iter(txn)?;
-            while let Some((key_bytes, record)) = cursor.next().transpose()? {
-                let key = WalArtifactKey::decode(key_bytes.as_ref());
+            while let Some((raw_key, record)) = cursor.next().transpose()? {
+                let key = WalArtifactKey::decode(raw_key);
                 if key.db_id == db_id {
                     out.push((key, record));
                 }
@@ -703,9 +786,26 @@ impl Manifest {
     }
 
     pub fn diagnostics(&self) -> ManifestDiagnosticsSnapshot {
-        ManifestDiagnosticsSnapshot {
+        let mut snapshot = ManifestDiagnosticsSnapshot {
             committed_batches: self.diagnostics.committed_batches.load(Ordering::Relaxed),
+            page_cache_hits: 0,
+            page_cache_misses: 0,
+            page_cache_insertions: 0,
+            page_cache_evictions: 0,
+        };
+
+        if let Some(metrics) = self.page_cache_metrics() {
+            snapshot.page_cache_hits = metrics.hits;
+            snapshot.page_cache_misses = metrics.misses;
+            snapshot.page_cache_insertions = metrics.insertions;
+            snapshot.page_cache_evictions = metrics.evictions;
         }
+
+        snapshot
+    }
+
+    pub fn page_cache_metrics(&self) -> Option<PageCacheMetricsSnapshot> {
+        self.page_cache.as_ref().map(|cache| cache.metrics())
     }
 
     fn send_command(&self, command: ManifestCommand) -> Result<(), ManifestError> {
@@ -849,6 +949,47 @@ fn apply_startup_truncation(
     txn.commit()?;
 
     change_state.oldest_sequence = truncate_before;
+    Ok(())
+}
+
+fn hydrate_change_log_cache(
+    env: &Env,
+    tables: &ManifestTables,
+    cache: &Arc<PageCache<PageCacheKey>>,
+    object_id: u64,
+    oldest_sequence: ChangeSequence,
+    latest_sequence: ChangeSequence,
+) -> Result<(), ManifestError> {
+    if latest_sequence < oldest_sequence || CHANGE_LOG_CACHE_PREFILL_LIMIT == 0 {
+        return Ok(());
+    }
+
+    let available = latest_sequence
+        .saturating_sub(oldest_sequence)
+        .saturating_add(1);
+    let start = if available > CHANGE_LOG_CACHE_PREFILL_LIMIT as u64 {
+        latest_sequence
+            .saturating_sub(CHANGE_LOG_CACHE_PREFILL_LIMIT as u64)
+            .saturating_add(1)
+    } else {
+        oldest_sequence
+    };
+
+    let txn = env.read_txn()?;
+    let config = bincode::config::standard();
+    let mut sequence = start;
+    while sequence <= latest_sequence {
+        if let Some(record) = tables.change_log.get(&txn, &sequence)? {
+            if let Ok(bytes) = encode_to_vec(&record, config) {
+                cache.insert(
+                    PageCacheKey::manifest(object_id, sequence),
+                    Arc::from(bytes.into_boxed_slice()),
+                );
+            }
+        }
+        sequence = sequence.saturating_add(1);
+    }
+    txn.commit()?;
     Ok(())
 }
 
@@ -1164,6 +1305,8 @@ fn worker_loop(
     mut generations: HashMap<ComponentId, Generation>,
     mut change_state: ChangeLogState,
     commit_latency: Duration,
+    page_cache: Option<Arc<PageCache<PageCacheKey>>>,
+    page_cache_object_id: Option<u64>,
 ) {
     let mut waiters: HashMap<ComponentId, VecDeque<WaitEntry>> = HashMap::new();
     let mut pending: Vec<(
@@ -1274,6 +1417,8 @@ fn worker_loop(
                 &mut persisted_job_counter,
                 &diagnostics,
                 &mut change_state,
+                page_cache.as_ref(),
+                page_cache_object_id,
             ) {
                 Ok(snapshots) => {
                     for ((_, completion), snapshot) in pending.iter().zip(snapshots.into_iter()) {
@@ -1379,10 +1524,13 @@ fn commit_pending(
     persisted_job_counter: &mut JobId,
     diagnostics: &ManifestDiagnostics,
     change_state: &mut ChangeLogState,
+    page_cache: Option<&Arc<PageCache<PageCacheKey>>>,
+    page_cache_object_id: Option<u64>,
 ) -> Result<Vec<HashMap<ComponentId, Generation>>, heed::Error> {
     let mut txn = env.write_txn()?;
     let mut snapshots = Vec::with_capacity(pending.len());
     let mut working_generations = generations.clone();
+    let config = bincode::config::standard();
 
     for (batch, _) in pending.iter() {
         let before_generations = working_generations.clone();
@@ -1408,6 +1556,14 @@ fn commit_pending(
             generation_updates,
         };
         tables.change_log.put(&mut txn, &sequence, &change_record)?;
+        if let (Some(cache), Some(object_id)) = (page_cache, page_cache_object_id) {
+            if let Ok(bytes) = encode_to_vec(&change_record, config) {
+                cache.insert(
+                    PageCacheKey::manifest(object_id, sequence),
+                    Arc::from(bytes.into_boxed_slice()),
+                );
+            }
+        }
         snapshots.push(working_generations.clone());
     }
 
@@ -1584,28 +1740,28 @@ fn apply_batch(
                 tables.db.delete(txn, &(*db_id as u64))?;
             }
             ManifestOp::PutWalState { key, value } => {
-                let key_bytes = key.encode();
-                tables.wal_state.put(txn, &key_bytes, value)?;
+                let key = key.encode();
+                tables.wal_state.put(txn, &key, value)?;
             }
             ManifestOp::DeleteWalState { key } => {
-                let key_bytes = key.encode();
-                tables.wal_state.delete(txn, &key_bytes)?;
+                let key = key.encode();
+                tables.wal_state.delete(txn, &key)?;
             }
             ManifestOp::UpsertChunk { key, value } => {
-                let key_bytes = key.encode();
-                tables.chunk_catalog.put(txn, &key_bytes, value)?;
+                let key = key.encode();
+                tables.chunk_catalog.put(txn, &key, value)?;
             }
             ManifestOp::DeleteChunk { key } => {
-                let key_bytes = key.encode();
-                tables.chunk_catalog.delete(txn, &key_bytes)?;
+                let key = key.encode();
+                tables.chunk_catalog.delete(txn, &key)?;
             }
             ManifestOp::UpsertChunkDelta { key, value } => {
-                let key_bytes = key.encode();
-                tables.chunk_delta_index.put(txn, &key_bytes, value)?;
+                let key = key.encode();
+                tables.chunk_delta_index.put(txn, &key, value)?;
             }
             ManifestOp::DeleteChunkDelta { key } => {
-                let key_bytes = key.encode();
-                tables.chunk_delta_index.delete(txn, &key_bytes)?;
+                let key = key.encode();
+                tables.chunk_delta_index.delete(txn, &key)?;
             }
             ManifestOp::PublishSnapshot { record } => {
                 publish_snapshot(txn, tables, record.clone())?;
@@ -1614,12 +1770,12 @@ fn apply_batch(
                 drop_snapshot(txn, tables, *key)?;
             }
             ManifestOp::UpsertWalArtifact { key, record } => {
-                let key_bytes = key.encode();
-                tables.wal_catalog.put(txn, &key_bytes, record)?;
+                let key = key.encode();
+                tables.wal_catalog.put(txn, &key, record)?;
             }
             ManifestOp::DeleteWalArtifact { key } => {
-                let key_bytes = key.encode();
-                tables.wal_catalog.delete(txn, &key_bytes)?;
+                let key = key.encode();
+                tables.wal_catalog.delete(txn, &key)?;
             }
             ManifestOp::PutJob { record } => {
                 tables.job_queue.put(txn, &record.job_id, record)?;
@@ -1634,12 +1790,12 @@ fn apply_batch(
                 tables.job_queue.delete(txn, job_id)?;
             }
             ManifestOp::UpsertPendingJob { key, job_id } => {
-                let key_bytes = key.encode();
-                tables.job_pending_index.put(txn, &key_bytes, job_id)?;
+                let key = key.encode();
+                tables.job_pending_index.put(txn, &key, job_id)?;
             }
             ManifestOp::DeletePendingJob { key } => {
-                let key_bytes = key.encode();
-                tables.job_pending_index.delete(txn, &key_bytes)?;
+                let key = key.encode();
+                tables.job_pending_index.delete(txn, &key)?;
             }
             ManifestOp::MergeMetric { key, delta } => {
                 merge_metric(txn, tables, *key, delta.clone())?;
@@ -1682,11 +1838,11 @@ fn publish_snapshot(
     tables: &ManifestTables,
     record: SnapshotRecord,
 ) -> Result<(), heed::Error> {
-    let key_bytes = record.key().encode();
+    let key = record.key().encode();
     for entry in &record.chunks {
         adjust_refcount(txn, tables, entry.chunk_id, 1)?;
     }
-    tables.snapshot_index.put(txn, &key_bytes, &record)
+    tables.snapshot_index.put(txn, &key, &record)
 }
 
 fn drop_snapshot(
@@ -1694,12 +1850,12 @@ fn drop_snapshot(
     tables: &ManifestTables,
     key: SnapshotKey,
 ) -> Result<(), heed::Error> {
-    let key_bytes = key.encode();
-    if let Some(record) = tables.snapshot_index.get(txn, &key_bytes)? {
+    let key = key.encode();
+    if let Some(record) = tables.snapshot_index.get(txn, &key)? {
         for entry in &record.chunks {
             adjust_refcount(txn, tables, entry.chunk_id, -1)?;
         }
-        tables.snapshot_index.delete(txn, &key_bytes)?;
+        tables.snapshot_index.delete(txn, &key)?;
     }
     Ok(())
 }
@@ -1710,10 +1866,10 @@ fn merge_metric(
     key: MetricKey,
     delta: MetricDelta,
 ) -> Result<(), heed::Error> {
-    let key_bytes = key.encode();
+    let key = key.encode();
     let mut record = tables
         .metrics
-        .get(txn, &key_bytes)?
+        .get(txn, &key)?
         .unwrap_or_else(|| MetricRecord {
             record_version: METRIC_RECORD_VERSION,
             count: 0,
@@ -1735,7 +1891,7 @@ fn merge_metric(
         (None, other) => other,
     };
 
-    tables.metrics.put(txn, &key_bytes, &record)
+    tables.metrics.put(txn, &key, &record)
 }
 
 fn adjust_refcount(
@@ -1827,8 +1983,7 @@ fn persist_job_counter(
 
     Ok(())
 }
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Pod, Zeroable, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WalStateKey {
     pub db_id: DbId,
 }
@@ -1838,12 +1993,12 @@ impl WalStateKey {
         Self { db_id }
     }
 
-    fn encode(&self) -> Vec<u8> {
-        bytes_of(self).to_vec()
+    fn encode(&self) -> u32 {
+        self.db_id
     }
 
-    fn decode(bytes: &[u8]) -> Self {
-        pod_read_unaligned(bytes)
+    fn decode(raw: u32) -> Self {
+        Self { db_id: raw }
     }
 
     fn with_db(self, db_id: DbId) -> Self {
@@ -1851,8 +2006,7 @@ impl WalStateKey {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Pod, Zeroable, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChunkKey {
     pub db_id: DbId,
     pub chunk_id: ChunkId,
@@ -1863,12 +2017,15 @@ impl ChunkKey {
         Self { db_id, chunk_id }
     }
 
-    fn encode(&self) -> Vec<u8> {
-        bytes_of(self).to_vec()
+    fn encode(&self) -> u64 {
+        ((self.db_id as u64) << 32) | (self.chunk_id as u64)
     }
 
-    fn decode(bytes: &[u8]) -> Self {
-        pod_read_unaligned(bytes)
+    fn decode(raw: u64) -> Self {
+        Self {
+            db_id: (raw >> 32) as DbId,
+            chunk_id: raw as ChunkId,
+        }
     }
 
     fn with_db(self, db_id: DbId) -> Self {
@@ -1876,13 +2033,11 @@ impl ChunkKey {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Pod, Zeroable, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChunkDeltaKey {
     pub db_id: DbId,
     pub chunk_id: ChunkId,
     pub generation: u32,
-    pub _pad: u32,
 }
 
 impl ChunkDeltaKey {
@@ -1891,16 +2046,21 @@ impl ChunkDeltaKey {
             db_id,
             chunk_id,
             generation,
-            _pad: 0,
         }
     }
 
-    fn encode(&self) -> Vec<u8> {
-        bytes_of(self).to_vec()
+    fn encode(&self) -> u128 {
+        ((self.db_id as u128) << 96)
+            | ((self.chunk_id as u128) << 64)
+            | ((self.generation as u128) << 32)
     }
 
-    fn decode(bytes: &[u8]) -> Self {
-        pod_read_unaligned(bytes)
+    fn decode(raw: u128) -> Self {
+        Self {
+            db_id: (raw >> 96) as DbId,
+            chunk_id: ((raw >> 64) & 0xffff_ffff) as ChunkId,
+            generation: ((raw >> 32) & 0xffff_ffff) as u32,
+        }
     }
 
     fn with_db(self, db_id: DbId) -> Self {
@@ -1908,8 +2068,7 @@ impl ChunkDeltaKey {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Pod, Zeroable, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SnapshotKey {
     pub db_id: DbId,
     pub snapshot_id: SnapshotId,
@@ -1920,35 +2079,42 @@ impl SnapshotKey {
         Self { db_id, snapshot_id }
     }
 
-    fn encode(&self) -> Vec<u8> {
-        bytes_of(self).to_vec()
+    fn encode(&self) -> u64 {
+        ((self.db_id as u64) << 32) | (self.snapshot_id as u64)
+    }
+
+    fn decode(raw: u64) -> Self {
+        Self {
+            db_id: (raw >> 32) as DbId,
+            snapshot_id: raw as SnapshotId,
+        }
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Pod, Zeroable, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PendingJobKey {
     pub db_id: DbId,
     pub job_kind: u16,
-    pub _pad: u16,
 }
 
 impl PendingJobKey {
     pub fn new(db_id: DbId, job_kind: u16) -> Self {
-        Self {
-            db_id,
-            job_kind,
-            _pad: 0,
-        }
+        Self { db_id, job_kind }
     }
 
-    fn encode(&self) -> Vec<u8> {
-        bytes_of(self).to_vec()
+    fn encode(&self) -> u64 {
+        ((self.db_id as u64) << 32) | (self.job_kind as u64)
+    }
+
+    fn decode(raw: u64) -> Self {
+        Self {
+            db_id: (raw >> 32) as DbId,
+            job_kind: raw as u16,
+        }
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Pod, Zeroable, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MetricKey {
     pub scope: u32,
     pub metric_kind: u32,
@@ -1959,8 +2125,15 @@ impl MetricKey {
         Self { scope, metric_kind }
     }
 
-    fn encode(&self) -> Vec<u8> {
-        bytes_of(self).to_vec()
+    fn encode(&self) -> u64 {
+        ((self.scope as u64) << 32) | (self.metric_kind as u64)
+    }
+
+    fn decode(raw: u64) -> Self {
+        Self {
+            scope: (raw >> 32) as u32,
+            metric_kind: raw as u32,
+        }
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2198,7 +2371,6 @@ impl RemoteObjectKind {
     }
 }
 
-#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WalArtifactKey {
     pub db_id: DbId,
@@ -2210,20 +2382,14 @@ impl WalArtifactKey {
         Self { db_id, artifact_id }
     }
 
-    fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(12);
-        buf.extend_from_slice(&(self.db_id as u32).to_le_bytes());
-        buf.extend_from_slice(&self.artifact_id.to_le_bytes());
-        buf
+    fn encode(&self) -> u128 {
+        ((self.db_id as u128) << 96) | (self.artifact_id as u128)
     }
 
-    fn decode(bytes: &[u8]) -> Self {
-        assert!(bytes.len() == 12, "invalid WalArtifactKey length");
-        let db_id = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-        let artifact_id = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
+    fn decode(raw: u128) -> Self {
         Self {
-            db_id: db_id as DbId,
-            artifact_id,
+            db_id: (raw >> 96) as DbId,
+            artifact_id: raw as WalArtifactId,
         }
     }
 
@@ -2469,10 +2635,248 @@ fn epoch_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::page_cache::{PageCache, PageCacheConfig};
     use std::sync::Arc;
     use std::thread;
 
     const TEST_COMPONENT: ComponentId = 1;
+
+    #[test]
+    fn lmdb_keys_iterate_in_numeric_order() {
+        fn chunk_record(name: &str) -> ChunkEntryRecord {
+            let mut record = ChunkEntryRecord::default();
+            record.file_name = name.to_string();
+            record.size_bytes = 1;
+            record
+        }
+
+        fn chunk_delta_record(base: ChunkId, delta_id: u16, name: &str) -> ChunkDeltaRecord {
+            let mut record = ChunkDeltaRecord::default();
+            record.base_chunk_id = base;
+            record.delta_id = delta_id;
+            record.delta_file = name.to_string();
+            record.size_bytes = 1;
+            record
+        }
+
+        fn snapshot_record(
+            db_id: DbId,
+            snapshot_id: SnapshotId,
+            chunk_id: ChunkId,
+        ) -> SnapshotRecord {
+            SnapshotRecord {
+                record_version: SNAPSHOT_RECORD_VERSION,
+                db_id,
+                snapshot_id,
+                created_at_epoch_ms: epoch_millis(),
+                source_generation: 0,
+                chunks: vec![SnapshotChunkRef::base(chunk_id)],
+            }
+        }
+
+        fn metric_delta(count: u64) -> MetricDelta {
+            MetricDelta {
+                count,
+                sum: count as f64,
+                min: Some(count as f64),
+                max: Some(count as f64),
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+        let mut txn = manifest.begin();
+        txn.put_wal_state(WalStateKey::new(2), WalStateRecord::default());
+        txn.put_wal_state(WalStateKey::new(1), WalStateRecord::default());
+
+        txn.upsert_chunk(ChunkKey::new(2, 5), chunk_record("chunk-2-5.bin"));
+        txn.upsert_chunk(ChunkKey::new(1, 7), chunk_record("chunk-1-7.bin"));
+        txn.upsert_chunk(ChunkKey::new(1, 3), chunk_record("chunk-1-3.bin"));
+
+        txn.upsert_chunk_delta(
+            ChunkDeltaKey::new(2, 5, 4),
+            chunk_delta_record(5, 4, "delta-2-5-4.bin"),
+        );
+        txn.upsert_chunk_delta(
+            ChunkDeltaKey::new(1, 3, 9),
+            chunk_delta_record(3, 9, "delta-1-3-9.bin"),
+        );
+        txn.upsert_chunk_delta(
+            ChunkDeltaKey::new(1, 3, 1),
+            chunk_delta_record(3, 1, "delta-1-3-1.bin"),
+        );
+
+        let snapshot_a = snapshot_record(2, 9, 5);
+        let snapshot_b = snapshot_record(1, 4, 3);
+        txn.publish_snapshot(snapshot_a);
+        txn.publish_snapshot(snapshot_b);
+
+        txn.register_wal_artifact(
+            WalArtifactKey::new(2, 10),
+            WalArtifactRecord::new(
+                2,
+                10,
+                WalArtifactKind::AppendOnlySegment {
+                    start_page_index: 0,
+                    end_page_index: 1,
+                    size_bytes: 1,
+                },
+                PathBuf::from("artifact-2-10.wal"),
+            ),
+        );
+        txn.register_wal_artifact(
+            WalArtifactKey::new(1, 40),
+            WalArtifactRecord::new(
+                1,
+                40,
+                WalArtifactKind::AppendOnlySegment {
+                    start_page_index: 0,
+                    end_page_index: 1,
+                    size_bytes: 1,
+                },
+                PathBuf::from("artifact-1-40.wal"),
+            ),
+        );
+
+        txn.upsert_pending_job(PendingJobKey::new(2, 200), 3);
+        txn.upsert_pending_job(PendingJobKey::new(1, 500), 5);
+        txn.upsert_pending_job(PendingJobKey::new(1, 100), 4);
+
+        txn.merge_metric(MetricKey::new(2, 7), metric_delta(1));
+        txn.merge_metric(MetricKey::new(1, 2), metric_delta(2));
+        txn.merge_metric(MetricKey::new(1, 5), metric_delta(3));
+
+        txn.commit().unwrap();
+
+        let (
+            wal_state_keys,
+            chunk_keys,
+            chunk_delta_keys,
+            snapshot_keys,
+            wal_artifact_keys,
+            pending_keys,
+            metric_keys,
+        ) = manifest
+            .read(|tables, txn| {
+                let wal_state = {
+                    let mut cursor = tables.wal_state.iter(txn)?;
+                    let mut out = Vec::new();
+                    while let Some((raw, _)) = cursor.next().transpose()? {
+                        out.push(WalStateKey::decode(raw));
+                    }
+                    out
+                };
+                let chunk = {
+                    let mut cursor = tables.chunk_catalog.iter(txn)?;
+                    let mut out = Vec::new();
+                    while let Some((raw, _)) = cursor.next().transpose()? {
+                        out.push(ChunkKey::decode(raw));
+                    }
+                    out
+                };
+                let chunk_delta = {
+                    let mut cursor = tables.chunk_delta_index.iter(txn)?;
+                    let mut out = Vec::new();
+                    while let Some((raw, _)) = cursor.next().transpose()? {
+                        out.push(ChunkDeltaKey::decode(raw));
+                    }
+                    out
+                };
+                let snapshots = {
+                    let mut cursor = tables.snapshot_index.iter(txn)?;
+                    let mut out = Vec::new();
+                    while let Some((raw, _)) = cursor.next().transpose()? {
+                        out.push(SnapshotKey::decode(raw));
+                    }
+                    out
+                };
+                let artifacts = {
+                    let mut cursor = tables.wal_catalog.iter(txn)?;
+                    let mut out = Vec::new();
+                    while let Some((raw, _)) = cursor.next().transpose()? {
+                        out.push(WalArtifactKey::decode(raw));
+                    }
+                    out
+                };
+                let pending = {
+                    let mut cursor = tables.job_pending_index.iter(txn)?;
+                    let mut out = Vec::new();
+                    while let Some((raw, _)) = cursor.next().transpose()? {
+                        out.push(PendingJobKey::decode(raw));
+                    }
+                    out
+                };
+                let metrics = {
+                    let mut cursor = tables.metrics.iter(txn)?;
+                    let mut out = Vec::new();
+                    while let Some((raw, _)) = cursor.next().transpose()? {
+                        out.push(MetricKey::decode(raw));
+                    }
+                    out
+                };
+                Ok((
+                    wal_state,
+                    chunk,
+                    chunk_delta,
+                    snapshots,
+                    artifacts,
+                    pending,
+                    metrics,
+                ))
+            })
+            .unwrap();
+
+        assert_eq!(
+            wal_state_keys
+                .iter()
+                .map(|key| key.db_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            chunk_keys
+                .iter()
+                .map(|key| (key.db_id, key.chunk_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 3), (1, 7), (2, 5)]
+        );
+        assert_eq!(
+            chunk_delta_keys
+                .iter()
+                .map(|key| (key.db_id, key.chunk_id, key.generation))
+                .collect::<Vec<_>>(),
+            vec![(1, 3, 1), (1, 3, 9), (2, 5, 4)]
+        );
+        assert_eq!(
+            snapshot_keys
+                .iter()
+                .map(|key| (key.db_id, key.snapshot_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 4), (2, 9)]
+        );
+        assert_eq!(
+            wal_artifact_keys
+                .iter()
+                .map(|key| (key.db_id, key.artifact_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 40), (2, 10)]
+        );
+        assert_eq!(
+            pending_keys
+                .iter()
+                .map(|key| (key.db_id, key.job_kind))
+                .collect::<Vec<_>>(),
+            vec![(1, 100), (1, 500), (2, 200)]
+        );
+        assert_eq!(
+            metric_keys
+                .iter()
+                .map(|key| (key.scope, key.metric_kind))
+                .collect::<Vec<_>>(),
+            vec![(1, 2), (1, 5), (2, 7)]
+        );
+    }
 
     #[test]
     fn change_log_records_commits_in_order() {
@@ -2921,5 +3325,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(after_refcount, 2);
+    }
+
+    #[test]
+    fn change_page_hits_cache_on_second_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(PageCache::new(PageCacheConfig {
+            capacity_bytes: Some(16 * 1024),
+        }));
+        let mut options = ManifestOptions::default();
+        options.page_cache = Some(cache.clone());
+        let manifest = Manifest::open(dir.path(), options).unwrap();
+
+        {
+            let mut txn = manifest.begin();
+            txn.bump_generation(TEST_COMPONENT, 1);
+            txn.commit().unwrap();
+        }
+
+        let cursor = manifest
+            .register_change_cursor(ChangeCursorStart::Oldest)
+            .unwrap();
+        let page = manifest.fetch_change_page(cursor.cursor_id, 10).unwrap();
+        assert_eq!(page.changes.len(), 1);
+
+        let metrics_before = cache.metrics();
+        let _ = manifest.fetch_change_page(cursor.cursor_id, 10).unwrap();
+        let metrics_after = cache.metrics();
+        assert!(metrics_after.hits > metrics_before.hits);
+
+        let diagnostics = manifest.diagnostics();
+        assert_eq!(diagnostics.page_cache_hits, 2);
+        assert_eq!(diagnostics.page_cache_misses, 0);
+
+        let cache_metrics = manifest.page_cache_metrics().unwrap();
+        assert_eq!(cache_metrics.hits, diagnostics.page_cache_hits);
+        assert_eq!(cache_metrics.misses, diagnostics.page_cache_misses);
     }
 }

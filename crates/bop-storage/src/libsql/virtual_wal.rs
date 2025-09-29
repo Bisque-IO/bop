@@ -1,11 +1,16 @@
+use std::collections::VecDeque;
 use std::os::raw::{c_char, c_int, c_longlong, c_uchar, c_uint, c_void};
 use std::ptr::NonNull;
-use std::slice;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::page_cache::{
+    PageCache, PageCacheKey, PageCacheMetricsSnapshot, allocate_cache_object_id,
+};
+use dashmap::DashMap;
 use libsql_ffi::{
-    self, RefCountedWalManager, SQLITE_ERROR, SQLITE_MISUSE, SQLITE_NOTFOUND, SQLITE_OK,
-    clone_wal_manager, destroy_wal_manager, libsql_pghdr, libsql_wal, libsql_wal_manager,
+    self, PageHdrIterMut, RefCountedWalManager, SQLITE_ERROR, SQLITE_MISUSE, SQLITE_NOTFOUND,
+    SQLITE_OK, clone_wal_manager, destroy_wal_manager, libsql_wal, libsql_wal_manager,
     libsql_wal_methods, make_ref_counted_wal_manager, sqlite3, sqlite3_file, sqlite3_vfs, wal_impl,
     wal_manager_impl,
 };
@@ -14,12 +19,18 @@ use thiserror::Error;
 use super::LibsqlVfs;
 
 /// Configuration parameters for the libsql virtual WAL bridge.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct VirtualWalConfig {
     /// Logical identifier for the WAL hook registration.
     pub name: String,
     /// Page size used when interacting with libsql frames.
     pub page_size: i32,
+    /// Optional ceiling for the in-memory frame cache in bytes.
+    pub frame_cache_bytes_limit: Option<usize>,
+    /// Optional shared page cache used to expose frame payloads to other components.
+    pub page_cache: Option<Arc<PageCache<PageCacheKey>>>,
+    /// Unique cache object identifier associated with this WAL for global caching.
+    pub page_cache_object_id: Option<u64>,
 }
 
 impl Default for VirtualWalConfig {
@@ -27,6 +38,9 @@ impl Default for VirtualWalConfig {
         Self {
             name: "bop-virtual-wal".to_string(),
             page_size: 4096,
+            frame_cache_bytes_limit: None,
+            page_cache: None,
+            page_cache_object_id: None,
         }
     }
 }
@@ -94,8 +108,11 @@ impl LibsqlVirtualWal {
     pub fn new(
         vfs: Arc<LibsqlVfs>,
         hook: Arc<dyn LibsqlWalHook>,
-        config: VirtualWalConfig,
+        mut config: VirtualWalConfig,
     ) -> Self {
+        if config.page_cache.is_some() && config.page_cache_object_id.is_none() {
+            config.page_cache_object_id = Some(allocate_cache_object_id());
+        }
         Self {
             config,
             vfs,
@@ -188,6 +205,11 @@ impl LibsqlVirtualWal {
         let cloned = unsafe { clone_wal_manager(storage.handle().as_ptr()) };
         NonNull::new(cloned)
     }
+
+    /// Return metrics for the shared page cache, when configured.
+    pub fn page_cache_metrics(&self) -> Option<PageCacheMetricsSnapshot> {
+        self.config.page_cache.as_ref().map(|cache| cache.metrics())
+    }
 }
 
 struct WalManagerStorage {
@@ -269,20 +291,85 @@ impl WalManagerImpl {
         self.config.page_size
     }
 
+    fn cache_limit_bytes(&self) -> Option<usize> {
+        self.config.frame_cache_bytes_limit
+    }
+
+    fn page_cache(&self) -> Option<Arc<PageCache<PageCacheKey>>> {
+        self.config.page_cache.clone()
+    }
+
+    fn cache_object_id(&self) -> Option<u64> {
+        self.config.page_cache_object_id
+    }
+
     unsafe fn from_raw<'a>(ptr: *mut wal_manager_impl) -> &'a mut WalManagerImpl {
         unsafe { &mut *(ptr as *mut WalManagerImpl) }
     }
 }
 
-#[repr(C)]
+struct FrameEntry {
+    page_no: u32,
+    bytes: Arc<[u8]>,
+}
+
+impl FrameEntry {
+    fn new(page_no: u32, bytes: Arc<[u8]>) -> Self {
+        Self { page_no, bytes }
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+#[derive(Default)]
+struct FrameCacheState {
+    order: VecDeque<u32>,
+    total_bytes: usize,
+}
+
+/// Concrete libsql WAL handle. Writer callbacks are serialized by SQLite,
+/// but the internal frame cache relies on lock-free data structures so that
+/// read-side lookups can run concurrently with frame ingestion. The
+/// `frame_state` mutex only protects eviction bookkeeping.
 struct WalImpl {
     hook: Arc<dyn LibsqlWalHook>,
     page_size: i32,
+    cache_limit_bytes: Option<usize>,
+    page_cache: Option<Arc<PageCache<PageCacheKey>>>,
+    page_cache_object_id: Option<u64>,
+    frames: DashMap<u32, FrameEntry>,
+    page_to_frame: DashMap<u32, u32>,
+    frame_state: Mutex<FrameCacheState>,
+    next_frame: AtomicU32,
+    max_page: AtomicU32,
 }
 
 impl WalImpl {
-    fn new(hook: Arc<dyn LibsqlWalHook>, page_size: i32) -> Self {
-        Self { hook, page_size }
+    fn new(
+        hook: Arc<dyn LibsqlWalHook>,
+        page_size: i32,
+        cache_limit_bytes: Option<usize>,
+        page_cache: Option<Arc<PageCache<PageCacheKey>>>,
+        page_cache_object_id: Option<u64>,
+    ) -> Self {
+        Self {
+            hook,
+            page_size,
+            cache_limit_bytes,
+            page_cache,
+            page_cache_object_id,
+            frames: DashMap::new(),
+            page_to_frame: DashMap::new(),
+            frame_state: Mutex::new(FrameCacheState::default()),
+            next_frame: AtomicU32::new(0),
+            max_page: AtomicU32::new(0),
+        }
     }
 
     fn hook(&self) -> &dyn LibsqlWalHook {
@@ -293,8 +380,131 @@ impl WalImpl {
         self.page_size
     }
 
-    unsafe fn from_raw<'a>(ptr: *mut wal_impl) -> &'a mut WalImpl {
-        unsafe { &mut *(ptr as *mut WalImpl) }
+    unsafe fn from_raw<'a>(ptr: *mut wal_impl) -> &'a WalImpl {
+        unsafe { &*(ptr as *mut WalImpl) }
+    }
+
+    fn page_cache_key(&self, pgno: u32) -> Option<PageCacheKey> {
+        self.page_cache_object_id
+            .map(|id| PageCacheKey::libsql_wal(id, pgno as u64))
+    }
+
+    fn remove_page_cache_entry(&self, pgno: u32) {
+        if let (Some(cache), Some(key)) = (self.page_cache.as_ref(), self.page_cache_key(pgno)) {
+            cache.remove(&key);
+        }
+    }
+
+    fn allocate_frame_id(&self) -> u32 {
+        self.next_frame.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn store_frame(&self, frame_id: u32, pgno: u32, data: Vec<u8>) {
+        let should_cache = match self.cache_limit_bytes {
+            Some(limit) if limit == 0 || data.len() > limit => false, // Too large to retain.
+            _ => true,
+        };
+
+        if should_cache {
+            let bytes: Arc<[u8]> = Arc::from(data);
+            if let (Some(cache), Some(key)) = (self.page_cache.as_ref(), self.page_cache_key(pgno))
+            {
+                cache.insert(key, bytes.clone());
+            }
+
+            let entry = FrameEntry::new(pgno, bytes);
+            let entry_len = entry.len();
+            let mut state = self
+                .frame_state
+                .lock()
+                .expect("libsql WAL frame cache state poisoned");
+
+            if let Some(replaced) = self.frames.insert(frame_id, entry) {
+                if let Some(position) = state.order.iter().position(|id| *id == frame_id) {
+                    state.order.remove(position);
+                }
+                state.total_bytes = state.total_bytes.saturating_sub(replaced.len());
+                if self
+                    .page_to_frame
+                    .remove_if(&replaced.page_no, |_, frame| *frame == frame_id)
+                    .is_some()
+                {
+                    self.remove_page_cache_entry(replaced.page_no);
+                }
+            }
+
+            self.page_to_frame.insert(pgno, frame_id);
+            state.order.push_back(frame_id);
+            state.total_bytes += entry_len;
+            self.enforce_limit_locked(&mut state);
+        }
+
+        self.bump_max_page(pgno);
+    }
+
+    fn bump_max_page(&self, pgno: u32) {
+        let mut current = self.max_page.load(Ordering::SeqCst);
+        while pgno > current {
+            match self
+                .max_page
+                .compare_exchange(current, pgno, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    fn clear(&self) {
+        if let (Some(cache), Some(object_id)) =
+            (self.page_cache.as_ref(), self.page_cache_object_id)
+        {
+            let keys: Vec<u32> = self
+                .page_to_frame
+                .iter()
+                .map(|entry| *entry.key())
+                .collect();
+            for pgno in keys {
+                cache.remove(&PageCacheKey::libsql_wal(object_id, pgno as u64));
+            }
+        }
+        self.frames.clear();
+        self.page_to_frame.clear();
+        if let Ok(mut state) = self.frame_state.lock() {
+            state.order.clear();
+            state.total_bytes = 0;
+        }
+        self.next_frame.store(0, Ordering::SeqCst);
+        self.max_page.store(0, Ordering::SeqCst);
+    }
+
+    fn enforce_limit_locked(&self, state: &mut FrameCacheState) {
+        let Some(limit) = self.cache_limit_bytes else {
+            return;
+        };
+
+        while state.total_bytes > limit {
+            let Some(oldest_id) = state.order.pop_front() else {
+                break;
+            };
+
+            if let Some((_key, evicted)) = self.frames.remove(&oldest_id) {
+                state.total_bytes = state.total_bytes.saturating_sub(evicted.len());
+                if self
+                    .page_to_frame
+                    .remove_if(&evicted.page_no, |_, frame| *frame == oldest_id)
+                    .is_some()
+                {
+                    self.remove_page_cache_entry(evicted.page_no);
+                }
+            } else {
+                // Fall back to avoid spinning if the cache dropped this frame elsewhere.
+                state.total_bytes = state.total_bytes.min(limit);
+            }
+        }
+        if state.total_bytes > limit {
+            state.total_bytes = limit;
+        }
     }
 }
 
@@ -356,12 +566,375 @@ unsafe extern "C" fn wal_manager_x_open(
         return hook_error_to_sqlite(err);
     }
 
-    let wal = Box::new(WalImpl::new(manager.clone_hook(), manager.page_size()));
+    let wal = Box::new(WalImpl::new(
+        manager.clone_hook(),
+        manager.page_size(),
+        manager.cache_limit_bytes(),
+        manager.page_cache(),
+        manager.cache_object_id(),
+    ));
     unsafe {
         (*out_wal).methods = wal_methods();
         (*out_wal).pData = Box::into_raw(wal) as *mut wal_impl;
     }
     SQLITE_OK
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    use crate::page_cache::{PageCache, PageCacheConfig, PageCacheKey, allocate_cache_object_id};
+
+    #[derive(Default)]
+    struct MockWalHook {
+        frames: Mutex<Vec<Vec<u8>>>,
+        checkpoints: AtomicUsize,
+    }
+
+    impl MockWalHook {
+        fn frame_count(&self) -> usize {
+            self.frames.lock().expect("frame log poisoned").len()
+        }
+
+        fn checkpoints(&self) -> usize {
+            self.checkpoints.load(Ordering::SeqCst)
+        }
+    }
+
+    impl LibsqlWalHook for MockWalHook {
+        fn on_frame(&self, frame: &[u8]) -> Result<(), LibsqlWalHookError> {
+            self.frames
+                .lock()
+                .expect("frame log poisoned")
+                .push(frame.to_vec());
+            Ok(())
+        }
+
+        fn on_checkpoint(&self) -> Result<(), LibsqlWalHookError> {
+            self.checkpoints.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct TestFrame {
+        header: Box<libsql_ffi::PgHdr>,
+        _data: Vec<u8>,
+    }
+
+    struct TestFrameList {
+        frames: Vec<TestFrame>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct WalPtr(*mut libsql_ffi::wal_impl);
+
+    unsafe impl Send for WalPtr {}
+    unsafe impl Sync for WalPtr {}
+
+    impl TestFrameList {
+        fn new(pages: Vec<(u32, Vec<u8>)>, page_size: usize) -> Self {
+            let mut frames: Vec<TestFrame> = pages
+                .into_iter()
+                .map(|(pgno, payload)| TestFrame::new(pgno, payload, page_size))
+                .collect();
+
+            let mut ptrs: Vec<*mut libsql_ffi::PgHdr> = frames
+                .iter_mut()
+                .map(|frame| frame.header.as_mut() as *mut libsql_ffi::PgHdr)
+                .collect();
+
+            for idx in 0..ptrs.len() {
+                let next_ptr = ptrs.get(idx + 1).copied().unwrap_or(std::ptr::null_mut());
+                unsafe {
+                    (*ptrs[idx]).pDirty = next_ptr;
+                }
+            }
+
+            Self { frames }
+        }
+
+        fn head_ptr(&mut self) -> *mut libsql_ffi::libsql_pghdr {
+            self.frames
+                .first_mut()
+                .map(|frame| {
+                    frame.header.as_mut() as *mut libsql_ffi::PgHdr as *mut libsql_ffi::libsql_pghdr
+                })
+                .unwrap_or(std::ptr::null_mut())
+        }
+    }
+
+    impl TestFrame {
+        fn new(pgno: u32, payload: Vec<u8>, page_size: usize) -> Self {
+            assert!(payload.len() <= page_size, "payload exceeds page size");
+            let mut data = vec![0u8; page_size];
+            data[..payload.len()].copy_from_slice(&payload);
+            let mut header = Box::new(unsafe { std::mem::zeroed::<libsql_ffi::PgHdr>() });
+            header.pgno = pgno;
+            header.pData = data.as_mut_ptr() as *mut c_void;
+            header.pDirty = std::ptr::null_mut();
+            Self {
+                header,
+                _data: data,
+            }
+        }
+    }
+
+    fn make_wal(hook: Arc<MockWalHook>, page_size: usize, limit: Option<usize>) -> WalPtr {
+        make_wal_with_cache(hook, page_size, limit, None, None)
+    }
+
+    fn make_wal_with_cache(
+        hook: Arc<MockWalHook>,
+        page_size: usize,
+        limit: Option<usize>,
+        cache: Option<Arc<PageCache<PageCacheKey>>>,
+        cache_object_id: Option<u64>,
+    ) -> WalPtr {
+        let hook_trait: Arc<dyn LibsqlWalHook> = hook;
+        WalPtr(Box::into_raw(Box::new(WalImpl::new(
+            hook_trait,
+            page_size as i32,
+            limit,
+            cache,
+            cache_object_id,
+        ))) as *mut libsql_ffi::wal_impl)
+    }
+
+    unsafe fn drop_wal(ptr: WalPtr) {
+        unsafe {
+            drop(Box::from_raw(ptr.0 as *mut WalImpl));
+        }
+    }
+
+    #[test]
+    fn frame_cache_roundtrip() {
+        const PAGE_SIZE: usize = 64;
+        let hook = Arc::new(MockWalHook::default());
+        let wal_ptr = make_wal(hook.clone(), PAGE_SIZE, None);
+
+        let mut frames = TestFrameList::new(
+            vec![
+                (1, vec![0xAA; PAGE_SIZE]),
+                (2, vec![0xBB; PAGE_SIZE]),
+                (1, vec![0xCC; PAGE_SIZE]),
+            ],
+            PAGE_SIZE,
+        );
+
+        let rc = unsafe {
+            wal_x_frames(
+                wal_ptr.0,
+                0,
+                frames.head_ptr(),
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, SQLITE_OK);
+
+        let recorded = hook.frames.lock().expect("frame log poisoned");
+        assert_eq!(recorded.len(), 3);
+        assert_eq!(recorded[0][0], 0xAA);
+        assert_eq!(recorded[1][0], 0xBB);
+        assert_eq!(recorded[2][0], 0xCC);
+        drop(recorded);
+
+        let mut frame_id: c_uint = 0;
+        let rc = unsafe { wal_x_find_frame(wal_ptr.0, 1, &mut frame_id) };
+        assert_eq!(rc, SQLITE_OK);
+        let mut buf = vec![0u8; PAGE_SIZE];
+        let rc =
+            unsafe { wal_x_read_frame(wal_ptr.0, frame_id, PAGE_SIZE as c_int, buf.as_mut_ptr()) };
+        assert_eq!(rc, SQLITE_OK);
+        assert!(buf.iter().all(|&b| b == 0xCC));
+
+        buf.iter_mut().for_each(|b| *b = 0);
+        let rc = unsafe { wal_x_read_frame(wal_ptr.0, 1, PAGE_SIZE as c_int, buf.as_mut_ptr()) };
+        assert_eq!(rc, SQLITE_OK);
+        assert!(buf.iter().all(|&b| b == 0xAA));
+
+        let rc = unsafe { wal_x_find_frame(wal_ptr.0, 2, &mut frame_id) };
+        assert_eq!(rc, SQLITE_OK);
+        buf.iter_mut().for_each(|b| *b = 0);
+        let rc =
+            unsafe { wal_x_read_frame(wal_ptr.0, frame_id, PAGE_SIZE as c_int, buf.as_mut_ptr()) };
+        assert_eq!(rc, SQLITE_OK);
+        assert!(buf.iter().all(|&b| b == 0xBB));
+
+        unsafe { drop_wal(wal_ptr) };
+    }
+
+    #[test]
+    fn checkpoint_clears_cached_frames() {
+        const PAGE_SIZE: usize = 64;
+        let hook = Arc::new(MockWalHook::default());
+        let wal_ptr = make_wal(hook.clone(), PAGE_SIZE, None);
+
+        for page in 1..=2 {
+            let payload = vec![page as u8; PAGE_SIZE];
+            let mut frames = TestFrameList::new(vec![(page, payload)], PAGE_SIZE);
+            let rc = unsafe {
+                wal_x_frames(
+                    wal_ptr.0,
+                    0,
+                    frames.head_ptr(),
+                    0,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(rc, SQLITE_OK);
+        }
+
+        let rc = unsafe {
+            wal_x_checkpoint(
+                wal_ptr.0,
+                std::ptr::null_mut(),
+                0,
+                None,
+                std::ptr::null_mut(),
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, SQLITE_OK);
+        assert_eq!(hook.checkpoints(), 1);
+
+        let mut frame_id: c_uint = 0;
+        let rc = unsafe { wal_x_find_frame(wal_ptr.0, 1, &mut frame_id) };
+        assert_eq!(rc, SQLITE_NOTFOUND);
+
+        let wal_ref = unsafe { &*(wal_ptr.0 as *mut WalImpl) };
+        assert!(wal_ref.frames.is_empty());
+
+        unsafe { drop_wal(wal_ptr) };
+    }
+
+    #[test]
+    fn parallel_x_frames_calls_do_not_race() {
+        const PAGE_SIZE: usize = 32;
+        const THREADS: usize = 4;
+        const FRAMES_PER_THREAD: usize = 6;
+
+        let hook = Arc::new(MockWalHook::default());
+        let wal_ptr = make_wal(hook.clone(), PAGE_SIZE, None);
+
+        let mut handles = Vec::new();
+        for t in 0..THREADS {
+            let wal_ptr = wal_ptr;
+            let raw_ptr = wal_ptr.0 as usize;
+            handles.push(thread::spawn(move || {
+                let wal_raw = raw_ptr as *mut libsql_ffi::wal_impl;
+                for i in 0..FRAMES_PER_THREAD {
+                    let page = (t * FRAMES_PER_THREAD + i + 1) as u32;
+                    let payload = vec![(page % 255) as u8; PAGE_SIZE];
+                    let mut frames = TestFrameList::new(vec![(page, payload)], PAGE_SIZE);
+                    let rc = unsafe {
+                        wal_x_frames(wal_raw, 0, frames.head_ptr(), 0, 0, 0, std::ptr::null_mut())
+                    };
+                    assert_eq!(rc, SQLITE_OK);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("parallel writer panicked");
+        }
+
+        let expected = (THREADS * FRAMES_PER_THREAD) as u32;
+        let wal_ref = unsafe { &*(wal_ptr.0 as *mut WalImpl) };
+        assert_eq!(wal_ref.next_frame.load(Ordering::SeqCst), expected);
+        assert!(hook.frame_count() >= expected as usize);
+
+        unsafe { drop_wal(wal_ptr) };
+    }
+
+    #[test]
+    fn cache_eviction_respects_byte_limit() {
+        const PAGE_SIZE: usize = 64;
+        let hook = Arc::new(MockWalHook::default());
+        let limit_bytes = PAGE_SIZE * 2;
+        let wal_ptr = make_wal(hook, PAGE_SIZE, Some(limit_bytes));
+
+        for page in 1..=3 {
+            let payload = vec![(page % 255) as u8; PAGE_SIZE];
+            let mut frames = TestFrameList::new(vec![(page, payload)], PAGE_SIZE);
+            let rc = unsafe {
+                wal_x_frames(
+                    wal_ptr.0,
+                    0,
+                    frames.head_ptr(),
+                    0,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(rc, SQLITE_OK);
+        }
+
+        let mut frame_id: c_uint = 0;
+        let rc = unsafe { wal_x_find_frame(wal_ptr.0, 1, &mut frame_id) };
+        assert_eq!(rc, SQLITE_NOTFOUND);
+
+        for page in 2..=3 {
+            let rc = unsafe { wal_x_find_frame(wal_ptr.0, page, &mut frame_id) };
+            assert_eq!(rc, SQLITE_OK);
+        }
+
+        let wal_ref = unsafe { &*(wal_ptr.0 as *mut WalImpl) };
+        assert!(!wal_ref.frames.contains_key(&1));
+        assert!(wal_ref.frames.contains_key(&2));
+        assert!(wal_ref.frames.contains_key(&3));
+
+        let state = wal_ref.frame_state.lock().expect("frame state poisoned");
+        assert!(state.total_bytes <= limit_bytes);
+
+        unsafe { drop_wal(wal_ptr) };
+    }
+
+    #[test]
+    fn frames_populate_global_page_cache() {
+        const PAGE_SIZE: usize = 32;
+        let hook = Arc::new(MockWalHook::default());
+        let cache = Arc::new(PageCache::new(PageCacheConfig {
+            capacity_bytes: Some(4096),
+        }));
+        let cache_id = allocate_cache_object_id();
+        let wal_ptr =
+            make_wal_with_cache(hook, PAGE_SIZE, None, Some(cache.clone()), Some(cache_id));
+
+        let mut frames = TestFrameList::new(vec![(1, vec![0xAB; PAGE_SIZE])], PAGE_SIZE);
+        let rc = unsafe {
+            wal_x_frames(
+                wal_ptr.0,
+                0,
+                frames.head_ptr(),
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, SQLITE_OK);
+
+        let key = PageCacheKey::libsql_wal(cache_id, 1);
+        assert!(cache.get(&key).is_some());
+
+        unsafe { drop_wal(wal_ptr) };
+    }
 }
 
 unsafe extern "C" fn wal_manager_x_close(
@@ -423,33 +996,48 @@ unsafe extern "C" fn wal_x_begin_read_transaction(
 unsafe extern "C" fn wal_x_end_read_transaction(_wal: *mut wal_impl) {}
 
 unsafe extern "C" fn wal_x_find_frame(
-    _wal: *mut wal_impl,
-    _pgno: c_uint,
-    _frame: *mut c_uint,
+    wal_ptr: *mut wal_impl,
+    pgno: c_uint,
+    frame_out: *mut c_uint,
 ) -> c_int {
-    SQLITE_NOTFOUND
+    if wal_ptr.is_null() || frame_out.is_null() {
+        return SQLITE_MISUSE;
+    }
+
+    let wal = unsafe { WalImpl::from_raw(wal_ptr) };
+    if let Some(frame) = wal.page_to_frame.get(&(pgno as u32)) {
+        unsafe { *frame_out = *frame }
+        SQLITE_OK
+    } else {
+        unsafe { *frame_out = 0 };
+        SQLITE_NOTFOUND
+    }
 }
 
 unsafe extern "C" fn wal_x_read_frame(
-    _wal: *mut wal_impl,
-    _frame: c_uint,
-    _amount: c_int,
-    _out: *mut c_uchar,
+    wal_ptr: *mut wal_impl,
+    frame_id: c_uint,
+    amount: c_int,
+    out: *mut c_uchar,
 ) -> c_int {
-    SQLITE_NOTFOUND
+    unsafe { wal_read_frame_common(wal_ptr, frame_id, amount, out) }
 }
 
 unsafe extern "C" fn wal_x_read_frame_raw(
-    _wal: *mut wal_impl,
-    _frame: c_uint,
-    _amount: c_int,
-    _out: *mut c_uchar,
+    wal_ptr: *mut wal_impl,
+    frame_id: c_uint,
+    amount: c_int,
+    out: *mut c_uchar,
 ) -> c_int {
-    SQLITE_NOTFOUND
+    unsafe { wal_read_frame_common(wal_ptr, frame_id, amount, out) }
 }
 
 unsafe extern "C" fn wal_x_dbsize(_wal: *mut wal_impl) -> c_uint {
-    0
+    if _wal.is_null() {
+        return 0;
+    }
+    let wal = unsafe { WalImpl::from_raw(_wal) };
+    wal.max_page.load(Ordering::SeqCst)
 }
 
 unsafe extern "C" fn wal_x_begin_write_transaction(_wal: *mut wal_impl) -> c_int {
@@ -481,12 +1069,16 @@ unsafe extern "C" fn wal_x_savepoint_undo(_wal: *mut wal_impl, _data: *mut c_uin
 }
 
 unsafe extern "C" fn wal_x_frame_count(
-    _wal: *mut wal_impl,
+    wal_ptr: *mut wal_impl,
     _include_uncommitted: c_int,
     count: *mut c_uint,
 ) -> c_int {
+    if wal_ptr.is_null() {
+        return SQLITE_MISUSE;
+    }
+    let wal = unsafe { WalImpl::from_raw(wal_ptr) };
     if !count.is_null() {
-        unsafe { *count = 0 };
+        unsafe { *count = wal.frames.len() as c_uint };
     }
     SQLITE_OK
 }
@@ -494,7 +1086,7 @@ unsafe extern "C" fn wal_x_frame_count(
 unsafe extern "C" fn wal_x_frames(
     wal_ptr: *mut wal_impl,
     _commit: c_int,
-    mut list: *mut libsql_pghdr,
+    list: *mut libsql_ffi::libsql_pghdr,
     _max_frame: c_uint,
     _is_ckpt: c_int,
     _sync_flags: c_int,
@@ -505,19 +1097,21 @@ unsafe extern "C" fn wal_x_frames(
     }
 
     let wal = unsafe { WalImpl::from_raw(wal_ptr) };
-    let page_size = wal.page_size() as usize;
 
-    while !list.is_null() {
-        let (frame, next) = unsafe {
-            let header = &*list;
-            let frame = slice::from_raw_parts(header.pData as *const u8, page_size);
-            let next = header.pDirty as *mut libsql_pghdr;
-            (frame, next)
-        };
-        if let Err(err) = wal.hook().on_frame(frame) {
+    let mut frames_written: c_int = 0;
+    let mut iter = PageHdrIterMut::new(list as *mut libsql_ffi::PgHdr, wal.page_size() as usize);
+    while let Some((pgno, frame)) = iter.next() {
+        let frame_vec = frame.to_vec();
+        if let Err(err) = wal.hook().on_frame(&frame_vec) {
             return hook_error_to_sqlite(err);
         }
-        list = next;
+        let frame_id = wal.allocate_frame_id();
+        wal.store_frame(frame_id, pgno, frame_vec);
+        frames_written += 1;
+    }
+
+    if !_written.is_null() {
+        unsafe { *_written = frames_written };
     }
 
     SQLITE_OK
@@ -545,7 +1139,10 @@ unsafe extern "C" fn wal_x_checkpoint(
 
     let wal = unsafe { WalImpl::from_raw(wal_ptr) };
     match wal.hook().on_checkpoint() {
-        Ok(()) => SQLITE_OK,
+        Ok(()) => {
+            wal.clear();
+            SQLITE_OK
+        }
         Err(err) => hook_error_to_sqlite(err),
     }
 }
@@ -576,3 +1173,36 @@ unsafe extern "C" fn wal_x_write_lock(_wal: *mut wal_impl, _lock: c_int) -> c_in
 }
 
 unsafe extern "C" fn wal_x_db(_wal: *mut wal_impl, _db: *mut sqlite3) {}
+
+unsafe fn wal_read_frame_common(
+    wal_ptr: *mut wal_impl,
+    frame_id: c_uint,
+    amount: c_int,
+    out: *mut c_uchar,
+) -> c_int {
+    if wal_ptr.is_null() || out.is_null() {
+        return SQLITE_MISUSE;
+    }
+
+    let wal = unsafe { WalImpl::from_raw(wal_ptr) };
+    let Some(frame) = wal.frames.get(&(frame_id as u32)) else {
+        return SQLITE_NOTFOUND;
+    };
+
+    if amount <= 0 {
+        return SQLITE_OK;
+    }
+    let amount = amount as usize;
+    let entry = frame.value();
+    let bytes = entry.bytes();
+    let copy_len = bytes.len().min(amount);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, copy_len);
+    }
+    if copy_len < amount {
+        unsafe {
+            std::ptr::write_bytes(out.add(copy_len), 0, amount - copy_len);
+        }
+    }
+    SQLITE_OK
+}

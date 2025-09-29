@@ -453,6 +453,7 @@ dependencies = [
  "byteorder",
  "crc64fast-nvme",
  "crossfire",
+ "dashmap",
  "generator",
  "heed",
  "libc",
@@ -463,7 +464,6 @@ dependencies = [
  "snmalloc-rs",
  "tempfile",
  "thiserror 2.0.16",
- "tokio",
  "windows-sys 0.61.0",
 ]
 
