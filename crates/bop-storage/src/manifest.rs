@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,7 +13,9 @@ use heed::types::{SerdeBincode, U32, U64, U128};
 use heed::{Database, Env, EnvOpenOptions, RoTxn, RwTxn};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
 
+use crate::flush::{FlushSink, FlushSinkError, FlushSinkRequest};
 use crate::page_cache::{PageCache, PageCacheKey, PageCacheMetricsSnapshot};
 
 pub type DbId = u32;
@@ -43,6 +46,8 @@ const REMOTE_NAMESPACE_VERSION: u16 = 1;
 const CHANGE_RECORD_VERSION: u16 = 1;
 const CURSOR_RECORD_VERSION: u16 = 1;
 const CHANGE_LOG_CACHE_PREFILL_LIMIT: usize = 256;
+const RUNTIME_STATE_VERSION: u16 = 1;
+const RUNTIME_STATE_KEY: u32 = 0;
 
 #[derive(Debug, Error)]
 pub enum ManifestError {
@@ -129,11 +134,53 @@ pub struct Manifest {
     change_signal: Arc<ChangeSignal>,
     page_cache: Option<Arc<PageCache<PageCacheKey>>>,
     change_log_cache_object_id: Option<u64>,
+    runtime_state: ManifestRuntimeState,
 }
 
 #[derive(Debug, Default)]
 struct ManifestDiagnostics {
     committed_batches: AtomicU64,
+}
+
+#[derive(Debug)]
+struct ManifestRuntimeState {
+    key: u32,
+    record: RuntimeStateRecord,
+    crash_detected: bool,
+}
+
+impl ManifestRuntimeState {
+    fn initialize(env: &Env, tables: &ManifestTables) -> Result<Self, ManifestError> {
+        let record = RuntimeStateRecord {
+            record_version: RUNTIME_STATE_VERSION,
+            instance_id: Uuid::new_v4(),
+            pid: process::id(),
+            started_at_epoch_ms: epoch_millis(),
+        };
+
+        let crash_detected = {
+            let mut txn = env.write_txn()?;
+            let existing = tables.runtime_state.get(&txn, &RUNTIME_STATE_KEY)?;
+            tables
+                .runtime_state
+                .put(&mut txn, &RUNTIME_STATE_KEY, &record)?;
+            txn.commit()?;
+            existing.is_some()
+        };
+
+        Ok(Self {
+            key: RUNTIME_STATE_KEY,
+            record,
+            crash_detected,
+        })
+    }
+
+    fn clear(&self, env: &Env, tables: &ManifestTables) -> Result<(), ManifestError> {
+        let mut txn = env.write_txn()?;
+        tables.runtime_state.delete(&mut txn, &self.key)?;
+        txn.commit()?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,6 +354,7 @@ pub(crate) struct ManifestTables {
         Database<U32<heed::byteorder::BigEndian>, SerdeBincode<RemoteNamespaceRecord>>,
     change_log: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<ManifestChangeRecord>>,
     change_cursors: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<ManifestCursorRecord>>,
+    runtime_state: Database<U32<heed::byteorder::BigEndian>, SerdeBincode<RuntimeStateRecord>>,
 }
 
 impl Manifest {
@@ -379,6 +427,11 @@ impl Manifest {
                     U64<heed::byteorder::BigEndian>,
                     SerdeBincode<ManifestCursorRecord>,
                 >(&mut txn, Some("change_cursors"))?;
+            let runtime_state = env
+                .create_database::<U32<heed::byteorder::BigEndian>, SerdeBincode<RuntimeStateRecord>>(
+                    &mut txn,
+                    Some("runtime_state"),
+                )?;
             txn.commit()?;
 
             Arc::new(ManifestTables {
@@ -396,6 +449,7 @@ impl Manifest {
                 remote_namespaces,
                 change_log,
                 change_cursors,
+                runtime_state,
             })
         };
 
@@ -450,6 +504,8 @@ impl Manifest {
         let worker_page_cache = page_cache.clone();
         let worker_cache_object_id = change_log_cache_object_id;
 
+        let runtime_state = ManifestRuntimeState::initialize(&env, &tables)?;
+
         let join = thread::Builder::new()
             .name("bop-manifest-writer".into())
             .spawn(move || {
@@ -484,6 +540,7 @@ impl Manifest {
             change_signal,
             page_cache,
             change_log_cache_object_id,
+            runtime_state,
         })
     }
 
@@ -778,6 +835,28 @@ impl Manifest {
         })
     }
 
+    pub fn wal_state(&self, db_id: DbId) -> Result<Option<WalStateRecord>, ManifestError> {
+        self.read(|tables, txn| {
+            let key = WalStateKey::new(db_id).encode();
+            Ok(tables.wal_state.get(txn, &key)?)
+        })
+    }
+
+    pub fn max_db_id(&self) -> Result<Option<u32>, ManifestError> {
+        self.read(|tables, txn| {
+            let mut cursor = tables.db.iter(txn)?;
+            let mut max_id: Option<u32> = None;
+            while let Some((raw_key, _)) = cursor.next().transpose()? {
+                let current = raw_key as u32;
+                max_id = Some(match max_id {
+                    Some(existing) => existing.max(current),
+                    None => current,
+                });
+            }
+            Ok(max_id)
+        })
+    }
+
     pub fn current_generation(&self, component: ComponentId) -> Option<Generation> {
         self.generation_cache
             .lock()
@@ -808,6 +887,14 @@ impl Manifest {
         self.page_cache.as_ref().map(|cache| cache.metrics())
     }
 
+    pub fn crash_detected(&self) -> bool {
+        self.runtime_state.crash_detected
+    }
+
+    pub fn runtime_state(&self) -> &RuntimeStateRecord {
+        &self.runtime_state.record
+    }
+
     fn send_command(&self, command: ManifestCommand) -> Result<(), ManifestError> {
         self.command_tx
             .send(command)
@@ -834,6 +921,7 @@ impl Manifest {
 }
 impl Drop for Manifest {
     fn drop(&mut self) {
+        let _ = self.runtime_state.clear(&self.env, &self.tables);
         let _ = self.command_tx.send(ManifestCommand::Shutdown);
         self.worker.stop();
     }
@@ -2255,6 +2343,14 @@ impl Default for WalStateRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeStateRecord {
+    pub record_version: u16,
+    pub instance_id: Uuid,
+    pub pid: u32,
+    pub started_at_epoch_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FlushGateState {
     pub active_job_id: Option<JobId>,
     pub last_success_at_epoch_ms: Option<u64>,
@@ -2268,6 +2364,62 @@ impl Default for FlushGateState {
             last_success_at_epoch_ms: None,
             errored_since_epoch_ms: None,
         }
+    }
+}
+#[derive(Debug, Clone)]
+pub(crate) struct ManifestFlushSink {
+    manifest: Arc<Manifest>,
+    db_id: DbId,
+}
+
+impl ManifestFlushSink {
+    pub(crate) fn new(manifest: Arc<Manifest>, db_id: DbId) -> Self {
+        Self { manifest, db_id }
+    }
+}
+
+impl FlushSink for ManifestFlushSink {
+    fn apply_flush(&self, request: FlushSinkRequest) -> Result<(), FlushSinkError> {
+        let manifest = self.manifest.clone();
+        let db_id = self.db_id;
+        thread::spawn(move || {
+            let FlushSinkRequest {
+                responder, target, ..
+            } = request;
+            let result = (|| -> Result<(), FlushSinkError> {
+                let key = WalStateKey::new(db_id);
+                let mut record = manifest
+                    .wal_state(db_id)
+                    .map_err(|err| FlushSinkError::Message(err.to_string()))?
+                    .unwrap_or_else(WalStateRecord::default);
+
+                let needs_update = target > record.last_applied_lsn
+                    || record.flush_gate_state.errored_since_epoch_ms.is_some();
+
+                if !needs_update {
+                    return Ok(());
+                }
+
+                if target > record.last_applied_lsn {
+                    record.last_applied_lsn = target;
+                }
+
+                record.flush_gate_state.last_success_at_epoch_ms = Some(epoch_millis());
+                record.flush_gate_state.errored_since_epoch_ms = None;
+
+                let mut txn = manifest.begin_with_capacity(1);
+                txn.put_wal_state(key, record);
+                txn.commit()
+                    .map_err(|err| FlushSinkError::Message(err.to_string()))?;
+                Ok(())
+            })();
+
+            match result {
+                Ok(()) => responder.succeed(),
+                Err(err) => responder.fail(err),
+            }
+        });
+        Ok(())
     }
 }
 
@@ -3361,5 +3513,144 @@ mod tests {
         let cache_metrics = manifest.page_cache_metrics().unwrap();
         assert_eq!(cache_metrics.hits, diagnostics.page_cache_hits);
         assert_eq!(cache_metrics.misses, diagnostics.page_cache_misses);
+    }
+
+    #[test]
+    fn open_sets_runtime_state_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = ManifestOptions::default();
+
+        let manifest = Manifest::open(dir.path(), options).expect("open manifest");
+
+        assert!(!manifest.crash_detected());
+        let runtime = manifest.runtime_state();
+        assert_eq!(runtime.record_version, RUNTIME_STATE_VERSION);
+        assert_eq!(runtime.pid, process::id());
+    }
+
+    #[test]
+    fn manifest_flush_sink_updates_state() {
+        use crate::flush::{FlushSinkRequest, FlushSinkResponder, FlushTask};
+        use crate::io::{IoFile, IoResult, IoVec, IoVecMut};
+        use crate::wal::WalSegment;
+        use crossfire::mpsc;
+
+        #[derive(Default)]
+        struct NoopIoFile;
+
+        impl IoFile for NoopIoFile {
+            fn readv_at(&self, _offset: u64, _bufs: &mut [IoVecMut<'_>]) -> IoResult<usize> {
+                Ok(0)
+            }
+
+            fn writev_at(&self, _offset: u64, bufs: &[IoVec<'_>]) -> IoResult<usize> {
+                Ok(bufs.iter().map(IoVec::len).sum())
+            }
+
+            fn allocate(&self, _offset: u64, _len: u64) -> IoResult<()> {
+                Ok(())
+            }
+
+            fn flush(&self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Arc::new(Manifest::open(dir.path(), ManifestOptions::default()).unwrap());
+        let sink = ManifestFlushSink::new(manifest.clone(), 42);
+        let segment = Arc::new(WalSegment::new(Arc::new(NoopIoFile::default()), 0, 0));
+        let (tx, rx) = mpsc::bounded_blocking(1);
+        let sender = Arc::new(tx);
+
+        let responder = FlushSinkResponder::new(sender.clone(), segment.clone(), 0, 512);
+        let request = FlushSinkRequest {
+            segment: segment.clone(),
+            target: 512,
+            responder: responder.for_request(),
+        };
+        sink.apply_flush(request).expect("apply flush");
+        match rx.recv().expect("sink ack") {
+            FlushTask::SinkAck { result, .. } => assert!(result.is_ok()),
+            other => panic!("unexpected flush task: {:?}", other),
+        }
+
+        let state = manifest
+            .read(|tables, txn| {
+                Ok(tables
+                    .wal_state
+                    .get(txn, &WalStateKey::new(42).encode())?
+                    .unwrap())
+            })
+            .expect("wal state");
+        assert_eq!(state.last_applied_lsn, 512);
+        assert!(state.flush_gate_state.last_success_at_epoch_ms.is_some());
+        assert!(state.flush_gate_state.errored_since_epoch_ms.is_none());
+
+        let responder = FlushSinkResponder::new(sender.clone(), segment.clone(), 0, 256);
+        let request = FlushSinkRequest {
+            segment: segment.clone(),
+            target: 256,
+            responder: responder.for_request(),
+        };
+        sink.apply_flush(request).expect("apply flush");
+        match rx.recv().expect("sink ack") {
+            FlushTask::SinkAck { result, .. } => assert!(result.is_ok()),
+            other => panic!("unexpected flush task: {:?}", other),
+        }
+        let state = manifest
+            .read(|tables, txn| {
+                Ok(tables
+                    .wal_state
+                    .get(txn, &WalStateKey::new(42).encode())?
+                    .unwrap())
+            })
+            .expect("wal state");
+        assert_eq!(state.last_applied_lsn, 512);
+    }
+
+    fn open_detects_leftover_runtime_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = ManifestOptions::default();
+
+        {
+            let manifest = Manifest::open(dir.path(), options.clone()).expect("first open");
+            assert!(!manifest.crash_detected());
+        }
+
+        {
+            let env = unsafe {
+                EnvOpenOptions::new()
+                    .map_size(options.map_size)
+                    .max_dbs(options.max_dbs)
+                    .open(dir.path())
+                    .expect("env open")
+            };
+
+            let mut txn = env.write_txn().expect("write txn");
+            let runtime_db = env
+                .create_database::<U32<heed::byteorder::BigEndian>, SerdeBincode<RuntimeStateRecord>>(
+                    &mut txn,
+                    Some("runtime_state"),
+                )
+                .expect("runtime db");
+            let record = RuntimeStateRecord {
+                record_version: RUNTIME_STATE_VERSION,
+                instance_id: Uuid::new_v4(),
+                pid: 9999,
+                started_at_epoch_ms: epoch_millis(),
+            };
+            runtime_db
+                .put(&mut txn, &RUNTIME_STATE_KEY, &record)
+                .expect("insert runtime state");
+            txn.commit().expect("commit runtime state");
+        }
+
+        let manifest = Manifest::open(dir.path(), options).expect("reopen manifest");
+        assert!(manifest.crash_detected());
+        assert_eq!(
+            manifest.runtime_state().record_version,
+            RUNTIME_STATE_VERSION
+        );
     }
 }

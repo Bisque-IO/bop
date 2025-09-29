@@ -26,6 +26,9 @@ snmalloc-rs = "0.3.8"
 libsql-ffi = { version = '0.9.24', optional = true, default-features = false }
 bytemuck = { version = '1.15', features = ['derive'] }
 dashmap = { version = '6.1' }
+tokio = { version = '1.47', features = ['rt-multi-thread', 'sync'] }
+tokio-util = '0.7'
+uuid = { version = '1.10', features = ['serde', 'v4'] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -35,3 +38,4 @@ libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = '0.61.0', features = ['Win32_Foundation', 'Win32_Storage_FileSystem'] }
+
