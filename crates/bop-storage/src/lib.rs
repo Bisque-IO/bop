@@ -1,5 +1,6 @@
 mod archive;
 mod db;
+mod error;
 mod flush;
 mod io;
 #[cfg(feature = "libsql")]
@@ -13,6 +14,7 @@ mod write;
 
 pub use archive::Archive;
 pub use db::{DB, DbConfig, DbDiagnostics, DbError, DbId};
+pub use error::{ErrorCode, ErrorWithContext, ResultExt};
 pub use flush::{
     FlushController, FlushControllerConfig, FlushControllerSnapshot, FlushProcessError,
     FlushScheduleError, FlushSink, FlushSinkError, FlushSinkRequest, FlushSinkResponder,

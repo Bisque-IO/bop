@@ -23,6 +23,9 @@ pub struct FlushControllerConfig {
     pub max_backoff: Duration,
     pub max_concurrent_flushes: usize,
     pub max_retry_attempts: u32,
+    /// Optional timeout for individual flush operations.
+    /// If None, flushes will wait indefinitely.
+    pub flush_timeout: Option<Duration>,
 }
 
 impl Default for FlushControllerConfig {
@@ -33,6 +36,7 @@ impl Default for FlushControllerConfig {
             max_backoff: Duration::from_secs(1),
             max_concurrent_flushes: 2,
             max_retry_attempts: 5,
+            flush_timeout: None, // No timeout by default
         }
     }
 }
@@ -72,6 +76,8 @@ pub enum FlushProcessError {
     Segment(String),
     #[error("flush retry limit exceeded after {0} attempts")]
     RetryLimitExceeded(u32),
+    #[error("flush operation timed out")]
+    Timeout,
 }
 
 impl From<crate::IoError> for FlushProcessError {

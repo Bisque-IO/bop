@@ -26,7 +26,11 @@
       "Read(/usr/bin/**)",
       "Read(/usr/**)",
       "Bash(for:*)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(cargo build:*)",
+      "Bash(git checkout:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo clippy:*)"
     ],
     "deny": [],
     "ask": []

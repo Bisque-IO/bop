@@ -9,6 +9,7 @@ use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use crossfire::{MTx, Rx, mpsc};
 use thiserror::Error;
@@ -23,6 +24,9 @@ pub struct WriteControllerConfig {
     pub queue_capacity: usize,
     pub max_concurrent_writes: usize,
     pub max_inflight_segments: usize,
+    /// Optional timeout for individual write operations.
+    /// If None, writes will wait indefinitely.
+    pub write_timeout: Option<Duration>,
 }
 
 impl Default for WriteControllerConfig {
@@ -31,6 +35,7 @@ impl Default for WriteControllerConfig {
             queue_capacity: 64,
             max_concurrent_writes: 4,
             max_inflight_segments: 16,
+            write_timeout: None, // No timeout by default
         }
     }
 }
@@ -74,6 +79,8 @@ pub enum WriteProcessError {
     Join(String),
     #[error("wal segment state error: {0}")]
     Segment(String),
+    #[error("write operation timed out after {0:?}")]
+    Timeout(Duration),
 }
 
 impl From<crate::IoError> for WriteProcessError {

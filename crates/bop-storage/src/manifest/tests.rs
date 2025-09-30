@@ -1,0 +1,992 @@
+//! Tests for the manifest module.
+
+use super::change_log::CHANGE_LOG_TRUNCATION_THRESHOLD;
+use super::operations::persist_pending_batch;
+use super::state::{RUNTIME_STATE_KEY, RUNTIME_STATE_VERSION};
+use super::worker::ManifestBatch;
+use super::*;
+use crate::flush::FlushSink;
+use crate::page_cache::{PageCache, PageCacheConfig};
+use heed::types::{SerdeBincode, U32};
+use std::path::PathBuf;
+use std::process;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+
+const TEST_COMPONENT: ComponentId = 1;
+
+#[test]
+fn lmdb_keys_iterate_in_numeric_order() {
+    fn chunk_record(name: &str) -> ChunkEntryRecord {
+        let mut record = ChunkEntryRecord::default();
+        record.file_name = name.to_string();
+        record.size_bytes = 1;
+        record
+    }
+
+    fn chunk_delta_record(base: ChunkId, delta_id: u16, name: &str) -> ChunkDeltaRecord {
+        let mut record = ChunkDeltaRecord::default();
+        record.base_chunk_id = base;
+        record.delta_id = delta_id;
+        record.delta_file = name.to_string();
+        record.size_bytes = 1;
+        record
+    }
+
+    fn snapshot_record(db_id: DbId, snapshot_id: SnapshotId, chunk_id: ChunkId) -> SnapshotRecord {
+        SnapshotRecord {
+            record_version: SNAPSHOT_RECORD_VERSION,
+            db_id,
+            snapshot_id,
+            created_at_epoch_ms: epoch_millis(),
+            source_generation: 0,
+            chunks: vec![SnapshotChunkRef::base(chunk_id)],
+        }
+    }
+
+    fn metric_delta(count: u64) -> MetricDelta {
+        MetricDelta {
+            count,
+            sum: count as f64,
+            min: Some(count as f64),
+            max: Some(count as f64),
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+    let mut txn = manifest.begin();
+    txn.put_wal_state(WalStateKey::new(2), WalStateRecord::default());
+    txn.put_wal_state(WalStateKey::new(1), WalStateRecord::default());
+
+    txn.upsert_chunk(ChunkKey::new(2, 5), chunk_record("chunk-2-5.bin"));
+    txn.upsert_chunk(ChunkKey::new(1, 7), chunk_record("chunk-1-7.bin"));
+    txn.upsert_chunk(ChunkKey::new(1, 3), chunk_record("chunk-1-3.bin"));
+
+    txn.upsert_chunk_delta(
+        ChunkDeltaKey::new(2, 5, 4),
+        chunk_delta_record(5, 4, "delta-2-5-4.bin"),
+    );
+    txn.upsert_chunk_delta(
+        ChunkDeltaKey::new(1, 3, 9),
+        chunk_delta_record(3, 9, "delta-1-3-9.bin"),
+    );
+    txn.upsert_chunk_delta(
+        ChunkDeltaKey::new(1, 3, 1),
+        chunk_delta_record(3, 1, "delta-1-3-1.bin"),
+    );
+
+    let snapshot_a = snapshot_record(2, 9, 5);
+    let snapshot_b = snapshot_record(1, 4, 3);
+    txn.publish_snapshot(snapshot_a);
+    txn.publish_snapshot(snapshot_b);
+
+    txn.register_wal_artifact(
+        WalArtifactKey::new(2, 10),
+        WalArtifactRecord::new(
+            2,
+            10,
+            WalArtifactKind::AppendOnlySegment {
+                start_page_index: 0,
+                end_page_index: 1,
+                size_bytes: 1,
+            },
+            PathBuf::from("artifact-2-10.wal"),
+        ),
+    );
+    txn.register_wal_artifact(
+        WalArtifactKey::new(1, 40),
+        WalArtifactRecord::new(
+            1,
+            40,
+            WalArtifactKind::AppendOnlySegment {
+                start_page_index: 0,
+                end_page_index: 1,
+                size_bytes: 1,
+            },
+            PathBuf::from("artifact-1-40.wal"),
+        ),
+    );
+
+    txn.upsert_pending_job(PendingJobKey::new(2, 200), 3);
+    txn.upsert_pending_job(PendingJobKey::new(1, 500), 5);
+    txn.upsert_pending_job(PendingJobKey::new(1, 100), 4);
+
+    txn.merge_metric(MetricKey::new(2, 7), metric_delta(1));
+    txn.merge_metric(MetricKey::new(1, 2), metric_delta(2));
+    txn.merge_metric(MetricKey::new(1, 5), metric_delta(3));
+
+    txn.commit().unwrap();
+
+    let (
+        wal_state_keys,
+        chunk_keys,
+        chunk_delta_keys,
+        snapshot_keys,
+        wal_artifact_keys,
+        pending_keys,
+        metric_keys,
+    ) = manifest
+        .read(|tables, txn| {
+            let wal_state = {
+                let mut cursor = tables.wal_state.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(WalStateKey::decode(raw));
+                }
+                out
+            };
+            let chunk = {
+                let mut cursor = tables.chunk_catalog.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(ChunkKey::decode(raw));
+                }
+                out
+            };
+            let chunk_delta = {
+                let mut cursor = tables.chunk_delta_index.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(ChunkDeltaKey::decode(raw));
+                }
+                out
+            };
+            let snapshots = {
+                let mut cursor = tables.snapshot_index.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(SnapshotKey::decode(raw));
+                }
+                out
+            };
+            let artifacts = {
+                let mut cursor = tables.wal_catalog.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(WalArtifactKey::decode(raw));
+                }
+                out
+            };
+            let pending = {
+                let mut cursor = tables.job_pending_index.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(PendingJobKey::decode(raw));
+                }
+                out
+            };
+            let metrics = {
+                let mut cursor = tables.metrics.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(MetricKey::decode(raw));
+                }
+                out
+            };
+            Ok((
+                wal_state,
+                chunk,
+                chunk_delta,
+                snapshots,
+                artifacts,
+                pending,
+                metrics,
+            ))
+        })
+        .unwrap();
+
+    assert_eq!(
+        wal_state_keys
+            .iter()
+            .map(|key| key.db_id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        chunk_keys
+            .iter()
+            .map(|key| (key.db_id, key.chunk_id))
+            .collect::<Vec<_>>(),
+        vec![(1, 3), (1, 7), (2, 5)]
+    );
+    assert_eq!(
+        chunk_delta_keys
+            .iter()
+            .map(|key| (key.db_id, key.chunk_id, key.generation))
+            .collect::<Vec<_>>(),
+        vec![(1, 3, 1), (1, 3, 9), (2, 5, 4)]
+    );
+    assert_eq!(
+        snapshot_keys
+            .iter()
+            .map(|key| (key.db_id, key.snapshot_id))
+            .collect::<Vec<_>>(),
+        vec![(1, 4), (2, 9)]
+    );
+    assert_eq!(
+        wal_artifact_keys
+            .iter()
+            .map(|key| (key.db_id, key.artifact_id))
+            .collect::<Vec<_>>(),
+        vec![(1, 40), (2, 10)]
+    );
+    assert_eq!(
+        pending_keys
+            .iter()
+            .map(|key| (key.db_id, key.job_kind))
+            .collect::<Vec<_>>(),
+        vec![(1, 100), (1, 500), (2, 200)]
+    );
+    assert_eq!(
+        metric_keys
+            .iter()
+            .map(|key| (key.scope, key.metric_kind))
+            .collect::<Vec<_>>(),
+        vec![(1, 2), (1, 5), (2, 7)]
+    );
+}
+
+#[test]
+fn change_log_records_commits_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+    for _ in 0..3 {
+        let mut txn = manifest.begin();
+        txn.bump_generation(TEST_COMPONENT, 1);
+        txn.commit().unwrap();
+    }
+
+    let cursor = manifest
+        .register_change_cursor(ChangeCursorStart::Oldest)
+        .unwrap();
+    assert_eq!(cursor.next_sequence, cursor.oldest_sequence);
+
+    let page = manifest.fetch_change_page(cursor.cursor_id, 10).unwrap();
+    assert_eq!(page.changes.len(), 3);
+    let sequences: Vec<_> = page.changes.iter().map(|change| change.sequence).collect();
+    assert_eq!(sequences, vec![1, 2, 3]);
+    for change in &page.changes {
+        assert!(matches!(
+            change.operations.as_slice(),
+            [ManifestOp::BumpGeneration { component, .. }]
+            if *component == TEST_COMPONENT
+        ));
+    }
+
+    let ack = manifest
+        .acknowledge_changes(cursor.cursor_id, page.next_sequence.saturating_sub(1))
+        .unwrap();
+    assert_eq!(ack.acked_sequence, 3);
+}
+
+#[test]
+fn batched_commits_have_ordered_change_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = ManifestOptions::default();
+    options.commit_latency = Duration::from_millis(80);
+    let manifest = Manifest::open(dir.path(), options).unwrap();
+
+    thread::scope(|scope| {
+        let manifest_ref = &manifest;
+        scope.spawn(move || {
+            let mut txn = manifest_ref.begin();
+            txn.bump_generation(TEST_COMPONENT, 1);
+            txn.commit().unwrap();
+        });
+
+        let mut txn = manifest.begin();
+        txn.bump_generation(TEST_COMPONENT, 1);
+        txn.commit().unwrap();
+    });
+
+    let diagnostics = manifest.diagnostics();
+    assert_eq!(diagnostics.committed_batches, 1);
+
+    let cursor = manifest
+        .register_change_cursor(ChangeCursorStart::Oldest)
+        .unwrap();
+    let page = manifest.fetch_change_page(cursor.cursor_id, 10).unwrap();
+    let sequences: Vec<_> = page.changes.iter().map(|change| change.sequence).collect();
+    assert_eq!(sequences, vec![1, 2]);
+}
+
+#[test]
+fn cursor_resume_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let cursor_id;
+    {
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+        let cursor = manifest
+            .register_change_cursor(ChangeCursorStart::Oldest)
+            .unwrap();
+        cursor_id = cursor.cursor_id;
+
+        for _ in 0..2 {
+            let mut txn = manifest.begin();
+            txn.bump_generation(TEST_COMPONENT, 1);
+            txn.commit().unwrap();
+        }
+
+        let page = manifest.fetch_change_page(cursor.cursor_id, 1).unwrap();
+        assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].sequence, 1);
+
+        manifest.acknowledge_changes(cursor.cursor_id, 1).unwrap();
+    }
+
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+    let page = manifest.fetch_change_page(cursor_id, 10).unwrap();
+    assert!(page.changes.first().is_some());
+    assert_eq!(page.changes[0].sequence, 2);
+
+    let ack = manifest
+        .acknowledge_changes(cursor_id, page.next_sequence.saturating_sub(1))
+        .unwrap();
+    assert_eq!(ack.acked_sequence, 2);
+}
+
+#[test]
+fn change_log_truncation_without_cursors() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+    let iterations = (CHANGE_LOG_TRUNCATION_THRESHOLD as usize) + 10;
+    for _ in 0..iterations {
+        let mut txn = manifest.begin();
+        txn.bump_generation(TEST_COMPONENT, 1);
+        txn.commit().unwrap();
+    }
+
+    let sequences = manifest
+        .read(|tables, txn| {
+            let mut iter = tables.change_log.iter(txn)?;
+            let mut seqs = Vec::new();
+            while let Some((seq, _)) = iter.next().transpose()? {
+                seqs.push(seq);
+            }
+            Ok(seqs)
+        })
+        .unwrap();
+
+    assert!(!sequences.is_empty());
+    assert!(
+        sequences[0] >= CHANGE_LOG_TRUNCATION_THRESHOLD + 1,
+        "expected truncation to advance oldest sequence"
+    );
+    assert!(
+        sequences.len() <= CHANGE_LOG_TRUNCATION_THRESHOLD as usize,
+        "log retained {} entries which exceeds threshold {}",
+        sequences.len(),
+        CHANGE_LOG_TRUNCATION_THRESHOLD
+    );
+}
+
+#[test]
+fn active_cursor_preserves_history_during_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+    let cursor = manifest
+        .register_change_cursor(ChangeCursorStart::Oldest)
+        .unwrap();
+
+    let iterations = (CHANGE_LOG_TRUNCATION_THRESHOLD as usize) + 10;
+    for _ in 0..iterations {
+        let mut txn = manifest.begin();
+        txn.bump_generation(TEST_COMPONENT, 1);
+        txn.commit().unwrap();
+    }
+
+    let sequences = manifest
+        .read(|tables, txn| {
+            let mut iter = tables.change_log.iter(txn)?;
+            let mut seqs = Vec::new();
+            while let Some((seq, _)) = iter.next().transpose()? {
+                seqs.push(seq);
+            }
+            Ok(seqs)
+        })
+        .unwrap();
+
+    assert_eq!(sequences.len(), iterations);
+    assert_eq!(sequences.first().copied(), Some(1));
+
+    let ack_target = (iterations as u64) / 2;
+    manifest
+        .acknowledge_changes(cursor.cursor_id, ack_target)
+        .unwrap();
+
+    let sequences_after_ack = manifest
+        .read(|tables, txn| {
+            let mut iter = tables.change_log.iter(txn)?;
+            let mut seqs = Vec::new();
+            while let Some((seq, _)) = iter.next().transpose()? {
+                seqs.push(seq);
+            }
+            Ok(seqs)
+        })
+        .unwrap();
+
+    assert_eq!(
+        sequences_after_ack.first().copied(),
+        Some(ack_target.saturating_add(1))
+    );
+    assert!(
+        sequences_after_ack.len() as u64 <= CHANGE_LOG_TRUNCATION_THRESHOLD,
+        "post-ack window exceeded truncation threshold"
+    );
+}
+
+#[test]
+fn truncation_respects_min_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+    for _ in 0..3 {
+        let mut txn = manifest.begin();
+        txn.bump_generation(TEST_COMPONENT, 1);
+        txn.commit().unwrap();
+    }
+
+    let cursor_a = manifest
+        .register_change_cursor(ChangeCursorStart::Oldest)
+        .unwrap();
+    let cursor_b = manifest
+        .register_change_cursor(ChangeCursorStart::Oldest)
+        .unwrap();
+
+    manifest.acknowledge_changes(cursor_a.cursor_id, 3).unwrap();
+    manifest.acknowledge_changes(cursor_b.cursor_id, 1).unwrap();
+
+    let sequences = manifest
+        .read(|tables, txn| {
+            let mut iter = tables.change_log.iter(txn)?;
+            let mut seqs = Vec::new();
+            while let Some((seq, _)) = iter.next().transpose()? {
+                seqs.push(seq);
+            }
+            Ok(seqs)
+        })
+        .unwrap();
+    assert_eq!(sequences, vec![2, 3]);
+
+    manifest.acknowledge_changes(cursor_b.cursor_id, 3).unwrap();
+
+    let sequences = manifest
+        .read(|tables, txn| {
+            let mut iter = tables.change_log.iter(txn)?;
+            let mut seqs = Vec::new();
+            while let Some((seq, _)) = iter.next().transpose()? {
+                seqs.push(seq);
+            }
+            Ok(seqs)
+        })
+        .unwrap();
+    assert!(sequences.is_empty());
+}
+
+#[test]
+fn cursor_start_sequence_clamps_to_available_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+    for _ in 0..3 {
+        let mut txn = manifest.begin();
+        txn.bump_generation(TEST_COMPONENT, 1);
+        txn.commit().unwrap();
+    }
+
+    let cursor = manifest
+        .register_change_cursor(ChangeCursorStart::Sequence(2))
+        .unwrap();
+    assert_eq!(cursor.next_sequence, 2);
+
+    manifest.acknowledge_changes(cursor.cursor_id, 3).unwrap();
+
+    for _ in 0..2 {
+        let mut txn = manifest.begin();
+        txn.bump_generation(TEST_COMPONENT, 1);
+        txn.commit().unwrap();
+    }
+
+    let cursor_b = manifest
+        .register_change_cursor(ChangeCursorStart::Sequence(1))
+        .unwrap();
+    // All prior entries were truncated, so the cursor should start at the new oldest sequence.
+    assert_eq!(cursor_b.next_sequence, cursor_b.oldest_sequence);
+    let page = manifest.fetch_change_page(cursor_b.cursor_id, 10).unwrap();
+    assert!(page.changes.first().is_some());
+    assert_eq!(page.changes[0].sequence, cursor_b.next_sequence);
+}
+
+#[test]
+fn wait_for_change_unblocks_on_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Arc::new(Manifest::open(dir.path(), ManifestOptions::default()).unwrap());
+
+    let waiter = Arc::clone(&manifest);
+    let handle = thread::spawn(move || {
+        waiter
+            .wait_for_change(0, Some(Instant::now() + Duration::from_secs(1)))
+            .unwrap()
+    });
+
+    thread::sleep(Duration::from_millis(50));
+    let mut txn = manifest.begin();
+    txn.bump_generation(TEST_COMPONENT, 1);
+    txn.commit().unwrap();
+
+    let latest = handle.join().unwrap();
+    assert!(latest >= 1);
+}
+
+#[test]
+fn batching_coalesces_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = ManifestOptions::default();
+    options.commit_latency = Duration::from_millis(80);
+    let manifest = Manifest::open(dir.path(), options).unwrap();
+
+    thread::scope(|scope| {
+        let manifest_ref = &manifest;
+        scope.spawn(move || {
+            let mut txn = manifest_ref.begin();
+            txn.bump_generation(TEST_COMPONENT, 1);
+            txn.commit().unwrap();
+        });
+
+        let mut txn = manifest.begin();
+        txn.bump_generation(TEST_COMPONENT, 1);
+        txn.commit().unwrap();
+    });
+
+    let diagnostics = manifest.diagnostics();
+    assert_eq!(diagnostics.committed_batches, 1);
+}
+
+#[test]
+fn pending_batches_replay_on_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+        let batch = ManifestBatch {
+            ops: vec![ManifestOp::BumpGeneration {
+                component: TEST_COMPONENT,
+                increment: 1,
+                timestamp_ms: epoch_millis(),
+            }],
+        };
+        persist_pending_batch(&manifest.env, &manifest.tables, 1, &batch).unwrap();
+    }
+
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+    let start = Instant::now();
+    while manifest.current_generation(TEST_COMPONENT).unwrap_or(0) < 1 {
+        if start.elapsed() > Duration::from_secs(1) {
+            panic!("pending batches were not applied on restart");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn snapshot_refcounts_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+    let chunk_key = ChunkKey::new(7, 42);
+    let mut chunk = ChunkEntryRecord::default();
+    chunk.generation = 1;
+    chunk.size_bytes = 1024;
+    chunk.file_name = String::from("chunk-42.dat");
+
+    let mut txn = manifest.begin();
+    txn.upsert_chunk(chunk_key, chunk.clone());
+    txn.commit().unwrap();
+
+    let snapshot = SnapshotRecord {
+        record_version: SNAPSHOT_RECORD_VERSION,
+        db_id: 7,
+        snapshot_id: 1,
+        created_at_epoch_ms: epoch_millis(),
+        source_generation: 1,
+        chunks: vec![SnapshotChunkRef::base(42)],
+    };
+
+    let mut txn = manifest.begin();
+    txn.publish_snapshot(snapshot.clone());
+    txn.commit().unwrap();
+
+    let refcount = manifest
+        .read(|tables, txn| {
+            Ok(tables
+                .gc_refcounts
+                .get(txn, &(42u64))?
+                .map(|record| record.strong)
+                .unwrap_or(0))
+        })
+        .unwrap();
+    assert_eq!(refcount, 1);
+
+    let mut txn = manifest.begin();
+    txn.drop_snapshot(snapshot.key());
+    txn.commit().unwrap();
+
+    let refcount = manifest
+        .read(|tables, txn| {
+            Ok(tables
+                .gc_refcounts
+                .get(txn, &(42u64))?
+                .map(|record| record.strong)
+                .unwrap_or(0))
+        })
+        .unwrap();
+    assert_eq!(refcount, 0);
+}
+
+#[test]
+fn retention_clears_refcount_on_last_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+    let chunk_key = ChunkKey::new(9, 100);
+    let mut chunk_entry = ChunkEntryRecord::default();
+    chunk_entry.file_name = String::from("chunk-100.bin");
+
+    let mut txn = manifest.begin();
+    txn.upsert_chunk(chunk_key, chunk_entry.clone());
+    txn.commit().unwrap();
+
+    let snapshot_a = SnapshotRecord {
+        record_version: SNAPSHOT_RECORD_VERSION,
+        db_id: 9,
+        snapshot_id: 1,
+        created_at_epoch_ms: epoch_millis(),
+        source_generation: 1,
+        chunks: vec![SnapshotChunkRef::base(100)],
+    };
+    let snapshot_b = SnapshotRecord {
+        record_version: SNAPSHOT_RECORD_VERSION,
+        db_id: 9,
+        snapshot_id: 2,
+        created_at_epoch_ms: epoch_millis(),
+        source_generation: 1,
+        chunks: vec![SnapshotChunkRef::base(100)],
+    };
+
+    let mut txn = manifest.begin();
+    txn.publish_snapshot(snapshot_a.clone());
+    txn.commit().unwrap();
+    let mut txn = manifest.begin();
+    txn.publish_snapshot(snapshot_b.clone());
+    txn.commit().unwrap();
+
+    let refcount = manifest
+        .read(|tables, txn| {
+            Ok(tables
+                .gc_refcounts
+                .get(txn, &(100u64))?
+                .map(|record| record.strong)
+                .unwrap_or(0))
+        })
+        .unwrap();
+    assert_eq!(refcount, 2);
+
+    let mut txn = manifest.begin();
+    txn.drop_snapshot(snapshot_a.key());
+    txn.commit().unwrap();
+    let refcount = manifest
+        .read(|tables, txn| {
+            Ok(tables
+                .gc_refcounts
+                .get(txn, &(100u64))?
+                .map(|record| record.strong)
+                .unwrap_or(0))
+        })
+        .unwrap();
+    assert_eq!(refcount, 1);
+
+    let mut txn = manifest.begin();
+    txn.drop_snapshot(snapshot_b.key());
+    txn.commit().unwrap();
+    let refcount = manifest
+        .read(|tables, txn| {
+            Ok(tables
+                .gc_refcounts
+                .get(txn, &(100u64))?
+                .map(|record| record.strong)
+                .unwrap_or(0))
+        })
+        .unwrap();
+    assert_eq!(refcount, 0);
+}
+
+#[test]
+fn fork_db_clones_state_and_refcounts() {
+    const SOURCE_DB: DbId = 11;
+    const TARGET_DB: DbId = 12;
+    const CHUNK_ID: ChunkId = 77;
+
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+    let mut source_descriptor = DbDescriptorRecord::default();
+    source_descriptor.name = "source".into();
+
+    let mut target_descriptor = DbDescriptorRecord::default();
+    target_descriptor.name = "fork".into();
+
+    let mut chunk_entry = ChunkEntryRecord::default();
+    chunk_entry.file_name = "chunk-77.bin".into();
+    chunk_entry.generation = 3;
+    chunk_entry.size_bytes = 4_096;
+
+    let mut wal_state = WalStateRecord::default();
+    wal_state.last_sealed_segment = 2;
+    wal_state.flush_gate_state.active_job_id = Some(99);
+
+    let wal_artifact_key = WalArtifactKey::new(SOURCE_DB, 42);
+    let wal_artifact = WalArtifactRecord::new(
+        SOURCE_DB,
+        42,
+        WalArtifactKind::AppendOnlySegment {
+            start_page_index: 0,
+            end_page_index: 1_024,
+            size_bytes: 1_024,
+        },
+        PathBuf::from("segment-42.wal"),
+    );
+
+    let mut txn = manifest.begin();
+    txn.put_db(SOURCE_DB, source_descriptor.clone());
+    txn.put_wal_state(WalStateKey::new(SOURCE_DB), wal_state.clone());
+    txn.upsert_chunk(ChunkKey::new(SOURCE_DB, CHUNK_ID), chunk_entry.clone());
+    txn.register_wal_artifact(wal_artifact_key, wal_artifact.clone());
+    txn.adjust_refcount(CHUNK_ID, 1);
+    txn.commit().unwrap();
+
+    let before_refcount = manifest
+        .read(|tables, txn| {
+            Ok(tables
+                .gc_refcounts
+                .get(txn, &(CHUNK_ID as u64))?
+                .map(|record| record.strong)
+                .unwrap_or(0))
+        })
+        .unwrap();
+    assert_eq!(before_refcount, 1);
+
+    manifest
+        .fork_db(SOURCE_DB, TARGET_DB, target_descriptor.clone())
+        .unwrap();
+
+    manifest
+        .read(|tables, txn| {
+            let chunk_key = ChunkKey::new(TARGET_DB, CHUNK_ID).encode();
+            assert!(tables.chunk_catalog.get(txn, &chunk_key)?.is_some());
+
+            let wal_key = WalStateKey::new(TARGET_DB).encode();
+            let state = tables.wal_state.get(txn, &wal_key)?.unwrap();
+            assert_eq!(state.flush_gate_state.active_job_id, None);
+
+            let artifact_key = WalArtifactKey::new(TARGET_DB, 42).encode();
+            let artifact = tables.wal_catalog.get(txn, &artifact_key)?.unwrap();
+            assert_eq!(artifact.db_id, TARGET_DB);
+            assert_eq!(artifact.artifact_id, 42);
+
+            Ok(())
+        })
+        .unwrap();
+
+    let after_refcount = manifest
+        .read(|tables, txn| {
+            Ok(tables
+                .gc_refcounts
+                .get(txn, &(CHUNK_ID as u64))?
+                .map(|record| record.strong)
+                .unwrap_or(0))
+        })
+        .unwrap();
+    assert_eq!(after_refcount, 2);
+}
+
+#[test]
+fn change_page_hits_cache_on_second_fetch() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Arc::new(PageCache::new(PageCacheConfig {
+        capacity_bytes: Some(16 * 1024),
+    }));
+    let mut options = ManifestOptions::default();
+    options.page_cache = Some(cache.clone());
+    let manifest = Manifest::open(dir.path(), options).unwrap();
+
+    {
+        let mut txn = manifest.begin();
+        txn.bump_generation(TEST_COMPONENT, 1);
+        txn.commit().unwrap();
+    }
+
+    let cursor = manifest
+        .register_change_cursor(ChangeCursorStart::Oldest)
+        .unwrap();
+    let page = manifest.fetch_change_page(cursor.cursor_id, 10).unwrap();
+    assert_eq!(page.changes.len(), 1);
+
+    let metrics_before = cache.metrics();
+    let _ = manifest.fetch_change_page(cursor.cursor_id, 10).unwrap();
+    let metrics_after = cache.metrics();
+    assert!(metrics_after.hits > metrics_before.hits);
+
+    let diagnostics = manifest.diagnostics();
+    assert_eq!(diagnostics.page_cache_hits, 2);
+    assert_eq!(diagnostics.page_cache_misses, 0);
+
+    let cache_metrics = manifest.page_cache_metrics().unwrap();
+    assert_eq!(cache_metrics.hits, diagnostics.page_cache_hits);
+    assert_eq!(cache_metrics.misses, diagnostics.page_cache_misses);
+}
+
+#[test]
+fn open_sets_runtime_state_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = ManifestOptions::default();
+
+    let manifest = Manifest::open(dir.path(), options).expect("open manifest");
+
+    assert!(!manifest.crash_detected());
+    let runtime = manifest.runtime_state();
+    assert_eq!(runtime.record_version, RUNTIME_STATE_VERSION);
+    assert_eq!(runtime.pid, process::id());
+}
+
+#[test]
+fn manifest_flush_sink_updates_state() {
+    use crate::flush::{FlushSinkRequest, FlushSinkResponder, FlushTask};
+    use crate::io::{IoFile, IoResult, IoVec, IoVecMut};
+    use crate::wal::WalSegment;
+    use crossfire::mpsc;
+
+    #[derive(Default)]
+    struct NoopIoFile;
+
+    impl IoFile for NoopIoFile {
+        fn readv_at(&self, _offset: u64, _bufs: &mut [IoVecMut<'_>]) -> IoResult<usize> {
+            Ok(0)
+        }
+
+        fn writev_at(&self, _offset: u64, bufs: &[IoVec<'_>]) -> IoResult<usize> {
+            Ok(bufs.iter().map(IoVec::len).sum())
+        }
+
+        fn allocate(&self, _offset: u64, _len: u64) -> IoResult<()> {
+            Ok(())
+        }
+
+        fn flush(&self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = Arc::new(Manifest::open(dir.path(), ManifestOptions::default()).unwrap());
+    let sink = ManifestFlushSink::new(manifest.clone(), 42);
+    let segment = Arc::new(WalSegment::new(Arc::new(NoopIoFile::default()), 0, 0));
+    let (tx, rx) = mpsc::bounded_blocking(1);
+    let sender = Arc::new(tx);
+
+    let responder = FlushSinkResponder::new(sender.clone(), segment.clone(), 0, 512);
+    let request = FlushSinkRequest {
+        segment: segment.clone(),
+        target: 512,
+        responder: responder.for_request(),
+    };
+    sink.apply_flush(request).expect("apply flush");
+    match rx.recv().expect("sink ack") {
+        FlushTask::SinkAck { result, .. } => assert!(result.is_ok()),
+        other => panic!("unexpected flush task: {:?}", other),
+    }
+
+    let state = manifest
+        .read(|tables, txn| {
+            Ok(tables
+                .wal_state
+                .get(txn, &WalStateKey::new(42).encode())?
+                .unwrap())
+        })
+        .expect("wal state");
+    assert_eq!(state.last_applied_lsn, 512);
+    assert!(state.flush_gate_state.last_success_at_epoch_ms.is_some());
+    assert!(state.flush_gate_state.errored_since_epoch_ms.is_none());
+
+    let responder = FlushSinkResponder::new(sender.clone(), segment.clone(), 0, 256);
+    let request = FlushSinkRequest {
+        segment: segment.clone(),
+        target: 256,
+        responder: responder.for_request(),
+    };
+    sink.apply_flush(request).expect("apply flush");
+    match rx.recv().expect("sink ack") {
+        FlushTask::SinkAck { result, .. } => assert!(result.is_ok()),
+        other => panic!("unexpected flush task: {:?}", other),
+    }
+    let state = manifest
+        .read(|tables, txn| {
+            Ok(tables
+                .wal_state
+                .get(txn, &WalStateKey::new(42).encode())?
+                .unwrap())
+        })
+        .expect("wal state");
+    assert_eq!(state.last_applied_lsn, 512);
+}
+
+fn open_detects_leftover_runtime_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = ManifestOptions::default();
+
+    {
+        let manifest = Manifest::open(dir.path(), options.clone()).expect("first open");
+        assert!(!manifest.crash_detected());
+    }
+
+    {
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(options.map_size)
+                .max_dbs(options.max_dbs)
+                .open(dir.path())
+                .expect("env open")
+        };
+
+        let mut txn = env.write_txn().expect("write txn");
+        let runtime_db = env
+            .create_database::<U32<heed::byteorder::BigEndian>, SerdeBincode<RuntimeStateRecord>>(
+                &mut txn,
+                Some("runtime_state"),
+            )
+            .expect("runtime db");
+        let record = RuntimeStateRecord {
+            record_version: RUNTIME_STATE_VERSION,
+            instance_id: Uuid::new_v4(),
+            pid: 9999,
+            started_at_epoch_ms: epoch_millis(),
+        };
+        runtime_db
+            .put(&mut txn, &RUNTIME_STATE_KEY, &record)
+            .expect("insert runtime state");
+        txn.commit().expect("commit runtime state");
+    }
+
+    let manifest = Manifest::open(dir.path(), options).expect("reopen manifest");
+    assert!(manifest.crash_detected());
+    assert_eq!(
+        manifest.runtime_state().record_version,
+        RUNTIME_STATE_VERSION
+    );
+}
