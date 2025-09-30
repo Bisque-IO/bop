@@ -164,7 +164,6 @@ impl ManifestRuntimeState {
             tables
                 .runtime_state
                 .put(&mut txn, &RUNTIME_STATE_KEY, &record)?;
-            txn.commit()?;
             existing.is_some()
         };
 
@@ -178,7 +177,6 @@ impl ManifestRuntimeState {
     fn clear(&self, env: &Env, tables: &ManifestTables) -> Result<(), ManifestError> {
         let mut txn = env.write_txn()?;
         tables.runtime_state.delete(&mut txn, &self.key)?;
-        txn.commit()?;
         Ok(())
     }
 }
@@ -354,6 +352,7 @@ pub(crate) struct ManifestTables {
         Database<U32<heed::byteorder::BigEndian>, SerdeBincode<RemoteNamespaceRecord>>,
     change_log: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<ManifestChangeRecord>>,
     change_cursors: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<ManifestCursorRecord>>,
+    pending_batches: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<PendingBatchRecord>>,
     runtime_state: Database<U32<heed::byteorder::BigEndian>, SerdeBincode<RuntimeStateRecord>>,
 }
 
@@ -427,6 +426,11 @@ impl Manifest {
                     U64<heed::byteorder::BigEndian>,
                     SerdeBincode<ManifestCursorRecord>,
                 >(&mut txn, Some("change_cursors"))?;
+            let pending_batches = env
+                .create_database::<
+                    U64<heed::byteorder::BigEndian>,
+                    SerdeBincode<PendingBatchRecord>,
+                >(&mut txn, Some("pending_batches"))?;
             let runtime_state = env
                 .create_database::<U32<heed::byteorder::BigEndian>, SerdeBincode<RuntimeStateRecord>>(
                     &mut txn,
@@ -449,6 +453,7 @@ impl Manifest {
                 remote_namespaces,
                 change_log,
                 change_cursors,
+                pending_batches,
                 runtime_state,
             })
         };
@@ -468,6 +473,8 @@ impl Manifest {
             .unwrap_or(0);
         let job_id_counter = Arc::new(AtomicU64::new(job_seed));
         let diagnostics = Arc::new(ManifestDiagnostics::default());
+        let (pending_replay, last_pending_id) = load_pending_batches(&env, &tables)?;
+        let batch_journal_counter = Arc::new(AtomicU64::new(last_pending_id));
         let mut change_bootstrap = load_change_state(&env, &tables)?;
         apply_startup_truncation(&env, &tables, &mut change_bootstrap.state)?;
         if let (Some(cache), Some(object_id)) = (page_cache.as_ref(), change_log_cache_object_id) {
@@ -500,6 +507,8 @@ impl Manifest {
         let worker_change_signal = change_signal.clone();
         let worker_cursor_counter = cursor_id_counter.clone();
         let worker_initial_change_state = initial_change_state.clone();
+        let worker_pending_replay = pending_replay;
+        let worker_batch_counter = batch_journal_counter.clone();
         let commit_latency = options.commit_latency;
         let worker_page_cache = page_cache.clone();
         let worker_cache_object_id = change_log_cache_object_id;
@@ -521,6 +530,8 @@ impl Manifest {
                     command_rx,
                     initial_generations,
                     worker_initial_change_state,
+                    worker_pending_replay,
+                    worker_batch_counter,
                     commit_latency,
                     worker_page_cache,
                     worker_cache_object_id,
@@ -943,6 +954,31 @@ fn load_generations(
     Ok(map)
 }
 
+fn load_pending_batches(
+    env: &Env,
+    tables: &ManifestTables,
+) -> Result<(Vec<PendingCommit>, PendingBatchId), ManifestError> {
+    let txn = env.read_txn()?;
+    let mut entries = Vec::new();
+    let mut iter = tables.pending_batches.iter(&txn)?;
+    let mut max_id = 0;
+    while let Some((id, record)) = iter.next().transpose()? {
+        if record.record_version != PENDING_BATCH_RECORD_VERSION {
+            return Err(ManifestError::InvariantViolation(format!(
+                "unknown pending batch version: {}",
+                record.record_version
+            )));
+        }
+        max_id = max_id.max(id);
+        entries.push(PendingCommit {
+            id,
+            batch: record.batch.clone(),
+            completion: None,
+        });
+    }
+    Ok((entries, max_id))
+}
+
 struct ChangeStateBootstrap {
     state: ChangeLogState,
     next_cursor_id: ChangeCursorId,
@@ -1277,6 +1313,23 @@ enum ManifestCommand {
 }
 
 #[derive(Debug)]
+struct PendingCommit {
+    id: PendingBatchId,
+    batch: ManifestBatch,
+    completion: Option<SyncSender<Result<CommitReceipt, ManifestError>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingBatchRecord {
+    record_version: u16,
+    batch: ManifestBatch,
+}
+
+type PendingBatchId = u64;
+
+const PENDING_BATCH_RECORD_VERSION: u16 = 1;
+
+#[derive(Debug)]
 struct CursorRegistrationRequest {
     start: ChangeCursorStart,
     responder: SyncSender<Result<ChangeCursorSnapshot, ManifestError>>,
@@ -1289,7 +1342,7 @@ struct CursorAckRequest {
     responder: SyncSender<Result<ChangeCursorSnapshot, ManifestError>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManifestBatch {
     ops: Vec<ManifestOp>,
 }
@@ -1392,16 +1445,18 @@ fn worker_loop(
     command_rx: Receiver<ManifestCommand>,
     mut generations: HashMap<ComponentId, Generation>,
     mut change_state: ChangeLogState,
+    mut pending: Vec<PendingCommit>,
+    batch_journal_counter: Arc<AtomicU64>,
     commit_latency: Duration,
     page_cache: Option<Arc<PageCache<PageCacheKey>>>,
     page_cache_object_id: Option<u64>,
 ) {
     let mut waiters: HashMap<ComponentId, VecDeque<WaitEntry>> = HashMap::new();
-    let mut pending: Vec<(
-        ManifestBatch,
-        SyncSender<Result<CommitReceipt, ManifestError>>,
-    )> = Vec::new();
-    let mut deadline: Option<Instant> = None;
+    let mut deadline: Option<Instant> = if pending.is_empty() {
+        None
+    } else {
+        Some(Instant::now())
+    };
     let mut shutdown = false;
     let mut persisted_job_counter = generations.get(&JOB_ID_COMPONENT).copied().unwrap_or(0);
 
@@ -1437,7 +1492,16 @@ fn worker_loop(
         if let Some(command) = command {
             match command {
                 ManifestCommand::Apply { batch, completion } => {
-                    pending.push((batch, completion));
+                    let batch_id = batch_journal_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    if let Err(err) = persist_pending_batch(&env, &tables, batch_id, &batch) {
+                        let _ = completion.send(Err(err));
+                        continue;
+                    }
+                    pending.push(PendingCommit {
+                        id: batch_id,
+                        batch,
+                        completion: Some(completion),
+                    });
                     if deadline.is_none() {
                         deadline = Some(Instant::now() + commit_latency);
                     }
@@ -1500,7 +1564,7 @@ fn worker_loop(
             match commit_pending(
                 &env,
                 &tables,
-                &mut pending,
+                pending.as_slice(),
                 &mut generations,
                 &mut persisted_job_counter,
                 &diagnostics,
@@ -1509,10 +1573,12 @@ fn worker_loop(
                 page_cache_object_id,
             ) {
                 Ok(snapshots) => {
-                    for ((_, completion), snapshot) in pending.iter().zip(snapshots.into_iter()) {
-                        let _ = completion.send(Ok(CommitReceipt {
-                            generations: snapshot,
-                        }));
+                    for (entry, snapshot) in pending.iter().zip(snapshots.into_iter()) {
+                        if let Some(completion) = &entry.completion {
+                            let _ = completion.send(Ok(CommitReceipt {
+                                generations: snapshot,
+                            }));
+                        }
                     }
                     pending.clear();
                     deadline = None;
@@ -1528,8 +1594,11 @@ fn worker_loop(
                 }
                 Err(err) => {
                     let err_msg = format!("{err}");
-                    for (_, completion) in pending.drain(..) {
-                        let _ = completion.send(Err(ManifestError::CommitFailed(err_msg.clone())));
+                    for entry in pending.drain(..) {
+                        if let Some(completion) = entry.completion {
+                            let _ =
+                                completion.send(Err(ManifestError::CommitFailed(err_msg.clone())));
+                        }
                     }
                     break;
                 }
@@ -1601,13 +1670,26 @@ fn expire_waiters(
         !queue.is_empty()
     });
 }
+fn persist_pending_batch(
+    env: &Env,
+    tables: &ManifestTables,
+    id: PendingBatchId,
+    batch: &ManifestBatch,
+) -> Result<(), ManifestError> {
+    let mut txn = env.write_txn()?;
+    let record = PendingBatchRecord {
+        record_version: PENDING_BATCH_RECORD_VERSION,
+        batch: batch.clone(),
+    };
+    tables.pending_batches.put(&mut txn, &id, &record)?;
+    txn.commit()?;
+    Ok(())
+}
+
 fn commit_pending(
     env: &Env,
     tables: &ManifestTables,
-    pending: &mut Vec<(
-        ManifestBatch,
-        SyncSender<Result<CommitReceipt, ManifestError>>,
-    )>,
+    pending: &[PendingCommit],
     generations: &mut HashMap<ComponentId, Generation>,
     persisted_job_counter: &mut JobId,
     diagnostics: &ManifestDiagnostics,
@@ -1620,7 +1702,8 @@ fn commit_pending(
     let mut working_generations = generations.clone();
     let config = bincode::config::standard();
 
-    for (batch, _) in pending.iter() {
+    for entry in pending.iter() {
+        let batch = &entry.batch;
         let before_generations = working_generations.clone();
         apply_batch(
             &mut txn,
@@ -1652,6 +1735,7 @@ fn commit_pending(
                 );
             }
         }
+        tables.pending_batches.delete(&mut txn, &entry.id)?;
         snapshots.push(working_generations.clone());
     }
 
@@ -3256,6 +3340,31 @@ mod tests {
 
         let diagnostics = manifest.diagnostics();
         assert_eq!(diagnostics.committed_batches, 1);
+    }
+
+    #[test]
+    fn pending_batches_replay_on_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+            let batch = ManifestBatch {
+                ops: vec![ManifestOp::BumpGeneration {
+                    component: TEST_COMPONENT,
+                    increment: 1,
+                    timestamp_ms: epoch_millis(),
+                }],
+            };
+            persist_pending_batch(&manifest.env, &manifest.tables, 1, &batch).unwrap();
+        }
+
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+        let start = Instant::now();
+        while manifest.current_generation(TEST_COMPONENT).unwrap_or(0) < 1 {
+            if start.elapsed() > Duration::from_secs(1) {
+                panic!("pending batches were not applied on restart");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

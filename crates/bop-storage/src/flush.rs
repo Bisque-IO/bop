@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use crossfire::{MTx, Rx, mpsc};
 use thiserror::Error;
+use tokio::time::sleep;
 
 use crate::runtime::StorageRuntime;
 use crate::wal::{WalSegment, WalSegmentError};
@@ -21,6 +22,7 @@ pub struct FlushControllerConfig {
     pub initial_backoff: Duration,
     pub max_backoff: Duration,
     pub max_concurrent_flushes: usize,
+    pub max_retry_attempts: u32,
 }
 
 impl Default for FlushControllerConfig {
@@ -30,6 +32,7 @@ impl Default for FlushControllerConfig {
             initial_backoff: Duration::from_millis(10),
             max_backoff: Duration::from_secs(1),
             max_concurrent_flushes: 2,
+            max_retry_attempts: 5,
         }
     }
 }
@@ -67,6 +70,8 @@ pub enum FlushProcessError {
     Join(String),
     #[error("wal segment state error: {0}")]
     Segment(String),
+    #[error("flush retry limit exceeded after {0} attempts")]
+    RetryLimitExceeded(u32),
 }
 
 impl From<crate::IoError> for FlushProcessError {
@@ -250,23 +255,31 @@ impl FlushControllerState {
         Ok(())
     }
 
-    fn schedule_retry(self: &Arc<Self>, segment: Arc<WalSegment>, attempt: u32) {
+    fn schedule_retry(self: &Arc<Self>, segment: Arc<WalSegment>, attempt: u32) -> bool {
         if self.is_shutdown() || self.runtime.is_shutdown() {
-            return;
+            return false;
+        }
+
+        if attempt > self.config.max_retry_attempts {
+            let error = FlushProcessError::RetryLimitExceeded(self.config.max_retry_attempts);
+            self.metrics.record_failure(&error);
+            return false;
         }
 
         self.metrics.record_retry();
         let backoff = self.backoff_duration(attempt);
         let state = Arc::downgrade(self);
-        thread::spawn(move || {
+        let handle = self.runtime.handle();
+        handle.spawn(async move {
             if backoff > Duration::ZERO {
-                thread::sleep(backoff);
+                sleep(backoff).await;
             }
 
             if let Some(state) = state.upgrade() {
                 let _ = state.push_task(segment, attempt);
             }
         });
+        true
     }
 
     fn backoff_duration(&self, attempt: u32) -> Duration {
@@ -579,9 +592,7 @@ fn flush_worker_main(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>) 
                         Ok(()) => {
                             state.metrics.record_completed();
                             segment.clear_flush_queue();
-                            if !state.runtime.is_shutdown()
-                                && segment.pending_flush_target() > 0
-                            {
+                            if !state.runtime.is_shutdown() && segment.pending_flush_target() > 0 {
                                 let _ = state.push_task(segment.clone(), 0);
                             }
                         }
@@ -848,6 +859,17 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct AlwaysFailFlushSink;
+
+    impl FlushSink for AlwaysFailFlushSink {
+        fn apply_flush(&self, request: FlushSinkRequest) -> Result<(), FlushSinkError> {
+            let FlushSinkRequest { responder, .. } = request;
+            responder.fail("permanent failure".into());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
     struct AsyncAckFlushSink {
         calls: Mutex<Vec<u64>>,
         responders: Mutex<Vec<FlushSinkResponder>>,
@@ -969,6 +991,35 @@ mod tests {
         assert_eq!(segment.durable_size(), 300);
         assert_eq!(io.flush_count(), 2);
         assert_eq!(sink.calls(), vec![300]);
+        assert!(controller.snapshot().failed >= 1);
+
+        controller.shutdown();
+    }
+
+    #[test]
+    fn retry_limit_is_enforced() {
+        let runtime = runtime();
+        let io = Arc::new(MockIoFile::default());
+        let sink = Arc::new(AlwaysFailFlushSink::default());
+        let mut config = FlushControllerConfig::default();
+        config.initial_backoff = Duration::from_millis(0);
+        config.max_backoff = Duration::from_millis(0);
+        config.max_retry_attempts = 2;
+        let controller = FlushController::new(runtime, sink.clone(), config.clone());
+        let segment = wal_segment(io.clone(), 1024);
+
+        segment.mark_written(128).unwrap();
+        assert!(segment.request_flush(128).unwrap());
+
+        controller.enqueue(segment.clone()).unwrap();
+
+        wait_for(
+            || controller.snapshot().retries == config.max_retry_attempts as u64,
+            Duration::from_secs(2),
+        );
+
+        wait_for(|| !segment.is_flush_enqueued(), Duration::from_secs(1));
+        assert_eq!(segment.durable_size(), 0);
         assert!(controller.snapshot().failed >= 1);
 
         controller.shutdown();

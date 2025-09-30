@@ -18,6 +18,7 @@ use crate::wal::{WalSegment, WalSegmentError, WriteBatch, WriteChunk};
 pub struct WriteControllerConfig {
     pub queue_capacity: usize,
     pub max_concurrent_writes: usize,
+    pub max_inflight_segments: usize,
 }
 
 impl Default for WriteControllerConfig {
@@ -25,6 +26,7 @@ impl Default for WriteControllerConfig {
         Self {
             queue_capacity: 64,
             max_concurrent_writes: 4,
+            max_inflight_segments: 16,
         }
     }
 }
@@ -33,6 +35,8 @@ impl Default for WriteControllerConfig {
 #[derive(Debug, Clone)]
 pub struct WriteControllerSnapshot {
     pub pending_queue_depth: usize,
+    pub inflight_queue_depth: usize,
+    pub peak_inflight_queue_depth: usize,
     pub enqueued: u64,
     pub completed: u64,
     pub failed: u64,
@@ -44,6 +48,8 @@ pub struct WriteControllerSnapshot {
 pub enum WriteScheduleError {
     #[error("write controller is shutdown")]
     Closed,
+    #[error("write controller backpressure limit reached")]
+    Backpressure,
 }
 
 /// Errors surfaced while processing staged write batches.
@@ -89,9 +95,14 @@ impl WriteController {
     pub(crate) fn new(runtime: Arc<StorageRuntime>, config: WriteControllerConfig) -> Self {
         let capacity = config.queue_capacity.max(1);
         let (sender, receiver) = mpsc::bounded_blocking(capacity);
+        let inflight_limit = config
+            .max_inflight_segments
+            .max(config.max_concurrent_writes)
+            .max(1);
         let state = Arc::new(WriteControllerState::new(
             runtime,
             config.max_concurrent_writes,
+            inflight_limit,
         ));
         let worker = spawn_write_worker(receiver, sender.clone(), state.clone());
         Self {
@@ -129,9 +140,12 @@ impl WriteController {
             return Err(WriteScheduleError::Closed);
         }
 
+        self.state.try_acquire_slot()?;
+
         let depth = self.state.pending.fetch_add(1, Ordering::AcqRel) + 1;
         if !segment.try_enqueue_write(depth) {
             self.state.pending.fetch_sub(1, Ordering::AcqRel);
+            self.state.release_slot();
             return Ok(());
         }
 
@@ -143,6 +157,7 @@ impl WriteController {
             .is_err()
         {
             self.state.pending.fetch_sub(1, Ordering::AcqRel);
+            self.state.release_slot();
             segment.clear_write_queue();
             return Err(WriteScheduleError::Closed);
         }
@@ -161,19 +176,26 @@ impl Drop for WriteController {
 struct WriteControllerState {
     runtime: Arc<StorageRuntime>,
     pending: AtomicUsize,
+    inflight: AtomicUsize,
+    peak_inflight: AtomicUsize,
     metrics: WriteControllerMetrics,
     shutdown: AtomicBool,
     max_concurrent: usize,
+    inflight_limit: usize,
 }
 
 impl WriteControllerState {
-    fn new(runtime: Arc<StorageRuntime>, max_concurrent: usize) -> Self {
+    fn new(runtime: Arc<StorageRuntime>, max_concurrent: usize, inflight_limit: usize) -> Self {
+        let capped_limit = inflight_limit.max(max_concurrent).max(1);
         Self {
             runtime,
             pending: AtomicUsize::new(0),
+            inflight: AtomicUsize::new(0),
+            peak_inflight: AtomicUsize::new(0),
             metrics: WriteControllerMetrics::default(),
             shutdown: AtomicBool::new(false),
             max_concurrent: max_concurrent.max(1),
+            inflight_limit: capped_limit,
         }
     }
 
@@ -188,9 +210,49 @@ impl WriteControllerState {
         true
     }
 
+    fn try_acquire_slot(&self) -> Result<(), WriteScheduleError> {
+        loop {
+            let current = self.inflight.load(Ordering::Acquire);
+            if current >= self.inflight_limit {
+                return Err(WriteScheduleError::Backpressure);
+            }
+            let next = current + 1;
+            if self
+                .inflight
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.update_peak(next);
+                return Ok(());
+            }
+        }
+    }
+
+    fn release_slot(&self) {
+        let previous = self.inflight.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "write inflight underflow");
+    }
+
+    fn update_peak(&self, value: usize) {
+        let mut observed = self.peak_inflight.load(Ordering::Relaxed);
+        while value > observed {
+            match self.peak_inflight.compare_exchange(
+                observed,
+                value,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => observed = next,
+            }
+        }
+    }
+
     fn snapshot(&self) -> WriteControllerSnapshot {
         WriteControllerSnapshot {
             pending_queue_depth: self.pending.load(Ordering::Acquire),
+            inflight_queue_depth: self.inflight.load(Ordering::Acquire),
+            peak_inflight_queue_depth: self.peak_inflight.load(Ordering::Relaxed),
             enqueued: self.metrics.enqueued.load(Ordering::Relaxed),
             completed: self.metrics.completed.load(Ordering::Relaxed),
             failed: self.metrics.failed.load(Ordering::Relaxed),
@@ -270,6 +332,7 @@ fn spawn_write_worker(
                     Ok(WriteTask::Segment(segment)) => {
                         if shutting_down {
                             segment.clear_write_queue();
+                            state.release_slot();
                             continue;
                         }
 
@@ -282,6 +345,7 @@ fn spawn_write_worker(
                                 .metrics
                                 .record_failure(&WriteProcessError::RuntimeClosed);
                             segment.clear_write_queue();
+                            state.release_slot();
                             continue;
                         }
 
@@ -307,10 +371,13 @@ fn spawn_write_worker(
                             segment.clear_write_queue();
                         }
 
+                        state.release_slot();
+
                         while active < max_concurrent {
                             if let Some(next) = backlog.pop_front() {
                                 if shutting_down || state.runtime.is_shutdown() {
                                     next.clear_write_queue();
+                                    state.release_slot();
                                     continue;
                                 }
                                 active += 1;
@@ -328,12 +395,19 @@ fn spawn_write_worker(
                         shutting_down = true;
                         while let Some(queued) = backlog.pop_front() {
                             queued.clear_write_queue();
+                            state.release_slot();
                         }
                         if active == 0 {
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        while let Some(queued) = backlog.pop_front() {
+                            queued.clear_write_queue();
+                            state.release_slot();
+                        }
+                        break;
+                    }
                 }
             }
         })
@@ -456,13 +530,31 @@ mod tests {
     use crate::io::{IoError, IoResult, IoVecMut};
     use crate::runtime::StorageRuntimeOptions;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct MockIoFile {
         writes: Mutex<Vec<(u64, Vec<u8>)>>,
         fail_next: AtomicBool,
+        delay: Duration,
+    }
+
+    impl Default for MockIoFile {
+        fn default() -> Self {
+            Self {
+                writes: Mutex::new(Vec::new()),
+                fail_next: AtomicBool::new(false),
+                delay: Duration::default(),
+            }
+        }
     }
 
     impl MockIoFile {
+        fn with_delay(delay: Duration) -> Self {
+            Self {
+                delay,
+                ..Default::default()
+            }
+        }
+
         fn fail_once(&self) {
             self.fail_next.store(true, Ordering::SeqCst);
         }
@@ -484,6 +576,10 @@ mod tests {
                     std::io::ErrorKind::Other,
                     "mock failure",
                 )));
+            }
+
+            if self.delay > Duration::ZERO {
+                thread::sleep(self.delay);
             }
 
             let mut payload = Vec::new();
@@ -559,6 +655,38 @@ mod tests {
         controller.enqueue(segment.clone()).unwrap();
         wait_for(|| segment.written_size() == 3, Duration::from_secs(1));
         assert_eq!(segment.pending_size(), 0);
+
+        controller.shutdown();
+    }
+
+    #[test]
+    fn respects_backpressure_limit() {
+        let runtime = runtime();
+        let mut config = WriteControllerConfig::default();
+        config.queue_capacity = 2;
+        config.max_concurrent_writes = 1;
+        config.max_inflight_segments = 2;
+        let controller = WriteController::new(runtime.clone(), config);
+        let io = Arc::new(MockIoFile::with_delay(Duration::from_millis(50)));
+
+        let segments: Vec<_> = (0..3).map(|_| wal_segment(io.clone(), 1024)).collect();
+
+        for segment in &segments {
+            segment.reserve_pending(1).unwrap();
+            segment.with_active_batch(|batch| batch.push(WriteChunk::Owned(vec![1])));
+            segment.stage_active_batch().unwrap();
+        }
+
+        controller.enqueue(segments[0].clone()).unwrap();
+        controller.enqueue(segments[1].clone()).unwrap();
+        let err = controller.enqueue(segments[2].clone()).unwrap_err();
+        assert_eq!(err, WriteScheduleError::Backpressure);
+
+        wait_for(|| segments[0].written_size() == 1, Duration::from_secs(2));
+        wait_for(|| segments[1].written_size() == 1, Duration::from_secs(2));
+
+        controller.enqueue(segments[2].clone()).unwrap();
+        wait_for(|| segments[2].written_size() == 1, Duration::from_secs(2));
 
         controller.shutdown();
     }

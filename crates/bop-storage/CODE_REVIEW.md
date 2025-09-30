@@ -2,6 +2,7 @@
 
 **Review Date:** September 29, 2025  
 **Reviewed By:** AI Code Analysis  
+**Peer Reviewed By:** Codex  
 **Crate Version:** 0.1.0
 
 ---
@@ -51,7 +52,7 @@ The crate implements a sophisticated storage engine with the following key featu
 - ✅ Proper shutdown coordination between manager and workers
 
 **Issues Found:**
-- ⚠️ The `slugify()` function could produce collisions for similar names (e.g., "my-db" and "my_db" both produce "my-db")
+- ⚠️ The `slugify()` function produces collisions for similar names - non-alphanumerics all normalize to dashes (line 177: e.g., "my-db" and "my_db" both produce "my-db")
 - ℹ️ `DBInner::deregister_pod()` called from both `close()` and `Drop` is properly guarded by `deregistered` flag
 
 **Recommendations:**
@@ -70,14 +71,14 @@ The crate implements a sophisticated storage engine with the following key featu
 - ✅ Comprehensive error types for different failure modes
 
 **Issues Found:**
-- ⚠️ No explicit bounds checking on `pending_flush_target` - could theoretically exceed `u64::MAX` in edge cases
 - 📝 Missing documentation on buffer swap invariants and state machine transitions
 - 📝 Magic number `STAGED_NONE = usize::MAX` should be better documented
+
+**Note:** Initial review flagged potential overflow in `pending_flush_target`, but peer review confirmed that `fetch_max` operations and `checked_add` in `mark_written` (line 398) properly prevent arithmetic overflow.
 
 **Recommendations:**
 1. Add state machine documentation with diagrams
 2. Document buffer swap safety invariants
-3. Add overflow protection for `pending_flush_target`
 
 ---
 
@@ -91,9 +92,9 @@ The crate implements a sophisticated storage engine with the following key featu
 - ✅ Good test coverage for success and failure paths
 
 **Issues Found:**
-- 🚨 **Critical**: Panics are converted to error strings, losing stack traces
+- 🚨 **Critical**: Panics are converted to error strings, losing stack traces (line 400, 438)
 - ⚠️ No timeout mechanism for hung write operations
-- ⚠️ Backlog grows unbounded in memory when `max_concurrent` is reached
+- 🚨 **Critical**: Backlog grows unbounded in memory when `max_concurrent` is reached (line 259: VecDeque accumulates WalSegments without bounds)
 
 **Recommendations:**
 1. **HIGH PRIORITY**: Preserve panic context using `std::panic::Location` or structured panic info
@@ -113,16 +114,19 @@ The crate implements a sophisticated storage engine with the following key featu
 
 **Issues Found:**
 - 🚨 **Critical**: Retry logic could cause unbounded memory growth if sink continuously fails
-- 🚨 **Critical**: No maximum retry limit - could retry forever
-- 🚨 **Critical**: `schedule_retry()` spawns a new thread for each retry - could exhaust thread resources under load
+- 🚨 **Critical**: No maximum retry limit - could retry forever (line 548: no attempt bound check)
+- 🚨 **Critical**: `schedule_retry()` spawns a new OS thread for each retry - could exhaust thread resources under load (line 253: `thread::spawn` in retry path)
 - ⚠️ Backoff calculation could overflow for large attempt counts
 
 **Recommendations:**
-1. **HIGH PRIORITY**: Add maximum retry limit (e.g., 10 attempts)
-2. **HIGH PRIORITY**: Use thread pool or runtime for retries instead of spawning threads
-3. **HIGH PRIORITY**: Implement bounded queue for retry tasks
-4. Add circuit breaker pattern for persistent failures
-5. Add metrics for retry counts and failure patterns
+1. **HIGH PRIORITY**: Implement complete retry mechanism overhaul:
+   - Add configurable maximum retry limit (e.g., 10 attempts with config override)
+   - Replace `thread::spawn` in `schedule_retry` with `runtime.handle().spawn` or `spawn_blocking`
+   - Implement bounded retry queue (bounded channel or semaphore-based limiter)
+   - Add attempt counter to `FlushTask::Segment` to track retry depth
+   - Fail permanently and report to metrics after max attempts exceeded
+2. Add circuit breaker pattern for persistent failures (open circuit after N consecutive failures)
+3. Add comprehensive metrics: retry attempts per segment, retry depth histogram, circuit breaker state
 
 ---
 
@@ -319,37 +323,54 @@ The crate implements a sophisticated storage engine with the following key featu
 
 ### 🚨 High Priority (Fix Immediately):
 
-1. **Flush Controller - Unbounded Retries**
-   - Location: `flush.rs:253-269`
-   - Issue: No maximum retry limit, spawns unlimited threads
-   - Impact: Resource exhaustion, potential system crash
-   - Fix: Add max retry limit, use thread pool
+1. **Write Controller - Unbounded Backlog**
+   - Location: `write.rs:259` (VecDeque in worker loop)
+   - Issue: Backlog accumulates WalSegments without bounds when `active >= max_concurrent`
+   - Impact: Memory exhaustion under sustained load
+   - Fix: Implement backlog size limits with backpressure signaling
 
-2. **Page Cache - Deadlock Risk**
+2. **Write Controller - Lost Panic Context**
+   - Location: `write.rs:400, 438`
+   - Issue: Panic payload reduced to plain string, losing stack traces and metadata
+   - Impact: Loss of debugging information for production failures
+   - Fix: Preserve panic location, backtrace, and structured payload
+
+3. **Flush Controller - Unbounded Retries**
+   - Location: `flush.rs:253` (`schedule_retry`), `flush.rs:548` (no attempt limit)
+   - Issue: Spawns new OS thread per retry, no maximum retry limit
+   - Impact: Thread exhaustion and queue growth with persistent failures
+   - **Fix (Complete Solution)**:
+     - Add `max_retry_attempts` to `FlushControllerConfig` (default: 10)
+     - Track attempt count in `FlushTask::Segment { attempt: u32 }` already present
+     - Replace `thread::spawn` at line 253 with `state.runtime.handle().spawn` for runtime scheduling
+     - Check `attempt >= config.max_retry_attempts` before retry, mark failed permanently if exceeded
+     - Implement bounded retry queue using semaphore or channel capacity
+     - Add metrics: `flush_retries_total`, `flush_retry_depth`, `flush_permanent_failures`
+
+4. **Page Cache - Deadlock Risk**
    - Location: `page_cache.rs:284-324`
-   - Issue: Holding lock while calling observers
+   - Issue: Holding eviction lock while calling observers
    - Impact: Deadlock if observer calls back into cache
    - Fix: Release lock before observer callbacks
 
-3. **Manifest - Memory Leak**
+5. **Manifest - Memory Leak**
    - Location: `manifest.rs` change log
    - Issue: Change log grows without truncation
    - Impact: Unbounded memory growth
-   - Fix: Implement periodic truncation
+   - Fix: Implement periodic truncation based on cursor positions
 
-4. **Write Controller - Lost Panic Context**
-   - Location: `write.rs:438-445`
-   - Issue: Panic info converted to string
-   - Impact: Loss of debugging information
-   - Fix: Preserve panic location and backtrace
+6. **Manifest - Worker Queue Durability Gap**
+   - Location: `manifest.rs` worker thread
+   - Issue: Batched commits could lose data if worker thread panics between receiving commands and committing
+   - Impact: Data loss on worker crash, inconsistent state
+   - **Fix (Complete Solution)**:
+     - Persist commands to LMDB before worker processes them (WAL-style approach)
+     - Add command replay on worker restart/recovery
+     - Or switch critical operations to synchronous commits
+     - Add integration tests simulating worker panic at various stages
+     - Document durability guarantees and failure modes
 
 ### ⚠️ Medium Priority (Fix Soon):
-
-5. **Flush Controller - Thread Spawning**
-   - Use runtime task spawning instead
-   
-6. **WAL Segment - Overflow Protection**
-   - Add bounds checking for flush targets
 
 7. **I/O Layer - macOS Buffering**
    - Ensure `F_NOCACHE` set before first write
@@ -357,12 +378,16 @@ The crate implements a sophisticated storage engine with the following key featu
 8. **Error Handling - Context Loss**
    - Add structured error context
 
+9. **Slugify Collisions**
+   - Location: `db.rs:177`
+   - Add uniqueness validation or improve normalization
+
 ### 📝 Low Priority (Technical Debt):
 
-9. Refactor large files (especially `manifest.rs`)
-10. Add comprehensive documentation
-11. Improve test coverage for edge cases
-12. Add performance benchmarks
+10. Refactor large files (especially `manifest.rs`)
+11. Add comprehensive documentation
+12. Improve test coverage for edge cases
+13. Add performance benchmarks
 
 ---
 
@@ -445,25 +470,46 @@ The crate implements a sophisticated storage engine with the following key featu
 ## 13. Action Items
 
 ### Immediate (Next Sprint):
-- [ ] Fix flush controller retry limits and thread spawning
+- [x] Fix write controller unbounded backlog with backpressure (write.rs:259)
+  - Implemented `max_inflight_segments` slot accounting and Backpressure errors
+  - Snapshot now reports inflight/peak metrics with regression test coverage
+- [ ] Preserve panic context in write controller (write.rs:400, 438)
+  - Capture panic location with `std::panic::Location::caller()`
+  - Store panic payload type info, not just string
+  - Include backtrace in error metrics/logs
+- [x] Fix flush controller retry limits and thread spawning (flush.rs:253, 548)
+  - Added `max_retry_attempts`, runtime-driven backoff, and retry-limit failures
+  - Unit test exercises permanent-failure path and metrics stay observable
 - [ ] Fix page cache deadlock by releasing lock before callbacks
+  - Collect observer callbacks while holding lock
+  - Release lock before invoking observers
+  - Add observer contract documentation
 - [ ] Implement change log truncation
-- [ ] Preserve panic context in write controller
-- [ ] Add comprehensive tests for failure scenarios
+  - Add truncation based on min cursor position
+  - Run truncation on periodic interval or size threshold
+- [x] Add manifest worker queue durability protection
+  - Journal now persists pending batches in LMDB and deletes entries post-commit
+  - Startup replays journal before serving requests; restart test verifies recovery
 
 ### Short Term (Next Month):
-- [ ] Refactor `manifest.rs` into smaller modules
-- [ ] Add timeout mechanisms for I/O operations
-- [ ] Improve error context preservation
-- [ ] Add performance benchmarks
-- [ ] Complete documentation coverage
+- [ ] Refactor `manifest.rs` into smaller modules (split into `change_log.rs`, `cursors.rs`, `tables.rs`)
+- [ ] Add timeout mechanisms for I/O operations (configurable deadline for write/flush)
+- [ ] Improve error context preservation (add error codes enum, context wrappers)
+- [ ] Add performance benchmarks (criterion suite for write/flush/cache hit latencies)
+- [ ] Add module-level documentation to all public modules
+- [ ] Document all public API with examples
+- [ ] Create operational runbook (deployment, monitoring, troubleshooting)
+- [ ] Add state machine diagrams for WalSegment and controllers
 
 ### Long Term (Next Quarter):
-- [ ] Add chaos testing and fuzzing
-- [ ] Implement advanced monitoring
-- [ ] Performance optimization based on benchmarks
-- [ ] Security audit of unsafe code
-- [ ] Production readiness review
+- [ ] Add property-based testing with proptest for concurrent operations
+- [ ] Implement fuzzing for I/O paths and buffer operations
+- [ ] Add structured logging with tracing crate
+- [ ] Implement metrics exporter (Prometheus/OpenTelemetry)
+- [ ] Create performance tuning guide based on benchmark results
+- [ ] Audit all unsafe code blocks with Miri
+- [ ] Document security assumptions and threat model
+- [ ] Production readiness checklist and review
 
 ---
 
@@ -513,6 +559,22 @@ With focused effort on the high-priority issues, this crate can become a robust,
 - Retry count > 100/min
 - Cache eviction rate > 50%
 - Write latency p99 > 100ms
+
+---
+
+## Appendix C: Peer Review Notes
+
+**Verified Issues:**
+- ✅ Write backlog unbounded growth in VecDeque (write.rs:259)
+- ✅ Panic handling loses stack traces (write.rs:400, 438)
+- ✅ Flush retry spawns unlimited threads (flush.rs:253, 548)
+- ✅ Slugify collision risk (db.rs:177)
+
+**Corrected Findings:**
+- ❌ ~~WAL overflow for pending_flush_target~~ - Properly protected by `checked_add` in `mark_written` (wal.rs:398) and `fetch_max` semantics (wal.rs:510). The target only tracks max durable goal and is validated against written_size.
+
+**Peer Reviewer:** Codex  
+**Review Date:** September 29, 2025
 
 ---
 
