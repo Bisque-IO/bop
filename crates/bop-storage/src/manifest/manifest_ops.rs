@@ -77,4 +77,25 @@ pub enum ManifestOp {
     },
     /// Persist the job counter generation.
     PersistJobCounter { next: JobId, timestamp_ms: u64 },
+    /// Cancel a checkpoint job mid-flight (T11b: Compensating entry).
+    ///
+    /// This operation records that a checkpoint was cancelled, typically due to
+    /// truncation conflicts. It ensures the change log reflects the cancellation
+    /// for observability and auditing purposes.
+    CancelCheckpoint {
+        job_id: JobId,
+        reason: CheckpointCancellationReason,
+        timestamp_ms: u64,
+    },
+}
+
+/// Reason for checkpoint cancellation (T11b).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CheckpointCancellationReason {
+    /// Cancelled due to truncation conflict.
+    TruncationConflict { generation: u64 },
+    /// Cancelled due to user request.
+    UserRequested,
+    /// Cancelled due to timeout.
+    Timeout,
 }

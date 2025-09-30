@@ -8,6 +8,7 @@ use super::*;
 use crate::flush::FlushSink;
 use crate::page_cache::{PageCache, PageCacheConfig};
 use heed::types::{SerdeBincode, U32};
+use heed::EnvOpenOptions;
 use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
@@ -989,4 +990,214 @@ fn open_detects_leftover_runtime_state() {
         manifest.runtime_state().record_version,
         RUNTIME_STATE_VERSION
     );
+}
+
+/// T3: Tests for checkpoint batch operations
+mod checkpoint_batch_tests {
+    use super::*;
+
+    #[test]
+    fn batch_atomic_commit_chunk_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+        let mut chunk_entry = ChunkEntryRecord::default();
+        chunk_entry.file_name = "chunk-1-base.bin".into();
+        chunk_entry.generation = 1;
+        chunk_entry.size_bytes = 64 * 1024 * 1024;
+
+        let mut delta_entry = ChunkDeltaRecord::default();
+        delta_entry.base_chunk_id = 42;
+        delta_entry.delta_id = 1;
+        delta_entry.delta_file = "delta-1-1.bin".into();
+        delta_entry.size_bytes = 1024;
+
+        let mut txn = manifest.begin();
+        txn.upsert_chunk(ChunkKey::new(1, 42), chunk_entry.clone());
+        txn.upsert_chunk_delta(ChunkDeltaKey::new(1, 42, 1), delta_entry.clone());
+        txn.bump_generation(TEST_COMPONENT, 1);
+        let receipt = txn.commit().unwrap();
+
+        assert!(receipt.generations.get(&TEST_COMPONENT).is_some());
+
+        let (chunk_exists, delta_exists) = manifest
+            .read(|tables, txn| {
+                let chunk = tables
+                    .chunk_catalog
+                    .get(txn, &ChunkKey::new(1, 42).encode())?
+                    .is_some();
+                let delta = tables
+                    .chunk_delta_index
+                    .get(txn, &ChunkDeltaKey::new(1, 42, 1).encode())?
+                    .is_some();
+                Ok((chunk, delta))
+            })
+            .unwrap();
+
+        assert!(chunk_exists, "chunk should be committed");
+        assert!(delta_exists, "delta should be committed");
+    }
+
+    #[test]
+    fn batch_atomic_rollback_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+        let mut chunk_entry = ChunkEntryRecord::default();
+        chunk_entry.file_name = "chunk-2-base.bin".into();
+        chunk_entry.generation = 1;
+        chunk_entry.size_bytes = 64 * 1024 * 1024;
+
+        let mut txn = manifest.begin();
+        txn.upsert_chunk(ChunkKey::new(2, 100), chunk_entry.clone());
+        txn.commit().unwrap();
+
+        let chunk_exists = manifest
+            .read(|tables, txn| {
+                Ok(tables
+                    .chunk_catalog
+                    .get(txn, &ChunkKey::new(2, 100).encode())?
+                    .is_some())
+            })
+            .unwrap();
+        assert!(chunk_exists, "initial chunk should exist");
+    }
+
+    #[test]
+    fn change_log_appends_for_checkpoint_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+        let mut chunk_entry = ChunkEntryRecord::default();
+        chunk_entry.file_name = "checkpoint-chunk.bin".into();
+        chunk_entry.generation = 1;
+        chunk_entry.size_bytes = 64 * 1024 * 1024;
+
+        let mut delta_entry = ChunkDeltaRecord::default();
+        delta_entry.base_chunk_id = 50;
+        delta_entry.delta_id = 1;
+        delta_entry.delta_file = "checkpoint-delta.bin".into();
+        delta_entry.size_bytes = 2048;
+
+        let mut txn = manifest.begin();
+        txn.upsert_chunk(ChunkKey::new(3, 50), chunk_entry);
+        txn.upsert_chunk_delta(ChunkDeltaKey::new(3, 50, 1), delta_entry);
+        txn.commit().unwrap();
+
+        let cursor = manifest
+            .register_change_cursor(ChangeCursorStart::Oldest)
+            .unwrap();
+
+        let page = manifest.fetch_change_page(cursor.cursor_id, 10).unwrap();
+        assert_eq!(
+            page.changes.len(),
+            1,
+            "should have one change log entry for the batch"
+        );
+
+        let ops = &page.changes[0].operations;
+        assert_eq!(ops.len(), 2, "batch should contain both operations");
+
+        let has_upsert_chunk = ops
+            .iter()
+            .any(|op| matches!(op, ManifestOp::UpsertChunk { .. }));
+        let has_upsert_delta = ops
+            .iter()
+            .any(|op| matches!(op, ManifestOp::UpsertChunkDelta { .. }));
+
+        assert!(has_upsert_chunk, "should have UpsertChunk operation");
+        assert!(has_upsert_delta, "should have UpsertChunkDelta operation");
+    }
+
+    #[test]
+    fn chunk_delta_upsert_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+        let mut delta_entry = ChunkDeltaRecord::default();
+        delta_entry.base_chunk_id = 99;
+        delta_entry.delta_id = 5;
+        delta_entry.delta_file = "test-delta.bin".into();
+        delta_entry.size_bytes = 512;
+
+        let delta_key = ChunkDeltaKey::new(4, 99, 5);
+
+        let mut txn = manifest.begin();
+        txn.upsert_chunk_delta(delta_key, delta_entry.clone());
+        txn.commit().unwrap();
+
+        let delta_exists = manifest
+            .read(|tables, txn| {
+                Ok(tables
+                    .chunk_delta_index
+                    .get(txn, &delta_key.encode())?
+                    .is_some())
+            })
+            .unwrap();
+        assert!(delta_exists, "delta should exist after upsert");
+
+        let mut txn = manifest.begin();
+        txn.delete_chunk_delta(delta_key);
+        txn.commit().unwrap();
+
+        let delta_exists = manifest
+            .read(|tables, txn| {
+                Ok(tables
+                    .chunk_delta_index
+                    .get(txn, &delta_key.encode())?
+                    .is_some())
+            })
+            .unwrap();
+        assert!(!delta_exists, "delta should not exist after delete");
+    }
+
+    #[test]
+    fn multiple_chunk_operations_in_single_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+        let mut txn = manifest.begin();
+
+        for chunk_id in 1..=5 {
+            let mut chunk_entry = ChunkEntryRecord::default();
+            chunk_entry.file_name = format!("chunk-{}.bin", chunk_id);
+            chunk_entry.generation = 1;
+            chunk_entry.size_bytes = 64 * 1024 * 1024;
+            txn.upsert_chunk(ChunkKey::new(5, chunk_id), chunk_entry);
+        }
+
+        for delta_id in 1..=3 {
+            let mut delta_entry = ChunkDeltaRecord::default();
+            delta_entry.base_chunk_id = 1;
+            delta_entry.delta_id = delta_id as u16;
+            delta_entry.delta_file = format!("delta-1-{}.bin", delta_id);
+            delta_entry.size_bytes = 1024 * delta_id as u64;
+            txn.upsert_chunk_delta(ChunkDeltaKey::new(5, 1, delta_id), delta_entry);
+        }
+
+        txn.commit().unwrap();
+
+        let (chunk_count, delta_count) = manifest
+            .read(|tables, txn| {
+                let chunks = tables
+                    .chunk_catalog
+                    .iter(txn)?
+                    .filter_map(|r| r.ok())
+                    .filter(|(raw, _)| ChunkKey::decode(*raw).db_id == 5)
+                    .count();
+
+                let deltas = tables
+                    .chunk_delta_index
+                    .iter(txn)?
+                    .filter_map(|r| r.ok())
+                    .filter(|(raw, _)| ChunkDeltaKey::decode(*raw).db_id == 5)
+                    .count();
+
+                Ok((chunks, deltas))
+            })
+            .unwrap();
+
+        assert_eq!(chunk_count, 5, "should have 5 chunks");
+        assert_eq!(delta_count, 3, "should have 3 deltas");
+    }
 }

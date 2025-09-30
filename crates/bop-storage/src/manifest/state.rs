@@ -8,12 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use heed::Env;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::tables::{ManifestTables, RuntimeStateRecord, epoch_millis};
 use super::{ChangeSequence, ManifestError};
-use crate::page_cache::{PageCache, PageCacheKey, PageCacheMetricsSnapshot};
+use crate::page_cache::{PageCache, PageCacheKey};
 
 /// Current version of the runtime state record format.
 pub(super) const RUNTIME_STATE_VERSION: u16 = 1;

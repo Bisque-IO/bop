@@ -165,7 +165,7 @@ Snapshot metadata references deltas through `SnapshotChunkKind::Delta`, so recov
 ## Manifest Driven Jobs
 
 Manifest jobs encapsulate durability work. The queue is backed by an embedded
-RocksDB so it survives restarts and replicates across control plane processes.
+LMDB so it survives restarts and replicates across control plane processes.
 
 Job types:
 

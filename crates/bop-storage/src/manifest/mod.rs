@@ -84,14 +84,12 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
-use heed::{Env, EnvOpenOptions};
+use heed::Env;
 use thiserror::Error;
 
 use crate::page_cache::{PageCache, PageCacheKey};
@@ -132,7 +130,7 @@ pub(crate) use tables::{
 
 // Re-export types from submodules
 pub use api::{ChangeBatchPage, ChangeCursorSnapshot, ChangeCursorStart};
-pub use manifest_ops::ManifestOp;
+pub use manifest_ops::{CheckpointCancellationReason, ManifestOp};
 pub use state::ManifestDiagnosticsSnapshot;
 pub use transaction::ManifestTxn;
 pub use worker::CommitReceipt;
@@ -144,20 +142,19 @@ use change_log::{
 };
 
 // Re-export internal types from cursors
-use cursors::{CursorAckRequest, CursorRegistrationRequest};
 
 // Re-export types from flush_sink
 pub(crate) use flush_sink::ManifestFlushSink;
 
 // Re-export types and functions from operations
-use operations::{ForkData, load_generations, load_pending_batches};
+use operations::{ForkData, load_generations};
 
 // Re-export types from worker
 pub(crate) use worker::PendingBatchRecord;
-use worker::{ManifestBatch, ManifestCommand, WaitRequest, WorkerHandle, worker_loop};
+use worker::{ManifestCommand, WaitRequest, WorkerHandle};
 
 // Re-export types from state
-use state::{ChangeSignal, ChangeStateBootstrap, ManifestDiagnostics, ManifestRuntimeState};
+use state::{ChangeSignal, ManifestDiagnostics, ManifestRuntimeState};
 
 /// Errors that can occur when using the manifest.
 #[derive(Debug, Error)]

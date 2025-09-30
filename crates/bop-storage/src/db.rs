@@ -1,20 +1,30 @@
+use std::collections::{HashMap, VecDeque};
+use std::convert::TryFrom;
 use std::env;
 use std::fmt;
+use std::mem::size_of;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use thiserror::Error;
 
+use crate::checkpoint::delta::{DeltaError, DeltaHeader, DeltaReader, PageDirEntry};
+use crate::cold_scan::{ColdScanError, ColdScanOptions, ColdScanStatsTracker, RemoteReadLimiter};
 use crate::flush::{
     FlushController, FlushControllerConfig, FlushControllerSnapshot, FlushScheduleError, FlushSink,
 };
 use crate::io::{IoBackendKind, SharedIoDriver};
 use crate::manager::ManagerInner;
-use crate::manifest::{Manifest, ManifestFlushSink};
+use crate::manifest::{
+    ChunkDeltaKey, ChunkDeltaRecord, ChunkEntryRecord, ChunkKey, Generation, Manifest,
+    ManifestError, ManifestFlushSink,
+};
 use crate::page_cache::{
     PageCache, PageCacheKey, PageCacheMetricsSnapshot, PageCacheNamespace, allocate_cache_object_id,
 };
+use crate::page_store_policies::FetchOptions;
+use crate::remote_store::{BlobKey, RemoteStore, RemoteStoreError};
 use crate::runtime::StorageRuntime;
 use crate::wal::{Wal, WalDiagnostics, WalSegment};
 use crate::write::{
@@ -236,6 +246,42 @@ impl DB {
         self.inner.diagnostics()
     }
 
+    /// Reads a page from cold storage with bandwidth throttling.
+    ///
+    /// This is designed for scanning operations that need to read pages from
+    /// remote storage without warming the cache or exhausting bandwidth.
+    ///
+    /// # Parameters
+    ///
+    /// - `page_no`: The page number to read
+    /// - `manifest`: Manifest for resolving page locations
+    /// - `remote`: Remote store for fetching chunks
+    /// - `limiter`: Bandwidth limiter for throttling
+    /// - `stats`: Optional statistics tracker
+    /// - `options`: Cold scan configuration options
+    pub async fn read_page_cold(
+        &self,
+        page_no: u64,
+        manifest: &Arc<Manifest>,
+        remote: &Arc<RemoteStore>,
+        limiter: &RemoteReadLimiter,
+        stats: Option<&ColdScanStatsTracker>,
+        options: ColdScanOptions,
+    ) -> Result<Vec<u8>, ColdScanError> {
+        self.inner
+            .page_store
+            .read_page_cold(
+                self.inner.id,
+                page_no,
+                manifest,
+                remote,
+                limiter,
+                stats,
+                options,
+            )
+            .await
+    }
+
     #[allow(dead_code)]
     pub(crate) fn runtime(&self) -> Arc<StorageRuntime> {
         self.inner.runtime()
@@ -251,6 +297,45 @@ impl DB {
 pub enum DbError {
     #[error("database is closed")]
     Closed,
+}
+
+/// Errors produced by PageStore operations.
+#[derive(Debug, Error)]
+pub enum PageStoreError {
+    #[error("page not found: {0}")]
+    NotFound(u32),
+
+    #[error("manifest error: {0}")]
+    Manifest(#[from] ManifestError),
+
+    #[error("remote store error: {0}")]
+    Remote(#[from] RemoteStoreError),
+
+    #[error("delta error: {0}")]
+    Delta(#[from] DeltaError),
+
+    #[error("cache error: {0}")]
+    Cache(String),
+
+    #[error("page out of bounds for chunk")]
+    PageOutOfBounds,
+}
+
+/// Metadata about where a page is located (base chunk + delta chain).
+#[derive(Debug, Clone)]
+pub struct PageLocation {
+    pub base_chunk: ChunkEntryRecord,
+    pub base_chunk_key: ChunkKey,
+    pub base_start_page: u64,
+    pub deltas: Vec<DeltaLocation>,
+}
+
+/// Metadata about a delta in the chain.
+#[derive(Debug, Clone)]
+pub struct DeltaLocation {
+    pub delta_key: ChunkDeltaKey,
+    pub delta_record: ChunkDeltaRecord,
+    pub generation: Generation,
 }
 
 #[derive(Debug, Clone)]
@@ -270,14 +355,132 @@ pub struct DbDiagnostics {
 pub struct PageStoreMetrics {
     pub cache_object_id: u64,
     pub cached_pages: u64,
+    pub delta_cache: DeltaCacheMetricsSnapshot,
 }
 
 #[derive(Debug)]
+struct DeltaCacheEntry {
+    header: DeltaHeader,
+    directory: Vec<PageDirEntry>,
+    data_start: usize,
+    data: Arc<Vec<u8>>,
+}
+
+impl DeltaCacheEntry {
+    fn contains_page(&self, page_in_chunk: u32) -> bool {
+        self.directory
+            .iter()
+            .any(|entry| entry.page_no == page_in_chunk)
+    }
+
+    fn read_page(&self, page_in_chunk: u32) -> Result<Vec<u8>, PageStoreError> {
+        let entry = self
+            .directory
+            .iter()
+            .find(|entry| entry.page_no == page_in_chunk)
+            .ok_or(PageStoreError::NotFound(page_in_chunk))?;
+
+        let start =
+            self.data_start
+                .checked_add(entry.offset as usize)
+                .ok_or(PageStoreError::Delta(DeltaError::InvalidFormat(
+                    "delta offset overflow".into(),
+                )))?;
+        let end =
+            start
+                .checked_add(self.header.page_size as usize)
+                .ok_or(PageStoreError::Delta(DeltaError::InvalidFormat(
+                    "delta length overflow".into(),
+                )))?;
+
+        if end > self.data.len() {
+            return Err(PageStoreError::Delta(DeltaError::InvalidFormat(
+                "delta entry exceeds file size".into(),
+            )));
+        }
+
+        Ok(self.data[start..end].to_vec())
+    }
+
+    fn byte_len(&self) -> usize {
+        self.data.len() + self.directory.len() * size_of::<PageDirEntry>()
+    }
+}
+#[derive(Debug)]
+struct DeltaCacheState {
+    entries: HashMap<ChunkDeltaKey, Arc<DeltaCacheEntry>>,
+    order: VecDeque<ChunkDeltaKey>,
+    current_bytes: usize,
+}
+
+impl DeltaCacheState {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            current_bytes: 0,
+        }
+    }
+
+    fn touch(&mut self, key: ChunkDeltaKey) {
+        if let Some(pos) = self.order.iter().position(|k| *k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key);
+    }
+}
+
+#[derive(Default, Debug)]
+struct DeltaCacheMetrics {
+    current_bytes: AtomicU64,
+    current_entries: AtomicU64,
+    total_insertions: AtomicU64,
+    total_evictions: AtomicU64,
+}
+
+impl DeltaCacheMetrics {
+    fn record_insert(&self, bytes: usize) {
+        self.total_insertions.fetch_add(1, Ordering::Relaxed);
+        self.current_entries.fetch_add(1, Ordering::Relaxed);
+        self.current_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn record_eviction(&self, bytes: usize) {
+        self.total_evictions.fetch_add(1, Ordering::Relaxed);
+        self.current_entries.fetch_sub(1, Ordering::Relaxed);
+        self.current_bytes
+            .fetch_sub(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> DeltaCacheMetricsSnapshot {
+        DeltaCacheMetricsSnapshot {
+            current_entries: self.current_entries.load(Ordering::Relaxed),
+            current_bytes: self.current_bytes.load(Ordering::Relaxed),
+            total_insertions: self.total_insertions.load(Ordering::Relaxed),
+            total_evictions: self.total_evictions.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeltaCacheMetricsSnapshot {
+    pub current_entries: u64,
+    pub current_bytes: u64,
+    pub total_insertions: u64,
+    pub total_evictions: u64,
+}
+
+const DEFAULT_DELTA_CACHE_TARGET_BYTES: usize = 256 * 1024 * 1024;
+
 struct PageStore {
     cache: Arc<PageCache<PageCacheKey>>,
     _namespace: PageCacheNamespace,
     object_id: u64,
     cached_pages: AtomicU64,
+    delta_cache: Mutex<DeltaCacheState>,
+    delta_metrics: DeltaCacheMetrics,
+    delta_cache_target_bytes: usize,
 }
 
 impl PageStore {
@@ -287,6 +490,9 @@ impl PageStore {
             _namespace: PageCacheNamespace::StoragePod,
             object_id: allocate_cache_object_id(),
             cached_pages: AtomicU64::new(0),
+            delta_cache: Mutex::new(DeltaCacheState::new()),
+            delta_metrics: DeltaCacheMetrics::default(),
+            delta_cache_target_bytes: DEFAULT_DELTA_CACHE_TARGET_BYTES,
         }
     }
 
@@ -294,6 +500,7 @@ impl PageStore {
         PageStoreMetrics {
             cache_object_id: self.object_id,
             cached_pages: self.cached_pages.load(Ordering::Relaxed),
+            delta_cache: self.delta_metrics.snapshot(),
         }
     }
 
@@ -304,6 +511,337 @@ impl PageStore {
     #[allow(dead_code)]
     fn cache_key(&self, page_no: u64) -> PageCacheKey {
         PageCacheKey::storage_pod(self.object_id, page_no)
+    }
+
+    /// Read a page from cache or remote storage with delta layering.
+    ///
+    /// This implements T4c: reading pages by applying deltas over base chunks.
+    async fn read_page(
+        &self,
+        db_id: DbId,
+        page_no: u64,
+        manifest: &Arc<Manifest>,
+        remote: &Arc<RemoteStore>,
+        options: FetchOptions,
+    ) -> Result<Vec<u8>, PageStoreError> {
+        let key = self.cache_key(page_no);
+
+        // Check cache first unless bypass_cache is set
+        if !options.bypass_cache {
+            if let Some(cached) = self.cache.get(&key) {
+                return Ok(cached.as_slice().to_vec());
+            }
+        }
+
+        // Resolve page location from manifest
+        let location = manifest.resolve_page_location(db_id.get(), page_no)?;
+
+        // Read page with delta layering
+        let page_data = self.read_with_deltas(location, page_no, remote).await?;
+
+        // Cache the result unless bypassing cache
+        if !options.bypass_cache {
+            self.cache.insert(key, Arc::from(page_data.as_slice()));
+            self.cached_pages.fetch_add(1, Ordering::Relaxed);
+        }
+
+        Ok(page_data)
+    }
+
+    /// Read a page with cold scan throttling (T9b).
+    async fn read_page_cold(
+        &self,
+        db_id: DbId,
+        page_no: u64,
+        manifest: &Arc<Manifest>,
+        remote: &Arc<RemoteStore>,
+        limiter: &RemoteReadLimiter,
+        stats: Option<&ColdScanStatsTracker>,
+        options: ColdScanOptions,
+    ) -> Result<Vec<u8>, ColdScanError> {
+        let key = self.cache_key(page_no);
+
+        // Check cache first unless bypass_cache is set
+        if !options.bypass_cache {
+            if let Some(cached) = self.cache.get(&key) {
+                return Ok(cached.as_slice().to_vec());
+            }
+        }
+
+        // Resolve page location
+        let location = manifest
+            .resolve_page_location(db_id.get(), page_no)
+            .map_err(|e| ColdScanError::PageStore(e.to_string()))?;
+
+        // Estimate bytes to read (base chunk + deltas)
+        let estimated_bytes = Self::base_page_estimate(&location.base_chunk)
+            + location
+                .deltas
+                .iter()
+                .map(|d| d.delta_record.size_bytes)
+                .sum::<u64>();
+
+        // Request bandwidth from limiter
+        match limiter.request_bytes(estimated_bytes) {
+            Ok(()) => {}
+            Err(ColdScanError::BandwidthExceeded(duration)) => {
+                if let Some(tracker) = stats {
+                    tracker.record_throttle();
+                }
+                // Sleep and retry once
+                tokio::time::sleep(duration).await;
+                limiter.request_bytes(estimated_bytes)?;
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Read page with delta layering
+        let page_data = self
+            .read_with_deltas(location, page_no, remote)
+            .await
+            .map_err(|e| ColdScanError::PageStore(e.to_string()))?;
+
+        // Record metrics
+        if let Some(tracker) = stats {
+            tracker.record_page_read(estimated_bytes);
+        }
+
+        Ok(page_data)
+    }
+
+    /// Apply delta layering to read a page (Phase 3 core algorithm).
+    async fn read_with_deltas(
+        &self,
+        location: PageLocation,
+        page_no: u64,
+        remote: &Arc<RemoteStore>,
+    ) -> Result<Vec<u8>, PageStoreError> {
+        let chunk_page_count = location.base_chunk.effective_page_count();
+        if chunk_page_count == 0 {
+            return Err(PageStoreError::PageOutOfBounds);
+        }
+
+        let chunk_start = location.base_start_page;
+        let chunk_end = chunk_start
+            .checked_add(chunk_page_count)
+            .ok_or(PageStoreError::PageOutOfBounds)?;
+        let global_page = page_no;
+
+        if global_page < chunk_start || global_page >= chunk_end {
+            return Err(PageStoreError::PageOutOfBounds);
+        }
+
+        let relative_page = u32::try_from(global_page - chunk_start)
+            .map_err(|_| PageStoreError::PageOutOfBounds)?;
+
+        let mut page_data = self
+            .fetch_page_from_base_chunk(
+                &location.base_chunk,
+                &location.base_chunk_key,
+                relative_page,
+                remote,
+            )
+            .await?;
+
+        // Apply deltas in order (oldest to newest)
+        for delta_loc in &location.deltas {
+            if self
+                .delta_contains_page(delta_loc, relative_page, remote)
+                .await?
+            {
+                let delta_page = self
+                    .fetch_delta_page(delta_loc, relative_page, remote)
+                    .await?;
+                page_data = delta_page; // Replace with delta version
+            }
+        }
+
+        Ok(page_data)
+    }
+    /// Fetch a page from a base chunk blob.
+    fn base_page_estimate(chunk: &ChunkEntryRecord) -> u64 {
+        if chunk.page_size != 0 {
+            chunk.page_size as u64
+        } else {
+            chunk.size_bytes
+        }
+    }
+
+    async fn fetch_page_from_base_chunk(
+        &self,
+        chunk: &ChunkEntryRecord,
+        chunk_key: &ChunkKey,
+        page_in_chunk: u32,
+        remote: &Arc<RemoteStore>,
+    ) -> Result<Vec<u8>, PageStoreError> {
+        if (page_in_chunk as u64) >= chunk.effective_page_count() {
+            return Err(PageStoreError::PageOutOfBounds);
+        }
+
+        let blob_key = BlobKey::chunk(
+            chunk_key.db_id,
+            chunk_key.chunk_id,
+            chunk.generation,
+            chunk.content_hash,
+        );
+
+        if chunk.page_size != 0 {
+            let page_size = chunk.page_size as u64;
+            if let Some(start) = (page_in_chunk as u64).checked_mul(page_size) {
+                if let Some(end) = start.checked_add(page_size) {
+                    match remote.get_blob_range(&blob_key, start..end).await {
+                        Ok(data) if data.len() == page_size as usize => return Ok(data),
+                        Ok(_) => {} // Fallback to full download below
+                        Err(err) => {
+                            if matches!(err, RemoteStoreError::NotFound(_)) {
+                                return Err(err.into());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut chunk_data = Vec::new();
+        remote
+            .get_blob(&blob_key, &mut chunk_data, None)
+            .await
+            .map_err(PageStoreError::Remote)?;
+
+        self.extract_page_from_chunk(&chunk_data, page_in_chunk, chunk.page_size)
+    }
+
+    /// Extract a specific page from chunk data.
+    fn extract_page_from_chunk(
+        &self,
+        chunk_data: &[u8],
+        page_in_chunk: u32,
+        page_size: u32,
+    ) -> Result<Vec<u8>, PageStoreError> {
+        let page_size = page_size as usize;
+        let offset = (page_in_chunk as usize)
+            .checked_mul(page_size)
+            .ok_or(PageStoreError::PageOutOfBounds)?;
+        let end = offset
+            .checked_add(page_size)
+            .ok_or(PageStoreError::PageOutOfBounds)?;
+
+        if end > chunk_data.len() {
+            return Err(PageStoreError::PageOutOfBounds);
+        }
+
+        Ok(chunk_data[offset..end].to_vec())
+    }
+
+    /// Check if a delta contains a specific page.
+    ///
+    /// Phase 4: Uses cached delta headers to avoid downloading full deltas.
+    async fn delta_contains_page(
+        &self,
+        delta_loc: &DeltaLocation,
+        page_in_chunk: u32,
+        remote: &Arc<RemoteStore>,
+    ) -> Result<bool, PageStoreError> {
+        let entry = self.load_delta_entry(delta_loc, remote).await?;
+        Ok(entry.contains_page(page_in_chunk))
+    }
+
+    async fn load_delta_entry(
+        &self,
+        delta_loc: &DeltaLocation,
+        remote: &Arc<RemoteStore>,
+    ) -> Result<Arc<DeltaCacheEntry>, PageStoreError> {
+        let key = delta_loc.delta_key;
+
+        {
+            let mut cache = self.delta_cache.lock().unwrap();
+            if let Some(entry) = cache.entries.get(&key).cloned() {
+                cache.touch(key);
+                return Ok(entry);
+            }
+        }
+
+        let fetched = self.download_delta_entry(delta_loc, remote).await?;
+        let entry_size = fetched.byte_len();
+
+        let mut cache = self.delta_cache.lock().unwrap();
+        if let Some(entry) = cache.entries.get(&key).cloned() {
+            cache.touch(key);
+            return Ok(entry);
+        }
+
+        cache.entries.insert(key, fetched.clone());
+        cache.touch(key);
+        cache.current_bytes = cache.current_bytes.saturating_add(entry_size);
+        self.delta_metrics.record_insert(entry_size);
+        self.evict_delta_cache(&mut cache);
+
+        Ok(fetched)
+    }
+
+    async fn download_delta_entry(
+        &self,
+        delta_loc: &DeltaLocation,
+        remote: &Arc<RemoteStore>,
+    ) -> Result<Arc<DeltaCacheEntry>, PageStoreError> {
+        let blob_key = BlobKey::delta(
+            delta_loc.delta_key.db_id,
+            delta_loc.delta_key.chunk_id,
+            delta_loc.generation,
+            delta_loc.delta_record.delta_id,
+            delta_loc.delta_record.content_hash,
+        );
+
+        let mut delta_data = Vec::new();
+        remote
+            .get_blob(&blob_key, &mut delta_data, None)
+            .await
+            .map_err(PageStoreError::Remote)?;
+
+        let mut cursor = std::io::Cursor::new(delta_data);
+        let delta_reader = DeltaReader::new(&mut cursor)?;
+        let header = delta_reader.header().clone();
+        let directory = delta_reader.directory().to_vec();
+        let data_start = cursor.position() as usize;
+        let data_vec = cursor.into_inner();
+        if data_start > data_vec.len() {
+            return Err(PageStoreError::Delta(DeltaError::InvalidFormat(
+                "delta data shorter than header".into(),
+            )));
+        }
+        let data = Arc::new(data_vec);
+
+        Ok(Arc::new(DeltaCacheEntry {
+            header,
+            directory,
+            data_start,
+            data,
+        }))
+    }
+
+    fn evict_delta_cache(&self, cache: &mut DeltaCacheState) {
+        while cache.current_bytes > self.delta_cache_target_bytes {
+            let Some(oldest) = cache.order.pop_front() else {
+                break;
+            };
+
+            if let Some(entry) = cache.entries.remove(&oldest) {
+                let size = entry.byte_len();
+                cache.current_bytes = cache.current_bytes.saturating_sub(size);
+                self.delta_metrics.record_eviction(size);
+            }
+        }
+    }
+
+    /// Fetch a specific page from a delta.
+    async fn fetch_delta_page(
+        &self,
+        delta_loc: &DeltaLocation,
+        page_in_chunk: u32,
+        remote: &Arc<RemoteStore>,
+    ) -> Result<Vec<u8>, PageStoreError> {
+        let entry = self.load_delta_entry(delta_loc, remote).await?;
+        entry.read_page(page_in_chunk)
     }
 }
 

@@ -3,7 +3,6 @@
 //! This module provides the `ManifestTxn` builder for accumulating operations
 //! and committing them atomically to the manifest.
 
-use std::collections::HashMap;
 use std::sync::mpsc;
 
 use super::manifest_ops::ManifestOp;
@@ -144,9 +143,35 @@ impl<'a> ManifestTxn<'a> {
         self
     }
 
+    /// Upsert a job record (T6b).
+    ///
+    /// Updates an existing job or creates a new one. Used for progress tracking.
+    pub fn upsert_job(&mut self, _job_id: JobId, record: JobRecord) -> &mut Self {
+        self.ops.push(ManifestOp::PutJob { record });
+        self
+    }
+
     /// Remove a job.
     pub fn remove_job(&mut self, job_id: JobId) -> &mut Self {
         self.ops.push(ManifestOp::RemoveJob { job_id });
+        self
+    }
+
+    /// Cancel a checkpoint job with a compensating change log entry (T11b).
+    ///
+    /// This records the cancellation in the change log for observability and
+    /// ensures subscribers can observe the cancellation event.
+    pub fn cancel_checkpoint(
+        &mut self,
+        job_id: JobId,
+        reason: crate::manifest::CheckpointCancellationReason,
+    ) -> &mut Self {
+        use crate::manifest::ManifestOp;
+        self.ops.push(ManifestOp::CancelCheckpoint {
+            job_id,
+            reason,
+            timestamp_ms: crate::manifest::epoch_millis(),
+        });
         self
     }
 

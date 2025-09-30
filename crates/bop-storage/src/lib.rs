@@ -1,18 +1,33 @@
 mod archive;
+mod checkpoint;
+mod cold_scan;
 mod db;
 mod error;
 mod flush;
 mod io;
 #[cfg(feature = "libsql")]
 pub mod libsql;
+mod local_store;
 mod manager;
 mod manifest;
 mod page_cache;
+mod page_store_policies;
+mod remote_store;
 mod runtime;
+mod storage_quota;
 mod wal;
 mod write;
 
 pub use archive::Archive;
+pub use checkpoint::{
+    CheckpointExecutor, CheckpointJobState, CheckpointOrchestrator, CheckpointPlan,
+    CheckpointPlanner, ChunkAction, ExecutorError, LeaseMap, OrchestratorConfig, OrchestratorError,
+    PlannerContext, PlannerError, TruncateDirection, TruncationError, TruncationRequest,
+    WorkloadType,
+};
+pub use cold_scan::{
+    ColdScanError, ColdScanOptions, ColdScanStats, ColdScanStatsTracker, RemoteReadLimiter,
+};
 pub use db::{DB, DbConfig, DbDiagnostics, DbError, DbId};
 pub use error::{ErrorCode, ErrorWithContext, ResultExt};
 pub use flush::{
@@ -30,6 +45,7 @@ pub use libsql::{
     LibsqlVfs, LibsqlVfsBuilder, LibsqlVfsConfig, LibsqlVfsError, LibsqlVirtualWal,
     LibsqlVirtualWalError, LibsqlWalHook, LibsqlWalHookError, VirtualWalConfig,
 };
+pub use local_store::{LocalStore, LocalStoreConfig, LocalStoreError};
 pub use manager::{
     ControllerDiagnostics, Manager, ManagerClosedError, ManagerDiagnostics, ManagerError,
 };
@@ -38,6 +54,12 @@ pub use page_cache::{
     PageCache, PageCacheConfig, PageCacheKey, PageCacheMetricsSnapshot, PageCacheNamespace,
     PageCacheObserver, PageFrame, allocate_cache_object_id,
 };
+pub use page_store_policies::{
+    CheckpointObserver, FetchOptions, PinGuard, PinTracker, PrefetchHint,
+};
+pub use remote_store::{BlobKey, RemoteStore, RemoteStoreConfig, RemoteStoreError};
+pub use scratch_janitor::{ScratchJanitor, ScratchJanitorConfig};
+pub use storage_quota::{QuotaConfig, QuotaError, ReservationGuard, StorageQuota};
 pub use wal::{
     StagedBatchStats, Wal, WalDiagnostics, WalSegment, WalSegmentError, WalSegmentSnapshot,
     WriteBatch, WriteBufferError, WriteChunk,
@@ -46,3 +68,4 @@ pub use write::{
     WriteController, WriteControllerConfig, WriteControllerSnapshot, WriteProcessError,
     WriteScheduleError,
 };
+mod scratch_janitor;

@@ -98,11 +98,29 @@ struct EvictionEntry<K> {
 /// cache defers observer invocations until internal bookkeeping locks are released, but
 /// re-entrant access can still create deadlocks if observers attempt to acquire cache locks
 /// held by other threads.
+///
+/// # T10a: Checkpoint Hooks
+/// The on_checkpoint_start and on_checkpoint_end hooks allow the checkpoint executor
+/// to coordinate with the PageCache, for example to pin pages or adjust eviction policies.
 pub trait PageCacheObserver<K>: Send + Sync + 'static {
     fn on_insert(&self, _key: &K, _bytes: &[u8]) {}
     fn on_hit(&self, _key: &K) {}
     fn on_miss(&self, _key: &K) {}
     fn on_evict(&self, _key: &K, _bytes: &[u8]) {}
+
+    /// Called when a checkpoint job starts processing chunks.
+    ///
+    /// # Parameters
+    /// - `job_id`: Unique identifier for the checkpoint job
+    /// - `generation`: The generation being written
+    fn on_checkpoint_start(&self, _job_id: u64, _generation: u64) {}
+
+    /// Called when a checkpoint job completes (success or failure).
+    ///
+    /// # Parameters
+    /// - `job_id`: Unique identifier for the checkpoint job
+    /// - `success`: Whether the checkpoint completed successfully
+    fn on_checkpoint_end(&self, _job_id: u64, _success: bool) {}
 }
 
 /// A cached page frame backed by reference-counted bytes.

@@ -12,22 +12,14 @@ use std::thread;
 use std::time::Instant;
 
 use bincode::serde::{decode_from_slice, encode_to_vec};
-use heed::{Env, EnvOpenOptions, RoTxn};
+use heed::{EnvOpenOptions, RoTxn};
 
-use super::change_log::{
-    ChangeLogState, apply_startup_truncation, compute_change_log_cache_id,
-    hydrate_change_log_cache, load_change_state,
-};
+use super::change_log::ChangeLogState;
 use super::cursors::{CursorAckRequest, CursorRegistrationRequest};
-use super::manifest_ops::ManifestOp;
-use super::operations::{ForkData, load_generations, load_pending_batches};
-use super::state::{
-    ChangeSignal, ChangeStateBootstrap, ManifestDiagnostics, ManifestDiagnosticsSnapshot,
-    ManifestRuntimeState,
-};
-use super::tables::{JOB_ID_COMPONENT, ManifestTables, epoch_millis};
-use super::transaction::ManifestTxn;
-use super::worker::{ManifestCommand, WaitRequest, WorkerHandle, worker_loop};
+use super::operations::load_pending_batches;
+use super::state::{ChangeSignal, ManifestDiagnostics, ManifestRuntimeState};
+use super::tables::ManifestTables;
+use super::worker::{ManifestCommand, WorkerHandle, worker_loop};
 use super::*;
 use crate::page_cache::{PageCache, PageCacheKey, PageCacheMetricsSnapshot};
 
@@ -509,6 +501,93 @@ impl Manifest {
         })
     }
 
+    /// Resolve the location of a page (base chunk + delta chain) for PageStore reads.
+    ///
+    /// This is the Phase 2 implementation that enables T4c delta layering.
+    pub fn resolve_page_location(
+        &self,
+        db_id: u32,
+        page_no: u64,
+    ) -> Result<crate::db::PageLocation, ManifestError> {
+        use crate::db::{DeltaLocation, PageLocation};
+
+        self.read(|tables, txn| {
+            let mut chunk_entries = Vec::new();
+            let mut chunk_cursor = tables.chunk_catalog.iter(txn)?;
+            while let Some((raw_key, record)) = chunk_cursor.next().transpose()? {
+                let key = ChunkKey::decode(raw_key);
+                if key.db_id == db_id {
+                    chunk_entries.push((key, record));
+                }
+            }
+
+            if chunk_entries.is_empty() {
+                return Err(ManifestError::InvariantViolation(format!(
+                    "no chunks found for db {}",
+                    db_id
+                )));
+            }
+
+            chunk_entries.sort_by_key(|(key, _)| key.chunk_id);
+
+            let requested_page = page_no;
+            let mut start_page_index = 0u64;
+            let mut selected: Option<(ChunkKey, ChunkEntryRecord, u64)> = None;
+
+            for (key, record) in chunk_entries.into_iter() {
+                let page_count = record.effective_page_count();
+
+                let end_page_index = start_page_index.checked_add(page_count).ok_or_else(|| {
+                    ManifestError::InvariantViolation(format!(
+                        "page index overflow while scanning chunks for db {}",
+                        db_id
+                    ))
+                })?;
+
+                if page_count > 0 && requested_page < end_page_index {
+                    selected = Some((key, record, start_page_index));
+                    break;
+                }
+
+                start_page_index = end_page_index;
+            }
+
+            let (chunk_key, base_chunk, base_start_page) = selected.ok_or_else(|| {
+                ManifestError::InvariantViolation(format!(
+                    "page {} not covered by any chunk in db {}",
+                    page_no, db_id
+                ))
+            })?;
+
+            let mut deltas = Vec::new();
+            let start_key = ChunkDeltaKey::new(db_id, chunk_key.chunk_id, 0).encode();
+            let end_key = ChunkDeltaKey::new(db_id, chunk_key.chunk_id, u32::MAX).encode();
+            let mut delta_cursor = tables.chunk_delta_index.range(txn, &(start_key..=end_key))?;
+            while let Some((raw_key, record)) = delta_cursor.next().transpose()? {
+                let delta_key = ChunkDeltaKey::decode(raw_key);
+
+                if delta_key.db_id != db_id || delta_key.chunk_id != chunk_key.chunk_id {
+                    break;
+                }
+
+                deltas.push(DeltaLocation {
+                    delta_key,
+                    delta_record: record,
+                    generation: delta_key.generation as u64,
+                });
+            }
+
+            deltas.sort_by_key(|d| d.generation);
+
+            Ok(PageLocation {
+                base_chunk,
+                base_chunk_key: chunk_key,
+                base_start_page,
+                deltas,
+            })
+        })
+    }
+
     /// Get the maximum database ID currently in use.
     pub fn max_db_id(&self) -> Result<Option<u32>, ManifestError> {
         self.read(|tables, txn| {
@@ -531,6 +610,11 @@ impl Manifest {
             .lock()
             .ok()
             .and_then(|map| map.get(&component).copied())
+    }
+
+    /// Get a job record by ID (T6b).
+    pub fn get_job(&self, job_id: JobId) -> Result<Option<JobRecord>, ManifestError> {
+        self.read(|tables, txn| Ok(tables.job_queue.get(txn, &job_id)?))
     }
 
     /// Get a snapshot of manifest diagnostics.

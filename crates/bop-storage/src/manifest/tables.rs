@@ -659,7 +659,7 @@ pub enum DbLifecycle {
     /// Database has been deleted and is waiting for garbage collection.
     Tombstoned {
         /// Timestamp when the database was tombstoned.
-        tombstoned_at_epoch_ms: u64
+        tombstoned_at_epoch_ms: u64,
     },
 }
 
@@ -714,7 +714,7 @@ pub enum RetentionPolicy {
     /// Keep only the most recent N generations.
     KeepGenerations {
         /// Number of generations to retain.
-        count: u32
+        count: u32,
     },
 }
 
@@ -826,6 +826,15 @@ pub struct ChunkEntryRecord {
     /// Size of the chunk in bytes.
     pub size_bytes: u64,
 
+    /// CRC64-NVME content hash for blob addressing (4x u64).
+    pub content_hash: [u64; 4],
+
+    /// Page size used in this chunk (typically 4096 bytes).
+    pub page_size: u32,
+
+    /// Number of pages in this chunk.
+    pub page_count: u32,
+
     /// Compression codec used for this chunk.
     pub compression: CompressionCodec,
 
@@ -849,11 +858,29 @@ impl Default for ChunkEntryRecord {
             file_name: String::new(),
             generation: 0,
             size_bytes: 0,
+            content_hash: [0; 4],
+            page_size: 4096,
+            page_count: 0,
             compression: CompressionCodec::None,
             encrypted: false,
             residency: ChunkResidency::Local,
             uploaded_at_epoch_ms: None,
             purge_after_epoch_ms: None,
+        }
+    }
+}
+impl ChunkEntryRecord {
+    /// Returns the effective number of pages contained in this chunk.
+    ///
+    /// Falls back to deriving the count from the stored size when the manifest
+    /// has not yet persisted an explicit page_count value.
+    pub fn effective_page_count(&self) -> u64 {
+        if self.page_count != 0 {
+            self.page_count as u64
+        } else if self.page_size != 0 {
+            (self.size_bytes + self.page_size as u64 - 1) / self.page_size as u64
+        } else {
+            0
         }
     }
 }
@@ -961,19 +988,19 @@ pub enum RemoteObjectKind {
     /// Delta chunk (incremental update to base chunk).
     Delta {
         /// Sequential delta identifier within the chunk's delta chain.
-        delta_id: u16
+        delta_id: u16,
     },
 
     /// Write-ahead log artifact for a specific shard.
     Wal {
         /// Shard index for this WAL artifact.
-        shard: u16
+        shard: u16,
     },
 
     /// Custom object type with user-defined tag.
     Custom {
         /// User-defined tag for this object type.
-        tag: String
+        tag: String,
     },
 }
 
@@ -1099,6 +1126,9 @@ pub struct ChunkDeltaRecord {
     /// Size of the delta file in bytes.
     pub size_bytes: u64,
 
+    /// CRC64-NVME content hash for blob addressing (4x u64).
+    pub content_hash: [u64; 4],
+
     /// Current residency state (local, remote, or both).
     pub residency: ChunkResidency,
 }
@@ -1111,6 +1141,7 @@ impl Default for ChunkDeltaRecord {
             delta_id: 0,
             delta_file: String::new(),
             size_bytes: 0,
+            content_hash: [0; 4],
             residency: ChunkResidency::Local,
         }
     }
@@ -1194,7 +1225,7 @@ pub enum SnapshotChunkKind {
     /// Reference to a delta chunk (incremental update).
     Delta {
         /// The base chunk ID that this delta applies to.
-        base_chunk_id: ChunkId
+        base_chunk_id: ChunkId,
     },
 }
 
@@ -1243,6 +1274,14 @@ pub enum JobKind {
 
     /// Run garbage collection to reclaim space.
     Gc,
+
+    /// Truncate append-only chunks (head or tail).
+    ///
+    /// # T5: Append-Only Truncation
+    ///
+    /// This job type coordinates truncation requests with checkpoint
+    /// execution using the lease map. See `checkpoint::truncation` for details.
+    TruncateAppendOnly,
 
     /// Custom job type with user-defined identifier.
     Custom(u16),
@@ -1293,19 +1332,42 @@ pub enum JobPayload {
     /// Flush job payload specifying which WAL shard to flush.
     FlushShard {
         /// Shard index to flush.
-        shard: u16
+        shard: u16,
     },
 
     /// Upload job payload specifying which chunk to upload.
     ChunkUpload {
         /// Chunk ID to upload.
-        chunk_id: ChunkId
+        chunk_id: ChunkId,
+    },
+
+    /// Checkpoint job progress tracking (T6b).
+    ///
+    /// Stores checkpoint execution state for crash recovery and resume logic.
+    CheckpointProgress {
+        /// Current execution phase (Preparing, Planning, Staging, Uploading, Publishing, Cleanup).
+        phase: String,
+
+        /// Total number of chunks in the plan.
+        total_chunks: u32,
+
+        /// Number of chunks staged so far.
+        chunks_staged: u32,
+
+        /// Number of chunks uploaded so far.
+        chunks_uploaded: u32,
+
+        /// Chunk IDs that have been processed (for idempotent retry).
+        processed_chunks: Vec<ChunkId>,
+
+        /// Generation number for this checkpoint.
+        generation: u64,
     },
 
     /// Custom payload with arbitrary bytes.
     Custom {
         /// Opaque payload bytes.
-        bytes: Vec<u8>
+        bytes: Vec<u8>,
     },
 }
 

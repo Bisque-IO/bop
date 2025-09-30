@@ -388,6 +388,17 @@ fn apply_batch(
                     persisted_job_counter,
                 )?;
             }
+            ManifestOp::CancelCheckpoint {
+                job_id,
+                reason,
+                timestamp_ms,
+            } => {
+                // T11b: Compensating entry for checkpoint cancellation
+                // This is recorded in the change log but doesn't modify any tables
+                // It's purely for observability and audit trails
+                // The actual job cleanup happens through RemoveJob
+                let _ = (job_id, reason, timestamp_ms); // Acknowledge usage
+            }
         }
     }
 
