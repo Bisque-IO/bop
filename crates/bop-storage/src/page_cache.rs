@@ -92,6 +92,12 @@ struct EvictionEntry<K> {
 
 /// Observer hooks invoked as cache events occur. Callers can use this to persist pages,
 /// build warm caches, or collect external diagnostics.
+///
+/// # Re-entrancy
+/// Callbacks must not synchronously call back into the cache while they are executing. The
+/// cache defers observer invocations until internal bookkeeping locks are released, but
+/// re-entrant access can still create deadlocks if observers attempt to acquire cache locks
+/// held by other threads.
 pub trait PageCacheObserver<K>: Send + Sync + 'static {
     fn on_insert(&self, _key: &K, _bytes: &[u8]) {}
     fn on_hit(&self, _key: &K) {}
@@ -287,38 +293,48 @@ where
         };
 
         loop {
-            let mut eviction = self
-                .eviction
-                .lock()
-                .expect("page cache eviction state poisoned");
-            if eviction.total_bytes <= limit {
-                break;
-            }
+            let (evicted, needs_more) = {
+                let mut eviction = self
+                    .eviction
+                    .lock()
+                    .expect("page cache eviction state poisoned");
 
-            let mut evicted = false;
-            while let Some(entry) = eviction.order.pop_front() {
-                if let Some(frame_guard) = self.frames.get(&entry.key) {
-                    let last_access = frame_guard.value().last_access();
-                    drop(frame_guard);
+                if eviction.total_bytes <= limit {
+                    return;
+                }
 
-                    if last_access == entry.stamp {
-                        if let Some((_k, removed_frame)) = self.frames.remove(&entry.key) {
-                            eviction.total_bytes =
-                                eviction.total_bytes.saturating_sub(removed_frame.len());
-                            self.evictions.fetch_add(1, Ordering::Relaxed);
-                            if let Some(observer) = &self.observer {
-                                observer.on_evict(&entry.key, removed_frame.as_slice());
+                let mut evicted: Option<(K, Arc<PageFrame>)> = None;
+
+                while let Some(entry) = eviction.order.pop_front() {
+                    if let Some(frame_guard) = self.frames.get(&entry.key) {
+                        let last_access = frame_guard.value().last_access();
+                        drop(frame_guard);
+
+                        if last_access == entry.stamp {
+                            if let Some((_k, removed_frame)) = self.frames.remove(&entry.key) {
+                                eviction.total_bytes =
+                                    eviction.total_bytes.saturating_sub(removed_frame.len());
+                                self.evictions.fetch_add(1, Ordering::Relaxed);
+                                evicted = Some((entry.key, removed_frame));
+                                break;
                             }
-                            evicted = true;
-                            break;
                         }
                     }
                 }
+
+                let needs_more = eviction.total_bytes > limit && evicted.is_some();
+                (evicted, needs_more)
+            };
+
+            if let Some((key, frame)) = evicted {
+                if let Some(observer) = &self.observer {
+                    observer.on_evict(&key, frame.as_slice());
+                }
+            } else {
+                break;
             }
 
-            if !evicted {
-                // We exhausted the order without finding a matching entry; stop to
-                // avoid spinning in a tight loop.
+            if !needs_more {
                 break;
             }
         }
@@ -365,7 +381,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock, Weak};
     use std::thread;
 
     #[test]
@@ -421,6 +437,52 @@ mod tests {
         }
 
         assert!(cache.total_bytes() <= 1024 * 8);
+    }
+
+    #[test]
+    fn observer_reentry_does_not_deadlock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct ReentrantObserver {
+            cache: OnceLock<Weak<PageCache<&'static str>>>,
+            invoked: AtomicBool,
+        }
+
+        impl ReentrantObserver {
+            fn new() -> Self {
+                Self {
+                    cache: OnceLock::new(),
+                    invoked: AtomicBool::new(false),
+                }
+            }
+
+            fn attach(&self, cache: &Arc<PageCache<&'static str>>) {
+                let _ = self.cache.set(Arc::downgrade(cache));
+            }
+        }
+
+        impl PageCacheObserver<&'static str> for ReentrantObserver {
+            fn on_evict(&self, _key: &&'static str, _bytes: &[u8]) {
+                self.invoked.store(true, Ordering::SeqCst);
+                if let Some(cache) = self.cache.get().and_then(|weak| weak.upgrade()) {
+                    let _ = cache.total_bytes();
+                }
+            }
+        }
+
+        let observer = Arc::new(ReentrantObserver::new());
+        let cache = Arc::new(PageCache::with_observer(
+            PageCacheConfig {
+                capacity_bytes: Some(4),
+            },
+            Some(observer.clone() as Arc<dyn PageCacheObserver<&'static str>>),
+        ));
+        observer.attach(&cache);
+
+        cache.insert("page-a", Arc::from(vec![1u8; 4]));
+        cache.insert("page-b", Arc::from(vec![2u8; 4]));
+
+        assert!(observer.invoked.load(Ordering::SeqCst));
     }
 
     #[test]

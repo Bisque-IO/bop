@@ -1,7 +1,11 @@
 #![allow(dead_code)]
 
+use std::any::TypeId;
+use std::backtrace::{Backtrace, BacktraceStatus};
+use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::panic::{self, AssertUnwindSafe};
+use std::fmt;
+use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -41,6 +45,7 @@ pub struct WriteControllerSnapshot {
     pub completed: u64,
     pub failed: u64,
     pub last_error: Option<String>,
+    pub last_panic: Option<PanicContext>,
 }
 
 /// Errors produced when scheduling segments onto the write controller.
@@ -53,7 +58,7 @@ pub enum WriteScheduleError {
 }
 
 /// Errors surfaced while processing staged write batches.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum WriteProcessError {
     #[error("write queue missing staged batch")]
     MissingBatch,
@@ -64,7 +69,7 @@ pub enum WriteProcessError {
     #[error("partial write: expected {expected} bytes, wrote {actual}")]
     Partial { expected: usize, actual: usize },
     #[error("write worker panic: {0}")]
-    Panic(String),
+    Panic(PanicContext),
     #[error("write worker join error: {0}")]
     Join(String),
     #[error("wal segment state error: {0}")]
@@ -80,6 +85,176 @@ impl From<crate::IoError> for WriteProcessError {
 impl From<WalSegmentError> for WriteProcessError {
     fn from(value: WalSegmentError) -> Self {
         Self::Segment(value.to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PanicContext {
+    message: Option<String>,
+    payload_kind: PanicPayloadKind,
+    location: Option<PanicLocation>,
+    backtrace: Arc<Backtrace>,
+}
+
+impl PanicContext {
+    fn from_captured(captured: Option<CapturedPanicInfo>) -> Self {
+        let (message, payload_kind, location) = if let Some(info) = captured {
+            (info.message, info.payload_kind, info.location)
+        } else {
+            (
+                None,
+                PanicPayloadKind::Other {
+                    type_id: TypeId::of::<()>(),
+                },
+                None,
+            )
+        };
+
+        Self {
+            message,
+            payload_kind,
+            location,
+            backtrace: Arc::new(Backtrace::force_capture()),
+        }
+    }
+
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
+    pub fn payload_kind(&self) -> PanicPayloadKind {
+        self.payload_kind
+    }
+
+    pub fn location(&self) -> Option<&PanicLocation> {
+        self.location.as_ref()
+    }
+
+    pub fn backtrace(&self) -> &Backtrace {
+        self.backtrace.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanicPayloadKind {
+    Str,
+    String,
+    Other { type_id: TypeId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanicLocation {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+impl PanicLocation {
+    fn from_std(location: &panic::Location<'_>) -> Self {
+        Self {
+            file: location.file().to_owned(),
+            line: location.line(),
+            column: location.column(),
+        }
+    }
+}
+
+impl fmt::Display for PanicContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = self.message.as_deref().unwrap_or("unknown panic");
+        write!(f, "{} [payload: {:?}", message, self.payload_kind)?;
+        if let Some(location) = &self.location {
+            write!(
+                f,
+                ", location: {}:{}:{}",
+                location.file, location.line, location.column
+            )?;
+        }
+        write!(f, "]")?;
+        match self.backtrace.status() {
+            BacktraceStatus::Captured => write!(f, "\nbacktrace:\n{}", self.backtrace),
+            BacktraceStatus::Disabled => write!(f, "\nbacktrace: <disabled>"),
+            BacktraceStatus::Unsupported => write!(f, "\nbacktrace: <unsupported>"),
+            _ => write!(f, "\nbacktrace: <unknown>"),
+        }
+    }
+}
+
+thread_local! {
+    static CAPTURED_PANIC_INFO: RefCell<Option<CapturedPanicInfo>> = RefCell::new(None);
+}
+
+#[derive(Debug, Clone)]
+struct CapturedPanicInfo {
+    message: Option<String>,
+    payload_kind: PanicPayloadKind,
+    location: Option<PanicLocation>,
+}
+
+struct PanicHookGuard {
+    previous: Option<Arc<dyn Fn(&PanicHookInfo) + Send + Sync + 'static>>,
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            panic::set_hook(Box::new(move |info: &PanicHookInfo| {
+                (*previous)(info);
+            }));
+        }
+    }
+}
+
+fn with_panic_capture<F, R>(f: F) -> Result<R, PanicContext>
+where
+    F: FnOnce() -> R,
+{
+    CAPTURED_PANIC_INFO.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+
+    let previous: Arc<dyn Fn(&PanicHookInfo) + Send + Sync + 'static> = panic::take_hook().into();
+    let hook_previous = previous.clone();
+
+    panic::set_hook(Box::new(move |info: &PanicHookInfo| {
+        let payload = info.payload();
+        let mut captured = CapturedPanicInfo {
+            message: None,
+            payload_kind: PanicPayloadKind::Other {
+                type_id: payload.type_id(),
+            },
+            location: info.location().map(PanicLocation::from_std),
+        };
+
+        if let Some(msg) = payload.downcast_ref::<&'static str>() {
+            captured.message = Some((*msg).to_string());
+            captured.payload_kind = PanicPayloadKind::Str;
+        } else if let Some(msg) = payload.downcast_ref::<String>() {
+            captured.message = Some(msg.clone());
+            captured.payload_kind = PanicPayloadKind::String;
+        }
+
+        CAPTURED_PANIC_INFO.with(|cell| {
+            *cell.borrow_mut() = Some(captured);
+        });
+
+        (*hook_previous)(info);
+    }));
+
+    let guard = PanicHookGuard {
+        previous: Some(previous),
+    };
+
+    let result = panic::catch_unwind(AssertUnwindSafe(f));
+
+    drop(guard);
+
+    match result {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            let captured = CAPTURED_PANIC_INFO.with(|cell| cell.borrow_mut().take());
+            Err(PanicContext::from_captured(captured))
+        }
     }
 }
 
@@ -257,6 +432,7 @@ impl WriteControllerState {
             completed: self.metrics.completed.load(Ordering::Relaxed),
             failed: self.metrics.failed.load(Ordering::Relaxed),
             last_error: self.metrics.last_error(),
+            last_panic: self.metrics.last_panic(),
         }
     }
 }
@@ -267,6 +443,7 @@ struct WriteControllerMetrics {
     completed: AtomicU64,
     failed: AtomicU64,
     last_error: Mutex<Option<String>>,
+    last_panic: Mutex<Option<PanicContext>>,
 }
 
 impl WriteControllerMetrics {
@@ -281,6 +458,12 @@ impl WriteControllerMetrics {
             .lock()
             .expect("write metrics mutex poisoned");
         *guard = None;
+        drop(guard);
+        let mut panic_guard = self
+            .last_panic
+            .lock()
+            .expect("write metrics mutex poisoned");
+        *panic_guard = None;
     }
 
     fn record_failure(&self, error: &WriteProcessError) {
@@ -290,10 +473,27 @@ impl WriteControllerMetrics {
             .lock()
             .expect("write metrics mutex poisoned");
         *guard = Some(error.to_string());
+        drop(guard);
+        let mut panic_guard = self
+            .last_panic
+            .lock()
+            .expect("write metrics mutex poisoned");
+        if let WriteProcessError::Panic(context) = error {
+            *panic_guard = Some(context.clone());
+        } else {
+            *panic_guard = None;
+        }
     }
 
     fn last_error(&self) -> Option<String> {
         self.last_error
+            .lock()
+            .expect("write metrics mutex poisoned")
+            .clone()
+    }
+
+    fn last_panic(&self) -> Option<PanicContext> {
+        self.last_panic
             .lock()
             .expect("write metrics mutex poisoned")
             .clone()
@@ -472,13 +672,11 @@ enum WriteExecutionResult {
 }
 
 fn blocking_write(io: Arc<dyn IoFile>, offset: u64, batch: WriteBatch) -> WriteExecutionResult {
-    match panic::catch_unwind(AssertUnwindSafe(|| {
-        perform_write(io.as_ref(), offset, &batch)
-    })) {
+    match with_panic_capture(|| perform_write(io.as_ref(), offset, &batch)) {
         Ok(Ok(bytes)) => WriteExecutionResult::Completed { bytes },
         Ok(Err(error)) => WriteExecutionResult::Failed { error, batch },
-        Err(payload) => WriteExecutionResult::Failed {
-            error: WriteProcessError::Panic(panic_message(payload)),
+        Err(context) => WriteExecutionResult::Failed {
+            error: WriteProcessError::Panic(context),
             batch,
         },
     }
@@ -506,16 +704,6 @@ fn perform_write(
             actual: bytes,
         }),
         Err(err) => Err(WriteProcessError::from(err)),
-    }
-}
-
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(msg) = payload.downcast_ref::<&str>() {
-        msg.to_string()
-    } else if let Some(msg) = payload.downcast_ref::<String>() {
-        msg.clone()
-    } else {
-        "unknown panic".to_string()
     }
 }
 
@@ -606,6 +794,61 @@ mod tests {
 
     fn wal_segment(io: Arc<dyn IoFile>, preallocated: u64) -> Arc<WalSegment> {
         Arc::new(WalSegment::new(io, 0, preallocated))
+    }
+
+    #[test]
+    fn blocking_write_captures_panic_context() {
+        #[derive(Debug)]
+        struct PanickingIo;
+
+        impl IoFile for PanickingIo {
+            fn readv_at(&self, _offset: u64, _bufs: &mut [IoVecMut<'_>]) -> IoResult<usize> {
+                Ok(0)
+            }
+
+            fn writev_at(&self, _offset: u64, _bufs: &[IoVec<'_>]) -> IoResult<usize> {
+                panic!("intentional panic");
+            }
+
+            fn allocate(&self, _offset: u64, _len: u64) -> IoResult<()> {
+                Ok(())
+            }
+
+            fn flush(&self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let io: Arc<dyn IoFile> = Arc::new(PanickingIo);
+        let batch = vec![WriteChunk::Owned(vec![1, 2, 3])];
+
+        let expected_len = 3;
+
+        let result = blocking_write(io, 0, batch);
+
+        match result {
+            WriteExecutionResult::Failed {
+                error,
+                batch: returned,
+            } => {
+                assert_eq!(batch_len(&returned), expected_len);
+                match error {
+                    WriteProcessError::Panic(context) => {
+                        assert_eq!(context.message(), Some("intentional panic"));
+                        assert_eq!(context.payload_kind(), PanicPayloadKind::Str);
+                        let location = context.location().expect("panic location");
+                        assert!(
+                            location.file.ends_with("write.rs"),
+                            "unexpected location: {}",
+                            location.file
+                        );
+                        assert_eq!(context.backtrace().status(), BacktraceStatus::Captured);
+                    }
+                    other => panic!("expected panic error, got {:?}", other),
+                }
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
     }
 
     #[test]

@@ -46,6 +46,7 @@ const REMOTE_NAMESPACE_VERSION: u16 = 1;
 const CHANGE_RECORD_VERSION: u16 = 1;
 const CURSOR_RECORD_VERSION: u16 = 1;
 const CHANGE_LOG_CACHE_PREFILL_LIMIT: usize = 256;
+const CHANGE_LOG_TRUNCATION_THRESHOLD: u64 = 256;
 const RUNTIME_STATE_VERSION: u16 = 1;
 const RUNTIME_STATE_KEY: u32 = 0;
 
@@ -1050,30 +1051,98 @@ fn load_change_state(
     })
 }
 
+fn compute_truncate_before(state: &ChangeLogState) -> ChangeSequence {
+    state
+        .min_acked_sequence()
+        .map(|seq| seq.saturating_add(1))
+        .unwrap_or(state.next_sequence)
+}
+
+fn delete_change_log_range(
+    txn: &mut RwTxn<'_>,
+    tables: &ManifestTables,
+    start: ChangeSequence,
+    end: ChangeSequence,
+) -> Result<(), heed::Error> {
+    let mut current = start;
+    while current < end {
+        tables.change_log.delete(txn, &current)?;
+        current = current.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn evict_change_log_cache_range(
+    cache: &PageCache<PageCacheKey>,
+    object_id: u64,
+    start: ChangeSequence,
+    end: ChangeSequence,
+) {
+    let mut current = start;
+    while current < end {
+        cache.remove(&PageCacheKey::manifest(object_id, current));
+        current = current.saturating_add(1);
+    }
+}
+
+fn truncate_change_log(
+    env: &Env,
+    tables: &ManifestTables,
+    change_state: &mut ChangeLogState,
+    truncate_before: ChangeSequence,
+    page_cache: Option<&Arc<PageCache<PageCacheKey>>>,
+    page_cache_object_id: Option<u64>,
+) -> Result<bool, ManifestError> {
+    if truncate_before <= change_state.oldest_sequence {
+        return Ok(false);
+    }
+
+    let start = change_state.oldest_sequence;
+    let mut txn = env.write_txn()?;
+    delete_change_log_range(&mut txn, tables, start, truncate_before)?;
+    txn.commit()?;
+
+    if let (Some(cache), Some(object_id)) = (page_cache, page_cache_object_id) {
+        evict_change_log_cache_range(cache, object_id, start, truncate_before);
+    }
+
+    change_state.oldest_sequence = truncate_before;
+    Ok(true)
+}
+
+fn maybe_truncate_change_log(
+    env: &Env,
+    tables: &ManifestTables,
+    change_state: &mut ChangeLogState,
+    page_cache: Option<&Arc<PageCache<PageCacheKey>>>,
+    page_cache_object_id: Option<u64>,
+) -> Result<bool, ManifestError> {
+    let depth = change_state
+        .next_sequence
+        .saturating_sub(change_state.oldest_sequence);
+
+    if depth < CHANGE_LOG_TRUNCATION_THRESHOLD {
+        return Ok(false);
+    }
+
+    let truncate_before = compute_truncate_before(change_state);
+    truncate_change_log(
+        env,
+        tables,
+        change_state,
+        truncate_before,
+        page_cache,
+        page_cache_object_id,
+    )
+}
+
 fn apply_startup_truncation(
     env: &Env,
     tables: &ManifestTables,
     change_state: &mut ChangeLogState,
 ) -> Result<(), ManifestError> {
-    let truncate_before = change_state
-        .min_acked_sequence()
-        .map(|seq| seq.saturating_add(1))
-        .unwrap_or(change_state.oldest_sequence);
-
-    if truncate_before <= change_state.oldest_sequence {
-        return Ok(());
-    }
-
-    let mut txn = env.write_txn()?;
-    let mut current = change_state.oldest_sequence;
-    while current < truncate_before {
-        tables.change_log.delete(&mut txn, &current)?;
-        current = current.saturating_add(1);
-    }
-    txn.commit()?;
-
-    change_state.oldest_sequence = truncate_before;
-    Ok(())
+    let truncate_before = compute_truncate_before(change_state);
+    truncate_change_log(env, tables, change_state, truncate_before, None, None).map(|_| ())
 }
 
 fn hydrate_change_log_cache(
@@ -1536,6 +1605,8 @@ fn worker_loop(
                         &mut change_state,
                         request.cursor_id,
                         request.sequence,
+                        page_cache.as_ref(),
+                        page_cache_object_id,
                     );
                     match result {
                         Ok(snapshot) => {
@@ -1582,6 +1653,17 @@ fn worker_loop(
                     }
                     pending.clear();
                     deadline = None;
+                    if maybe_truncate_change_log(
+                        &env,
+                        &tables,
+                        &mut change_state,
+                        page_cache.as_ref(),
+                        page_cache_object_id,
+                    )
+                    .is_err()
+                    {
+                        break;
+                    }
                     if let Ok(mut cache) = generation_cache.lock() {
                         *cache = generations.clone();
                     }
@@ -1796,6 +1878,8 @@ fn acknowledge_cursor(
     change_state: &mut ChangeLogState,
     cursor_id: ChangeCursorId,
     sequence: ChangeSequence,
+    page_cache: Option<&Arc<PageCache<PageCacheKey>>>,
+    page_cache_object_id: Option<u64>,
 ) -> Result<ChangeCursorSnapshot, ManifestError> {
     let existing_state = change_state
         .cursors
@@ -1825,10 +1909,12 @@ fn acknowledge_cursor(
         cursor.updated_at_epoch_ms = now;
     }
 
-    let truncate_before = projected_state
-        .min_acked_sequence()
-        .map(|seq| seq.saturating_add(1))
-        .unwrap_or(projected_state.oldest_sequence);
+    let truncate_before = compute_truncate_before(&projected_state);
+    let truncation_range = if truncate_before > projected_state.oldest_sequence {
+        Some((projected_state.oldest_sequence, truncate_before))
+    } else {
+        None
+    };
 
     {
         let mut txn = env.write_txn()?;
@@ -1841,12 +1927,8 @@ fn acknowledge_cursor(
         };
         tables.change_cursors.put(&mut txn, &cursor_id, &record)?;
 
-        if truncate_before > projected_state.oldest_sequence {
-            let mut current = projected_state.oldest_sequence;
-            while current < truncate_before {
-                tables.change_log.delete(&mut txn, &current)?;
-                current = current.saturating_add(1);
-            }
+        if let Some((start, end)) = truncation_range {
+            delete_change_log_range(&mut txn, tables, start, end)?;
         }
 
         txn.commit()?;
@@ -1855,8 +1937,13 @@ fn acknowledge_cursor(
     change_state
         .cursors
         .insert(cursor_id, updated_entry.clone());
-    if truncate_before > change_state.oldest_sequence {
-        change_state.oldest_sequence = truncate_before;
+    if let Some((start, end)) = truncation_range {
+        if let (Some(cache), Some(object_id)) = (page_cache, page_cache_object_id) {
+            evict_change_log_cache_range(cache, object_id, start, end);
+        }
+        if end > change_state.oldest_sequence {
+            change_state.oldest_sequence = end;
+        }
     }
 
     Ok(change_state.snapshot_for_cursor(&updated_entry))
@@ -3213,6 +3300,98 @@ mod tests {
             .acknowledge_changes(cursor_id, page.next_sequence.saturating_sub(1))
             .unwrap();
         assert_eq!(ack.acked_sequence, 2);
+    }
+
+    #[test]
+    fn change_log_truncation_without_cursors() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+        let iterations = (CHANGE_LOG_TRUNCATION_THRESHOLD as usize) + 10;
+        for _ in 0..iterations {
+            let mut txn = manifest.begin();
+            txn.bump_generation(TEST_COMPONENT, 1);
+            txn.commit().unwrap();
+        }
+
+        let sequences = manifest
+            .read(|tables, txn| {
+                let mut iter = tables.change_log.iter(txn)?;
+                let mut seqs = Vec::new();
+                while let Some((seq, _)) = iter.next().transpose()? {
+                    seqs.push(seq);
+                }
+                Ok(seqs)
+            })
+            .unwrap();
+
+        assert!(!sequences.is_empty());
+        assert!(
+            sequences[0] >= CHANGE_LOG_TRUNCATION_THRESHOLD + 1,
+            "expected truncation to advance oldest sequence"
+        );
+        assert!(
+            sequences.len() <= CHANGE_LOG_TRUNCATION_THRESHOLD as usize,
+            "log retained {} entries which exceeds threshold {}",
+            sequences.len(),
+            CHANGE_LOG_TRUNCATION_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn active_cursor_preserves_history_during_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
+
+        let cursor = manifest
+            .register_change_cursor(ChangeCursorStart::Oldest)
+            .unwrap();
+
+        let iterations = (CHANGE_LOG_TRUNCATION_THRESHOLD as usize) + 10;
+        for _ in 0..iterations {
+            let mut txn = manifest.begin();
+            txn.bump_generation(TEST_COMPONENT, 1);
+            txn.commit().unwrap();
+        }
+
+        let sequences = manifest
+            .read(|tables, txn| {
+                let mut iter = tables.change_log.iter(txn)?;
+                let mut seqs = Vec::new();
+                while let Some((seq, _)) = iter.next().transpose()? {
+                    seqs.push(seq);
+                }
+                Ok(seqs)
+            })
+            .unwrap();
+
+        assert_eq!(sequences.len(), iterations);
+        assert_eq!(sequences.first().copied(), Some(1));
+
+        let ack_target = (iterations as u64) / 2;
+        manifest
+            .acknowledge_changes(cursor.cursor_id, ack_target)
+            .unwrap();
+
+        let sequences_after_ack = manifest
+            .read(|tables, txn| {
+                let mut iter = tables.change_log.iter(txn)?;
+                let mut seqs = Vec::new();
+                while let Some((seq, _)) = iter.next().transpose()? {
+                    seqs.push(seq);
+                }
+                Ok(seqs)
+            })
+            .unwrap();
+
+        assert_eq!(
+            sequences_after_ack.first().copied(),
+            Some(ack_target.saturating_add(1))
+        );
+        assert!(
+            sequences_after_ack.len() as u64 <= CHANGE_LOG_TRUNCATION_THRESHOLD,
+            "post-ack window exceeded truncation threshold"
+        );
     }
 
     #[test]
