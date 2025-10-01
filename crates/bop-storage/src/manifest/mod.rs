@@ -92,13 +92,10 @@ use std::time::Duration;
 use heed::Env;
 use thiserror::Error;
 
-use crate::page_cache::{PageCache, PageCacheKey};
-
 // Module declarations
 mod api;
 mod change_log;
 mod cursors;
-mod flush_sink;
 mod manifest_ops;
 mod operations;
 mod state;
@@ -108,43 +105,46 @@ mod worker;
 
 // Re-export public types from tables
 pub use tables::{
-    ChangeCursorId, ChangeSequence, ChunkDeltaKey, ChunkDeltaRecord, ChunkEntryRecord, ChunkId,
-    ChunkKey, ChunkRefcountRecord, ChunkResidency, ComponentGeneration, ComponentId,
-    CompressionCodec, CompressionConfig, DbDescriptorRecord, DbId, DbLifecycle,
-    EncryptionAlgorithm, EncryptionConfig, FlushGateState, Generation, GenerationRecord,
-    JobDurableState, JobId, JobKind, JobPayload, JobRecord, ManifestChangeRecord,
-    ManifestDbOptions, MetricDelta, MetricKey, MetricRecord, PendingJobKey, RemoteNamespaceId,
-    RemoteNamespaceRecord, RemoteObjectId, RemoteObjectKey, RemoteObjectKind, RetentionPolicy,
-    RuntimeStateRecord, SnapshotChunkKind, SnapshotChunkRef, SnapshotId, SnapshotKey,
-    SnapshotRecord, WalArtifactId, WalArtifactKey, WalArtifactKind, WalArtifactRecord, WalStateKey,
-    WalStateRecord,
+    AofChunkRecord, ChangeCursorId, ChangeSequence, ChunkDeltaKey,
+    ChunkEntryRecord, ChunkId, ChunkKey, ChunkRefcountRecord, ChunkResidency,
+    AofDescriptorRecord, ComponentGeneration, ComponentId, CompressionCodec, CompressionConfig,
+    DbId, DbLifecycle, EncryptionAlgorithm, EncryptionConfig, Generation,
+    GenerationRecord, JobDurableState, JobId, JobKind, JobPayload, JobRecord,
+    ManifestChangeRecord, ManifestDbOptions, MetricDelta, MetricKey, MetricRecord, PendingJobKey,
+    RemoteNamespaceId, RemoteNamespaceRecord, RemoteObjectId, RemoteObjectKey, RemoteObjectKind,
+    RetentionPolicy, RuntimeStateRecord, SnapshotChunkKind, SnapshotChunkRef, SnapshotId,
+    SnapshotKey, WalArtifactId, WalArtifactKey, WalArtifactKind,
+    AofWalArtifactRecord, AofStateKey, AofStateRecord,
 };
+
+#[cfg(feature = "libsql")]
+pub use tables::{LibSqlChunkDeltaRecord, LibSqlChunkRecord, LibSqlDescriptorRecord, LibSqlSnapshotRecord, LibSqlWalArtifactRecord};
 
 // Re-export internal types and constants from tables
 pub(crate) use tables::{
-    CHANGE_RECORD_VERSION, CHUNK_DELTA_VERSION, CHUNK_ENTRY_VERSION, CHUNK_REFCOUNT_VERSION,
-    CURSOR_RECORD_VERSION, DB_DESCRIPTOR_VERSION, GENERATION_RECORD_VERSION, JOB_ID_COMPONENT,
-    JOB_RECORD_VERSION, METRIC_RECORD_VERSION, ManifestCursorRecord, ManifestTables,
-    SNAPSHOT_RECORD_VERSION, WAL_ARTIFACT_VERSION, WAL_STATE_VERSION, epoch_millis,
+    JOB_ID_COMPONENT, JOB_RECORD_VERSION, ManifestTables, SNAPSHOT_RECORD_VERSION,
 };
 
+// Re-export epoch_millis for use in flush controller
+pub use tables::epoch_millis;
+
 // Re-export types from submodules
-pub use api::{ChangeBatchPage, ChangeCursorSnapshot, ChangeCursorStart};
+pub use api::{
+    ChangeBatchPage, ChangeCursorSnapshot, ChangeCursorStart,
+};
+
+#[cfg(feature = "libsql")]
+pub use api::{DeltaLocation, PageLocation};
+
 pub use manifest_ops::{CheckpointCancellationReason, ManifestOp};
 pub use state::ManifestDiagnosticsSnapshot;
 pub use transaction::ManifestTxn;
 pub use worker::CommitReceipt;
 
 // Re-export internal functions and types from change_log
-use change_log::{
-    ChangeLogState, apply_startup_truncation, compute_change_log_cache_id,
-    hydrate_change_log_cache, load_change_state,
-};
+use change_log::{ChangeLogState, apply_startup_truncation, load_change_state};
 
 // Re-export internal types from cursors
-
-// Re-export types from flush_sink
-pub(crate) use flush_sink::ManifestFlushSink;
 
 // Re-export types and functions from operations
 use operations::{ForkData, load_generations};
@@ -191,8 +191,11 @@ pub enum ManifestError {
 /// Configuration options for opening a manifest.
 #[derive(Debug, Clone)]
 pub struct ManifestOptions {
-    /// Maximum size of the LMDB memory map in bytes.
-    pub map_size: usize,
+    /// Initial size of the LMDB memory map in bytes.
+    pub initial_map_size: usize,
+
+    /// Maximum size the LMDB memory map can grow to in bytes.
+    pub max_map_size: usize,
 
     /// Maximum number of named databases (LMDB sub-databases).
     pub max_dbs: u32,
@@ -203,9 +206,6 @@ pub struct ManifestOptions {
     /// How long to batch operations before committing (for throughput).
     pub commit_latency: Duration,
 
-    /// Optional page cache for caching change log entries.
-    pub page_cache: Option<Arc<PageCache<PageCacheKey>>>,
-
     /// Optional object ID for change log cache keys (computed from path if not provided).
     pub change_log_cache_object_id: Option<u64>,
 }
@@ -213,15 +213,22 @@ pub struct ManifestOptions {
 impl Default for ManifestOptions {
     fn default() -> Self {
         Self {
-            map_size: 256 * 1024 * 1024,
-            max_dbs: 16,
+            initial_map_size: 64 * 1024 * 1024,  // 64 MB initial
+            max_map_size: 16 * 1024 * 1024 * 1024,  // 16 GB maximum
+            max_dbs: 32,  // Increased to accommodate additional tables (aof_chunks, etc.)
             queue_capacity: 128,
             commit_latency: Duration::from_millis(5),
-            page_cache: None,
             change_log_cache_object_id: None,
         }
     }
 }
+
+// TODO: Implement automatic LMDB map expansion on MDB_FULL errors
+// The try_expand_map_size() method is available but not yet integrated into the worker loop.
+// When MDB_FULL is encountered during a commit, the worker should:
+// 1. Call try_expand_map_size() to double the map size (up to max_map_size)
+// 2. Retry the commit operation
+// 3. If already at maximum, return an error
 
 /// The manifest database handle.
 ///
@@ -273,14 +280,17 @@ pub struct Manifest {
     /// Condition variable for signaling new change log entries.
     change_signal: Arc<ChangeSignal>,
 
-    /// Optional page cache for change log entries.
-    page_cache: Option<Arc<PageCache<PageCacheKey>>>,
-
-    /// Cache key prefix for this manifest's change log entries.
-    change_log_cache_object_id: Option<u64>,
-
     /// Runtime state for crash detection.
     runtime_state: ManifestRuntimeState,
+
+    /// Current LMDB map size in bytes.
+    current_map_size: Arc<AtomicU64>,
+
+    /// Maximum LMDB map size in bytes.
+    max_map_size: usize,
+
+    /// Path to the manifest directory.
+    path: std::path::PathBuf,
 }
 
 #[cfg(test)]

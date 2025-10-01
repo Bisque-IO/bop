@@ -28,6 +28,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::PendingBatchRecord;
+use crate::aof::AofId;
+#[cfg(feature = "libsql")]
+use crate::libsql::LibSqlId;
 
 // ============================================================================
 // Type Aliases
@@ -127,27 +130,38 @@ pub(crate) const RUNTIME_STATE_KEY: u32 = 0;
 /// can be opened for reading and writing.
 #[derive(Debug)]
 pub(crate) struct ManifestTables {
-    /// Database descriptor records, indexed by DbId.
-    pub(crate) db: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<DbDescriptorRecord>>,
+    /// AOF database descriptor records, indexed by DbId.
+    pub(crate) aof_db: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<AofDescriptorRecord>>,
 
-    /// WAL state records, indexed by DbId.
-    pub(crate) wal_state: Database<U32<heed::byteorder::BigEndian>, SerdeBincode<WalStateRecord>>,
+    /// LibSQL database descriptor records, indexed by DbId.
+    #[cfg(feature = "libsql")]
+    pub(crate) libsql_db: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<LibSqlDescriptorRecord>>,
+
+    /// AOF state records, indexed by DbId.
+    pub(crate) aof_state: Database<U32<heed::byteorder::BigEndian>, SerdeBincode<AofStateRecord>>,
 
     /// Chunk catalog entries, indexed by (DbId, ChunkId).
     pub(crate) chunk_catalog:
         Database<U64<heed::byteorder::BigEndian>, SerdeBincode<ChunkEntryRecord>>,
 
-    /// Chunk delta records, indexed by (DbId, ChunkId, Generation).
-    pub(crate) chunk_delta_index:
-        Database<U128<heed::byteorder::BigEndian>, SerdeBincode<ChunkDeltaRecord>>,
+    /// LibSQL chunk delta records, indexed by (DbId, ChunkId, Generation).
+    #[cfg(feature = "libsql")]
+    pub(crate) libsql_chunk_delta_index:
+        Database<U128<heed::byteorder::BigEndian>, SerdeBincode<LibSqlChunkDeltaRecord>>,
 
-    /// Snapshot records, indexed by (DbId, SnapshotId).
-    pub(crate) snapshot_index:
-        Database<U64<heed::byteorder::BigEndian>, SerdeBincode<SnapshotRecord>>,
+    /// LibSQL snapshot records, indexed by (DbId, SnapshotId).
+    #[cfg(feature = "libsql")]
+    pub(crate) libsql_snapshot_index:
+        Database<U64<heed::byteorder::BigEndian>, SerdeBincode<LibSqlSnapshotRecord>>,
 
-    /// WAL artifact records, indexed by (DbId, WalArtifactId).
-    pub(crate) wal_catalog:
-        Database<U128<heed::byteorder::BigEndian>, SerdeBincode<WalArtifactRecord>>,
+    /// AOF WAL artifact records, indexed by (DbId, WalArtifactId).
+    pub(crate) aof_wal:
+        Database<U128<heed::byteorder::BigEndian>, SerdeBincode<AofWalArtifactRecord>>,
+
+    /// LibSQL WAL artifact records, indexed by (DbId, WalArtifactId).
+    #[cfg(feature = "libsql")]
+    pub(crate) libsql_wal:
+        Database<U128<heed::byteorder::BigEndian>, SerdeBincode<LibSqlWalArtifactRecord>>,
 
     /// Job records, indexed by JobId.
     pub(crate) job_queue: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<JobRecord>>,
@@ -186,6 +200,17 @@ pub(crate) struct ManifestTables {
     /// Runtime state sentinel for crash detection, indexed by fixed key.
     pub(crate) runtime_state:
         Database<U32<heed::byteorder::BigEndian>, SerdeBincode<RuntimeStateRecord>>,
+
+    /// AOF chunk records indexed by (AofId, start_lsn).
+    /// This allows efficient lookup of which chunk contains a given LSN.
+    pub(crate) aof_chunks:
+        Database<U128<heed::byteorder::BigEndian>, SerdeBincode<AofChunkRecord>>,
+
+    /// LibSQL chunk records indexed by (LibSqlId, chunk_id).
+    /// This tracks chunks for LibSQL database instances.
+    #[cfg(feature = "libsql")]
+    pub(crate) libsql_chunks:
+        Database<U128<heed::byteorder::BigEndian>, SerdeBincode<LibSqlChunkRecord>>,
 }
 
 impl ManifestTables {
@@ -196,35 +221,49 @@ impl ManifestTables {
     /// Returns an error if any database cannot be created or opened.
     pub(crate) fn open(env: &heed::Env) -> Result<Self, heed::Error> {
         let mut txn = env.write_txn()?;
-        let db = env
-            .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<DbDescriptorRecord>>(
+        let aof_db = env
+            .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<AofDescriptorRecord>>(
                 &mut txn,
-                Some("db"),
+                Some("aof_db"),
             )?;
-        let wal_state = env
-            .create_database::<U32<heed::byteorder::BigEndian>, SerdeBincode<WalStateRecord>>(
+        #[cfg(feature = "libsql")]
+        let libsql_db = env
+            .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<LibSqlDescriptorRecord>>(
                 &mut txn,
-                Some("wal_state"),
+                Some("libsql_db"),
+            )?;
+        let aof_state = env
+            .create_database::<U32<heed::byteorder::BigEndian>, SerdeBincode<AofStateRecord>>(
+                &mut txn,
+                Some("aof_state"),
             )?;
         let chunk_catalog = env
             .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<ChunkEntryRecord>>(
                 &mut txn,
                 Some("chunk_catalog"),
             )?;
-        let chunk_delta_index = env
-            .create_database::<U128<heed::byteorder::BigEndian>, SerdeBincode<ChunkDeltaRecord>>(
+        #[cfg(feature = "libsql")]
+        let libsql_chunk_delta_index = env
+            .create_database::<U128<heed::byteorder::BigEndian>, SerdeBincode<LibSqlChunkDeltaRecord>>(
                 &mut txn,
-                Some("chunk_delta_index"),
+                Some("libsql_chunk_delta_index"),
             )?;
-        let snapshot_index = env
-            .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<SnapshotRecord>>(
+        #[cfg(feature = "libsql")]
+        let libsql_snapshot_index = env
+            .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<LibSqlSnapshotRecord>>(
                 &mut txn,
-                Some("snapshot_index"),
+                Some("libsql_snapshot_index"),
             )?;
-        let wal_catalog = env
-            .create_database::<U128<heed::byteorder::BigEndian>, SerdeBincode<WalArtifactRecord>>(
+        let aof_wal = env
+            .create_database::<U128<heed::byteorder::BigEndian>, SerdeBincode<AofWalArtifactRecord>>(
                 &mut txn,
-                Some("wal_catalog"),
+                Some("aof_wal"),
+            )?;
+        #[cfg(feature = "libsql")]
+        let libsql_wal = env
+            .create_database::<U128<heed::byteorder::BigEndian>, SerdeBincode<LibSqlWalArtifactRecord>>(
+                &mut txn,
+                Some("libsql_wal"),
             )?;
         let job_queue = env
             .create_database::<U64<heed::byteorder::BigEndian>, SerdeBincode<JobRecord>>(
@@ -272,15 +311,32 @@ impl ManifestTables {
                 &mut txn,
                 Some("runtime_state"),
             )?;
+        let aof_chunks = env
+            .create_database::<U128<heed::byteorder::BigEndian>, SerdeBincode<AofChunkRecord>>(
+                &mut txn,
+                Some("aof_chunks"),
+            )?;
+        #[cfg(feature = "libsql")]
+        let libsql_chunks = env
+            .create_database::<U128<heed::byteorder::BigEndian>, SerdeBincode<LibSqlChunkRecord>>(
+                &mut txn,
+                Some("libsql_chunks"),
+            )?;
         txn.commit()?;
 
         Ok(ManifestTables {
-            db,
-            wal_state,
+            aof_db,
+            #[cfg(feature = "libsql")]
+            libsql_db,
+            aof_state,
             chunk_catalog,
-            chunk_delta_index,
-            snapshot_index,
-            wal_catalog,
+            #[cfg(feature = "libsql")]
+            libsql_chunk_delta_index,
+            #[cfg(feature = "libsql")]
+            libsql_snapshot_index,
+            aof_wal,
+            #[cfg(feature = "libsql")]
+            libsql_wal,
             job_queue,
             job_pending_index,
             metrics,
@@ -291,6 +347,9 @@ impl ManifestTables {
             change_cursors,
             pending_batches,
             runtime_state,
+            aof_chunks,
+            #[cfg(feature = "libsql")]
+            libsql_chunks,
         })
     }
 }
@@ -299,17 +358,15 @@ impl ManifestTables {
 // Key Structures
 // ============================================================================
 
-/// Key for indexing WAL state records by database ID.
-///
-/// This is a simple key structure that directly maps to a u32 in LMDB.
+/// Key for indexing AOF state records by database ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct WalStateKey {
-    /// Database ID for this WAL state.
+pub struct AofStateKey {
+    /// Database ID for this AOF state.
     pub db_id: DbId,
 }
 
-impl WalStateKey {
-    /// Creates a new WAL state key for the given database.
+impl AofStateKey {
+    /// Creates a new AOF state key for the given database.
     pub fn new(db_id: DbId) -> Self {
         Self { db_id }
     }
@@ -319,14 +376,14 @@ impl WalStateKey {
         self.db_id
     }
 
-    /// Decodes a raw LMDB key into a WAL state key.
+    /// Decodes a raw LMDB key into an AOF state key.
     pub(crate) fn decode(raw: u32) -> Self {
         Self { db_id: raw }
     }
 
-    /// Creates a new key with a different database ID, preserving other fields.
+    /// Creates a new key with a different database ID.
     pub(crate) fn with_db(self, db_id: DbId) -> Self {
-        Self { db_id, ..self }
+        Self { db_id }
     }
 }
 
@@ -569,13 +626,13 @@ impl WalArtifactKey {
 // Record Structures
 // ============================================================================
 
-/// Metadata record for a database instance.
+/// Metadata record for an AOF database instance.
 ///
-/// This record stores configuration and lifecycle information for a database.
+/// This record stores configuration and lifecycle information for an AOF database.
 /// Each database has a unique DbId and maintains its own set of chunks, WAL state,
 /// and snapshots.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DbDescriptorRecord {
+pub struct AofDescriptorRecord {
     /// Record format version for schema evolution.
     pub record_version: u16,
 
@@ -591,6 +648,12 @@ pub struct DbDescriptorRecord {
     /// Number of WAL shards for this database (affects parallelism).
     pub wal_shards: u16,
 
+    /// Fixed chunk size in bytes for this AOF instance.
+    /// This value is immutable for the lifetime of the database and enables
+    /// deterministic chunk ID calculation from LSN without manifest queries.
+    /// Valid range: 128KB (131,072 bytes) to 4GB (4,294,967,296 bytes).
+    pub chunk_size_bytes: u64,
+
     /// Database configuration options (directories, compression, encryption, etc.).
     pub options: ManifestDbOptions,
 
@@ -598,7 +661,7 @@ pub struct DbDescriptorRecord {
     pub status: DbLifecycle,
 }
 
-impl Default for DbDescriptorRecord {
+impl Default for AofDescriptorRecord {
     fn default() -> Self {
         Self {
             record_version: DB_DESCRIPTOR_VERSION,
@@ -606,6 +669,47 @@ impl Default for DbDescriptorRecord {
             name: String::new(),
             config_hash: [0; 32],
             wal_shards: 1,
+            chunk_size_bytes: 64 * 1024 * 1024, // 64MB default
+            options: ManifestDbOptions::default(),
+            status: DbLifecycle::Active,
+        }
+    }
+}
+
+/// Metadata record for a LibSQL database instance.
+///
+/// This record stores configuration and lifecycle information for a LibSQL database.
+/// LibSQL uses page-based WAL frames instead of LSN-based AOF chunks.
+#[cfg(feature = "libsql")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LibSqlDescriptorRecord {
+    /// Record format version for schema evolution.
+    pub record_version: u16,
+
+    /// Timestamp when this database was created (milliseconds since Unix epoch).
+    pub created_at_epoch_ms: u64,
+
+    /// Human-readable name for this database.
+    pub name: String,
+
+    /// Hash of the database configuration for detecting configuration changes.
+    pub config_hash: [u8; 32],
+
+    /// Database configuration options (directories, compression, encryption, etc.).
+    pub options: ManifestDbOptions,
+
+    /// Current lifecycle state of the database.
+    pub status: DbLifecycle,
+}
+
+#[cfg(feature = "libsql")]
+impl Default for LibSqlDescriptorRecord {
+    fn default() -> Self {
+        Self {
+            record_version: DB_DESCRIPTOR_VERSION,
+            created_at_epoch_ms: epoch_millis(),
+            name: String::new(),
+            config_hash: [0; 32],
             options: ManifestDbOptions::default(),
             status: DbLifecycle::Active,
         }
@@ -724,41 +828,38 @@ impl Default for RetentionPolicy {
     }
 }
 
-/// Persistent state tracking for a database's write-ahead log (WAL).
+/// Persistent state tracking for an AOF (Append-Only File) database.
 ///
-/// This record tracks the current state of the WAL system, including which
-/// segments have been sealed, what data has been durably flushed, and checkpoint
-/// progress. It's critical for crash recovery and ensuring data durability.
+/// Tracks the durable LSN position for crash recovery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WalStateRecord {
-    /// Record format version for schema evolution.
-    pub record_version: u16,
-
-    /// ID of the last WAL segment that was sealed (closed for writing).
-    pub last_sealed_segment: u64,
-
+pub struct AofStateRecord {
     /// Log sequence number (LSN) of the last successfully flushed data.
     pub last_applied_lsn: u64,
-
-    /// Generation number of the last completed checkpoint.
-    pub last_checkpoint_generation: u64,
-
-    /// Restart epoch counter, incremented on each database restart.
-    pub restart_epoch: u32,
-
-    /// Flush gate state for coordinating flush operations and error handling.
-    pub flush_gate_state: FlushGateState,
 }
 
-impl Default for WalStateRecord {
+impl Default for AofStateRecord {
     fn default() -> Self {
         Self {
-            record_version: WAL_STATE_VERSION,
-            last_sealed_segment: 0,
             last_applied_lsn: 0,
-            last_checkpoint_generation: 0,
-            restart_epoch: 0,
-            flush_gate_state: FlushGateState::default(),
+        }
+    }
+}
+
+/// Persistent state tracking for a LibSQL database.
+///
+/// LibSQL uses page-based WAL frames instead of LSNs.
+#[cfg(feature = "libsql")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LibSqlStateRecord {
+    /// Last WAL frame index that was successfully applied.
+    pub last_applied_frame: u64,
+}
+
+#[cfg(feature = "libsql")]
+impl Default for LibSqlStateRecord {
+    fn default() -> Self {
+        Self {
+            last_applied_frame: 0,
         }
     }
 }
@@ -782,28 +883,212 @@ pub struct RuntimeStateRecord {
     pub started_at_epoch_ms: u64,
 }
 
-/// State of the flush gate for error handling and coordination.
+
+/// Metadata record for an AOF chunk.
 ///
-/// The flush gate tracks the current flush job and error state to coordinate
-/// flush operations and handle failures gracefully.
+/// AOF chunks are variable-sized segments of an append-only file.
+/// Each chunk represents a contiguous range of LSNs with adaptive sizing
+/// based on write velocity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FlushGateState {
-    /// Job ID of the currently active flush (if any).
-    pub active_job_id: Option<JobId>,
+pub struct AofChunkRecord {
+    /// Record format version.
+    pub record_version: u16,
 
-    /// Timestamp of the last successful flush.
-    pub last_success_at_epoch_ms: Option<u64>,
+    /// Chunk ID (unique within this AOF).
+    pub chunk_id: ChunkId,
 
-    /// Timestamp when errors started occurring (cleared on success).
-    pub errored_since_epoch_ms: Option<u64>,
+    /// AOF ID that owns this chunk.
+    pub aof_id: AofId,
+
+    /// Starting LSN (inclusive).
+    pub start_lsn: u64,
+
+    /// Ending LSN (exclusive).
+    pub end_lsn: u64,
+
+    /// Actual data size in bytes.
+    pub size_bytes: u64,
+
+    /// Allocated size on disk (page-aligned, multiple of 4KB).
+    pub size_on_disk: u64,
+
+    /// Timestamp when chunk was created (microseconds since epoch).
+    pub created_at_micros: u64,
+
+    /// Timestamp when chunk was sealed (microseconds since epoch).
+    pub sealed_at_micros: u64,
+
+    /// Write rate when this chunk was being written (bytes/sec).
+    pub write_rate_bytes_per_sec: u64,
+
+    /// Generation number when this chunk was created.
+    pub generation: u64,
+
+    /// Current residency state (local, remote, both, or evicted).
+    pub residency: ChunkResidency,
+
+    /// Timestamp when uploaded to remote storage (if applicable).
+    pub uploaded_at_epoch_ms: Option<u64>,
+
+    /// Timestamp after which this chunk can be purged.
+    pub purge_after_epoch_ms: Option<u64>,
 }
 
-impl Default for FlushGateState {
+const AOF_CHUNK_VERSION: u16 = 1;
+
+impl Default for AofChunkRecord {
     fn default() -> Self {
         Self {
-            active_job_id: None,
-            last_success_at_epoch_ms: None,
-            errored_since_epoch_ms: None,
+            record_version: AOF_CHUNK_VERSION,
+            chunk_id: 0,
+            aof_id: AofId::from(0),
+            start_lsn: 0,
+            end_lsn: 0,
+            size_bytes: 0,
+            size_on_disk: 0,
+            created_at_micros: 0,
+            sealed_at_micros: 0,
+            write_rate_bytes_per_sec: 0,
+            generation: 0,
+            residency: ChunkResidency::Local,
+            uploaded_at_epoch_ms: None,
+            purge_after_epoch_ms: None,
+        }
+    }
+}
+
+impl AofChunkRecord {
+    /// Create a composite key for indexing this chunk by (aof_id, start_lsn).
+    /// This allows efficient range queries to find which chunk contains a given LSN.
+    pub fn make_key(aof_id: AofId, start_lsn: u64) -> u128 {
+        let aof_id_u64 = aof_id.as_u64();
+        ((aof_id_u64 as u128) << 64) | (start_lsn as u128)
+    }
+
+    /// Get the key for this record.
+    pub fn key(&self) -> u128 {
+        Self::make_key(self.aof_id, self.start_lsn)
+    }
+
+    /// Extract aof_id and start_lsn from a composite key.
+    pub fn decode_key(key: u128) -> (AofId, u64) {
+        let aof_id = (key >> 64) as u32;
+        let start_lsn = key as u64;
+        (AofId::new(aof_id), start_lsn)
+    }
+}
+
+/// Metadata record for a LibSQL chunk.
+///
+/// LibSQL chunks represent SQLite database pages stored in the chunk system.
+/// Unlike AOF chunks which track LSN ranges, LibSQL chunks track discrete page data.
+#[cfg(feature = "libsql")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LibSqlChunkRecord {
+    /// Record format version.
+    pub record_version: u16,
+
+    /// Chunk ID (unique within this LibSQL instance).
+    pub chunk_id: ChunkId,
+
+    /// LibSQL database ID that owns this chunk.
+    pub libsql_id: LibSqlId,
+
+    /// File name of the chunk on disk.
+    pub file_name: String,
+
+    /// Generation number when this chunk was created.
+    pub generation: u64,
+
+    /// Size of the chunk in bytes.
+    pub size_bytes: u64,
+
+    /// CRC64-NVME content hash for blob addressing (4x u64).
+    pub content_hash: [u64; 4],
+
+    /// Page size used in this chunk (typically 4096 bytes).
+    pub page_size: u32,
+
+    /// Number of pages in this chunk.
+    pub page_count: u32,
+
+    /// Compression codec used for this chunk.
+    pub compression: CompressionCodec,
+
+    /// Whether this chunk is encrypted.
+    pub encrypted: bool,
+
+    /// Current residency state (local, remote, both, or evicted).
+    pub residency: ChunkResidency,
+
+    /// Timestamp when uploaded to remote storage (if applicable).
+    pub uploaded_at_epoch_ms: Option<u64>,
+
+    /// Timestamp after which this chunk can be purged.
+    pub purge_after_epoch_ms: Option<u64>,
+
+    /// Timestamp when chunk was created (milliseconds since epoch).
+    pub created_at_epoch_ms: u64,
+}
+
+#[cfg(feature = "libsql")]
+const LIBSQL_CHUNK_VERSION: u16 = 1;
+
+#[cfg(feature = "libsql")]
+impl Default for LibSqlChunkRecord {
+    fn default() -> Self {
+        Self {
+            record_version: LIBSQL_CHUNK_VERSION,
+            chunk_id: 0,
+            libsql_id: LibSqlId::from(0),
+            file_name: String::new(),
+            generation: 0,
+            size_bytes: 0,
+            content_hash: [0; 4],
+            page_size: 4096,
+            page_count: 0,
+            compression: CompressionCodec::None,
+            encrypted: false,
+            residency: ChunkResidency::Local,
+            uploaded_at_epoch_ms: None,
+            purge_after_epoch_ms: None,
+            created_at_epoch_ms: 0,
+        }
+    }
+}
+
+#[cfg(feature = "libsql")]
+impl LibSqlChunkRecord {
+    /// Create a composite key for indexing this chunk by (libsql_id, chunk_id).
+    /// This allows efficient range queries to find all chunks for a given LibSQL instance.
+    pub fn make_key(libsql_id: LibSqlId, chunk_id: ChunkId) -> u128 {
+        let libsql_id_u64 = libsql_id.as_u64();
+        ((libsql_id_u64 as u128) << 64) | (chunk_id as u128)
+    }
+
+    /// Get the key for this record.
+    pub fn key(&self) -> u128 {
+        Self::make_key(self.libsql_id, self.chunk_id)
+    }
+
+    /// Extract libsql_id and chunk_id from a composite key.
+    pub fn decode_key(key: u128) -> (LibSqlId, ChunkId) {
+        let libsql_id = (key >> 64) as u32;
+        let chunk_id = key as u32;
+        (LibSqlId::new(libsql_id), chunk_id)
+    }
+
+    /// Returns the effective number of pages contained in this chunk.
+    ///
+    /// Falls back to deriving the count from the stored size when the manifest
+    /// has not yet persisted an explicit page_count value.
+    pub fn effective_page_count(&self) -> u64 {
+        if self.page_count != 0 {
+            self.page_count as u64
+        } else if self.page_size != 0 {
+            (self.size_bytes + self.page_size as u64 - 1) / self.page_size as u64
+        } else {
+            0
         }
     }
 }
@@ -1041,12 +1326,12 @@ pub enum WalArtifactKind {
     },
 }
 
-/// Metadata record for a WAL artifact (sealed segment or bundle).
+/// Metadata record for an AOF WAL artifact (sealed segment or bundle).
 ///
-/// WAL artifacts are immutable files containing committed WAL data that have been
+/// AOF WAL artifacts are immutable files containing committed WAL data that have been
 /// sealed and written to stable storage. They can be reclaimed once checkpointed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WalArtifactRecord {
+pub struct AofWalArtifactRecord {
     /// Record format version.
     pub record_version: u16,
 
@@ -1066,8 +1351,54 @@ pub struct WalArtifactRecord {
     pub local_path: PathBuf,
 }
 
-impl WalArtifactRecord {
-    /// Creates a new WAL artifact record with the current timestamp.
+impl AofWalArtifactRecord {
+    /// Creates a new AOF WAL artifact record with the current timestamp.
+    pub fn new(
+        db_id: DbId,
+        artifact_id: WalArtifactId,
+        kind: WalArtifactKind,
+        local_path: PathBuf,
+    ) -> Self {
+        Self {
+            record_version: WAL_ARTIFACT_VERSION,
+            db_id,
+            artifact_id,
+            created_at_epoch_ms: epoch_millis(),
+            kind,
+            local_path,
+        }
+    }
+}
+
+/// Metadata record for a LibSQL WAL artifact (sealed WAL frame file or bundle).
+///
+/// LibSQL WAL artifacts are immutable files containing committed WAL frames that have been
+/// sealed and written to stable storage. They can be reclaimed once checkpointed.
+#[cfg(feature = "libsql")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LibSqlWalArtifactRecord {
+    /// Record format version.
+    pub record_version: u16,
+
+    /// Database that owns this artifact.
+    pub db_id: DbId,
+
+    /// Unique identifier for this artifact.
+    pub artifact_id: WalArtifactId,
+
+    /// Timestamp when this artifact was created.
+    pub created_at_epoch_ms: u64,
+
+    /// Type and metadata of the artifact (segment or bundle).
+    pub kind: WalArtifactKind,
+
+    /// Local filesystem path where this artifact is stored.
+    pub local_path: PathBuf,
+}
+
+#[cfg(feature = "libsql")]
+impl LibSqlWalArtifactRecord {
+    /// Creates a new LibSQL WAL artifact record with the current timestamp.
     pub fn new(
         db_id: DbId,
         artifact_id: WalArtifactId,
@@ -1104,13 +1435,14 @@ pub struct RemoteNamespaceRecord {
     pub encryption_profile: Option<String>,
 }
 
-/// Metadata record for a delta (incremental update to a base chunk).
+/// Metadata record for a LibSQL delta (incremental update to a base chunk).
 ///
-/// Deltas allow efficient storage of incremental changes by storing only the
+/// LibSQL deltas allow efficient storage of incremental changes by storing only the
 /// differences from a base chunk, forming a delta chain that can be applied
 /// sequentially to reconstruct the current state.
+#[cfg(feature = "libsql")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChunkDeltaRecord {
+pub struct LibSqlChunkDeltaRecord {
     /// Record format version.
     pub record_version: u16,
 
@@ -1133,7 +1465,8 @@ pub struct ChunkDeltaRecord {
     pub residency: ChunkResidency,
 }
 
-impl Default for ChunkDeltaRecord {
+#[cfg(feature = "libsql")]
+impl Default for LibSqlChunkDeltaRecord {
     fn default() -> Self {
         Self {
             record_version: CHUNK_DELTA_VERSION,
@@ -1147,13 +1480,14 @@ impl Default for ChunkDeltaRecord {
     }
 }
 
-/// Metadata record for a database snapshot.
+/// Metadata record for a LibSQL database snapshot.
 ///
 /// A snapshot is a point-in-time capture of the database state, consisting of
 /// a collection of chunk references (base chunks and deltas). Snapshots are used
 /// for backups, replication, and time-travel queries.
+#[cfg(feature = "libsql")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SnapshotRecord {
+pub struct LibSqlSnapshotRecord {
     /// Record format version.
     pub record_version: u16,
 
@@ -1173,14 +1507,16 @@ pub struct SnapshotRecord {
     pub chunks: Vec<SnapshotChunkRef>,
 }
 
-impl SnapshotRecord {
+#[cfg(feature = "libsql")]
+impl LibSqlSnapshotRecord {
     /// Returns the composite key for this snapshot.
     pub fn key(&self) -> SnapshotKey {
         SnapshotKey::new(self.db_id, self.snapshot_id)
     }
 }
 
-impl Default for SnapshotRecord {
+#[cfg(feature = "libsql")]
+impl Default for LibSqlSnapshotRecord {
     fn default() -> Self {
         Self {
             record_version: SNAPSHOT_RECORD_VERSION,
@@ -1519,7 +1855,8 @@ pub struct ChunkRefcountRecord {
 ///
 /// This is used throughout the manifest system for timestamping records.
 /// If the system clock is set before the Unix epoch (unlikely), returns 0.
-pub(crate) fn epoch_millis() -> u64 {
+/// Returns the current Unix timestamp in milliseconds.
+pub fn epoch_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

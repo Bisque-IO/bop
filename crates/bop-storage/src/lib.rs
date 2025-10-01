@@ -1,7 +1,5 @@
-mod archive;
-mod checkpoint;
-mod cold_scan;
-mod db;
+mod aof;
+mod chunk_quota;
 mod error;
 mod flush;
 mod io;
@@ -10,29 +8,25 @@ pub mod libsql;
 mod local_store;
 mod manager;
 mod manifest;
-mod page_cache;
-mod page_store_policies;
-mod remote_store;
+mod remote_chunk;
 mod runtime;
 mod storage_quota;
-mod wal;
 mod write;
 
-pub use archive::Archive;
-pub use checkpoint::{
-    CheckpointExecutor, CheckpointJobState, CheckpointOrchestrator, CheckpointPlan,
-    CheckpointPlanner, ChunkAction, ExecutorError, LeaseMap, OrchestratorConfig, OrchestratorError,
-    PlannerContext, PlannerError, TruncateDirection, TruncationError, TruncationRequest,
-    WorkloadType,
+pub use aof::{
+    Aof, AofConfig, AofCursor, AofDiagnostics, AofId, AofPlanner, AofPlannerContext,
+    AofReaderError, AofWal, AofWalDiagnostics, AofWalSegment, AofWalSegmentError,
+    AofWalSegmentSnapshot, AppendOnlyCheckpointConfig, AppendOnlyContext, AppendOnlyError,
+    AppendOnlyJob, AppendOnlyOutcome, LeaseMap, StagedBatchStats, TruncateDirection,
+    TruncationError, TruncationRequest, WriteBatch, WriteBufferError, WriteChunk, run_checkpoint,
+    TAIL_CHUNK_ID, DEFAULT_CHUNK_SIZE_BYTES, MAX_CHUNK_SIZE_BYTES, MIN_CHUNK_SIZE_BYTES,
 };
-pub use cold_scan::{
-    ColdScanError, ColdScanOptions, ColdScanStats, ColdScanStatsTracker, RemoteReadLimiter,
-};
-pub use db::{DB, DbConfig, DbDiagnostics, DbError, DbId};
+
+pub use chunk_quota::{ChunkQuotaError, ChunkQuotaGuard, ChunkStorageQuota};
 pub use error::{ErrorCode, ErrorWithContext, ResultExt};
 pub use flush::{
     FlushController, FlushControllerConfig, FlushControllerSnapshot, FlushProcessError,
-    FlushScheduleError, FlushSink, FlushSinkError, FlushSinkRequest, FlushSinkResponder,
+    FlushScheduleError,
 };
 #[cfg(any(unix, target_os = "windows"))]
 pub use io::{DirectIoBuffer, DirectIoDriver};
@@ -42,30 +36,24 @@ pub use io::{
 };
 #[cfg(feature = "libsql")]
 pub use libsql::{
-    LibsqlVfs, LibsqlVfsBuilder, LibsqlVfsConfig, LibsqlVfsError, LibsqlVirtualWal,
+    LibSqlId, LibsqlVfs, LibsqlVfsBuilder, LibsqlVfsConfig, LibsqlVfsError, LibsqlVirtualWal,
     LibsqlVirtualWalError, LibsqlWalHook, LibsqlWalHookError, VirtualWalConfig,
 };
-pub use local_store::{LocalStore, LocalStoreConfig, LocalStoreError};
+pub use local_store::{
+    LocalChunkHandle, LocalChunkKey, LocalChunkStore, LocalChunkStoreConfig, LocalChunkStoreError,
+};
 pub use manager::{
     ControllerDiagnostics, Manager, ManagerClosedError, ManagerDiagnostics, ManagerError,
 };
-pub use manifest::Manifest;
-pub use page_cache::{
-    PageCache, PageCacheConfig, PageCacheKey, PageCacheMetricsSnapshot, PageCacheNamespace,
-    PageCacheObserver, PageFrame, allocate_cache_object_id,
+pub use manifest::{Manifest, ManifestOptions};
+#[cfg(feature = "libsql")]
+pub use manifest::{DeltaLocation, LibSqlChunkRecord, PageLocation};
+pub use remote_chunk::{
+    RemoteChunkError, RemoteChunkFetcher, RemoteChunkSpec, RemoteChunkStore, RemoteUploadRequest,
+    RemoteUploadResult,
 };
-pub use page_store_policies::{
-    CheckpointObserver, FetchOptions, PinGuard, PinTracker, PrefetchHint,
-};
-pub use remote_store::{BlobKey, RemoteStore, RemoteStoreConfig, RemoteStoreError};
-pub use scratch_janitor::{ScratchJanitor, ScratchJanitorConfig};
 pub use storage_quota::{QuotaConfig, QuotaError, ReservationGuard, StorageQuota};
-pub use wal::{
-    StagedBatchStats, Wal, WalDiagnostics, WalSegment, WalSegmentError, WalSegmentSnapshot,
-    WriteBatch, WriteBufferError, WriteChunk,
-};
 pub use write::{
     WriteController, WriteControllerConfig, WriteControllerSnapshot, WriteProcessError,
     WriteScheduleError,
 };
-mod scratch_janitor;

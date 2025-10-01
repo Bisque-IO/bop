@@ -13,20 +13,20 @@ use super::tables::*;
 /// when the transaction is committed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ManifestOp {
-    /// Put a database descriptor.
-    PutDb {
+    /// Put an AOF database descriptor.
+    PutAofDb {
         db_id: DbId,
-        value: DbDescriptorRecord,
+        value: AofDescriptorRecord,
     },
-    /// Delete a database descriptor.
-    DeleteDb { db_id: DbId },
-    /// Put a WAL state record.
-    PutWalState {
-        key: WalStateKey,
-        value: WalStateRecord,
+    /// Delete an AOF database descriptor.
+    DeleteAofDb { db_id: DbId },
+    /// Put an AOF state record.
+    PutAofState {
+        key: AofStateKey,
+        value: AofStateRecord,
     },
-    /// Delete a WAL state record.
-    DeleteWalState { key: WalStateKey },
+    /// Delete an AOF state record.
+    DeleteAofState { key: AofStateKey },
     /// Upsert a chunk entry.
     UpsertChunk {
         key: ChunkKey,
@@ -34,24 +34,37 @@ pub enum ManifestOp {
     },
     /// Delete a chunk entry.
     DeleteChunk { key: ChunkKey },
-    /// Upsert a chunk delta.
-    UpsertChunkDelta {
+    /// Upsert a LibSQL chunk delta.
+    #[cfg(feature = "libsql")]
+    UpsertLibSqlChunkDelta {
         key: ChunkDeltaKey,
-        value: ChunkDeltaRecord,
+        value: LibSqlChunkDeltaRecord,
     },
-    /// Delete a chunk delta.
-    DeleteChunkDelta { key: ChunkDeltaKey },
-    /// Publish a snapshot.
-    PublishSnapshot { record: SnapshotRecord },
-    /// Drop a snapshot.
-    DropSnapshot { key: SnapshotKey },
-    /// Upsert a WAL artifact.
-    UpsertWalArtifact {
+    /// Delete a LibSQL chunk delta.
+    #[cfg(feature = "libsql")]
+    DeleteLibSqlChunkDelta { key: ChunkDeltaKey },
+    /// Publish a LibSQL snapshot.
+    #[cfg(feature = "libsql")]
+    PublishLibSqlSnapshot { record: LibSqlSnapshotRecord },
+    /// Drop a LibSQL snapshot.
+    #[cfg(feature = "libsql")]
+    DropLibSqlSnapshot { key: SnapshotKey },
+    /// Upsert an AOF WAL artifact.
+    UpsertAofWalArtifact {
         key: WalArtifactKey,
-        record: WalArtifactRecord,
+        record: AofWalArtifactRecord,
     },
-    /// Delete a WAL artifact.
-    DeleteWalArtifact { key: WalArtifactKey },
+    /// Delete an AOF WAL artifact.
+    DeleteAofWalArtifact { key: WalArtifactKey },
+    /// Upsert a LibSQL WAL artifact.
+    #[cfg(feature = "libsql")]
+    UpsertLibSqlWalArtifact {
+        key: WalArtifactKey,
+        record: LibSqlWalArtifactRecord,
+    },
+    /// Delete a LibSQL WAL artifact.
+    #[cfg(feature = "libsql")]
+    DeleteLibSqlWalArtifact { key: WalArtifactKey },
     /// Put a job record.
     PutJob { record: JobRecord },
     /// Update a job's state.
@@ -86,6 +99,22 @@ pub enum ManifestOp {
         job_id: JobId,
         reason: CheckpointCancellationReason,
         timestamp_ms: u64,
+    },
+    /// Upsert an AOF chunk record.
+    UpsertAofChunk { record: AofChunkRecord },
+    /// Delete an AOF chunk record.
+    DeleteAofChunk {
+        aof_id: crate::aof::AofId,
+        start_lsn: u64,
+    },
+    /// Upsert a LibSQL chunk record.
+    #[cfg(feature = "libsql")]
+    UpsertLibSqlChunk { record: LibSqlChunkRecord },
+    /// Delete a LibSQL chunk record.
+    #[cfg(feature = "libsql")]
+    DeleteLibSqlChunk {
+        libsql_id: crate::libsql::LibSqlId,
+        chunk_id: ChunkId,
     },
 }
 

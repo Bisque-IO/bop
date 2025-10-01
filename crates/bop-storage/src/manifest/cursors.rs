@@ -22,8 +22,6 @@ use std::sync::mpsc::SyncSender;
 
 use heed::Env;
 
-use crate::page_cache::{PageCache, PageCacheKey};
-
 use super::change_log::{
     ChangeCursorState, ChangeLogState, compute_truncate_before, delete_change_log_range,
     evict_change_log_cache_range,
@@ -143,8 +141,6 @@ pub(crate) fn acknowledge_cursor(
     change_state: &mut ChangeLogState,
     cursor_id: ChangeCursorId,
     sequence: ChangeSequence,
-    page_cache: Option<&Arc<PageCache<PageCacheKey>>>,
-    page_cache_object_id: Option<u64>,
 ) -> Result<ChangeCursorSnapshot, ManifestError> {
     let existing_state = change_state
         .cursors
@@ -203,9 +199,6 @@ pub(crate) fn acknowledge_cursor(
         .cursors
         .insert(cursor_id, updated_entry.clone());
     if let Some((start, end)) = truncation_range {
-        if let (Some(cache), Some(object_id)) = (page_cache, page_cache_object_id) {
-            evict_change_log_cache_range(cache, object_id, start, end);
-        }
         if end > change_state.oldest_sequence {
             change_state.oldest_sequence = end;
         }

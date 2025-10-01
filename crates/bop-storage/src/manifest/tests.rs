@@ -5,10 +5,8 @@ use super::operations::persist_pending_batch;
 use super::state::{RUNTIME_STATE_KEY, RUNTIME_STATE_VERSION};
 use super::worker::ManifestBatch;
 use super::*;
-use crate::flush::FlushSink;
-use crate::page_cache::{PageCache, PageCacheConfig};
-use heed::types::{SerdeBincode, U32};
 use heed::EnvOpenOptions;
+use heed::types::{SerdeBincode, U32};
 use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
@@ -27,8 +25,9 @@ fn lmdb_keys_iterate_in_numeric_order() {
         record
     }
 
-    fn chunk_delta_record(base: ChunkId, delta_id: u16, name: &str) -> ChunkDeltaRecord {
-        let mut record = ChunkDeltaRecord::default();
+    #[cfg(feature = "libsql")]
+    fn chunk_delta_record(base: ChunkId, delta_id: u16, name: &str) -> LibSqlChunkDeltaRecord {
+        let mut record = LibSqlChunkDeltaRecord::default();
         record.base_chunk_id = base;
         record.delta_id = delta_id;
         record.delta_file = name.to_string();
@@ -36,8 +35,9 @@ fn lmdb_keys_iterate_in_numeric_order() {
         record
     }
 
-    fn snapshot_record(db_id: DbId, snapshot_id: SnapshotId, chunk_id: ChunkId) -> SnapshotRecord {
-        SnapshotRecord {
+    #[cfg(feature = "libsql")]
+    fn snapshot_record(db_id: DbId, snapshot_id: SnapshotId, chunk_id: ChunkId) -> LibSqlSnapshotRecord {
+        LibSqlSnapshotRecord {
             record_version: SNAPSHOT_RECORD_VERSION,
             db_id,
             snapshot_id,
@@ -60,34 +60,37 @@ fn lmdb_keys_iterate_in_numeric_order() {
     let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
 
     let mut txn = manifest.begin();
-    txn.put_wal_state(WalStateKey::new(2), WalStateRecord::default());
-    txn.put_wal_state(WalStateKey::new(1), WalStateRecord::default());
+    txn.put_aof_state(AofStateKey::new(2), AofStateRecord::default());
+    txn.put_aof_state(AofStateKey::new(1), AofStateRecord::default());
 
     txn.upsert_chunk(ChunkKey::new(2, 5), chunk_record("chunk-2-5.bin"));
     txn.upsert_chunk(ChunkKey::new(1, 7), chunk_record("chunk-1-7.bin"));
     txn.upsert_chunk(ChunkKey::new(1, 3), chunk_record("chunk-1-3.bin"));
 
-    txn.upsert_chunk_delta(
-        ChunkDeltaKey::new(2, 5, 4),
-        chunk_delta_record(5, 4, "delta-2-5-4.bin"),
-    );
-    txn.upsert_chunk_delta(
-        ChunkDeltaKey::new(1, 3, 9),
-        chunk_delta_record(3, 9, "delta-1-3-9.bin"),
-    );
-    txn.upsert_chunk_delta(
-        ChunkDeltaKey::new(1, 3, 1),
-        chunk_delta_record(3, 1, "delta-1-3-1.bin"),
-    );
+    #[cfg(feature = "libsql")]
+    {
+        txn.upsert_chunk_delta(
+            ChunkDeltaKey::new(2, 5, 4),
+            chunk_delta_record(5, 4, "delta-2-5-4.bin"),
+        );
+        txn.upsert_chunk_delta(
+            ChunkDeltaKey::new(1, 3, 9),
+            chunk_delta_record(3, 9, "delta-1-3-9.bin"),
+        );
+        txn.upsert_chunk_delta(
+            ChunkDeltaKey::new(1, 3, 1),
+            chunk_delta_record(3, 1, "delta-1-3-1.bin"),
+        );
 
-    let snapshot_a = snapshot_record(2, 9, 5);
-    let snapshot_b = snapshot_record(1, 4, 3);
-    txn.publish_snapshot(snapshot_a);
-    txn.publish_snapshot(snapshot_b);
+        let snapshot_a = snapshot_record(2, 9, 5);
+        let snapshot_b = snapshot_record(1, 4, 3);
+        txn.publish_libsql_snapshot(snapshot_a);
+        txn.publish_libsql_snapshot(snapshot_b);
+    }
 
     txn.register_wal_artifact(
         WalArtifactKey::new(2, 10),
-        WalArtifactRecord::new(
+        AofWalArtifactRecord::new(
             2,
             10,
             WalArtifactKind::AppendOnlySegment {
@@ -100,7 +103,7 @@ fn lmdb_keys_iterate_in_numeric_order() {
     );
     txn.register_wal_artifact(
         WalArtifactKey::new(1, 40),
-        WalArtifactRecord::new(
+        AofWalArtifactRecord::new(
             1,
             40,
             WalArtifactKind::AppendOnlySegment {
@@ -122,8 +125,9 @@ fn lmdb_keys_iterate_in_numeric_order() {
 
     txn.commit().unwrap();
 
+    #[cfg(feature = "libsql")]
     let (
-        wal_state_keys,
+        aof_state_keys,
         chunk_keys,
         chunk_delta_keys,
         snapshot_keys,
@@ -132,11 +136,11 @@ fn lmdb_keys_iterate_in_numeric_order() {
         metric_keys,
     ) = manifest
         .read(|tables, txn| {
-            let wal_state = {
-                let mut cursor = tables.wal_state.iter(txn)?;
+            let aof_state = {
+                let mut cursor = tables.aof_state.iter(txn)?;
                 let mut out = Vec::new();
                 while let Some((raw, _)) = cursor.next().transpose()? {
-                    out.push(WalStateKey::decode(raw));
+                    out.push(AofStateKey::decode(raw));
                 }
                 out
             };
@@ -149,7 +153,7 @@ fn lmdb_keys_iterate_in_numeric_order() {
                 out
             };
             let chunk_delta = {
-                let mut cursor = tables.chunk_delta_index.iter(txn)?;
+                let mut cursor = tables.libsql_chunk_delta_index.iter(txn)?;
                 let mut out = Vec::new();
                 while let Some((raw, _)) = cursor.next().transpose()? {
                     out.push(ChunkDeltaKey::decode(raw));
@@ -157,7 +161,7 @@ fn lmdb_keys_iterate_in_numeric_order() {
                 out
             };
             let snapshots = {
-                let mut cursor = tables.snapshot_index.iter(txn)?;
+                let mut cursor = tables.libsql_snapshot_index.iter(txn)?;
                 let mut out = Vec::new();
                 while let Some((raw, _)) = cursor.next().transpose()? {
                     out.push(SnapshotKey::decode(raw));
@@ -165,7 +169,7 @@ fn lmdb_keys_iterate_in_numeric_order() {
                 out
             };
             let artifacts = {
-                let mut cursor = tables.wal_catalog.iter(txn)?;
+                let mut cursor = tables.aof_wal.iter(txn)?;
                 let mut out = Vec::new();
                 while let Some((raw, _)) = cursor.next().transpose()? {
                     out.push(WalArtifactKey::decode(raw));
@@ -189,7 +193,7 @@ fn lmdb_keys_iterate_in_numeric_order() {
                 out
             };
             Ok((
-                wal_state,
+                aof_state,
                 chunk,
                 chunk_delta,
                 snapshots,
@@ -200,8 +204,67 @@ fn lmdb_keys_iterate_in_numeric_order() {
         })
         .unwrap();
 
+    #[cfg(not(feature = "libsql"))]
+    let (
+        aof_state_keys,
+        chunk_keys,
+        wal_artifact_keys,
+        pending_keys,
+        metric_keys,
+    ) = manifest
+        .read(|tables, txn| {
+            let aof_state = {
+                let mut cursor = tables.aof_state.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(AofStateKey::decode(raw));
+                }
+                out
+            };
+            let chunk = {
+                let mut cursor = tables.chunk_catalog.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(ChunkKey::decode(raw));
+                }
+                out
+            };
+            let artifacts = {
+                let mut cursor = tables.aof_wal.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(WalArtifactKey::decode(raw));
+                }
+                out
+            };
+            let pending = {
+                let mut cursor = tables.job_pending_index.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(PendingJobKey::decode(raw));
+                }
+                out
+            };
+            let metrics = {
+                let mut cursor = tables.metrics.iter(txn)?;
+                let mut out = Vec::new();
+                while let Some((raw, _)) = cursor.next().transpose()? {
+                    out.push(MetricKey::decode(raw));
+                }
+                out
+            };
+            Ok((
+                aof_state,
+                chunk,
+                artifacts,
+                pending,
+                metrics,
+            ))
+        })
+        .unwrap();
+
     assert_eq!(
-        wal_state_keys
+        aof_state_keys
             .iter()
             .map(|key| key.db_id)
             .collect::<Vec<_>>(),
@@ -214,20 +277,23 @@ fn lmdb_keys_iterate_in_numeric_order() {
             .collect::<Vec<_>>(),
         vec![(1, 3), (1, 7), (2, 5)]
     );
-    assert_eq!(
-        chunk_delta_keys
-            .iter()
-            .map(|key| (key.db_id, key.chunk_id, key.generation))
-            .collect::<Vec<_>>(),
-        vec![(1, 3, 1), (1, 3, 9), (2, 5, 4)]
-    );
-    assert_eq!(
-        snapshot_keys
-            .iter()
-            .map(|key| (key.db_id, key.snapshot_id))
-            .collect::<Vec<_>>(),
-        vec![(1, 4), (2, 9)]
-    );
+    #[cfg(feature = "libsql")]
+    {
+        assert_eq!(
+            chunk_delta_keys
+                .iter()
+                .map(|key| (key.db_id, key.chunk_id, key.generation))
+                .collect::<Vec<_>>(),
+            vec![(1, 3, 1), (1, 3, 9), (2, 5, 4)]
+        );
+        assert_eq!(
+            snapshot_keys
+                .iter()
+                .map(|key| (key.db_id, key.snapshot_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 4), (2, 9)]
+        );
+    }
     assert_eq!(
         wal_artifact_keys
             .iter()
@@ -597,6 +663,7 @@ fn pending_batches_replay_on_restart() {
 }
 
 #[test]
+#[cfg(feature = "libsql")]
 fn snapshot_refcounts_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
@@ -611,7 +678,7 @@ fn snapshot_refcounts_roundtrip() {
     txn.upsert_chunk(chunk_key, chunk.clone());
     txn.commit().unwrap();
 
-    let snapshot = SnapshotRecord {
+    let snapshot = LibSqlSnapshotRecord {
         record_version: SNAPSHOT_RECORD_VERSION,
         db_id: 7,
         snapshot_id: 1,
@@ -621,7 +688,7 @@ fn snapshot_refcounts_roundtrip() {
     };
 
     let mut txn = manifest.begin();
-    txn.publish_snapshot(snapshot.clone());
+    txn.publish_libsql_snapshot(snapshot.clone());
     txn.commit().unwrap();
 
     let refcount = manifest
@@ -636,7 +703,7 @@ fn snapshot_refcounts_roundtrip() {
     assert_eq!(refcount, 1);
 
     let mut txn = manifest.begin();
-    txn.drop_snapshot(snapshot.key());
+    txn.drop_libsql_snapshot(snapshot.key());
     txn.commit().unwrap();
 
     let refcount = manifest
@@ -652,6 +719,7 @@ fn snapshot_refcounts_roundtrip() {
 }
 
 #[test]
+#[cfg(feature = "libsql")]
 fn retention_clears_refcount_on_last_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
@@ -664,7 +732,7 @@ fn retention_clears_refcount_on_last_snapshot() {
     txn.upsert_chunk(chunk_key, chunk_entry.clone());
     txn.commit().unwrap();
 
-    let snapshot_a = SnapshotRecord {
+    let snapshot_a = LibSqlSnapshotRecord {
         record_version: SNAPSHOT_RECORD_VERSION,
         db_id: 9,
         snapshot_id: 1,
@@ -672,7 +740,7 @@ fn retention_clears_refcount_on_last_snapshot() {
         source_generation: 1,
         chunks: vec![SnapshotChunkRef::base(100)],
     };
-    let snapshot_b = SnapshotRecord {
+    let snapshot_b = LibSqlSnapshotRecord {
         record_version: SNAPSHOT_RECORD_VERSION,
         db_id: 9,
         snapshot_id: 2,
@@ -682,10 +750,10 @@ fn retention_clears_refcount_on_last_snapshot() {
     };
 
     let mut txn = manifest.begin();
-    txn.publish_snapshot(snapshot_a.clone());
+    txn.publish_libsql_snapshot(snapshot_a.clone());
     txn.commit().unwrap();
     let mut txn = manifest.begin();
-    txn.publish_snapshot(snapshot_b.clone());
+    txn.publish_libsql_snapshot(snapshot_b.clone());
     txn.commit().unwrap();
 
     let refcount = manifest
@@ -700,7 +768,7 @@ fn retention_clears_refcount_on_last_snapshot() {
     assert_eq!(refcount, 2);
 
     let mut txn = manifest.begin();
-    txn.drop_snapshot(snapshot_a.key());
+    txn.drop_libsql_snapshot(snapshot_a.key());
     txn.commit().unwrap();
     let refcount = manifest
         .read(|tables, txn| {
@@ -714,7 +782,7 @@ fn retention_clears_refcount_on_last_snapshot() {
     assert_eq!(refcount, 1);
 
     let mut txn = manifest.begin();
-    txn.drop_snapshot(snapshot_b.key());
+    txn.drop_libsql_snapshot(snapshot_b.key());
     txn.commit().unwrap();
     let refcount = manifest
         .read(|tables, txn| {
@@ -737,10 +805,10 @@ fn fork_db_clones_state_and_refcounts() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
 
-    let mut source_descriptor = DbDescriptorRecord::default();
+    let mut source_descriptor = AofDescriptorRecord::default();
     source_descriptor.name = "source".into();
 
-    let mut target_descriptor = DbDescriptorRecord::default();
+    let mut target_descriptor = AofDescriptorRecord::default();
     target_descriptor.name = "fork".into();
 
     let mut chunk_entry = ChunkEntryRecord::default();
@@ -748,12 +816,11 @@ fn fork_db_clones_state_and_refcounts() {
     chunk_entry.generation = 3;
     chunk_entry.size_bytes = 4_096;
 
-    let mut wal_state = WalStateRecord::default();
-    wal_state.last_sealed_segment = 2;
-    wal_state.flush_gate_state.active_job_id = Some(99);
+    let mut aof_state = AofStateRecord::default();
+    aof_state.last_applied_lsn = 1024;
 
     let wal_artifact_key = WalArtifactKey::new(SOURCE_DB, 42);
-    let wal_artifact = WalArtifactRecord::new(
+    let wal_artifact = AofWalArtifactRecord::new(
         SOURCE_DB,
         42,
         WalArtifactKind::AppendOnlySegment {
@@ -765,8 +832,8 @@ fn fork_db_clones_state_and_refcounts() {
     );
 
     let mut txn = manifest.begin();
-    txn.put_db(SOURCE_DB, source_descriptor.clone());
-    txn.put_wal_state(WalStateKey::new(SOURCE_DB), wal_state.clone());
+    txn.put_aof_db(SOURCE_DB, source_descriptor.clone());
+    txn.put_aof_state(AofStateKey::new(SOURCE_DB), aof_state.clone());
     txn.upsert_chunk(ChunkKey::new(SOURCE_DB, CHUNK_ID), chunk_entry.clone());
     txn.register_wal_artifact(wal_artifact_key, wal_artifact.clone());
     txn.adjust_refcount(CHUNK_ID, 1);
@@ -792,12 +859,12 @@ fn fork_db_clones_state_and_refcounts() {
             let chunk_key = ChunkKey::new(TARGET_DB, CHUNK_ID).encode();
             assert!(tables.chunk_catalog.get(txn, &chunk_key)?.is_some());
 
-            let wal_key = WalStateKey::new(TARGET_DB).encode();
-            let state = tables.wal_state.get(txn, &wal_key)?.unwrap();
-            assert_eq!(state.flush_gate_state.active_job_id, None);
+            let aof_key = AofStateKey::new(TARGET_DB).encode();
+            let state = tables.aof_state.get(txn, &aof_key)?.unwrap();
+            assert_eq!(state.last_applied_lsn, 1024);
 
             let artifact_key = WalArtifactKey::new(TARGET_DB, 42).encode();
-            let artifact = tables.wal_catalog.get(txn, &artifact_key)?.unwrap();
+            let artifact = tables.aof_wal.get(txn, &artifact_key)?.unwrap();
             assert_eq!(artifact.db_id, TARGET_DB);
             assert_eq!(artifact.artifact_id, 42);
 
@@ -818,42 +885,6 @@ fn fork_db_clones_state_and_refcounts() {
 }
 
 #[test]
-fn change_page_hits_cache_on_second_fetch() {
-    let dir = tempfile::tempdir().unwrap();
-    let cache = Arc::new(PageCache::new(PageCacheConfig {
-        capacity_bytes: Some(16 * 1024),
-    }));
-    let mut options = ManifestOptions::default();
-    options.page_cache = Some(cache.clone());
-    let manifest = Manifest::open(dir.path(), options).unwrap();
-
-    {
-        let mut txn = manifest.begin();
-        txn.bump_generation(TEST_COMPONENT, 1);
-        txn.commit().unwrap();
-    }
-
-    let cursor = manifest
-        .register_change_cursor(ChangeCursorStart::Oldest)
-        .unwrap();
-    let page = manifest.fetch_change_page(cursor.cursor_id, 10).unwrap();
-    assert_eq!(page.changes.len(), 1);
-
-    let metrics_before = cache.metrics();
-    let _ = manifest.fetch_change_page(cursor.cursor_id, 10).unwrap();
-    let metrics_after = cache.metrics();
-    assert!(metrics_after.hits > metrics_before.hits);
-
-    let diagnostics = manifest.diagnostics();
-    assert_eq!(diagnostics.page_cache_hits, 2);
-    assert_eq!(diagnostics.page_cache_misses, 0);
-
-    let cache_metrics = manifest.page_cache_metrics().unwrap();
-    assert_eq!(cache_metrics.hits, diagnostics.page_cache_hits);
-    assert_eq!(cache_metrics.misses, diagnostics.page_cache_misses);
-}
-
-#[test]
 fn open_sets_runtime_state_sentinel() {
     let dir = tempfile::tempdir().unwrap();
     let options = ManifestOptions::default();
@@ -864,87 +895,6 @@ fn open_sets_runtime_state_sentinel() {
     let runtime = manifest.runtime_state();
     assert_eq!(runtime.record_version, RUNTIME_STATE_VERSION);
     assert_eq!(runtime.pid, process::id());
-}
-
-#[test]
-fn manifest_flush_sink_updates_state() {
-    use crate::flush::{FlushSinkRequest, FlushSinkResponder, FlushTask};
-    use crate::io::{IoFile, IoResult, IoVec, IoVecMut};
-    use crate::wal::WalSegment;
-    use crossfire::mpsc;
-
-    #[derive(Default)]
-    struct NoopIoFile;
-
-    impl IoFile for NoopIoFile {
-        fn readv_at(&self, _offset: u64, _bufs: &mut [IoVecMut<'_>]) -> IoResult<usize> {
-            Ok(0)
-        }
-
-        fn writev_at(&self, _offset: u64, bufs: &[IoVec<'_>]) -> IoResult<usize> {
-            Ok(bufs.iter().map(IoVec::len).sum())
-        }
-
-        fn allocate(&self, _offset: u64, _len: u64) -> IoResult<()> {
-            Ok(())
-        }
-
-        fn flush(&self) -> IoResult<()> {
-            Ok(())
-        }
-    }
-
-    let dir = tempfile::tempdir().unwrap();
-    let manifest = Arc::new(Manifest::open(dir.path(), ManifestOptions::default()).unwrap());
-    let sink = ManifestFlushSink::new(manifest.clone(), 42);
-    let segment = Arc::new(WalSegment::new(Arc::new(NoopIoFile::default()), 0, 0));
-    let (tx, rx) = mpsc::bounded_blocking(1);
-    let sender = Arc::new(tx);
-
-    let responder = FlushSinkResponder::new(sender.clone(), segment.clone(), 0, 512);
-    let request = FlushSinkRequest {
-        segment: segment.clone(),
-        target: 512,
-        responder: responder.for_request(),
-    };
-    sink.apply_flush(request).expect("apply flush");
-    match rx.recv().expect("sink ack") {
-        FlushTask::SinkAck { result, .. } => assert!(result.is_ok()),
-        other => panic!("unexpected flush task: {:?}", other),
-    }
-
-    let state = manifest
-        .read(|tables, txn| {
-            Ok(tables
-                .wal_state
-                .get(txn, &WalStateKey::new(42).encode())?
-                .unwrap())
-        })
-        .expect("wal state");
-    assert_eq!(state.last_applied_lsn, 512);
-    assert!(state.flush_gate_state.last_success_at_epoch_ms.is_some());
-    assert!(state.flush_gate_state.errored_since_epoch_ms.is_none());
-
-    let responder = FlushSinkResponder::new(sender.clone(), segment.clone(), 0, 256);
-    let request = FlushSinkRequest {
-        segment: segment.clone(),
-        target: 256,
-        responder: responder.for_request(),
-    };
-    sink.apply_flush(request).expect("apply flush");
-    match rx.recv().expect("sink ack") {
-        FlushTask::SinkAck { result, .. } => assert!(result.is_ok()),
-        other => panic!("unexpected flush task: {:?}", other),
-    }
-    let state = manifest
-        .read(|tables, txn| {
-            Ok(tables
-                .wal_state
-                .get(txn, &WalStateKey::new(42).encode())?
-                .unwrap())
-        })
-        .expect("wal state");
-    assert_eq!(state.last_applied_lsn, 512);
 }
 
 fn open_detects_leftover_runtime_state() {
@@ -959,7 +909,7 @@ fn open_detects_leftover_runtime_state() {
     {
         let env = unsafe {
             EnvOpenOptions::new()
-                .map_size(options.map_size)
+                .map_size(options.initial_map_size)
                 .max_dbs(options.max_dbs)
                 .open(dir.path())
                 .expect("env open")
@@ -1006,36 +956,39 @@ mod checkpoint_batch_tests {
         chunk_entry.generation = 1;
         chunk_entry.size_bytes = 64 * 1024 * 1024;
 
-        let mut delta_entry = ChunkDeltaRecord::default();
-        delta_entry.base_chunk_id = 42;
-        delta_entry.delta_id = 1;
-        delta_entry.delta_file = "delta-1-1.bin".into();
-        delta_entry.size_bytes = 1024;
+        #[cfg(feature = "libsql")]
+        {
+            let mut delta_entry = LibSqlChunkDeltaRecord::default();
+            delta_entry.base_chunk_id = 42;
+            delta_entry.delta_id = 1;
+            delta_entry.delta_file = "delta-1-1.bin".into();
+            delta_entry.size_bytes = 1024;
 
-        let mut txn = manifest.begin();
-        txn.upsert_chunk(ChunkKey::new(1, 42), chunk_entry.clone());
-        txn.upsert_chunk_delta(ChunkDeltaKey::new(1, 42, 1), delta_entry.clone());
-        txn.bump_generation(TEST_COMPONENT, 1);
-        let receipt = txn.commit().unwrap();
+            let mut txn = manifest.begin();
+            txn.upsert_chunk(ChunkKey::new(1, 42), chunk_entry.clone());
+            txn.upsert_chunk_delta(ChunkDeltaKey::new(1, 42, 1), delta_entry.clone());
+            txn.bump_generation(TEST_COMPONENT, 1);
+            let receipt = txn.commit().unwrap();
 
-        assert!(receipt.generations.get(&TEST_COMPONENT).is_some());
+            assert!(receipt.generations.get(&TEST_COMPONENT).is_some());
 
-        let (chunk_exists, delta_exists) = manifest
-            .read(|tables, txn| {
-                let chunk = tables
-                    .chunk_catalog
-                    .get(txn, &ChunkKey::new(1, 42).encode())?
-                    .is_some();
-                let delta = tables
-                    .chunk_delta_index
-                    .get(txn, &ChunkDeltaKey::new(1, 42, 1).encode())?
-                    .is_some();
-                Ok((chunk, delta))
-            })
-            .unwrap();
+            let (chunk_exists, delta_exists) = manifest
+                .read(|tables, txn| {
+                    let chunk = tables
+                        .chunk_catalog
+                        .get(txn, &ChunkKey::new(1, 42).encode())?
+                        .is_some();
+                    let delta = tables
+                        .libsql_chunk_delta_index
+                        .get(txn, &ChunkDeltaKey::new(1, 42, 1).encode())?
+                        .is_some();
+                    Ok((chunk, delta))
+                })
+                .unwrap();
 
-        assert!(chunk_exists, "chunk should be committed");
-        assert!(delta_exists, "delta should be committed");
+            assert!(chunk_exists, "chunk should be committed");
+            assert!(delta_exists, "delta should be committed");
+        }
     }
 
     #[test]
@@ -1073,48 +1026,65 @@ mod checkpoint_batch_tests {
         chunk_entry.generation = 1;
         chunk_entry.size_bytes = 64 * 1024 * 1024;
 
-        let mut delta_entry = ChunkDeltaRecord::default();
-        delta_entry.base_chunk_id = 50;
-        delta_entry.delta_id = 1;
-        delta_entry.delta_file = "checkpoint-delta.bin".into();
-        delta_entry.size_bytes = 2048;
+        #[cfg(feature = "libsql")]
+        {
+            let mut delta_entry = LibSqlChunkDeltaRecord::default();
+            delta_entry.base_chunk_id = 50;
+            delta_entry.delta_id = 1;
+            delta_entry.delta_file = "checkpoint-delta.bin".into();
+            delta_entry.size_bytes = 2048;
 
-        let mut txn = manifest.begin();
-        txn.upsert_chunk(ChunkKey::new(3, 50), chunk_entry);
-        txn.upsert_chunk_delta(ChunkDeltaKey::new(3, 50, 1), delta_entry);
-        txn.commit().unwrap();
+            let mut txn = manifest.begin();
+            txn.upsert_chunk(ChunkKey::new(3, 50), chunk_entry);
+            txn.upsert_chunk_delta(ChunkDeltaKey::new(3, 50, 1), delta_entry);
+            txn.commit().unwrap();
+        }
 
         let cursor = manifest
             .register_change_cursor(ChangeCursorStart::Oldest)
             .unwrap();
 
         let page = manifest.fetch_change_page(cursor.cursor_id, 10).unwrap();
-        assert_eq!(
-            page.changes.len(),
-            1,
-            "should have one change log entry for the batch"
-        );
 
-        let ops = &page.changes[0].operations;
-        assert_eq!(ops.len(), 2, "batch should contain both operations");
+        #[cfg(feature = "libsql")]
+        {
+            assert_eq!(
+                page.changes.len(),
+                1,
+                "should have one change log entry for the batch"
+            );
 
-        let has_upsert_chunk = ops
-            .iter()
-            .any(|op| matches!(op, ManifestOp::UpsertChunk { .. }));
-        let has_upsert_delta = ops
-            .iter()
-            .any(|op| matches!(op, ManifestOp::UpsertChunkDelta { .. }));
+            let ops = &page.changes[0].operations;
+            assert_eq!(ops.len(), 2, "batch should contain both operations");
 
-        assert!(has_upsert_chunk, "should have UpsertChunk operation");
-        assert!(has_upsert_delta, "should have UpsertChunkDelta operation");
+            let has_upsert_chunk = ops
+                .iter()
+                .any(|op| matches!(op, ManifestOp::UpsertChunk { .. }));
+            let has_upsert_delta = ops
+                .iter()
+                .any(|op| matches!(op, ManifestOp::UpsertLibSqlChunkDelta { .. }));
+
+            assert!(has_upsert_chunk, "should have UpsertChunk operation");
+            assert!(has_upsert_delta, "should have UpsertChunkDelta operation");
+        }
+
+        #[cfg(not(feature = "libsql"))]
+        {
+            assert_eq!(
+                page.changes.len(),
+                0,
+                "should have no change log entries without libsql feature"
+            );
+        }
     }
 
     #[test]
+    #[cfg(feature = "libsql")]
     fn chunk_delta_upsert_and_delete() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = Manifest::open(dir.path(), ManifestOptions::default()).unwrap();
 
-        let mut delta_entry = ChunkDeltaRecord::default();
+        let mut delta_entry = LibSqlChunkDeltaRecord::default();
         delta_entry.base_chunk_id = 99;
         delta_entry.delta_id = 5;
         delta_entry.delta_file = "test-delta.bin".into();
@@ -1129,7 +1099,7 @@ mod checkpoint_batch_tests {
         let delta_exists = manifest
             .read(|tables, txn| {
                 Ok(tables
-                    .chunk_delta_index
+                    .libsql_chunk_delta_index
                     .get(txn, &delta_key.encode())?
                     .is_some())
             })
@@ -1143,7 +1113,7 @@ mod checkpoint_batch_tests {
         let delta_exists = manifest
             .read(|tables, txn| {
                 Ok(tables
-                    .chunk_delta_index
+                    .libsql_chunk_delta_index
                     .get(txn, &delta_key.encode())?
                     .is_some())
             })
@@ -1166,8 +1136,9 @@ mod checkpoint_batch_tests {
             txn.upsert_chunk(ChunkKey::new(5, chunk_id), chunk_entry);
         }
 
+        #[cfg(feature = "libsql")]
         for delta_id in 1..=3 {
-            let mut delta_entry = ChunkDeltaRecord::default();
+            let mut delta_entry = LibSqlChunkDeltaRecord::default();
             delta_entry.base_chunk_id = 1;
             delta_entry.delta_id = delta_id as u16;
             delta_entry.delta_file = format!("delta-1-{}.bin", delta_id);
@@ -1186,18 +1157,22 @@ mod checkpoint_batch_tests {
                     .filter(|(raw, _)| ChunkKey::decode(*raw).db_id == 5)
                     .count();
 
+                #[cfg(feature = "libsql")]
                 let deltas = tables
-                    .chunk_delta_index
+                    .libsql_chunk_delta_index
                     .iter(txn)?
                     .filter_map(|r| r.ok())
                     .filter(|(raw, _)| ChunkDeltaKey::decode(*raw).db_id == 5)
                     .count();
+                #[cfg(not(feature = "libsql"))]
+                let deltas = 0;
 
                 Ok((chunks, deltas))
             })
             .unwrap();
 
         assert_eq!(chunk_count, 5, "should have 5 chunks");
+        #[cfg(feature = "libsql")]
         assert_eq!(delta_count, 3, "should have 3 deltas");
     }
 }

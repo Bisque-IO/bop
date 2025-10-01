@@ -21,7 +21,23 @@ use super::state::{ChangeSignal, ManifestDiagnostics, ManifestRuntimeState};
 use super::tables::ManifestTables;
 use super::worker::{ManifestCommand, WorkerHandle, worker_loop};
 use super::*;
-use crate::page_cache::{PageCache, PageCacheKey, PageCacheMetricsSnapshot};
+
+#[cfg(feature = "libsql")]
+#[derive(Debug, Clone)]
+pub struct PageLocation {
+    pub base_chunk: ChunkEntryRecord,
+    pub base_chunk_key: ChunkKey,
+    pub base_start_page: u64,
+    pub deltas: Vec<DeltaLocation>,
+}
+
+#[cfg(feature = "libsql")]
+#[derive(Debug, Clone)]
+pub struct DeltaLocation {
+    pub delta_key: ChunkDeltaKey,
+    pub delta_record: LibSqlChunkDeltaRecord,
+    pub generation: Generation,
+}
 
 /// Starting position for a new change cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,19 +100,12 @@ impl Manifest {
 
         let env = unsafe {
             EnvOpenOptions::new()
-                .map_size(options.map_size)
+                .map_size(options.initial_map_size)
                 .max_dbs(options.max_dbs)
                 .open(path_ref)?
         };
 
         let tables = Arc::new(ManifestTables::open(&env)?);
-
-        let page_cache = options.page_cache.clone();
-        let change_log_cache_object_id = options.change_log_cache_object_id.or_else(|| {
-            page_cache
-                .as_ref()
-                .map(|_| compute_change_log_cache_id(path_ref))
-        });
 
         let generation_cache = Arc::new(Mutex::new(load_generations(&env, &tables)?));
         let job_seed = generation_cache
@@ -110,16 +119,7 @@ impl Manifest {
         let batch_journal_counter = Arc::new(AtomicU64::new(last_pending_id));
         let mut change_bootstrap = load_change_state(&env, &tables)?;
         apply_startup_truncation(&env, &tables, &mut change_bootstrap.state)?;
-        if let (Some(cache), Some(object_id)) = (page_cache.as_ref(), change_log_cache_object_id) {
-            hydrate_change_log_cache(
-                &env,
-                &tables,
-                cache,
-                object_id,
-                change_bootstrap.state.oldest_sequence,
-                change_bootstrap.state.latest_sequence(),
-            )?;
-        }
+
         let initial_change_state = change_bootstrap.state.clone();
         let change_state = Arc::new(Mutex::new(change_bootstrap.state));
         let change_signal = Arc::new(ChangeSignal::new(initial_change_state.latest_sequence()));
@@ -143,10 +143,13 @@ impl Manifest {
         let worker_pending_replay = pending_replay;
         let worker_batch_counter = batch_journal_counter.clone();
         let commit_latency = options.commit_latency;
-        let worker_page_cache = page_cache.clone();
-        let worker_cache_object_id = change_log_cache_object_id;
 
         let runtime_state = ManifestRuntimeState::initialize(&env, &tables)?;
+
+        let worker_current_map_size = Arc::new(AtomicU64::new(options.initial_map_size as u64));
+        let current_map_size = worker_current_map_size.clone();
+        let worker_max_map_size = options.max_map_size;
+        let worker_path = path_ref.to_path_buf();
 
         let join = thread::Builder::new()
             .name("bop-manifest-writer".into())
@@ -166,8 +169,9 @@ impl Manifest {
                     worker_pending_replay,
                     worker_batch_counter,
                     commit_latency,
-                    worker_page_cache,
-                    worker_cache_object_id,
+                    worker_current_map_size,
+                    worker_max_map_size,
+                    worker_path,
                 )
             })
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
@@ -182,9 +186,10 @@ impl Manifest {
             job_id_counter,
             change_state,
             change_signal,
-            page_cache,
-            change_log_cache_object_id,
             runtime_state,
+            current_map_size,
+            max_map_size: options.max_map_size,
+            path: path_ref.to_path_buf(),
         })
     }
 
@@ -199,6 +204,36 @@ impl Manifest {
             manifest: self,
             ops: Vec::with_capacity(capacity),
         }
+    }
+
+    /// Attempt to expand the LMDB map size when MDB_FULL is encountered.
+    ///
+    /// Doubles the current map size up to the maximum configured limit.
+    /// Returns true if expansion succeeded, false if already at maximum.
+    pub(crate) fn try_expand_map_size(&self) -> Result<bool, ManifestError> {
+        use std::sync::atomic::Ordering;
+
+        let current = self.current_map_size.load(Ordering::Acquire) as usize;
+
+        // Try to double the size, but cap at max
+        let new_size = (current * 2).min(self.max_map_size);
+
+        if new_size <= current {
+            // Already at maximum
+            return Ok(false);
+        }
+
+        // Resize the environment
+        unsafe {
+            self.env.resize(new_size)?;
+        }
+
+        self.current_map_size.store(new_size as u64, Ordering::Release);
+
+        // TODO: Add logging when tracing is available
+        // tracing::info!(old_size = current, new_size = new_size, max_size = self.max_map_size, "Expanded LMDB map size");
+
+        Ok(true)
     }
 
     /// Register a new change cursor.
@@ -260,7 +295,6 @@ impl Manifest {
         let mut remaining = page_size;
         let mut changes = Vec::new();
 
-        let change_log_cache = self.change_log_cache();
         let latest_sequence = state.latest_sequence();
 
         if remaining > 0 && start_sequence <= latest_sequence {
@@ -269,27 +303,8 @@ impl Manifest {
             let config = bincode::config::standard();
 
             while remaining > 0 && sequence <= latest_sequence {
-                if let Some((cache, object_id)) = change_log_cache.as_ref() {
-                    if let Some(frame) = cache.get(&PageCacheKey::manifest(*object_id, sequence)) {
-                        let (record, _len) = decode_from_slice(frame.as_slice(), config)
-                            .map_err(|err| ManifestError::CacheSerialization(err.to_string()))?;
-                        changes.push(record);
-                        remaining -= 1;
-                        sequence = sequence.saturating_add(1);
-                        continue;
-                    }
-                }
-
                 match self.tables.change_log.get(&txn, &sequence)? {
                     Some(record) => {
-                        if let Some((cache, object_id)) = change_log_cache.as_ref() {
-                            if let Ok(bytes) = encode_to_vec(&record, config) {
-                                cache.insert(
-                                    PageCacheKey::manifest(*object_id, sequence),
-                                    Arc::from(bytes.into_boxed_slice()),
-                                );
-                            }
-                        }
                         changes.push(record);
                         remaining -= 1;
                     }
@@ -331,14 +346,6 @@ impl Manifest {
         self.change_signal.current()
     }
 
-    /// Get the change log cache if configured.
-    pub(super) fn change_log_cache(&self) -> Option<(Arc<PageCache<PageCacheKey>>, u64)> {
-        self.page_cache.as_ref().and_then(|cache| {
-            self.change_log_cache_object_id
-                .map(|id| (cache.clone(), id))
-        })
-    }
-
     /// Wait for a component's generation to reach a target value.
     pub fn wait_for_generation(
         &self,
@@ -372,16 +379,16 @@ impl Manifest {
         &self,
         source_db: DbId,
         target_db: DbId,
-        descriptor: DbDescriptorRecord,
+        descriptor: AofDescriptorRecord,
     ) -> Result<(), ManifestError> {
         let data = self.read(|tables, txn| {
-            if tables.db.get(txn, &(target_db as u64))?.is_some() {
+            if tables.aof_db.get(txn, &(target_db as u64))?.is_some() {
                 return Err(ManifestError::InvariantViolation(format!(
                     "db {target_db} already exists"
                 )));
             }
 
-            if tables.db.get(txn, &(source_db as u64))?.is_none() {
+            if tables.aof_db.get(txn, &(source_db as u64))?.is_none() {
                 return Err(ManifestError::InvariantViolation(format!(
                     "source db {source_db} missing"
                 )));
@@ -396,26 +403,30 @@ impl Manifest {
                 }
             }
 
+            #[cfg(feature = "libsql")]
             let mut chunk_deltas = Vec::new();
-            let mut delta_cursor = tables.chunk_delta_index.iter(txn)?;
-            while let Some((raw_key, value)) = delta_cursor.next().transpose()? {
-                let key = ChunkDeltaKey::decode(raw_key);
-                if key.db_id == source_db {
-                    chunk_deltas.push((key, value));
+            #[cfg(feature = "libsql")]
+            {
+                let mut delta_cursor = tables.libsql_chunk_delta_index.iter(txn)?;
+                while let Some((raw_key, value)) = delta_cursor.next().transpose()? {
+                    let key = ChunkDeltaKey::decode(raw_key);
+                    if key.db_id == source_db {
+                        chunk_deltas.push((key, value));
+                    }
                 }
             }
 
-            let mut wal_states = Vec::new();
-            let mut wal_cursor = tables.wal_state.iter(txn)?;
-            while let Some((raw_key, value)) = wal_cursor.next().transpose()? {
-                let key = WalStateKey::decode(raw_key);
+            let mut aof_states = Vec::new();
+            let mut aof_cursor = tables.aof_state.iter(txn)?;
+            while let Some((raw_key, value)) = aof_cursor.next().transpose()? {
+                let key = AofStateKey::decode(raw_key);
                 if key.db_id == source_db {
-                    wal_states.push((key, value));
+                    aof_states.push((key, value));
                 }
             }
 
             let mut wal_artifacts = Vec::new();
-            let mut artifact_cursor = tables.wal_catalog.iter(txn)?;
+            let mut artifact_cursor = tables.aof_wal.iter(txn)?;
             while let Some((raw_key, value)) = artifact_cursor.next().transpose()? {
                 let key = WalArtifactKey::decode(raw_key);
                 if key.db_id == source_db {
@@ -425,27 +436,30 @@ impl Manifest {
 
             Ok(ForkData {
                 chunk_entries,
+                #[cfg(feature = "libsql")]
                 chunk_deltas,
-                wal_states,
+                aof_states,
                 wal_artifacts,
             })
         })?;
 
         let capacity = 1
-            + data.wal_states.len()
+            + data.aof_states.len()
             + data.chunk_entries.len() * 2
-            + data.chunk_deltas.len()
+            + {
+                #[cfg(feature = "libsql")]
+                { data.chunk_deltas.len() }
+                #[cfg(not(feature = "libsql"))]
+                { 0 }
+            }
             + data.wal_artifacts.len();
         let mut txn = self.begin_with_capacity(capacity.max(4));
 
-        txn.put_db(target_db, descriptor);
+        txn.put_aof_db(target_db, descriptor);
 
-        for (key, record) in &data.wal_states {
-            let mut clone = record.clone();
-            clone.flush_gate_state.active_job_id = None;
-            clone.flush_gate_state.errored_since_epoch_ms = None;
+        for (key, record) in &data.aof_states {
             let new_key = key.with_db(target_db);
-            txn.put_wal_state(new_key, clone);
+            txn.put_aof_state(new_key, record.clone());
         }
 
         for (key, record) in &data.chunk_entries {
@@ -454,6 +468,7 @@ impl Manifest {
             txn.adjust_refcount(key.chunk_id, 1);
         }
 
+        #[cfg(feature = "libsql")]
         for (key, record) in &data.chunk_deltas {
             let new_key = key.with_db(target_db);
             txn.upsert_chunk_delta(new_key, record.clone());
@@ -475,14 +490,14 @@ impl Manifest {
         self.next_job_id()
     }
 
-    /// Get all WAL artifacts for a database.
+    /// Get all AOF WAL artifacts for a database.
     pub fn wal_artifacts(
         &self,
         db_id: DbId,
-    ) -> Result<Vec<(WalArtifactKey, WalArtifactRecord)>, ManifestError> {
+    ) -> Result<Vec<(WalArtifactKey, AofWalArtifactRecord)>, ManifestError> {
         self.read(|tables, txn| {
             let mut out = Vec::new();
-            let mut cursor = tables.wal_catalog.iter(txn)?;
+            let mut cursor = tables.aof_wal.iter(txn)?;
             while let Some((raw_key, record)) = cursor.next().transpose()? {
                 let key = WalArtifactKey::decode(raw_key);
                 if key.db_id == db_id {
@@ -493,24 +508,23 @@ impl Manifest {
         })
     }
 
-    /// Get the WAL state for a database.
-    pub fn wal_state(&self, db_id: DbId) -> Result<Option<WalStateRecord>, ManifestError> {
+    /// Get the AOF state for a database.
+    pub fn aof_state(&self, db_id: DbId) -> Result<Option<AofStateRecord>, ManifestError> {
         self.read(|tables, txn| {
-            let key = WalStateKey::new(db_id).encode();
-            Ok(tables.wal_state.get(txn, &key)?)
+            let key = AofStateKey::new(db_id).encode();
+            Ok(tables.aof_state.get(txn, &key)?)
         })
     }
 
     /// Resolve the location of a page (base chunk + delta chain) for PageStore reads.
     ///
     /// This is the Phase 2 implementation that enables T4c delta layering.
+    #[cfg(feature = "libsql")]
     pub fn resolve_page_location(
         &self,
         db_id: u32,
         page_no: u64,
-    ) -> Result<crate::db::PageLocation, ManifestError> {
-        use crate::db::{DeltaLocation, PageLocation};
-
+    ) -> Result<PageLocation, ManifestError> {
         self.read(|tables, txn| {
             let mut chunk_entries = Vec::new();
             let mut chunk_cursor = tables.chunk_catalog.iter(txn)?;
@@ -562,7 +576,9 @@ impl Manifest {
             let mut deltas = Vec::new();
             let start_key = ChunkDeltaKey::new(db_id, chunk_key.chunk_id, 0).encode();
             let end_key = ChunkDeltaKey::new(db_id, chunk_key.chunk_id, u32::MAX).encode();
-            let mut delta_cursor = tables.chunk_delta_index.range(txn, &(start_key..=end_key))?;
+            let mut delta_cursor = tables
+                .libsql_chunk_delta_index
+                .range(txn, &(start_key..=end_key))?;
             while let Some((raw_key, record)) = delta_cursor.next().transpose()? {
                 let delta_key = ChunkDeltaKey::decode(raw_key);
 
@@ -573,7 +589,7 @@ impl Manifest {
                 deltas.push(DeltaLocation {
                     delta_key,
                     delta_record: record,
-                    generation: delta_key.generation as u64,
+                    generation: delta_key.generation as Generation,
                 });
             }
 
@@ -591,7 +607,7 @@ impl Manifest {
     /// Get the maximum database ID currently in use.
     pub fn max_db_id(&self) -> Result<Option<u32>, ManifestError> {
         self.read(|tables, txn| {
-            let mut cursor = tables.db.iter(txn)?;
+            let mut cursor = tables.aof_db.iter(txn)?;
             let mut max_id: Option<u32> = None;
             while let Some((raw_key, _)) = cursor.next().transpose()? {
                 let current = raw_key as u32;
@@ -619,12 +635,7 @@ impl Manifest {
 
     /// Get a snapshot of manifest diagnostics.
     pub fn diagnostics(&self) -> ManifestDiagnosticsSnapshot {
-        ManifestDiagnosticsSnapshot::from_manifest(&self.diagnostics, &self.page_cache)
-    }
-
-    /// Get page cache metrics if a cache is configured.
-    pub fn page_cache_metrics(&self) -> Option<PageCacheMetricsSnapshot> {
-        self.page_cache.as_ref().map(|cache| cache.metrics())
+        ManifestDiagnosticsSnapshot::from_manifest(&self.diagnostics)
     }
 
     /// Check if a crash was detected on startup.
@@ -635,6 +646,103 @@ impl Manifest {
     /// Get the runtime state record.
     pub fn runtime_state(&self) -> &RuntimeStateRecord {
         &self.runtime_state.record
+    }
+
+    /// Look up an AOF chunk record by AOF ID and LSN.
+    ///
+    /// This performs an efficient range query to find the chunk containing the given LSN.
+    /// Returns None if no chunk is found for the given AOF and LSN.
+    pub fn get_aof_chunk(
+        &self,
+        aof_id: crate::aof::AofId,
+        lsn: u64,
+    ) -> Result<Option<AofChunkRecord>, ManifestError> {
+        self.read(|tables, txn| {
+            // Create a range query starting from (aof_id, lsn)
+            let search_key = AofChunkRecord::make_key(aof_id, lsn);
+
+            // Find the chunk with start_lsn <= lsn
+            let mut iter = tables.aof_chunks.rev_iter(txn)?;
+
+            // Seek to our search key or the first key before it
+            if let Some(result) = iter.next() {
+                let (key, record) = result?;
+                let (record_aof_id, start_lsn) = AofChunkRecord::decode_key(key);
+
+                // Check if this chunk belongs to our AOF and contains the LSN
+                if record_aof_id == aof_id && start_lsn <= lsn && lsn < record.end_lsn {
+                    return Ok(Some(record));
+                }
+            }
+
+            Ok(None)
+        })
+    }
+
+    /// List all AOF chunks for a given AOF ID.
+    ///
+    /// Returns chunks in ascending order by start_lsn.
+    pub fn list_aof_chunks(
+        &self,
+        aof_id: crate::aof::AofId,
+    ) -> Result<Vec<AofChunkRecord>, ManifestError> {
+        self.read(|tables, txn| {
+            let mut chunks = Vec::new();
+
+            // Create range for this AOF: from (aof_id, 0) to (aof_id, u64::MAX)
+            let start_key = AofChunkRecord::make_key(aof_id, 0);
+            let end_key = AofChunkRecord::make_key(aof_id, u64::MAX);
+
+            let range = start_key..=end_key;
+            let mut iter = tables.aof_chunks.range(txn, &range)?;
+
+            while let Some(result) = iter.next() {
+                let (_key, record) = result?;
+                chunks.push(record);
+            }
+
+            Ok(chunks)
+        })
+    }
+
+    /// Look up a LibSQL chunk record by LibSQL ID and chunk ID.
+    #[cfg(feature = "libsql")]
+    pub fn get_libsql_chunk(
+        &self,
+        libsql_id: crate::libsql::LibSqlId,
+        chunk_id: ChunkId,
+    ) -> Result<Option<LibSqlChunkRecord>, ManifestError> {
+        self.read(|tables, txn| {
+            let key = LibSqlChunkRecord::make_key(libsql_id, chunk_id);
+            Ok(tables.libsql_chunks.get(txn, &key)?)
+        })
+    }
+
+    /// List all LibSQL chunks for a given LibSQL database ID.
+    ///
+    /// Returns chunks in ascending order by chunk_id.
+    #[cfg(feature = "libsql")]
+    pub fn list_libsql_chunks(
+        &self,
+        libsql_id: crate::libsql::LibSqlId,
+    ) -> Result<Vec<LibSqlChunkRecord>, ManifestError> {
+        self.read(|tables, txn| {
+            let mut chunks = Vec::new();
+
+            // Create range for this LibSQL instance: from (libsql_id, 0) to (libsql_id, u32::MAX)
+            let start_key = LibSqlChunkRecord::make_key(libsql_id, 0);
+            let end_key = LibSqlChunkRecord::make_key(libsql_id, u32::MAX);
+
+            let range = start_key..=end_key;
+            let mut iter = tables.libsql_chunks.range(txn, &range)?;
+
+            while let Some(result) = iter.next() {
+                let (_key, record) = result?;
+                chunks.push(record);
+            }
+
+            Ok(chunks)
+        })
     }
 
     /// Execute a read-only operation on the manifest.

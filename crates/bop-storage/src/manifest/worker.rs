@@ -36,8 +36,6 @@ use std::time::Instant;
 use heed::Env;
 use serde::{Deserialize, Serialize};
 
-use crate::page_cache::{PageCache, PageCacheKey};
-
 use super::change_log::{ChangeLogState, maybe_truncate_change_log};
 use super::cursors::{
     CursorAckRequest, CursorRegistrationRequest, acknowledge_cursor, register_cursor,
@@ -47,6 +45,80 @@ use super::tables::{JOB_ID_COMPONENT, ManifestTables};
 use super::{
     ChangeSignal, ComponentId, Generation, ManifestDiagnostics, ManifestError, ManifestOp,
 };
+
+/// Retry commit_pending with automatic map expansion on MDB_FULL errors.
+///
+/// Attempts to commit pending operations, and if the LMDB environment is full,
+/// expands the map size (doubling up to max_map_size) and retries.
+fn retry_with_expansion(
+    env: &Env,
+    tables: &Arc<ManifestTables>,
+    pending: &[PendingCommit],
+    generations: &mut HashMap<ComponentId, Generation>,
+    persisted_job_counter: &mut u64,
+    diagnostics: &Arc<ManifestDiagnostics>,
+    change_state: &mut ChangeLogState,
+    current_map_size: &Arc<AtomicU64>,
+    max_map_size: usize,
+    path: &std::path::Path,
+) -> Result<Vec<HashMap<ComponentId, Generation>>, ManifestError> {
+    const MAX_RETRIES: usize = 3;
+
+    for attempt in 0..MAX_RETRIES {
+        let result = commit_pending(
+            env,
+            tables,
+            pending,
+            generations,
+            persisted_job_counter,
+            diagnostics,
+            change_state,
+        );
+
+        match result {
+            Ok(snapshots) => return Ok(snapshots),
+            Err(heed::Error::Mdb(mdb_err)) if mdb_err.to_err_code() == -30792 => {
+                // MDB_FULL error (error code -30792) - try to expand
+                let current = current_map_size.load(Ordering::Acquire) as usize;
+                let new_size = (current * 2).min(max_map_size);
+
+                if new_size <= current {
+                    // Already at maximum, can't expand further
+                    return Err(ManifestError::CommitFailed(
+                        format!("LMDB database full at maximum size {} bytes", max_map_size)
+                    ));
+                }
+
+                // Expand the map
+                if let Err(resize_err) = unsafe { env.resize(new_size) } {
+                    return Err(ManifestError::Heed(resize_err));
+                }
+
+                current_map_size.store(new_size as u64, Ordering::Release);
+
+                // Log expansion (would use tracing if available)
+                eprintln!(
+                    "[manifest] Expanded LMDB from {} MB to {} MB (attempt {}/{})",
+                    current / (1024 * 1024),
+                    new_size / (1024 * 1024),
+                    attempt + 1,
+                    MAX_RETRIES
+                );
+
+                // Retry on next iteration
+                continue;
+            }
+            Err(other_err) => {
+                // Not a map full error, return it immediately
+                return Err(ManifestError::Heed(other_err));
+            }
+        }
+    }
+
+    Err(ManifestError::CommitFailed(
+        "Failed to commit after multiple map expansion attempts".to_string()
+    ))
+}
 
 /// Handle to the background worker thread.
 ///
@@ -216,8 +288,9 @@ pub(super) fn worker_loop(
     mut pending: Vec<PendingCommit>,
     batch_journal_counter: Arc<AtomicU64>,
     commit_latency: std::time::Duration,
-    page_cache: Option<Arc<PageCache<PageCacheKey>>>,
-    page_cache_object_id: Option<u64>,
+    current_map_size: Arc<AtomicU64>,
+    max_map_size: usize,
+    path: std::path::PathBuf,
 ) {
     let mut waiters: HashMap<ComponentId, VecDeque<WaitEntry>> = HashMap::new();
     let mut deadline: Option<Instant> = if pending.is_empty() {
@@ -304,8 +377,6 @@ pub(super) fn worker_loop(
                         &mut change_state,
                         request.cursor_id,
                         request.sequence,
-                        page_cache.as_ref(),
-                        page_cache_object_id,
                     );
                     match result {
                         Ok(snapshot) => {
@@ -331,7 +402,8 @@ pub(super) fn worker_loop(
             && (shutdown || deadline.map_or(false, |limit| Instant::now() >= limit));
 
         if should_commit {
-            match commit_pending(
+            // Retry commit with map expansion on MDB_FULL errors
+            let commit_result = retry_with_expansion(
                 &env,
                 &tables,
                 pending.as_slice(),
@@ -339,9 +411,12 @@ pub(super) fn worker_loop(
                 &mut persisted_job_counter,
                 &diagnostics,
                 &mut change_state,
-                page_cache.as_ref(),
-                page_cache_object_id,
-            ) {
+                &current_map_size,
+                max_map_size,
+                &path,
+            );
+
+            match commit_result {
                 Ok(snapshots) => {
                     for (entry, snapshot) in pending.iter().zip(snapshots.into_iter()) {
                         if let Some(completion) = &entry.completion {
@@ -352,15 +427,7 @@ pub(super) fn worker_loop(
                     }
                     pending.clear();
                     deadline = None;
-                    if maybe_truncate_change_log(
-                        &env,
-                        &tables,
-                        &mut change_state,
-                        page_cache.as_ref(),
-                        page_cache_object_id,
-                    )
-                    .is_err()
-                    {
+                    if maybe_truncate_change_log(&env, &tables, &mut change_state).is_err() {
                         break;
                     }
                     if let Ok(mut cache) = generation_cache.lock() {

@@ -29,12 +29,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::Arc;
 
-use bincode::serde::encode_to_vec;
 use heed::{Env, RwTxn};
-
-use crate::page_cache::{PageCache, PageCacheKey};
 
 use super::ManifestError;
 use super::tables::{ChangeCursorId, ChangeSequence, ManifestTables};
@@ -264,15 +260,10 @@ pub(crate) fn delete_change_log_range(
 ///
 /// This should be called after truncating entries from LMDB to ensure the cache
 /// doesn't contain stale data. The range is [start, end).
-pub(crate) fn evict_change_log_cache_range(
-    cache: &PageCache<PageCacheKey>,
-    object_id: u64,
-    start: ChangeSequence,
-    end: ChangeSequence,
-) {
+pub(crate) fn evict_change_log_cache_range(start: ChangeSequence, end: ChangeSequence) {
     let mut current = start;
     while current < end {
-        cache.remove(&PageCacheKey::manifest(object_id, current));
+        // cache.remove(&PageCacheKey::manifest(object_id, current));
         current = current.saturating_add(1);
     }
 }
@@ -296,8 +287,6 @@ pub(crate) fn truncate_change_log(
     tables: &ManifestTables,
     change_state: &mut ChangeLogState,
     truncate_before: ChangeSequence,
-    page_cache: Option<&Arc<PageCache<PageCacheKey>>>,
-    page_cache_object_id: Option<u64>,
 ) -> Result<bool, ManifestError> {
     if truncate_before <= change_state.oldest_sequence {
         return Ok(false);
@@ -307,10 +296,6 @@ pub(crate) fn truncate_change_log(
     let mut txn = env.write_txn()?;
     delete_change_log_range(&mut txn, tables, start, truncate_before)?;
     txn.commit()?;
-
-    if let (Some(cache), Some(object_id)) = (page_cache, page_cache_object_id) {
-        evict_change_log_cache_range(cache, object_id, start, truncate_before);
-    }
 
     change_state.oldest_sequence = truncate_before;
     Ok(true)
@@ -336,8 +321,6 @@ pub(crate) fn maybe_truncate_change_log(
     env: &Env,
     tables: &ManifestTables,
     change_state: &mut ChangeLogState,
-    page_cache: Option<&Arc<PageCache<PageCacheKey>>>,
-    page_cache_object_id: Option<u64>,
 ) -> Result<bool, ManifestError> {
     let depth = change_state
         .next_sequence
@@ -348,14 +331,7 @@ pub(crate) fn maybe_truncate_change_log(
     }
 
     let truncate_before = compute_truncate_before(change_state);
-    truncate_change_log(
-        env,
-        tables,
-        change_state,
-        truncate_before,
-        page_cache,
-        page_cache_object_id,
-    )
+    truncate_change_log(env, tables, change_state, truncate_before)
 }
 
 /// Applies truncation during manifest startup.
@@ -373,58 +349,5 @@ pub(crate) fn apply_startup_truncation(
     change_state: &mut ChangeLogState,
 ) -> Result<(), ManifestError> {
     let truncate_before = compute_truncate_before(change_state);
-    truncate_change_log(env, tables, change_state, truncate_before, None, None).map(|_| ())
-}
-
-/// Hydrates the page cache with recent change log entries.
-///
-/// This function pre-loads the most recent change log entries into the page cache
-/// to improve read performance for consumers that need recent changes. It's called
-/// during manifest startup if a page cache is configured.
-///
-/// The number of entries loaded is limited by `CHANGE_LOG_CACHE_PREFILL_LIMIT`.
-///
-/// # Errors
-///
-/// Returns an error if LMDB operations fail. Serialization errors are logged but
-/// don't fail the operation.
-pub(crate) fn hydrate_change_log_cache(
-    env: &Env,
-    tables: &ManifestTables,
-    cache: &Arc<PageCache<PageCacheKey>>,
-    object_id: u64,
-    oldest_sequence: ChangeSequence,
-    latest_sequence: ChangeSequence,
-) -> Result<(), ManifestError> {
-    if latest_sequence < oldest_sequence || CHANGE_LOG_CACHE_PREFILL_LIMIT == 0 {
-        return Ok(());
-    }
-
-    let available = latest_sequence
-        .saturating_sub(oldest_sequence)
-        .saturating_add(1);
-    let start = if available > CHANGE_LOG_CACHE_PREFILL_LIMIT as u64 {
-        latest_sequence
-            .saturating_sub(CHANGE_LOG_CACHE_PREFILL_LIMIT as u64)
-            .saturating_add(1)
-    } else {
-        oldest_sequence
-    };
-
-    let txn = env.read_txn()?;
-    let config = bincode::config::standard();
-    let mut sequence = start;
-    while sequence <= latest_sequence {
-        if let Some(record) = tables.change_log.get(&txn, &sequence)? {
-            if let Ok(bytes) = encode_to_vec(&record, config) {
-                cache.insert(
-                    PageCacheKey::manifest(object_id, sequence),
-                    Arc::from(bytes.into_boxed_slice()),
-                );
-            }
-        }
-        sequence = sequence.saturating_add(1);
-    }
-    txn.commit()?;
-    Ok(())
+    truncate_change_log(env, tables, change_state, truncate_before).map(|_| ())
 }

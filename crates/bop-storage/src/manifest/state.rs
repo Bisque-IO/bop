@@ -12,7 +12,6 @@ use uuid::Uuid;
 
 use super::tables::{ManifestTables, RuntimeStateRecord, epoch_millis};
 use super::{ChangeSequence, ManifestError};
-use crate::page_cache::{PageCache, PageCacheKey};
 
 /// Current version of the runtime state record format.
 pub(super) const RUNTIME_STATE_VERSION: u16 = 1;
@@ -88,10 +87,7 @@ pub struct ManifestDiagnosticsSnapshot {
 
 impl ManifestDiagnosticsSnapshot {
     /// Create a diagnostics snapshot from the manifest's state.
-    pub(super) fn from_manifest(
-        diagnostics: &ManifestDiagnostics,
-        page_cache: &Option<std::sync::Arc<PageCache<PageCacheKey>>>,
-    ) -> Self {
+    pub(super) fn from_manifest(diagnostics: &ManifestDiagnostics) -> Self {
         let mut snapshot = Self {
             committed_batches: diagnostics.committed_batches.load(Ordering::Relaxed),
             page_cache_hits: 0,
@@ -100,13 +96,13 @@ impl ManifestDiagnosticsSnapshot {
             page_cache_evictions: 0,
         };
 
-        if let Some(cache) = page_cache {
-            let metrics = cache.metrics();
-            snapshot.page_cache_hits = metrics.hits;
-            snapshot.page_cache_misses = metrics.misses;
-            snapshot.page_cache_insertions = metrics.insertions;
-            snapshot.page_cache_evictions = metrics.evictions;
-        }
+        // if let Some(cache) = page_cache {
+        //     let metrics = cache.metrics();
+        //     snapshot.page_cache_hits = metrics.hits;
+        //     snapshot.page_cache_misses = metrics.misses;
+        //     snapshot.page_cache_insertions = metrics.insertions;
+        //     snapshot.page_cache_evictions = metrics.evictions;
+        // }
 
         snapshot
     }

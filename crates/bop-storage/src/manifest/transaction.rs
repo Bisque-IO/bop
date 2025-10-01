@@ -32,27 +32,27 @@ pub struct ManifestTxn<'a> {
 }
 
 impl<'a> ManifestTxn<'a> {
-    /// Put a database descriptor.
-    pub fn put_db(&mut self, db_id: DbId, value: DbDescriptorRecord) -> &mut Self {
-        self.ops.push(ManifestOp::PutDb { db_id, value });
+    /// Put an AOF database descriptor.
+    pub fn put_aof_db(&mut self, db_id: DbId, value: AofDescriptorRecord) -> &mut Self {
+        self.ops.push(ManifestOp::PutAofDb { db_id, value });
         self
     }
 
-    /// Delete a database descriptor.
-    pub fn delete_db(&mut self, db_id: DbId) -> &mut Self {
-        self.ops.push(ManifestOp::DeleteDb { db_id });
+    /// Delete an AOF database descriptor.
+    pub fn delete_aof_db(&mut self, db_id: DbId) -> &mut Self {
+        self.ops.push(ManifestOp::DeleteAofDb { db_id });
         self
     }
 
-    /// Put a WAL state record.
-    pub fn put_wal_state(&mut self, key: WalStateKey, value: WalStateRecord) -> &mut Self {
-        self.ops.push(ManifestOp::PutWalState { key, value });
+    /// Put an AOF state record.
+    pub fn put_aof_state(&mut self, key: AofStateKey, value: AofStateRecord) -> &mut Self {
+        self.ops.push(ManifestOp::PutAofState { key, value });
         self
     }
 
-    /// Delete a WAL state record.
-    pub fn delete_wal_state(&mut self, key: WalStateKey) -> &mut Self {
-        self.ops.push(ManifestOp::DeleteWalState { key });
+    /// Delete an AOF state record.
+    pub fn delete_aof_state(&mut self, key: AofStateKey) -> &mut Self {
+        self.ops.push(ManifestOp::DeleteAofState { key });
         self
     }
 
@@ -68,43 +68,65 @@ impl<'a> ManifestTxn<'a> {
         self
     }
 
-    /// Upsert a chunk delta.
-    pub fn upsert_chunk_delta(&mut self, key: ChunkDeltaKey, value: ChunkDeltaRecord) -> &mut Self {
-        self.ops.push(ManifestOp::UpsertChunkDelta { key, value });
+    /// Upsert a LibSQL chunk delta.
+    #[cfg(feature = "libsql")]
+    pub fn upsert_chunk_delta(&mut self, key: ChunkDeltaKey, value: LibSqlChunkDeltaRecord) -> &mut Self {
+        self.ops.push(ManifestOp::UpsertLibSqlChunkDelta { key, value });
         self
     }
 
-    /// Delete a chunk delta.
+    /// Delete a LibSQL chunk delta.
+    #[cfg(feature = "libsql")]
     pub fn delete_chunk_delta(&mut self, key: ChunkDeltaKey) -> &mut Self {
-        self.ops.push(ManifestOp::DeleteChunkDelta { key });
+        self.ops.push(ManifestOp::DeleteLibSqlChunkDelta { key });
         self
     }
 
-    /// Publish a snapshot.
-    pub fn publish_snapshot(&mut self, record: SnapshotRecord) -> &mut Self {
-        self.ops.push(ManifestOp::PublishSnapshot { record });
+    /// Publish a LibSQL snapshot.
+    #[cfg(feature = "libsql")]
+    pub fn publish_libsql_snapshot(&mut self, record: LibSqlSnapshotRecord) -> &mut Self {
+        self.ops.push(ManifestOp::PublishLibSqlSnapshot { record });
         self
     }
 
-    /// Drop a snapshot.
-    pub fn drop_snapshot(&mut self, key: SnapshotKey) -> &mut Self {
-        self.ops.push(ManifestOp::DropSnapshot { key });
+    /// Drop a LibSQL snapshot.
+    #[cfg(feature = "libsql")]
+    pub fn drop_libsql_snapshot(&mut self, key: SnapshotKey) -> &mut Self {
+        self.ops.push(ManifestOp::DropLibSqlSnapshot { key });
         self
     }
 
-    /// Register a WAL artifact.
+    /// Register an AOF WAL artifact.
     pub fn register_wal_artifact(
         &mut self,
         key: WalArtifactKey,
-        record: WalArtifactRecord,
+        record: AofWalArtifactRecord,
     ) -> &mut Self {
-        self.ops.push(ManifestOp::UpsertWalArtifact { key, record });
+        self.ops.push(ManifestOp::UpsertAofWalArtifact { key, record });
         self
     }
 
-    /// Remove a WAL artifact.
+    /// Remove an AOF WAL artifact.
     pub fn remove_wal_artifact(&mut self, key: WalArtifactKey) -> &mut Self {
-        self.ops.push(ManifestOp::DeleteWalArtifact { key });
+        self.ops.push(ManifestOp::DeleteAofWalArtifact { key });
+        self
+    }
+
+    /// Register a LibSQL WAL artifact.
+    #[cfg(feature = "libsql")]
+    pub fn register_libsql_wal_artifact(
+        &mut self,
+        key: WalArtifactKey,
+        record: LibSqlWalArtifactRecord,
+    ) -> &mut Self {
+        self.ops.push(ManifestOp::UpsertLibSqlWalArtifact { key, record });
+        self
+    }
+
+    /// Remove a LibSQL WAL artifact.
+    #[cfg(feature = "libsql")]
+    pub fn remove_libsql_wal_artifact(&mut self, key: WalArtifactKey) -> &mut Self {
+        self.ops.push(ManifestOp::DeleteLibSqlWalArtifact { key });
         self
     }
 
@@ -237,5 +259,33 @@ impl<'a> ManifestTxn<'a> {
             Ok(result) => result,
             Err(_) => Err(ManifestError::WorkerClosed),
         }
+    }
+
+    /// Commit this transaction asynchronously without waiting for completion.
+    ///
+    /// This sends the batch to the manifest worker for batching with other operations
+    /// but does not wait for the commit to complete. Use this for fire-and-forget updates
+    /// where you don't need to wait for durability confirmation.
+    ///
+    /// If the transaction is empty, returns immediately.
+    pub fn commit_async(mut self) -> Result<(), ManifestError> {
+        if self.ops.is_empty() {
+            return Ok(());
+        }
+
+        let batch = ManifestBatch {
+            ops: self.ops.drain(..).collect(),
+        };
+
+        // Use a channel that we immediately drop the receiver for
+        // This allows the worker to complete without blocking us
+        let (tx, _rx) = mpsc::sync_channel(0);
+        self.manifest.send_command(ManifestCommand::Apply {
+            batch,
+            completion: tx,
+        })?;
+
+        // Don't wait - just return
+        Ok(())
     }
 }

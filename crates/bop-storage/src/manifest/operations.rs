@@ -30,14 +30,12 @@ use bincode::serde::encode_to_vec;
 use heed::{Env, RwTxn};
 use serde::{Deserialize, Serialize};
 
-use crate::page_cache::{PageCache, PageCacheKey};
-
 use super::change_log::ChangeLogState;
 use super::tables::{
     CHANGE_RECORD_VERSION, CHUNK_REFCOUNT_VERSION, ChunkId, ChunkRefcountRecord,
     ComponentGeneration, ComponentId, GENERATION_RECORD_VERSION, GenerationRecord,
     JOB_ID_COMPONENT, METRIC_RECORD_VERSION, ManifestChangeRecord, ManifestTables, MetricDelta,
-    MetricKey, MetricRecord, SnapshotKey, SnapshotRecord, epoch_millis,
+    MetricKey, MetricRecord, SnapshotKey, epoch_millis,
 };
 use super::worker::{
     ManifestBatch, PENDING_BATCH_RECORD_VERSION, PendingBatchId, PendingBatchRecord, PendingCommit,
@@ -53,14 +51,15 @@ pub(super) struct ForkData {
     /// Chunk catalog entries to copy.
     pub(super) chunk_entries: Vec<(super::ChunkKey, super::ChunkEntryRecord)>,
 
-    /// Chunk delta entries to copy.
-    pub(super) chunk_deltas: Vec<(super::ChunkDeltaKey, super::ChunkDeltaRecord)>,
+    /// LibSQL chunk delta entries to copy.
+    #[cfg(feature = "libsql")]
+    pub(super) chunk_deltas: Vec<(super::ChunkDeltaKey, super::LibSqlChunkDeltaRecord)>,
 
-    /// WAL state records to copy.
-    pub(super) wal_states: Vec<(super::WalStateKey, super::WalStateRecord)>,
+    /// AOF state records to copy.
+    pub(super) aof_states: Vec<(super::AofStateKey, super::AofStateRecord)>,
 
     /// WAL artifact records to copy.
-    pub(super) wal_artifacts: Vec<(super::WalArtifactKey, super::WalArtifactRecord)>,
+    pub(super) wal_artifacts: Vec<(super::WalArtifactKey, super::AofWalArtifactRecord)>,
 }
 
 /// Loads the generation watermarks from LMDB on startup.
@@ -182,8 +181,6 @@ pub(super) fn commit_pending(
     persisted_job_counter: &mut JobId,
     diagnostics: &ManifestDiagnostics,
     change_state: &mut ChangeLogState,
-    page_cache: Option<&Arc<PageCache<PageCacheKey>>>,
-    page_cache_object_id: Option<u64>,
 ) -> Result<Vec<HashMap<ComponentId, Generation>>, heed::Error> {
     let mut txn = env.write_txn()?;
     let mut snapshots = Vec::with_capacity(pending.len());
@@ -215,14 +212,14 @@ pub(super) fn commit_pending(
             generation_updates,
         };
         tables.change_log.put(&mut txn, &sequence, &change_record)?;
-        if let (Some(cache), Some(object_id)) = (page_cache, page_cache_object_id) {
-            if let Ok(bytes) = encode_to_vec(&change_record, config) {
-                cache.insert(
-                    PageCacheKey::manifest(object_id, sequence),
-                    Arc::from(bytes.into_boxed_slice()),
-                );
-            }
-        }
+        // if let (Some(cache), Some(object_id)) = (page_cache, page_cache_object_id) {
+        //     if let Ok(bytes) = encode_to_vec(&change_record, config) {
+        //         cache.insert(
+        //             PageCacheKey::manifest(object_id, sequence),
+        //             Arc::from(bytes.into_boxed_slice()),
+        //         );
+        //     }
+        // }
         tables.pending_batches.delete(&mut txn, &entry.id)?;
         snapshots.push(working_generations.clone());
     }
@@ -294,19 +291,19 @@ fn apply_batch(
 ) -> Result<(), heed::Error> {
     for op in &batch.ops {
         match op {
-            ManifestOp::PutDb { db_id, value } => {
-                tables.db.put(txn, &(*db_id as u64), value)?;
+            ManifestOp::PutAofDb { db_id, value } => {
+                tables.aof_db.put(txn, &(*db_id as u64), value)?;
             }
-            ManifestOp::DeleteDb { db_id } => {
-                tables.db.delete(txn, &(*db_id as u64))?;
+            ManifestOp::DeleteAofDb { db_id } => {
+                tables.aof_db.delete(txn, &(*db_id as u64))?;
             }
-            ManifestOp::PutWalState { key, value } => {
+            ManifestOp::PutAofState { key, value } => {
                 let key = key.encode();
-                tables.wal_state.put(txn, &key, value)?;
+                tables.aof_state.put(txn, &key, value)?;
             }
-            ManifestOp::DeleteWalState { key } => {
+            ManifestOp::DeleteAofState { key } => {
                 let key = key.encode();
-                tables.wal_state.delete(txn, &key)?;
+                tables.aof_state.delete(txn, &key)?;
             }
             ManifestOp::UpsertChunk { key, value } => {
                 let key = key.encode();
@@ -316,27 +313,41 @@ fn apply_batch(
                 let key = key.encode();
                 tables.chunk_catalog.delete(txn, &key)?;
             }
-            ManifestOp::UpsertChunkDelta { key, value } => {
+            #[cfg(feature = "libsql")]
+            ManifestOp::UpsertLibSqlChunkDelta { key, value } => {
                 let key = key.encode();
-                tables.chunk_delta_index.put(txn, &key, value)?;
+                tables.libsql_chunk_delta_index.put(txn, &key, value)?;
             }
-            ManifestOp::DeleteChunkDelta { key } => {
+            #[cfg(feature = "libsql")]
+            ManifestOp::DeleteLibSqlChunkDelta { key } => {
                 let key = key.encode();
-                tables.chunk_delta_index.delete(txn, &key)?;
+                tables.libsql_chunk_delta_index.delete(txn, &key)?;
             }
-            ManifestOp::PublishSnapshot { record } => {
-                publish_snapshot(txn, tables, record.clone())?;
+            #[cfg(feature = "libsql")]
+            ManifestOp::PublishLibSqlSnapshot { record } => {
+                publish_libsql_snapshot(txn, tables, record.clone())?;
             }
-            ManifestOp::DropSnapshot { key } => {
-                drop_snapshot(txn, tables, *key)?;
+            #[cfg(feature = "libsql")]
+            ManifestOp::DropLibSqlSnapshot { key } => {
+                drop_libsql_snapshot(txn, tables, *key)?;
             }
-            ManifestOp::UpsertWalArtifact { key, record } => {
+            ManifestOp::UpsertAofWalArtifact { key, record } => {
                 let key = key.encode();
-                tables.wal_catalog.put(txn, &key, record)?;
+                tables.aof_wal.put(txn, &key, record)?;
             }
-            ManifestOp::DeleteWalArtifact { key } => {
+            ManifestOp::DeleteAofWalArtifact { key } => {
                 let key = key.encode();
-                tables.wal_catalog.delete(txn, &key)?;
+                tables.aof_wal.delete(txn, &key)?;
+            }
+            #[cfg(feature = "libsql")]
+            ManifestOp::UpsertLibSqlWalArtifact { key, record } => {
+                let key = key.encode();
+                tables.libsql_wal.put(txn, &key, record)?;
+            }
+            #[cfg(feature = "libsql")]
+            ManifestOp::DeleteLibSqlWalArtifact { key } => {
+                let key = key.encode();
+                tables.libsql_wal.delete(txn, &key)?;
             }
             ManifestOp::PutJob { record } => {
                 tables.job_queue.put(txn, &record.job_id, record)?;
@@ -399,6 +410,27 @@ fn apply_batch(
                 // The actual job cleanup happens through RemoveJob
                 let _ = (job_id, reason, timestamp_ms); // Acknowledge usage
             }
+            ManifestOp::UpsertAofChunk { record } => {
+                let key = record.key();
+                tables.aof_chunks.put(txn, &key, record)?;
+            }
+            ManifestOp::DeleteAofChunk { aof_id, start_lsn } => {
+                let key = super::AofChunkRecord::make_key(*aof_id, *start_lsn);
+                tables.aof_chunks.delete(txn, &key)?;
+            }
+            #[cfg(feature = "libsql")]
+            ManifestOp::UpsertLibSqlChunk { record } => {
+                let key = record.key();
+                tables.libsql_chunks.put(txn, &key, record)?;
+            }
+            #[cfg(feature = "libsql")]
+            ManifestOp::DeleteLibSqlChunk {
+                libsql_id,
+                chunk_id,
+            } => {
+                let key = super::LibSqlChunkRecord::make_key(*libsql_id, *chunk_id);
+                tables.libsql_chunks.delete(txn, &key)?;
+            }
         }
     }
 
@@ -420,17 +452,18 @@ fn apply_batch(
 /// # Errors
 ///
 /// Returns an error if LMDB operations fail.
-fn publish_snapshot(
+#[cfg(feature = "libsql")]
+fn publish_libsql_snapshot(
     txn: &mut RwTxn<'_>,
     tables: &ManifestTables,
-    record: SnapshotRecord,
+    record: LibSqlSnapshotRecord,
 ) -> Result<(), heed::Error> {
     let key = record.key().encode();
     // Increment refcount for each chunk in the snapshot
     for entry in &record.chunks {
         adjust_refcount(txn, tables, entry.chunk_id, 1)?;
     }
-    tables.snapshot_index.put(txn, &key, &record)
+    tables.libsql_snapshot_index.put(txn, &key, &record)
 }
 
 /// Drops a snapshot from the manifest, decrementing refcounts for all referenced chunks.
@@ -448,18 +481,19 @@ fn publish_snapshot(
 /// # Errors
 ///
 /// Returns an error if LMDB operations fail.
-fn drop_snapshot(
+#[cfg(feature = "libsql")]
+fn drop_libsql_snapshot(
     txn: &mut RwTxn<'_>,
     tables: &ManifestTables,
     key: SnapshotKey,
 ) -> Result<(), heed::Error> {
     let key = key.encode();
-    if let Some(record) = tables.snapshot_index.get(txn, &key)? {
+    if let Some(record) = tables.libsql_snapshot_index.get(txn, &key)? {
         // Decrement refcount for each chunk in the snapshot
         for entry in &record.chunks {
             adjust_refcount(txn, tables, entry.chunk_id, -1)?;
         }
-        tables.snapshot_index.delete(txn, &key)?;
+        tables.libsql_snapshot_index.delete(txn, &key)?;
     }
     Ok(())
 }
