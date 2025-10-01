@@ -35,6 +35,7 @@ use std::time::Instant;
 
 use heed::Env;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use super::change_log::{ChangeLogState, maybe_truncate_change_log};
 use super::cursors::{
@@ -50,6 +51,7 @@ use super::{
 ///
 /// Attempts to commit pending operations, and if the LMDB environment is full,
 /// expands the map size (doubling up to max_map_size) and retries.
+#[instrument(skip(env, tables, pending, generations, persisted_job_counter, diagnostics, change_state, current_map_size, path), fields(pending_count = pending.len()))]
 fn retry_with_expansion(
     env: &Env,
     tables: &Arc<ManifestTables>,
@@ -64,6 +66,8 @@ fn retry_with_expansion(
 ) -> Result<Vec<HashMap<ComponentId, Generation>>, ManifestError> {
     const MAX_RETRIES: usize = 3;
 
+    trace!(pending_count = pending.len(), "Attempting to commit pending operations");
+
     for attempt in 0..MAX_RETRIES {
         let result = commit_pending(
             env,
@@ -76,7 +80,10 @@ fn retry_with_expansion(
         );
 
         match result {
-            Ok(snapshots) => return Ok(snapshots),
+            Ok(snapshots) => {
+                debug!("Commit successful");
+                return Ok(snapshots);
+            }
             Err(heed::Error::Mdb(mdb_err)) if mdb_err.to_err_code() == -30792 => {
                 // MDB_FULL error (error code -30792) - try to expand
                 let current = current_map_size.load(Ordering::Acquire) as usize;
@@ -84,6 +91,11 @@ fn retry_with_expansion(
 
                 if new_size <= current {
                     // Already at maximum, can't expand further
+                    error!(
+                        current_size = current,
+                        max_size = max_map_size,
+                        "LMDB database full at maximum size"
+                    );
                     return Err(ManifestError::CommitFailed(
                         format!("LMDB database full at maximum size {} bytes", max_map_size)
                     ));
@@ -91,18 +103,18 @@ fn retry_with_expansion(
 
                 // Expand the map
                 if let Err(resize_err) = unsafe { env.resize(new_size) } {
+                    error!(error = ?resize_err, "Failed to resize LMDB map");
                     return Err(ManifestError::Heed(resize_err));
                 }
 
                 current_map_size.store(new_size as u64, Ordering::Release);
 
-                // Log expansion (would use tracing if available)
-                eprintln!(
-                    "[manifest] Expanded LMDB from {} MB to {} MB (attempt {}/{})",
-                    current / (1024 * 1024),
-                    new_size / (1024 * 1024),
-                    attempt + 1,
-                    MAX_RETRIES
+                info!(
+                    old_size_mb = current / (1024 * 1024),
+                    new_size_mb = new_size / (1024 * 1024),
+                    attempt = attempt + 1,
+                    max_retries = MAX_RETRIES,
+                    "Expanded LMDB map size due to MDB_FULL"
                 );
 
                 // Retry on next iteration
@@ -110,11 +122,13 @@ fn retry_with_expansion(
             }
             Err(other_err) => {
                 // Not a map full error, return it immediately
+                error!(error = ?other_err, "Commit failed with non-recoverable error");
                 return Err(ManifestError::Heed(other_err));
             }
         }
     }
 
+    error!("Failed to commit after multiple map expansion attempts");
     Err(ManifestError::CommitFailed(
         "Failed to commit after multiple map expansion attempts".to_string()
     ))
@@ -131,9 +145,14 @@ pub(super) struct WorkerHandle {
 
 impl WorkerHandle {
     /// Joins the worker thread, waiting for it to complete.
+    #[instrument(skip(self))]
     pub(super) fn stop(&mut self) {
+        info!("Stopping manifest worker thread");
         if let Some(handle) = self.join.take() {
-            let _ = handle.join();
+            match handle.join() {
+                Ok(_) => debug!("Worker thread joined successfully"),
+                Err(e) => error!(error = ?e, "Worker thread panicked"),
+            }
         }
     }
 }
@@ -273,6 +292,10 @@ pub struct CommitReceipt {
 /// This function is the single writer for the manifest LMDB database. All write
 /// operations are serialized through this worker to avoid conflicts.
 #[allow(clippy::too_many_arguments)]
+#[instrument(skip_all, fields(
+    pending_replay = pending.len(),
+    commit_latency_ms = commit_latency.as_millis()
+))]
 pub(super) fn worker_loop(
     env: Env,
     tables: Arc<ManifestTables>,
@@ -292,6 +315,7 @@ pub(super) fn worker_loop(
     max_map_size: usize,
     path: std::path::PathBuf,
 ) {
+    info!("Manifest worker loop starting");
     let mut waiters: HashMap<ComponentId, VecDeque<WaitEntry>> = HashMap::new();
     let mut deadline: Option<Instant> = if pending.is_empty() {
         None
@@ -303,6 +327,7 @@ pub(super) fn worker_loop(
 
     loop {
         if shutdown && pending.is_empty() {
+            info!("Worker shutdown complete");
             break;
         }
 
@@ -334,10 +359,13 @@ pub(super) fn worker_loop(
             match command {
                 ManifestCommand::Apply { batch, completion } => {
                     let batch_id = batch_journal_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    trace!(batch_id, ops_count = batch.ops.len(), "Persisting batch to journal");
                     if let Err(err) = persist_pending_batch(&env, &tables, batch_id, &batch) {
+                        error!(batch_id, error = ?err, "Failed to persist batch");
                         let _ = completion.send(Err(err));
                         continue;
                     }
+                    debug!(batch_id, ops_count = batch.ops.len(), "Batch added to pending queue");
                     pending.push(PendingCommit {
                         id: batch_id,
                         batch,
@@ -348,9 +376,11 @@ pub(super) fn worker_loop(
                     }
                 }
                 ManifestCommand::Wait(request) => {
+                    debug!(component = request.component, target = request.target, "Generation wait request");
                     handle_wait_request(&mut waiters, request, &generations);
                 }
                 ManifestCommand::RegisterCursor(request) => {
+                    trace!(?request.start, "Registering cursor in worker");
                     let result = register_cursor(
                         &env,
                         &tables,
@@ -366,11 +396,13 @@ pub(super) fn worker_loop(
                             let _ = request.responder.send(Ok(snapshot));
                         }
                         Err(err) => {
+                            error!(error = ?err, "Failed to register cursor");
                             let _ = request.responder.send(Err(err));
                         }
                     }
                 }
                 ManifestCommand::AcknowledgeCursor(request) => {
+                    trace!(cursor_id = request.cursor_id, sequence = request.sequence, "Acknowledging cursor in worker");
                     let result = acknowledge_cursor(
                         &env,
                         &tables,
@@ -386,11 +418,13 @@ pub(super) fn worker_loop(
                             let _ = request.responder.send(Ok(snapshot));
                         }
                         Err(err) => {
+                            error!(cursor_id = request.cursor_id, error = ?err, "Failed to acknowledge cursor");
                             let _ = request.responder.send(Err(err));
                         }
                     }
                 }
                 ManifestCommand::Shutdown => {
+                    info!("Shutdown command received");
                     shutdown = true;
                 }
             }
@@ -402,6 +436,15 @@ pub(super) fn worker_loop(
             && (shutdown || deadline.map_or(false, |limit| Instant::now() >= limit));
 
         if should_commit {
+            let batch_count = pending.len();
+            let total_ops: usize = pending.iter().map(|p| p.batch.ops.len()).sum();
+            info!(
+                batch_count,
+                total_ops,
+                shutdown,
+                "Committing pending batches"
+            );
+
             // Retry commit with map expansion on MDB_FULL errors
             let commit_result = retry_with_expansion(
                 &env,
@@ -418,6 +461,13 @@ pub(super) fn worker_loop(
 
             match commit_result {
                 Ok(snapshots) => {
+                    debug!(
+                        batch_count,
+                        total_ops,
+                        latest_sequence = change_state.latest_sequence(),
+                        "Batches committed successfully"
+                    );
+
                     for (entry, snapshot) in pending.iter().zip(snapshots.into_iter()) {
                         if let Some(completion) = &entry.completion {
                             let _ = completion.send(Ok(CommitReceipt {
@@ -427,9 +477,12 @@ pub(super) fn worker_loop(
                     }
                     pending.clear();
                     deadline = None;
-                    if maybe_truncate_change_log(&env, &tables, &mut change_state).is_err() {
+
+                    if let Err(e) = maybe_truncate_change_log(&env, &tables, &mut change_state) {
+                        error!(error = ?e, "Failed to truncate change log");
                         break;
                     }
+
                     if let Ok(mut cache) = generation_cache.lock() {
                         *cache = generations.clone();
                     }
@@ -441,6 +494,7 @@ pub(super) fn worker_loop(
                     expire_waiters(&mut waiters, &generations);
                 }
                 Err(err) => {
+                    error!(error = ?err, batch_count, "Failed to commit batches");
                     let err_msg = format!("{err}");
                     for entry in pending.drain(..) {
                         if let Some(completion) = entry.completion {

@@ -5,6 +5,7 @@ use std::thread::{self, JoinHandle};
 use crossfire::{MTx, Rx, mpsc};
 use dashmap::{DashMap, mapref::entry::Entry};
 use thiserror::Error;
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::aof::{Aof, AofConfig, AofDiagnostics, AofId, AofInner};
 use crate::chunk_quota::ChunkStorageQuota;
@@ -79,7 +80,9 @@ pub(crate) struct ManagerInner {
 impl Manager {
     /// Create a manager using the provided manifest handle with the default queue capacity
     /// and cache configuration.
+    #[instrument(skip(manifest))]
     pub fn new(manifest: Arc<Manifest>) -> Self {
+        info!("creating manager with default configuration");
         Self::with_capacity(manifest, DEFAULT_QUEUE_CAPACITY)
     }
 
@@ -129,8 +132,10 @@ impl Manager {
     }
 
     /// Open or register a storage pod described by `config`.
+    #[instrument(skip(self, config), fields(db_id, config_name = config.name()))]
     pub fn open_db(&self, mut config: AofConfig) -> Result<Aof, ManagerError> {
         if self.inner.is_closed() {
+            warn!("attempted to open database on closed manager");
             return Err(ManagerError::Closed);
         }
 
@@ -142,10 +147,15 @@ impl Manager {
             config.assign_id(id);
             id
         };
+        tracing::Span::current().record("db_id", db_id.get());
 
         match self.inner.pods.entry(db_id) {
-            Entry::Occupied(_) => Err(ManagerError::AofAlreadyExists(db_id)),
+            Entry::Occupied(_) => {
+                warn!(?db_id, "database already open");
+                Err(ManagerError::AofAlreadyExists(db_id))
+            }
             Entry::Vacant(entry) => {
+                debug!(?db_id, "opening new database");
                 let driver = self.inner.resolve_io(config.io_backend())?;
                 let pod = AofInner::bootstrap(
                     config,
@@ -158,6 +168,7 @@ impl Manager {
                 .map_err(ManagerError::ChunkStore)?;
                 let handle = Aof::from_arc(pod.clone());
                 entry.insert(pod);
+                info!(?db_id, "database opened successfully");
                 Ok(handle)
             }
         }
@@ -172,23 +183,32 @@ impl Manager {
     }
 
     /// Close a pod and remove it from the registry.
+    #[instrument(skip(self), fields(db_id = ?id))]
     pub fn close_db(&self, id: &AofId) -> Result<(), ManagerError> {
+        debug!("closing database");
         let removed = self
             .inner
             .pods
             .remove(id)
-            .ok_or_else(|| ManagerError::AofNotFound(id.clone()))?;
+            .ok_or_else(|| {
+                warn!("database not found");
+                ManagerError::AofNotFound(id.clone())
+            })?;
         let (_, pod) = removed;
         pod.close();
+        info!("database closed successfully");
         Ok(())
     }
 
     /// Shutdown the worker thread and deregister all pods.
+    #[instrument(skip(self))]
     pub fn shutdown(&self) {
+        info!("shutting down manager");
         self.inner.request_shutdown();
         self.inner.join_worker();
         self.inner.clear_pods();
         self.inner.shutdown_runtime();
+        info!("manager shutdown complete");
     }
 
     /// Produce a diagnostic snapshot of the manager and managed pods.
@@ -362,17 +382,27 @@ fn spawn_worker(receiver: Rx<ManagerCommand>, inner: Weak<ManagerInner>) -> Join
     thread::Builder::new()
         .name("bop-storage-manager".into())
         .spawn(move || {
+            debug!("manager worker thread started");
             loop {
                 match receiver.recv() {
                     Ok(ManagerCommand::Execute(job)) => {
+                        trace!("executing manager job");
                         job();
                         if let Some(inner) = inner.upgrade() {
                             inner.mark_job_executed();
                         }
                     }
-                    Ok(ManagerCommand::Shutdown) | Err(_) => break,
+                    Ok(ManagerCommand::Shutdown) => {
+                        info!("manager worker received shutdown signal");
+                        break;
+                    }
+                    Err(_) => {
+                        warn!("manager worker channel closed");
+                        break;
+                    }
                 }
             }
+            debug!("manager worker thread exiting");
         })
         .expect("failed to spawn storage manager thread")
 }

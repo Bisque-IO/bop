@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crossfire::{MTx, Rx, mpsc};
 use thiserror::Error;
 use tokio::time::sleep;
+use tracing::{debug, error, instrument, trace, warn};
 
 use crate::runtime::StorageRuntime;
 use crate::aof::{AofWalSegment, AofWalSegmentError};
@@ -123,7 +124,9 @@ impl FlushController {
         }
     }
 
+    #[instrument(skip(self, segment))]
     pub fn enqueue(&self, segment: Arc<AofWalSegment>) -> Result<(), FlushScheduleError> {
+        trace!("enqueueing flush segment");
         self.state.push_task(segment, 0)
     }
 
@@ -135,7 +138,9 @@ impl FlushController {
         self.state.pending.load(Ordering::Acquire)
     }
 
+    #[instrument(skip(self))]
     pub fn shutdown(&self) {
+        debug!("shutting down flush controller");
         if self.state.request_shutdown() {
             let _ = self.state.sender.send(FlushTask::Shutdown);
         }
@@ -144,6 +149,7 @@ impl FlushController {
                 let _ = handle.join();
             }
         }
+        debug!("flush controller shutdown complete");
     }
 }
 
@@ -365,7 +371,9 @@ fn spawn_flush_worker(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>)
     thread::Builder::new()
         .name("bop-storage-flush".into())
         .spawn(move || {
+            debug!("flush worker thread started");
             flush_worker_main(receiver, state);
+            debug!("flush worker thread exiting");
         })
         .expect("failed to spawn flush controller thread")
 }
@@ -458,6 +466,7 @@ fn flush_worker_main(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>) 
                 }
             }
             Ok(FlushTask::Shutdown) => {
+                debug!("flush worker received shutdown signal");
                 shutting_down = true;
                 while let Some(item) = backlog.pop_front() {
                     item.segment.clear_flush_queue();
@@ -466,12 +475,16 @@ fn flush_worker_main(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>) 
                     break;
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                warn!("flush worker channel closed");
+                break;
+            }
         }
     }
 }
 
 
+#[instrument(skip(state, segment), fields(db_id = state.db_id))]
 fn run_flush_job(
     state: &Arc<FlushControllerState>,
     segment: Arc<AofWalSegment>,
@@ -480,23 +493,30 @@ fn run_flush_job(
     loop {
         let target = match segment.take_flush_target() {
             Some(target) => target,
-            None => return Ok(()),
+            None => {
+                trace!("no flush target, completing");
+                return Ok(());
+            }
         };
 
         if target <= segment.durable_size() {
+            trace!(target, durable_size = segment.durable_size(), "target already durable, skipping");
             continue;
         }
 
+        trace!(target, "flushing segment to disk");
         let io = segment.io();
         let start = Instant::now();
 
         // Flush to disk
         if let Err(error) = io.flush() {
+            error!(error = ?error, "flush to disk failed");
             segment.restore_flush_target(target);
             return Err(FlushProcessError::from(error));
         }
 
         let duration = start.elapsed();
+        debug!(target, ?duration, "flush to disk completed");
         segment.set_last_flush_duration(duration);
 
         // Update manifest asynchronously via worker (batched with other ops)
@@ -509,13 +529,20 @@ fn run_flush_job(
 
         // Only update if we're advancing the LSN
         if target > record.last_applied_lsn {
+            trace!(old_lsn = record.last_applied_lsn, new_lsn = target, "updating manifest LSN");
             record.last_applied_lsn = target;
 
             // Fire-and-forget commit - manifest worker batches these updates
             let mut txn = state.manifest.begin_with_capacity(1);
             txn.put_aof_state(key, record);
             txn.commit_async()
-                .map_err(|err| FlushProcessError::Sink(err.to_string()))?;
+                .map_err(|err| {
+                    error!(error = %err, "manifest async commit failed");
+                    FlushProcessError::Sink(err.to_string())
+                })?;
+            debug!(target, "manifest LSN updated");
+        } else {
+            trace!(target, current_lsn = record.last_applied_lsn, "LSN not advanced, skipping manifest update");
         }
 
         // Mark segment as durable (manifest update queued asynchronously)

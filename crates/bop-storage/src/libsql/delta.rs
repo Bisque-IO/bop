@@ -38,6 +38,7 @@
 use std::io::{self, Read, Write};
 
 use crate::manifest::{ChunkId, Generation};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 /// Magic number for delta file format: "BOPDELTA"
 const DELTA_MAGIC: u64 = 0x424F5044454C5441;
@@ -213,6 +214,12 @@ impl DeltaBuilder {
     /// Adds a page to the delta.
     pub fn add_page(&mut self, page_no: u32, page_data: Vec<u8>) -> Result<(), DeltaError> {
         if page_data.len() != self.header.page_size as usize {
+            error!(
+                page_no,
+                expected_size = self.header.page_size,
+                actual_size = page_data.len(),
+                "Page size mismatch"
+            );
             return Err(DeltaError::InvalidFormat(format!(
                 "page size mismatch: expected {}, got {}",
                 self.header.page_size,
@@ -224,6 +231,7 @@ impl DeltaBuilder {
         self.directory.push(PageDirEntry { page_no, offset });
         self.pages.push(page_data);
         self.header.page_count += 1;
+        trace!(page_no, offset, page_count = self.header.page_count, "Added page to delta");
 
         Ok(())
     }
@@ -231,19 +239,35 @@ impl DeltaBuilder {
     /// Writes the delta file to a writer.
     ///
     /// Returns the content hash (CRC64-NVME).
+    #[instrument(skip(self, writer), fields(
+        base_chunk_id = self.header.base_chunk_id,
+        delta_generation = self.header.delta_generation,
+        page_count = self.header.page_count
+    ))]
     pub fn write<W: Write>(self, writer: &mut W) -> Result<[u64; 4], DeltaError> {
+        info!(
+            base_chunk_id = self.header.base_chunk_id,
+            delta_generation = self.header.delta_generation,
+            page_count = self.header.page_count,
+            "Writing delta file"
+        );
+
         // Write header
         self.header.write(writer)?;
+        debug!("Wrote delta header");
 
         // Write page directory
         for entry in &self.directory {
             entry.write(writer)?;
         }
+        debug!(entries = self.directory.len(), "Wrote page directory");
 
         // Write page data
+        let total_bytes: usize = self.pages.iter().map(|p| p.len()).sum();
         for page in &self.pages {
             writer.write_all(page)?;
         }
+        debug!(total_bytes, "Wrote page data");
 
         // Compute content hash (simplified - in production would use proper CRC64)
         let content_hash = [0u64, 0u64, 0u64, 0u64]; // Placeholder
@@ -252,7 +276,14 @@ impl DeltaBuilder {
         for value in &content_hash {
             writer.write_all(&value.to_le_bytes())?;
         }
+        debug!("Wrote delta footer");
 
+        info!(
+            base_chunk_id = self.header.base_chunk_id,
+            page_count = self.header.page_count,
+            size_bytes = total_bytes,
+            "Successfully wrote delta file"
+        );
         Ok(content_hash)
     }
 

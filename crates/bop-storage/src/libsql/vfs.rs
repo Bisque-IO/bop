@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use libsql_ffi::{self, sqlite3_vfs};
 use thiserror::Error;
+use tracing::{debug, error, info, instrument, warn};
 
 const DEFAULT_MAX_PATHNAME: i32 = 1024;
 
@@ -89,7 +90,13 @@ struct VfsState {
 
 impl LibsqlVfs {
     /// Create a new VFS from the provided configuration.
+    #[instrument(skip(config), fields(vfs_name = %config.name))]
     pub fn new(config: LibsqlVfsConfig) -> Self {
+        info!(
+            vfs_name = %config.name,
+            max_pathname = config.max_pathname,
+            "Creating new libsql VFS instance"
+        );
         Self {
             config,
             state: Mutex::new(VfsState::default()),
@@ -126,24 +133,33 @@ impl LibsqlVfs {
     }
 
     /// Register the VFS with libsql by cloning an existing VFS and adjusting its metadata.
+    #[instrument(skip(self), fields(vfs_name = %self.config.name))]
     pub fn register(&self) -> Result<(), LibsqlVfsError> {
+        info!(vfs_name = %self.config.name, "Registering libsql VFS");
+
         let mut state = self.state.lock().expect("libsql VFS state poisoned");
         if state.storage.is_some() {
+            warn!(vfs_name = %self.config.name, "VFS already registered");
             return Err(LibsqlVfsError::AlreadyRegistered);
         }
 
         unsafe {
             let rc = libsql_ffi::sqlite3_initialize();
             if rc != libsql_ffi::SQLITE_OK {
+                error!(vfs_name = %self.config.name, code = rc, "Failed to initialize sqlite3");
                 return Err(LibsqlVfsError::SqliteError { code: rc });
             }
         }
 
         let base_name_cstr = match self.config.base_vfs_name.as_ref() {
             Some(name) => {
+                debug!(vfs_name = %self.config.name, base_vfs = %name, "Using custom base VFS");
                 Some(CString::new(name.as_str()).map_err(|_| LibsqlVfsError::InvalidName)?)
             }
-            None => None,
+            None => {
+                debug!(vfs_name = %self.config.name, "Using default base VFS");
+                None
+            }
         };
 
         let base_ptr = unsafe {
@@ -154,6 +170,11 @@ impl LibsqlVfs {
         };
 
         if base_ptr.is_null() {
+            error!(
+                vfs_name = %self.config.name,
+                base_vfs = ?self.config.base_vfs_name,
+                "Base VFS not found"
+            );
             return Err(LibsqlVfsError::BaseVfsUnavailable {
                 name: self.config.base_vfs_name.clone(),
             });
@@ -163,24 +184,34 @@ impl LibsqlVfs {
         let raw_ptr = storage.as_mut_ptr();
         let rc = unsafe { libsql_ffi::sqlite3_vfs_register(raw_ptr, 0 as c_int) };
         if rc != libsql_ffi::SQLITE_OK {
+            error!(vfs_name = %self.config.name, code = rc, "Failed to register VFS with sqlite3");
             return Err(LibsqlVfsError::SqliteError { code: rc });
         }
 
         state.storage = Some(storage);
+        info!(vfs_name = %self.config.name, "Successfully registered libsql VFS");
         Ok(())
     }
 
     /// Remove the VFS from libsql.
+    #[instrument(skip(self), fields(vfs_name = %self.config.name))]
     pub fn unregister(&self) -> Result<(), LibsqlVfsError> {
+        info!(vfs_name = %self.config.name, "Unregistering libsql VFS");
+
         let mut state = self.state.lock().expect("libsql VFS state poisoned");
-        let mut storage = state.storage.take().ok_or(LibsqlVfsError::NotRegistered)?;
+        let mut storage = state.storage.take().ok_or_else(|| {
+            warn!(vfs_name = %self.config.name, "VFS not registered");
+            LibsqlVfsError::NotRegistered
+        })?;
         let raw_ptr = storage.as_mut_ptr();
         let rc = unsafe { libsql_ffi::sqlite3_vfs_unregister(raw_ptr) };
         if rc != libsql_ffi::SQLITE_OK {
+            error!(vfs_name = %self.config.name, code = rc, "Failed to unregister VFS");
             state.storage = Some(storage);
             return Err(LibsqlVfsError::SqliteError { code: rc });
         }
 
+        debug!(vfs_name = %self.config.name, "Successfully unregistered libsql VFS");
         Ok(())
     }
 }

@@ -5,6 +5,8 @@
 
 use std::sync::mpsc;
 
+use tracing::{debug, error, info, instrument, trace, warn};
+
 use super::manifest_ops::ManifestOp;
 use super::tables::{JOB_RECORD_VERSION, epoch_millis};
 use super::worker::{CommitReceipt, ManifestBatch, ManifestCommand};
@@ -34,36 +36,42 @@ pub struct ManifestTxn<'a> {
 impl<'a> ManifestTxn<'a> {
     /// Put an AOF database descriptor.
     pub fn put_aof_db(&mut self, db_id: DbId, value: AofDescriptorRecord) -> &mut Self {
+        trace!(db_id, "Adding put_aof_db operation");
         self.ops.push(ManifestOp::PutAofDb { db_id, value });
         self
     }
 
     /// Delete an AOF database descriptor.
     pub fn delete_aof_db(&mut self, db_id: DbId) -> &mut Self {
+        trace!(db_id, "Adding delete_aof_db operation");
         self.ops.push(ManifestOp::DeleteAofDb { db_id });
         self
     }
 
     /// Put an AOF state record.
     pub fn put_aof_state(&mut self, key: AofStateKey, value: AofStateRecord) -> &mut Self {
+        trace!(?key, "Adding put_aof_state operation");
         self.ops.push(ManifestOp::PutAofState { key, value });
         self
     }
 
     /// Delete an AOF state record.
     pub fn delete_aof_state(&mut self, key: AofStateKey) -> &mut Self {
+        trace!(?key, "Adding delete_aof_state operation");
         self.ops.push(ManifestOp::DeleteAofState { key });
         self
     }
 
     /// Upsert a chunk entry.
     pub fn upsert_chunk(&mut self, key: ChunkKey, value: ChunkEntryRecord) -> &mut Self {
+        trace!(?key, "Adding upsert_chunk operation");
         self.ops.push(ManifestOp::UpsertChunk { key, value });
         self
     }
 
     /// Delete a chunk entry.
     pub fn delete_chunk(&mut self, key: ChunkKey) -> &mut Self {
+        trace!(?key, "Adding delete_chunk operation");
         self.ops.push(ManifestOp::DeleteChunk { key });
         self
     }
@@ -138,6 +146,7 @@ impl<'a> ManifestTxn<'a> {
         payload: JobPayload,
     ) -> JobId {
         let job_id = self.manifest.next_job_id();
+        debug!(job_id, ?kind, db_id, "Enqueuing job");
         let now = epoch_millis();
         let record = JobRecord {
             record_version: JOB_RECORD_VERSION,
@@ -160,6 +169,7 @@ impl<'a> ManifestTxn<'a> {
 
     /// Update a job's state.
     pub fn update_job_state(&mut self, job_id: JobId, new_state: JobDurableState) -> &mut Self {
+        trace!(job_id, ?new_state, "Updating job state");
         self.ops
             .push(ManifestOp::UpdateJobState { job_id, new_state });
         self
@@ -169,12 +179,14 @@ impl<'a> ManifestTxn<'a> {
     ///
     /// Updates an existing job or creates a new one. Used for progress tracking.
     pub fn upsert_job(&mut self, _job_id: JobId, record: JobRecord) -> &mut Self {
+        trace!(job_id = record.job_id, "Upserting job record");
         self.ops.push(ManifestOp::PutJob { record });
         self
     }
 
     /// Remove a job.
     pub fn remove_job(&mut self, job_id: JobId) -> &mut Self {
+        debug!(job_id, "Removing job");
         self.ops.push(ManifestOp::RemoveJob { job_id });
         self
     }
@@ -227,6 +239,7 @@ impl<'a> ManifestTxn<'a> {
     /// Bump a component's generation number.
     pub fn bump_generation(&mut self, component: ComponentId, increment: u64) -> &mut Self {
         if increment > 0 {
+            trace!(component, increment, "Bumping generation");
             self.ops.push(ManifestOp::BumpGeneration {
                 component,
                 increment,
@@ -240,12 +253,16 @@ impl<'a> ManifestTxn<'a> {
     ///
     /// If the transaction is empty, returns immediately with the current generations.
     /// Otherwise, sends the batch to the worker and waits for the commit to complete.
+    #[instrument(skip(self), fields(ops_count = self.ops.len()))]
     pub fn commit(mut self) -> Result<CommitReceipt, ManifestError> {
         if self.ops.is_empty() {
+            trace!("Commit called with empty transaction");
             return Ok(CommitReceipt {
                 generations: self.manifest.current_generation_snapshot(),
             });
         }
+
+        info!(ops_count = self.ops.len(), "Committing transaction");
 
         let batch = ManifestBatch {
             ops: self.ops.drain(..).collect(),
@@ -256,8 +273,21 @@ impl<'a> ManifestTxn<'a> {
             completion: tx,
         })?;
         match rx.recv() {
-            Ok(result) => result,
-            Err(_) => Err(ManifestError::WorkerClosed),
+            Ok(result) => {
+                match &result {
+                    Ok(_) => {
+                        debug!("Transaction committed successfully");
+                    }
+                    Err(e) => {
+                        error!(error = ?e, "Transaction commit failed");
+                    }
+                }
+                result
+            }
+            Err(_) => {
+                error!("Worker closed while waiting for commit");
+                Err(ManifestError::WorkerClosed)
+            }
         }
     }
 
@@ -268,10 +298,14 @@ impl<'a> ManifestTxn<'a> {
     /// where you don't need to wait for durability confirmation.
     ///
     /// If the transaction is empty, returns immediately.
+    #[instrument(skip(self), fields(ops_count = self.ops.len()))]
     pub fn commit_async(mut self) -> Result<(), ManifestError> {
         if self.ops.is_empty() {
+            trace!("Async commit called with empty transaction");
             return Ok(());
         }
+
+        debug!(ops_count = self.ops.len(), "Committing transaction asynchronously");
 
         let batch = ManifestBatch {
             ops: self.ops.drain(..).collect(),
@@ -286,6 +320,7 @@ impl<'a> ManifestTxn<'a> {
         })?;
 
         // Don't wait - just return
+        trace!("Async commit sent to worker");
         Ok(())
     }
 }

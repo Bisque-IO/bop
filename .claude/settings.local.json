@@ -36,7 +36,11 @@
       "Bash(git rm:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(python -c \"import sys, json; data = json.load(sys.stdin); tracing = [p for p in data[''''packages''''] if p[''''name''''] == ''''tracing''''][0] if [p for p in data[''''packages''''] if p[''''name''''] == ''''tracing''''] else None; print(''''Features:'''', tracing[''''features''''] if tracing else ''''Not found'''')\")",
+      "Bash(cargo expand:*)"
     ],
     "deny": [],
     "ask": []

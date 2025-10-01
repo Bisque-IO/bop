@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use bincode::serde::{decode_from_slice, encode_to_vec};
 use heed::{EnvOpenOptions, RoTxn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use super::change_log::ChangeLogState;
 use super::cursors::{CursorAckRequest, CursorRegistrationRequest};
@@ -94,7 +95,13 @@ pub struct ChangeBatchPage {
 
 impl Manifest {
     /// Open or create a manifest at the specified path.
+    #[instrument(skip(options), fields(
+        path = %path.as_ref().display(),
+        initial_map_size = options.initial_map_size,
+        max_map_size = options.max_map_size
+    ))]
     pub fn open(path: impl AsRef<Path>, options: ManifestOptions) -> Result<Self, ManifestError> {
+        info!("Opening manifest");
         let path_ref = path.as_ref();
         std::fs::create_dir_all(path_ref)?;
 
@@ -140,6 +147,7 @@ impl Manifest {
         let worker_change_signal = change_signal.clone();
         let worker_cursor_counter = cursor_id_counter.clone();
         let worker_initial_change_state = initial_change_state.clone();
+        let pending_replay_len = pending_replay.len();
         let worker_pending_replay = pending_replay;
         let worker_batch_counter = batch_journal_counter.clone();
         let commit_latency = options.commit_latency;
@@ -176,7 +184,7 @@ impl Manifest {
             })
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
 
-        Ok(Self {
+        let manifest = Self {
             env,
             tables,
             command_tx,
@@ -190,16 +198,28 @@ impl Manifest {
             current_map_size,
             max_map_size: options.max_map_size,
             path: path_ref.to_path_buf(),
-        })
+        };
+
+        info!(
+            crash_detected = manifest.runtime_state.crash_detected,
+            pending_batches = pending_replay_len,
+            "Manifest opened successfully"
+        );
+
+        Ok(manifest)
     }
 
     /// Begin a new transaction with default capacity.
+    #[instrument(skip(self))]
     pub fn begin(&self) -> ManifestTxn<'_> {
+        trace!("Beginning transaction with default capacity");
         self.begin_with_capacity(16)
     }
 
     /// Begin a new transaction with the specified operation capacity.
+    #[instrument(skip(self))]
     pub fn begin_with_capacity(&self, capacity: usize) -> ManifestTxn<'_> {
+        trace!(capacity, "Beginning transaction with capacity");
         ManifestTxn {
             manifest: self,
             ops: Vec::with_capacity(capacity),
@@ -210,6 +230,7 @@ impl Manifest {
     ///
     /// Doubles the current map size up to the maximum configured limit.
     /// Returns true if expansion succeeded, false if already at maximum.
+    #[instrument(skip(self))]
     pub(crate) fn try_expand_map_size(&self) -> Result<bool, ManifestError> {
         use std::sync::atomic::Ordering;
 
@@ -220,6 +241,11 @@ impl Manifest {
 
         if new_size <= current {
             // Already at maximum
+            warn!(
+                current_size = current,
+                max_size = self.max_map_size,
+                "Cannot expand LMDB map size - already at maximum"
+            );
             return Ok(false);
         }
 
@@ -230,8 +256,12 @@ impl Manifest {
 
         self.current_map_size.store(new_size as u64, Ordering::Release);
 
-        // TODO: Add logging when tracing is available
-        // tracing::info!(old_size = current, new_size = new_size, max_size = self.max_map_size, "Expanded LMDB map size");
+        info!(
+            old_size = current,
+            new_size = new_size,
+            max_size = self.max_map_size,
+            "Expanded LMDB map size"
+        );
 
         Ok(true)
     }
@@ -239,17 +269,35 @@ impl Manifest {
     /// Register a new change cursor.
     ///
     /// Returns a snapshot of the cursor state after registration.
+    #[instrument(skip(self))]
     pub fn register_change_cursor(
         &self,
         start: ChangeCursorStart,
     ) -> Result<ChangeCursorSnapshot, ManifestError> {
+        debug!(?start, "Registering change cursor");
         let (tx, rx) = mpsc::sync_channel(0);
         self.send_command(ManifestCommand::RegisterCursor(CursorRegistrationRequest {
             start,
             responder: tx,
         }))?;
         match rx.recv() {
-            Ok(result) => result,
+            Ok(result) => {
+                match &result {
+                    Ok(snapshot) => {
+                        info!(
+                            cursor_id = snapshot.cursor_id,
+                            acked_sequence = snapshot.acked_sequence,
+                            next_sequence = snapshot.next_sequence,
+                            latest_sequence = snapshot.latest_sequence,
+                            "Change cursor registered"
+                        );
+                    }
+                    Err(e) => {
+                        error!(error = ?e, "Failed to register change cursor");
+                    }
+                }
+                result
+            }
             Err(_) => Err(ManifestError::WorkerClosed),
         }
     }
@@ -257,11 +305,13 @@ impl Manifest {
     /// Acknowledge changes up to a sequence number for a cursor.
     ///
     /// Returns the updated cursor state.
+    #[instrument(skip(self))]
     pub fn acknowledge_changes(
         &self,
         cursor_id: ChangeCursorId,
         upto_sequence: ChangeSequence,
     ) -> Result<ChangeCursorSnapshot, ManifestError> {
+        debug!(cursor_id, upto_sequence, "Acknowledging changes");
         let (tx, rx) = mpsc::sync_channel(0);
         self.send_command(ManifestCommand::AcknowledgeCursor(CursorAckRequest {
             cursor_id,
@@ -269,7 +319,22 @@ impl Manifest {
             responder: tx,
         }))?;
         match rx.recv() {
-            Ok(result) => result,
+            Ok(result) => {
+                match &result {
+                    Ok(snapshot) => {
+                        debug!(
+                            cursor_id = snapshot.cursor_id,
+                            acked_sequence = snapshot.acked_sequence,
+                            next_sequence = snapshot.next_sequence,
+                            "Changes acknowledged"
+                        );
+                    }
+                    Err(e) => {
+                        error!(cursor_id, error = ?e, "Failed to acknowledge changes");
+                    }
+                }
+                result
+            }
             Err(_) => Err(ManifestError::WorkerClosed),
         }
     }
@@ -278,11 +343,13 @@ impl Manifest {
     ///
     /// Returns up to `page_size` change records starting from the cursor's
     /// current position.
+    #[instrument(skip(self))]
     pub fn fetch_change_page(
         &self,
         cursor_id: ChangeCursorId,
         page_size: usize,
     ) -> Result<ChangeBatchPage, ManifestError> {
+        trace!(cursor_id, page_size, "Fetching change page");
         let state = self.change_state_snapshot()?;
         let cursor_state = state.cursors.get(&cursor_id).cloned().ok_or_else(|| {
             ManifestError::InvariantViolation(format!("cursor {cursor_id} not registered"))
@@ -321,6 +388,15 @@ impl Manifest {
             .last()
             .map(|record| record.sequence.saturating_add(1))
             .unwrap_or(start_sequence);
+
+        debug!(
+            cursor_id,
+            changes_fetched = changes.len(),
+            next_sequence,
+            latest_sequence = state.latest_sequence(),
+            "Change page fetched"
+        );
+
         Ok(ChangeBatchPage {
             cursor_id,
             changes,
@@ -375,12 +451,14 @@ impl Manifest {
     ///
     /// Copies all chunks, deltas, WAL state, and artifacts from the source
     /// database to the target database. Reference counts are adjusted accordingly.
+    #[instrument(skip(self, descriptor))]
     pub fn fork_db(
         &self,
         source_db: DbId,
         target_db: DbId,
         descriptor: AofDescriptorRecord,
     ) -> Result<(), ManifestError> {
+        info!(source_db, target_db, "Forking database");
         let data = self.read(|tables, txn| {
             if tables.aof_db.get(txn, &(target_db as u64))?.is_some() {
                 return Err(ManifestError::InvariantViolation(format!(
@@ -482,6 +560,16 @@ impl Manifest {
         }
 
         txn.commit()?;
+
+        info!(
+            source_db,
+            target_db,
+            chunks_forked = data.chunk_entries.len(),
+            aof_states_forked = data.aof_states.len(),
+            wal_artifacts_forked = data.wal_artifacts.len(),
+            "Database forked successfully"
+        );
+
         Ok(())
     }
 

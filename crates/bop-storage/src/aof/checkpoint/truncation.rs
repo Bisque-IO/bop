@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::manifest::{ChunkId, ChunkKey, DbId, Generation, JobId, Manifest};
 
@@ -225,6 +226,7 @@ impl LeaseMap {
     /// Registers a lease for a chunk.
     ///
     /// Returns an error if a lease already exists for this chunk.
+    #[instrument(skip(self), fields(chunk_id, generation, job_id, ttl_secs = ttl.as_secs()))]
     pub fn register(
         &self,
         chunk_id: ChunkId,
@@ -236,39 +238,63 @@ impl LeaseMap {
 
         if let Some(existing) = leases.get(&chunk_id) {
             if !existing.is_expired() {
+                warn!(
+                    existing_generation = existing.generation,
+                    existing_job_id = existing.job_id,
+                    "lease registration blocked by existing active lease"
+                );
                 return Err(TruncationError::LeaseBlocked {
                     chunk_id,
                     generation: existing.generation,
                     job_id: existing.job_id,
                 });
             }
+            debug!("existing lease expired, replacing with new lease");
         }
 
         let lease = ChunkLease::new(chunk_id, generation, job_id, ttl);
         leases.insert(chunk_id, lease);
+        debug!("chunk lease registered successfully");
         Ok(())
     }
 
     /// Releases a lease for a chunk.
     ///
     /// Idempotent - releasing a non-existent lease is a no-op.
+    #[instrument(skip(self))]
     pub fn release(&self, chunk_id: ChunkId) {
         let mut leases = self.leases.lock().unwrap();
-        leases.remove(&chunk_id);
+        if leases.remove(&chunk_id).is_some() {
+            debug!("chunk lease released");
+        } else {
+            trace!("no lease found to release (already released or never existed)");
+        }
     }
 
     /// Checks if a truncation request is blocked by any active leases.
     ///
     /// Returns the blocking lease if found, or None if truncation can proceed.
+    #[instrument(skip(self, request), fields(
+        db_id = request.db_id,
+        direction = ?request.direction,
+        boundary_chunk_id = request.boundary_chunk_id
+    ))]
     pub fn check_truncation_blocked(&self, request: &TruncationRequest) -> Option<ChunkLease> {
         let leases = self.leases.lock().unwrap();
 
         for lease in leases.values() {
             if lease.blocks_truncation(request) {
+                debug!(
+                    blocking_chunk_id = lease.chunk_id,
+                    blocking_generation = lease.generation,
+                    blocking_job_id = lease.job_id,
+                    "truncation blocked by active lease"
+                );
                 return Some(lease.clone());
             }
         }
 
+        trace!("no blocking leases found, truncation can proceed");
         None
     }
 
@@ -281,17 +307,40 @@ impl LeaseMap {
     ///
     /// This method polls the lease map periodically. In a full implementation,
     /// it would also send cancellation signals to blocking jobs via the job queue.
+    #[instrument(skip(self, request), fields(
+        db_id = request.db_id,
+        direction = ?request.direction,
+        boundary_chunk_id = request.boundary_chunk_id,
+        timeout_secs = request.timeout.as_secs()
+    ))]
     pub fn wait_for_truncation(&self, request: &TruncationRequest) -> Result<(), TruncationError> {
+        info!("waiting for truncation to be unblocked");
         let start = Instant::now();
         let poll_interval = Duration::from_millis(100);
+        let mut poll_count = 0;
 
         loop {
             // Check if truncation is blocked
             if let Some(_lease) = self.check_truncation_blocked(request) {
                 let elapsed = start.elapsed();
+                poll_count += 1;
 
                 if elapsed >= request.timeout {
+                    error!(
+                        elapsed_ms = elapsed.as_millis(),
+                        timeout_ms = request.timeout.as_millis(),
+                        poll_count,
+                        "truncation wait timed out"
+                    );
                     return Err(TruncationError::Timeout { elapsed });
+                }
+
+                if poll_count % 10 == 0 {
+                    debug!(
+                        elapsed_ms = elapsed.as_millis(),
+                        poll_count,
+                        "still waiting for blocking leases to clear"
+                    );
                 }
 
                 // TODO: T5c - Send cancellation signal to _lease.job_id via job queue
@@ -300,6 +349,11 @@ impl LeaseMap {
                 std::thread::sleep(poll_interval);
             } else {
                 // Not blocked - truncation can proceed
+                info!(
+                    elapsed_ms = start.elapsed().as_millis(),
+                    poll_count,
+                    "truncation unblocked, can proceed"
+                );
                 return Ok(());
             }
         }
@@ -308,9 +362,19 @@ impl LeaseMap {
     /// Removes expired leases from the map.
     ///
     /// Should be called periodically by a janitor task.
+    #[instrument(skip(self))]
     pub fn cleanup_expired(&self) {
         let mut leases = self.leases.lock().unwrap();
+        let before_count = leases.len();
         leases.retain(|_, lease| !lease.is_expired());
+        let after_count = leases.len();
+        let removed = before_count - after_count;
+
+        if removed > 0 {
+            debug!(removed_count = removed, remaining_count = after_count, "cleaned up expired leases");
+        } else {
+            trace!("no expired leases to clean up");
+        }
     }
 
     /// Returns the number of active (non-expired) leases.
@@ -400,35 +464,65 @@ impl TruncationExecutor {
     ///
     /// The list of chunk IDs that were deleted, or an error if truncation
     /// was blocked or failed.
+    #[instrument(skip(self, existing_chunks), fields(
+        db_id = request.db_id,
+        direction = ?request.direction,
+        boundary_chunk_id = request.boundary_chunk_id,
+        existing_chunk_count = existing_chunks.len()
+    ))]
     pub fn execute_truncation(
         &self,
         request: &TruncationRequest,
         existing_chunks: &[ChunkId],
     ) -> Result<Vec<ChunkId>, TruncationError> {
+        info!("starting truncation execution");
+
         // Step 1: Wait for blocking leases to clear
+        debug!("waiting for blocking leases to clear");
         self.wait_for_truncation(request)?;
 
         // Step 2: Determine affected chunks
+        debug!("determining affected chunks");
         let affected = request.affected_chunks(existing_chunks);
 
         if affected.is_empty() {
+            info!("no chunks affected by truncation, nothing to delete");
             return Ok(vec![]);
         }
 
+        info!(
+            affected_count = affected.len(),
+            affected_chunks = ?affected,
+            "identified chunks for truncation"
+        );
+
         // Step 3: Build chunk keys for deletion
+        debug!("building chunk keys for deletion");
         let chunk_keys = request.chunk_keys_to_delete(&affected);
 
         // Step 4: Submit to manifest writer if available
         if let Some(ref manifest) = self.manifest {
+            info!("submitting delete operations to manifest");
             let mut txn = manifest.begin();
             for key in &chunk_keys {
+                debug!(chunk_id = key.chunk_id, "deleting chunk from manifest");
                 txn.delete_chunk(*key);
                 // Note: Deltas are stored separately in chunk_delta table
                 // In production, would query delta_index to find all deltas
                 // and delete them as well. For now, just delete the base chunk.
             }
-            txn.commit()
-                .map_err(|e| TruncationError::Manifest(e.to_string()))?;
+
+            match txn.commit() {
+                Ok(_) => {
+                    info!(deleted_count = affected.len(), "manifest commit successful");
+                }
+                Err(e) => {
+                    error!(error = %e, "manifest commit failed");
+                    return Err(TruncationError::Manifest(e.to_string()));
+                }
+            }
+        } else {
+            debug!("no manifest configured, skipping manifest operations (test mode)");
         }
         // If no manifest is set, just validate and return (for testing)
 
@@ -436,6 +530,7 @@ impl TruncationExecutor {
         // by a separate GC job that reads the change_log.
 
         // Step 5: Return affected chunks
+        info!(deleted_count = affected.len(), "truncation execution completed successfully");
         Ok(affected)
     }
 
@@ -445,32 +540,73 @@ impl TruncationExecutor {
     ///
     /// This method polls the lease map and invokes the cancellation callback
     /// when blocked by active leases.
+    #[instrument(skip(self, request), fields(
+        db_id = request.db_id,
+        direction = ?request.direction,
+        boundary_chunk_id = request.boundary_chunk_id,
+        timeout_secs = request.timeout.as_secs()
+    ))]
     fn wait_for_truncation(&self, request: &TruncationRequest) -> Result<(), TruncationError> {
+        info!("waiting for truncation to be unblocked with cancellation support");
         let start = Instant::now();
         let poll_interval = Duration::from_millis(100);
         let mut signaled_jobs = std::collections::HashSet::new();
+        let mut poll_count = 0;
 
         loop {
             // Check if truncation is blocked
             if let Some(lease) = self.lease_map.check_truncation_blocked(request) {
                 let elapsed = start.elapsed();
+                poll_count += 1;
 
                 if elapsed >= request.timeout {
+                    error!(
+                        elapsed_ms = elapsed.as_millis(),
+                        timeout_ms = request.timeout.as_millis(),
+                        poll_count,
+                        blocking_job_id = lease.job_id,
+                        "truncation wait timed out"
+                    );
                     return Err(TruncationError::Timeout { elapsed });
                 }
 
                 // Send cancellation signal if we haven't already for this job
                 if !signaled_jobs.contains(&lease.job_id) {
                     if let Some(ref callback) = self.cancellation_callback {
+                        info!(
+                            job_id = lease.job_id,
+                            chunk_id = lease.chunk_id,
+                            "sending cancellation signal to blocking job"
+                        );
                         callback(lease.job_id);
                         signaled_jobs.insert(lease.job_id);
+                    } else {
+                        debug!(
+                            job_id = lease.job_id,
+                            "no cancellation callback configured, waiting for lease expiry"
+                        );
                     }
+                }
+
+                if poll_count % 10 == 0 {
+                    debug!(
+                        elapsed_ms = elapsed.as_millis(),
+                        poll_count,
+                        signaled_jobs_count = signaled_jobs.len(),
+                        "still waiting for blocking leases to clear"
+                    );
                 }
 
                 // Wait and retry
                 std::thread::sleep(poll_interval);
             } else {
                 // Not blocked - truncation can proceed
+                info!(
+                    elapsed_ms = start.elapsed().as_millis(),
+                    poll_count,
+                    signaled_jobs_count = signaled_jobs.len(),
+                    "truncation unblocked, can proceed"
+                );
                 return Ok(());
             }
         }

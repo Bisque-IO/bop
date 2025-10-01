@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::aof::AofId;
+use tracing::{debug, error, info, instrument, trace, warn};
 
 /// Configuration for cold scan operations.
 ///
@@ -96,7 +97,13 @@ pub struct RemoteReadLimiter {
 
 impl RemoteReadLimiter {
     /// Creates a new bandwidth limiter with the given options.
+    #[instrument(skip(options), fields(max_bandwidth = ?options.max_bandwidth_bytes_per_sec))]
     pub fn new(options: ColdScanOptions) -> Self {
+        info!(
+            max_bandwidth = ?options.max_bandwidth_bytes_per_sec,
+            bypass_cache = options.bypass_cache,
+            "Creating remote read limiter"
+        );
         Self {
             options,
             bytes_read: Arc::new(AtomicU64::new(0)),
@@ -116,8 +123,9 @@ impl RemoteReadLimiter {
 
             // Reset window if 1 second has passed
             if elapsed >= Duration::from_secs(1) {
-                self.bytes_read.store(0, Ordering::Relaxed);
+                let previous_bytes = self.bytes_read.swap(0, Ordering::Relaxed);
                 *window_start = now;
+                debug!(previous_bytes, "Reset bandwidth limiter window");
             }
 
             let current_bytes = self.bytes_read.load(Ordering::Relaxed);
@@ -126,10 +134,18 @@ impl RemoteReadLimiter {
             if new_total > max_bps {
                 // Calculate how long to wait
                 let remaining = Duration::from_secs(1).saturating_sub(elapsed);
+                warn!(
+                    bytes,
+                    current_bytes,
+                    max_bps,
+                    retry_after_ms = remaining.as_millis(),
+                    "Bandwidth limit exceeded"
+                );
                 return Err(ColdScanError::BandwidthExceeded(remaining));
             }
 
             self.bytes_read.fetch_add(bytes, Ordering::Relaxed);
+            trace!(bytes, current_bytes, new_total, max_bps, "Bandwidth request granted");
         }
 
         Ok(())
@@ -181,7 +197,9 @@ pub struct ColdScanStatsTracker {
 
 impl ColdScanStatsTracker {
     /// Creates a new stats tracker for a database.
+    #[instrument(fields(db_id))]
     pub fn new(db_id: AofId) -> Self {
+        info!(db_id, "Creating cold scan stats tracker");
         Self {
             db_id,
             pages_read: AtomicU64::new(0),
@@ -195,11 +213,13 @@ impl ColdScanStatsTracker {
     pub fn record_page_read(&self, bytes: u64) {
         self.pages_read.fetch_add(1, Ordering::Relaxed);
         self.bytes_read.fetch_add(bytes, Ordering::Relaxed);
+        trace!(db_id = self.db_id, bytes, "Recorded page read");
     }
 
     /// Records a throttle event.
     pub fn record_throttle(&self) {
-        self.throttle_events.fetch_add(1, Ordering::Relaxed);
+        let count = self.throttle_events.fetch_add(1, Ordering::Relaxed) + 1;
+        debug!(db_id = self.db_id, throttle_count = count, "Recorded throttle event");
     }
 
     /// Returns the current statistics.

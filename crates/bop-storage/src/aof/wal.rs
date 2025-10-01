@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use thiserror::Error;
+use tracing::{debug, error, instrument, trace, warn};
 
 use crate::{IoFile, IoVec};
 
@@ -22,14 +23,18 @@ pub struct AofWal {
 
 impl AofWal {
     /// Create a new AOF WAL handle.
+    #[instrument]
     pub fn new() -> Self {
+        debug!("creating new AOF WAL");
         Self {
             last_sequence: AtomicU64::new(0),
         }
     }
 
     /// Record the latest observed sequence number.
+    #[instrument(skip(self))]
     pub fn mark_progress(&self, sequence: u64) {
+        trace!(sequence, "marking WAL progress");
         self.last_sequence.store(sequence, Ordering::Relaxed);
     }
 
@@ -167,6 +172,7 @@ impl WalSegmentBuffers {
     fn stage_active(&self) -> Result<StagedBatchStats, WriteBufferError> {
         let staged = self.staged.load(Ordering::Acquire);
         if staged != STAGED_NONE {
+            trace!("buffer already staged");
             return Err(WriteBufferError::AlreadyStaged);
         }
 
@@ -184,10 +190,12 @@ impl WalSegmentBuffers {
         };
 
         if active_guard.is_empty() {
+            trace!("active buffer is empty");
             return Err(WriteBufferError::Empty);
         }
 
         if !standby_guard.is_empty() {
+            warn!("standby buffer is not empty");
             return Err(WriteBufferError::StandbyDirty);
         }
 
@@ -197,6 +205,12 @@ impl WalSegmentBuffers {
         let staged_chunks = standby_guard.len();
 
         self.staged.store(standby_idx, Ordering::Release);
+
+        trace!(
+            bytes = staged_bytes,
+            chunks = staged_chunks,
+            "staged active buffer"
+        );
 
         Ok(StagedBatchStats {
             bytes: staged_bytes,
@@ -214,7 +228,13 @@ impl WalSegmentBuffers {
         if guard.is_empty() {
             return None;
         }
-        Some(std::mem::take(&mut *guard))
+        let batch = std::mem::take(&mut *guard);
+        trace!(
+            bytes = total_chunk_len(&batch),
+            chunks = batch.len(),
+            "took staged buffer"
+        );
+        Some(batch)
     }
 
     /// Atomically swap active and standby buffers and take the data for writing.
@@ -243,7 +263,13 @@ impl WalSegmentBuffers {
         self.active.store(standby_idx, Ordering::Release);
 
         // Take the data from what was active (now standby)
-        Some(std::mem::take(&mut *active_guard))
+        let batch = std::mem::take(&mut *active_guard);
+        trace!(
+            bytes = total_chunk_len(&batch),
+            chunks = batch.len(),
+            "took active buffer (swapped)"
+        );
+        Some(batch)
     }
 
     fn staged_len(&self) -> usize {
@@ -256,16 +282,23 @@ impl WalSegmentBuffers {
     }
 
     fn restore_active(&self, mut batch: WriteBatch) {
+        let bytes = total_chunk_len(&batch);
         let active_idx = self.active.load(Ordering::Acquire);
         let mut guard = self.slots[active_idx]
             .lock()
             .expect("wal buffer mutex poisoned");
         if guard.is_empty() {
+            trace!(bytes, chunks = batch.len(), "restored batch to active buffer");
             *guard = batch;
             return;
         }
 
         batch.extend(guard.drain(..));
+        trace!(
+            bytes,
+            chunks = batch.len(),
+            "restored batch to active buffer (merged)"
+        );
         *guard = batch;
     }
 }
@@ -339,7 +372,9 @@ pub struct AofWalSegment {
 }
 
 impl AofWalSegment {
+    #[instrument(skip(io))]
     pub fn new(io: Arc<dyn IoFile>, base_offset: u64, preallocated_size: u64) -> Self {
+        debug!(base_offset, preallocated_size, "creating new WAL segment");
         let created_at_micros = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -393,10 +428,13 @@ impl AofWalSegment {
         self.buffers.staged_len()
     }
 
+    #[instrument(skip(self))]
     pub fn extend_preallocated(&self, bytes: u64) {
-        self.preallocated_size.fetch_add(bytes, Ordering::AcqRel);
+        let new_size = self.preallocated_size.fetch_add(bytes, Ordering::AcqRel) + bytes;
+        debug!(bytes, new_size, "extended preallocated size");
     }
 
+    #[instrument(skip(self))]
     pub fn reserve_pending(&self, bytes: u64) -> Result<(), AofWalSegmentError> {
         loop {
             let written = self.written_size.load(Ordering::Acquire);
@@ -413,6 +451,14 @@ impl AofWalSegment {
             if committed > preallocated {
                 let occupied = written.saturating_add(pending);
                 let available = preallocated.saturating_sub(occupied);
+                warn!(
+                    bytes,
+                    available,
+                    pending_size = pending,
+                    written_size = written,
+                    preallocated_size = preallocated,
+                    "insufficient capacity for reservation"
+                );
                 return Err(AofWalSegmentError::InsufficientCapacity { bytes, available });
             }
 
@@ -422,16 +468,30 @@ impl AofWalSegment {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    trace!(
+                        bytes,
+                        new_pending,
+                        pending_size = new_pending,
+                        "reserved pending capacity"
+                    );
+                    return Ok(());
+                }
                 Err(_) => continue,
             }
         }
     }
 
+    #[instrument(skip(self))]
     pub fn release_pending(&self, bytes: u64) -> Result<(), AofWalSegmentError> {
         loop {
             let current = self.pending_size.load(Ordering::Acquire);
             if current < bytes {
+                error!(
+                    bytes,
+                    current,
+                    "pending underflow: attempting to release more than reserved"
+                );
                 return Err(AofWalSegmentError::PendingUnderflow { current, bytes });
             }
             let next = current - bytes;
@@ -441,12 +501,16 @@ impl AofWalSegment {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    trace!(bytes, pending_size = next, "released pending capacity");
+                    return Ok(());
+                }
                 Err(_) => continue,
             }
         }
     }
 
+    #[instrument(skip(self))]
     pub fn mark_written(&self, bytes: u64) -> Result<(), AofWalSegmentError> {
         loop {
             let current = self.written_size.load(Ordering::Acquire);
@@ -454,6 +518,12 @@ impl AofWalSegment {
                 .checked_add(bytes)
                 .ok_or(AofWalSegmentError::IntegerOverflow)?;
             if next > self.preallocated_size() {
+                error!(
+                    bytes,
+                    next,
+                    preallocated_size = self.preallocated_size(),
+                    "written size exceeds preallocated size"
+                );
                 return Err(AofWalSegmentError::WrittenExceedsPreallocated { next });
             }
             match self.written_size.compare_exchange(
@@ -465,6 +535,12 @@ impl AofWalSegment {
                 Ok(_) => {
                     // Update write rate tracking
                     self.update_write_rate(bytes);
+                    debug!(
+                        bytes,
+                        offset = current,
+                        written_size = next,
+                        "marked bytes as written"
+                    );
                     return Ok(());
                 }
                 Err(_) => continue,
@@ -495,9 +571,15 @@ impl AofWalSegment {
         self.write_rate_bytes_per_sec.store(rate_bytes_per_sec, Ordering::Relaxed);
     }
 
+    #[instrument(skip(self))]
     pub fn mark_durable(&self, new_durable: u64) -> Result<(), AofWalSegmentError> {
         let written = self.written_size();
         if new_durable > written {
+            error!(
+                new_durable,
+                written_size = written,
+                "durable size exceeds written size"
+            );
             return Err(AofWalSegmentError::DurableBeyondWritten {
                 written,
                 new_durable,
@@ -506,6 +588,11 @@ impl AofWalSegment {
         loop {
             let current = self.durable_size.load(Ordering::Acquire);
             if new_durable < current {
+                error!(
+                    new_durable,
+                    durable_size = current,
+                    "durable size regression detected"
+                );
                 return Err(AofWalSegmentError::DurableRegression {
                     current,
                     new_durable,
@@ -517,7 +604,16 @@ impl AofWalSegment {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    let advanced = new_durable - current;
+                    debug!(
+                        new_durable,
+                        durable_size = new_durable,
+                        advanced,
+                        "marked bytes as durable"
+                    );
+                    return Ok(());
+                }
                 Err(_) => continue,
             }
         }
@@ -530,20 +626,42 @@ impl AofWalSegment {
         self.buffers.with_active(f)
     }
 
+    #[instrument(skip(self))]
     pub fn stage_active_batch(&self) -> Result<StagedBatchStats, WriteBufferError> {
-        self.buffers.stage_active()
+        let stats = self.buffers.stage_active()?;
+        debug!(
+            bytes = stats.bytes,
+            chunks = stats.chunks,
+            "staged active batch for write"
+        );
+        Ok(stats)
     }
 
+    #[instrument(skip(self))]
     pub fn take_staged_batch(&self) -> Option<WriteBatch> {
-        self.buffers.take_staged()
+        let batch = self.buffers.take_staged();
+        if let Some(ref b) = batch {
+            let bytes = total_chunk_len(b);
+            trace!(bytes, chunks = b.len(), "took staged batch");
+        }
+        batch
     }
 
     /// Atomically take the active batch for writing (no staging required).
+    #[instrument(skip(self))]
     pub fn take_active_batch(&self) -> Option<WriteBatch> {
-        self.buffers.take_active_batch()
+        let batch = self.buffers.take_active_batch();
+        if let Some(ref b) = batch {
+            let bytes = total_chunk_len(b);
+            trace!(bytes, chunks = b.len(), "took active batch");
+        }
+        batch
     }
 
+    #[instrument(skip(self, batch))]
     pub fn restore_active_batch(&self, batch: WriteBatch) {
+        let bytes = total_chunk_len(&batch);
+        trace!(bytes, chunks = batch.len(), "restoring active batch");
         self.buffers.restore_active(batch)
     }
 
@@ -551,27 +669,49 @@ impl AofWalSegment {
         self.io.clone()
     }
 
+    #[instrument(skip(self))]
     pub fn try_enqueue_write(&self, queue_depth: usize) -> bool {
-        self.write_queue.try_enqueue(queue_depth)
+        let enqueued = self.write_queue.try_enqueue(queue_depth);
+        if enqueued {
+            trace!(queue_depth, "enqueued for write");
+        } else {
+            trace!(queue_depth, "already enqueued for write");
+        }
+        enqueued
     }
 
+    #[instrument(skip(self))]
     pub fn clear_write_queue(&self) {
+        trace!("clearing write queue");
         self.write_queue.clear();
     }
 
+    #[instrument(skip(self))]
     pub fn update_write_queue_depth(&self, depth: usize) {
+        trace!(depth, "updated write queue depth");
         self.write_queue.update_depth(depth);
     }
 
+    #[instrument(skip(self))]
     pub fn try_enqueue_flush(&self, queue_depth: usize) -> bool {
-        self.flush_queue.try_enqueue(queue_depth)
+        let enqueued = self.flush_queue.try_enqueue(queue_depth);
+        if enqueued {
+            trace!(queue_depth, "enqueued for flush");
+        } else {
+            trace!(queue_depth, "already enqueued for flush");
+        }
+        enqueued
     }
 
+    #[instrument(skip(self))]
     pub fn clear_flush_queue(&self) {
+        trace!("clearing flush queue");
         self.flush_queue.clear();
     }
 
+    #[instrument(skip(self))]
     pub fn update_flush_queue_depth(&self, depth: usize) {
+        trace!(depth, "updated flush queue depth");
         self.flush_queue.update_depth(depth);
     }
 
@@ -601,15 +741,29 @@ impl AofWalSegment {
         self.created_at_micros
     }
 
+    #[instrument(skip(self))]
     pub fn request_flush(&self, durable_target: u64) -> Result<bool, AofWalSegmentError> {
-        if durable_target > self.written_size() {
+        let written = self.written_size();
+        let durable = self.durable_size();
+
+        if durable_target > written {
+            error!(
+                durable_target,
+                written_size = written,
+                "flush target exceeds written size"
+            );
             return Err(AofWalSegmentError::DurableBeyondWritten {
-                written: self.written_size(),
+                written,
                 new_durable: durable_target,
             });
         }
 
-        if durable_target <= self.durable_size() {
+        if durable_target <= durable {
+            trace!(
+                durable_target,
+                durable_size = durable,
+                "flush target already durable"
+            );
             return Ok(false);
         }
 
@@ -617,18 +771,41 @@ impl AofWalSegment {
             .pending_flush_target
             .fetch_max(durable_target, Ordering::AcqRel);
 
-        Ok(durable_target > previous)
+        let needs_flush = durable_target > previous;
+        if needs_flush {
+            debug!(
+                durable_target,
+                previous,
+                durable_size = durable,
+                "flush requested"
+            );
+        } else {
+            trace!(
+                durable_target,
+                previous,
+                "flush already pending with higher target"
+            );
+        }
+        Ok(needs_flush)
     }
 
+    #[instrument(skip(self))]
     pub fn take_flush_target(&self) -> Option<u64> {
         let target = self.pending_flush_target.swap(0, Ordering::AcqRel);
-        if target == 0 { None } else { Some(target) }
+        if target == 0 {
+            None
+        } else {
+            trace!(target, "took flush target");
+            Some(target)
+        }
     }
 
+    #[instrument(skip(self))]
     pub fn restore_flush_target(&self, target: u64) {
         if target == 0 {
             return;
         }
+        trace!(target, "restoring flush target");
         self.pending_flush_target
             .fetch_max(target, Ordering::AcqRel);
     }

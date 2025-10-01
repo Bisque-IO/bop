@@ -1,9 +1,10 @@
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
 use std::sync::Arc;
 
 use thiserror::Error;
+use tracing::{debug, error, instrument, trace};
 use zstd::stream::read::Decoder;
 use zstd::stream::write::Encoder;
 
@@ -86,44 +87,112 @@ impl RemoteChunkStore {
     }
 
     /// Download and decompress a chunk from remote storage into the local cache.
+    #[instrument(skip(self, spec, local), fields(
+        db_id = spec.db_id,
+        chunk_id = spec.chunk_id,
+        generation = spec.generation,
+        remote_key = ?spec.remote_key,
+        compressed_size = spec.compressed_size,
+        uncompressed_size = spec.uncompressed_size
+    ))]
     pub fn hydrate(
         &self,
         spec: &RemoteChunkSpec,
         local: &LocalChunkStore,
     ) -> Result<LocalChunkHandle, RemoteChunkError> {
-        let remote_reader = self.fetcher.fetch(spec)?;
-        let mut decoder = Decoder::new(remote_reader)?;
-        let handle =
-            local.insert_from_reader(spec.cache_key(), spec.uncompressed_size, &mut decoder)?;
+        trace!("starting chunk hydration from remote storage");
+
+        let remote_reader = self.fetcher.fetch(spec).map_err(|e| {
+            error!(error = ?e, "failed to fetch chunk from remote storage");
+            e
+        })?;
+
+        let mut decoder = Decoder::new(remote_reader).map_err(|e| {
+            error!(error = ?e, "failed to create decompression decoder");
+            RemoteChunkError::Io(e)
+        })?;
+
+        let handle = local.insert_from_reader(spec.cache_key(), spec.uncompressed_size, &mut decoder).map_err(|e| {
+            error!(error = ?e, "failed to insert decompressed chunk into local cache");
+            e
+        })?;
+
+        debug!(
+            compressed_size = spec.compressed_size,
+            uncompressed_size = spec.uncompressed_size,
+            "chunk hydration completed successfully"
+        );
+
         Ok(handle)
     }
 
     /// Compress and upload a chunk from the local filesystem to remote storage.
     /// Returns metadata about the uploaded chunk.
+    #[instrument(skip(self, request), fields(
+        db_id = request.db_id,
+        chunk_id = request.chunk_id,
+        generation = request.generation,
+        remote_key = ?request.remote_key,
+        local_path = ?request.local_path
+    ))]
     pub fn upload(
         &self,
         request: &RemoteUploadRequest,
     ) -> Result<RemoteUploadResult, RemoteChunkError> {
-        let uncompressed_size = std::fs::metadata(&request.local_path)?.len();
+        trace!("starting chunk compression and upload");
+
+        let uncompressed_size = std::fs::metadata(&request.local_path).map_err(|e| {
+            error!(error = ?e, "failed to get file metadata");
+            RemoteChunkError::Io(e)
+        })?.len();
 
         // Compress to a temporary buffer
         let mut compressed = Vec::new();
         {
             let mut encoder = Encoder::new(&mut compressed, 3)
-                .map_err(|e| RemoteChunkError::Compression(e.to_string()))?;
+                .map_err(|e| {
+                    error!(error = %e, "failed to create compression encoder");
+                    RemoteChunkError::Compression(e.to_string())
+                })?;
 
-            let mut source = File::open(&request.local_path)?;
-            std::io::copy(&mut source, &mut encoder)?;
+            let mut source = File::open(&request.local_path).map_err(|e| {
+                error!(error = ?e, "failed to open source file");
+                RemoteChunkError::Io(e)
+            })?;
+
+            std::io::copy(&mut source, &mut encoder).map_err(|e| {
+                error!(error = ?e, "failed to compress chunk data");
+                RemoteChunkError::Io(e)
+            })?;
 
             encoder.finish()
-                .map_err(|e| RemoteChunkError::Compression(e.to_string()))?;
+                .map_err(|e| {
+                    error!(error = %e, "failed to finalize compression");
+                    RemoteChunkError::Compression(e.to_string())
+                })?;
         }
 
         let compressed_size = compressed.len() as u64;
+        debug!(
+            uncompressed_size,
+            compressed_size,
+            compression_ratio = (compressed_size as f64 / uncompressed_size as f64),
+            "chunk compression completed"
+        );
 
         // Upload compressed data
+        trace!("uploading compressed chunk to remote storage");
         let mut cursor = std::io::Cursor::new(compressed);
-        self.fetcher.upload(&request.remote_key, &mut cursor, compressed_size)?;
+        self.fetcher.upload(&request.remote_key, &mut cursor, compressed_size).map_err(|e| {
+            error!(error = ?e, "failed to upload chunk to remote storage");
+            e
+        })?;
+
+        debug!(
+            compressed_size,
+            uncompressed_size,
+            "chunk upload completed successfully"
+        );
 
         Ok(RemoteUploadResult {
             remote_key: request.remote_key.clone(),
@@ -133,6 +202,12 @@ impl RemoteChunkStore {
     }
 
     /// Upload a chunk that's already in the local cache.
+    #[instrument(skip(self, handle), fields(
+        db_id,
+        chunk_id,
+        generation,
+        remote_key = ?remote_key
+    ))]
     pub fn upload_from_handle(
         &self,
         db_id: DbId,
@@ -141,6 +216,7 @@ impl RemoteChunkStore {
         remote_key: RemoteObjectKey,
         handle: &LocalChunkHandle,
     ) -> Result<RemoteUploadResult, RemoteChunkError> {
+        trace!("uploading chunk from local cache handle");
         let request = RemoteUploadRequest {
             db_id,
             chunk_id,
@@ -153,25 +229,51 @@ impl RemoteChunkStore {
 
     /// Compress a local file and return the compressed data and sizes.
     /// Useful for testing or streaming uploads.
+    #[instrument(skip(local_path), fields(local_path = ?local_path, compression_level))]
     pub fn compress_file(
         local_path: &Path,
         compression_level: i32,
     ) -> Result<(Vec<u8>, u64, u64), RemoteChunkError> {
-        let uncompressed_size = std::fs::metadata(local_path)?.len();
+        trace!("starting file compression");
+
+        let uncompressed_size = std::fs::metadata(local_path).map_err(|e| {
+            error!(error = ?e, "failed to get file metadata");
+            RemoteChunkError::Io(e)
+        })?.len();
 
         let mut compressed = Vec::new();
         {
             let mut encoder = Encoder::new(&mut compressed, compression_level)
-                .map_err(|e| RemoteChunkError::Compression(e.to_string()))?;
+                .map_err(|e| {
+                    error!(error = %e, "failed to create compression encoder");
+                    RemoteChunkError::Compression(e.to_string())
+                })?;
 
-            let mut source = File::open(local_path)?;
-            std::io::copy(&mut source, &mut encoder)?;
+            let mut source = File::open(local_path).map_err(|e| {
+                error!(error = ?e, "failed to open source file");
+                RemoteChunkError::Io(e)
+            })?;
+
+            std::io::copy(&mut source, &mut encoder).map_err(|e| {
+                error!(error = ?e, "failed to compress file data");
+                RemoteChunkError::Io(e)
+            })?;
 
             encoder.finish()
-                .map_err(|e| RemoteChunkError::Compression(e.to_string()))?;
+                .map_err(|e| {
+                    error!(error = %e, "failed to finalize compression");
+                    RemoteChunkError::Compression(e.to_string())
+                })?;
         }
 
         let compressed_size = compressed.len() as u64;
+
+        debug!(
+            uncompressed_size,
+            compressed_size,
+            compression_ratio = (compressed_size as f64 / uncompressed_size as f64),
+            "file compression completed successfully"
+        );
 
         Ok((compressed, compressed_size, uncompressed_size))
     }

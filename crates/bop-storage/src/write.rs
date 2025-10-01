@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use crossfire::{MTx, Rx, mpsc};
 use thiserror::Error;
+use tracing::{debug, error, instrument, trace, warn};
 
 use crate::IoFile;
 use crate::runtime::StorageRuntime;
@@ -294,7 +295,9 @@ impl WriteController {
         }
     }
 
+    #[instrument(skip(self, segment))]
     pub fn enqueue(&self, segment: Arc<AofWalSegment>) -> Result<(), WriteScheduleError> {
+        trace!("enqueueing write segment");
         self.schedule(segment)
     }
 
@@ -306,7 +309,9 @@ impl WriteController {
         self.state.pending.load(Ordering::Acquire)
     }
 
+    #[instrument(skip(self))]
     pub fn shutdown(&self) {
+        debug!("shutting down write controller");
         if self.state.request_shutdown() {
             let _ = self.sender.send(WriteTask::Shutdown);
         }
@@ -315,6 +320,7 @@ impl WriteController {
                 let _ = handle.join();
             }
         }
+        debug!("write controller shutdown complete");
     }
 
     fn schedule(&self, segment: Arc<AofWalSegment>) -> Result<(), WriteScheduleError> {
@@ -520,6 +526,7 @@ fn spawn_write_worker(
     thread::Builder::new()
         .name("bop-storage-write".into())
         .spawn(move || {
+            debug!("write worker thread started");
             let mut backlog: VecDeque<Arc<AofWalSegment>> = VecDeque::new();
             let mut active = 0usize;
             let mut shutting_down = false;
@@ -594,6 +601,7 @@ fn spawn_write_worker(
                         }
                     }
                     Ok(WriteTask::Shutdown) => {
+                        debug!("write worker received shutdown signal");
                         shutting_down = true;
                         while let Some(queued) = backlog.pop_front() {
                             queued.clear_write_queue();
@@ -604,6 +612,7 @@ fn spawn_write_worker(
                         }
                     }
                     Err(_) => {
+                        warn!("write worker channel closed");
                         while let Some(queued) = backlog.pop_front() {
                             queued.clear_write_queue();
                             state.release_slot();
@@ -612,6 +621,7 @@ fn spawn_write_worker(
                     }
                 }
             }
+            debug!("write worker thread exiting");
         })
         .expect("failed to spawn write controller thread")
 }
@@ -629,6 +639,7 @@ fn spawn_write_job(
     });
 }
 
+#[instrument(skip(segment))]
 fn run_write_job(segment: Arc<AofWalSegment>) -> Result<usize, WriteProcessError> {
     let batch = segment
         .take_active_batch()
@@ -638,20 +649,24 @@ fn run_write_job(segment: Arc<AofWalSegment>) -> Result<usize, WriteProcessError
     segment.set_last_write_batch_bytes(expected);
 
     if expected == 0 {
+        trace!("skipping write for empty batch");
         return Ok(0);
     }
 
+    trace!(bytes = expected, "writing batch to disk");
     let io = segment.io();
     let offset = segment.write_offset();
 
     match blocking_write(io, offset, batch) {
         WriteExecutionResult::Completed { bytes } => {
+            debug!(bytes, offset, "write completed successfully");
             let bytes_u64 = bytes as u64;
             segment.release_pending(bytes_u64)?;
             segment.mark_written(bytes_u64)?;
             Ok(bytes)
         }
         WriteExecutionResult::Failed { error, batch } => {
+            error!(error = ?error, "write failed, restoring batch");
             segment.restore_active_batch(batch);
             Err(error)
         }

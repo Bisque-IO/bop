@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::append_only::checkpoint::LeaseMap;
 use crate::manifest::{ChunkId, DbId, Generation, JobId};
 use crate::page_cache::{PageCacheKey, PageCacheObserver};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 /// Options for fetching pages from storage.
 ///
@@ -77,12 +78,20 @@ impl CheckpointObserver {
     /// # T10a: on_checkpoint_start
     ///
     /// Registers leases for all chunks being checkpointed.
+    #[instrument(skip(self, chunk_ids), fields(db_id = self.db_id, job_id, generation, chunk_count = chunk_ids.len()))]
     pub fn on_checkpoint_start(
         &self,
         job_id: JobId,
         chunk_ids: &[ChunkId],
         generation: Generation,
     ) {
+        info!(
+            db_id = self.db_id,
+            job_id,
+            generation,
+            chunk_count = chunk_ids.len(),
+            "Checkpoint started, registering leases"
+        );
         for &chunk_id in chunk_ids {
             let _ = self.lease_map.register(
                 chunk_id,
@@ -90,7 +99,14 @@ impl CheckpointObserver {
                 job_id,
                 std::time::Duration::from_secs(600),
             );
+            trace!(chunk_id, "Registered lease for chunk");
         }
+        debug!(
+            db_id = self.db_id,
+            job_id,
+            chunk_count = chunk_ids.len(),
+            "All checkpoint leases registered"
+        );
     }
 
     /// Called when a checkpoint completes successfully.
@@ -98,14 +114,32 @@ impl CheckpointObserver {
     /// # T10a: on_checkpoint_end
     ///
     /// Releases leases for all checkpointed chunks.
+    #[instrument(skip(self, chunk_ids), fields(db_id = self.db_id, chunk_count = chunk_ids.len()))]
     pub fn on_checkpoint_end(&self, chunk_ids: &[ChunkId]) {
+        info!(
+            db_id = self.db_id,
+            chunk_count = chunk_ids.len(),
+            "Checkpoint ended, releasing leases"
+        );
         for &chunk_id in chunk_ids {
             self.lease_map.release(chunk_id);
+            trace!(chunk_id, "Released lease for chunk");
         }
+        debug!(
+            db_id = self.db_id,
+            chunk_count = chunk_ids.len(),
+            "All checkpoint leases released"
+        );
     }
 
     /// Called when a checkpoint fails or is cancelled.
+    #[instrument(skip(self, chunk_ids), fields(db_id = self.db_id, chunk_count = chunk_ids.len()))]
     pub fn on_checkpoint_failed(&self, chunk_ids: &[ChunkId]) {
+        warn!(
+            db_id = self.db_id,
+            chunk_count = chunk_ids.len(),
+            "Checkpoint failed, releasing leases"
+        );
         // Release leases
         self.on_checkpoint_end(chunk_ids);
     }

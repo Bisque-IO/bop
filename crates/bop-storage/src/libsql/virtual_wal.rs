@@ -15,6 +15,7 @@ use libsql_ffi::{
     wal_manager_impl,
 };
 use thiserror::Error;
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use super::LibsqlVfs;
 
@@ -105,14 +106,28 @@ pub struct LibsqlVirtualWal {
 
 impl LibsqlVirtualWal {
     /// Construct a new virtual WAL instance using the supplied pieces.
+    #[instrument(skip(vfs, hook, config), fields(wal_name = %config.name, page_size = config.page_size))]
     pub fn new(
         vfs: Arc<LibsqlVfs>,
         hook: Arc<dyn LibsqlWalHook>,
         mut config: VirtualWalConfig,
     ) -> Self {
         if config.page_cache.is_some() && config.page_cache_object_id.is_none() {
-            config.page_cache_object_id = Some(allocate_cache_object_id());
+            let cache_id = allocate_cache_object_id();
+            config.page_cache_object_id = Some(cache_id);
+            debug!(
+                wal_name = %config.name,
+                cache_object_id = cache_id,
+                "Allocated page cache object ID for virtual WAL"
+            );
         }
+        info!(
+            wal_name = %config.name,
+            page_size = config.page_size,
+            has_cache = config.page_cache.is_some(),
+            frame_cache_limit = ?config.frame_cache_bytes_limit,
+            "Creating virtual WAL instance"
+        );
         Self {
             config,
             vfs,
@@ -151,23 +166,31 @@ impl LibsqlVirtualWal {
     }
 
     /// Attach the virtual WAL to libsql by creating a reference-counted WAL manager.
+    #[instrument(skip(self), fields(wal_name = %self.config.name))]
     pub fn attach(&self) -> Result<(), LibsqlVirtualWalError> {
+        info!(wal_name = %self.config.name, "Attaching virtual WAL to libsql");
+
         let mut state = self
             .state
             .lock()
             .expect("libsql virtual WAL state poisoned");
         if state.manager.is_some() {
+            warn!(wal_name = %self.config.name, "Virtual WAL already attached");
             return Err(LibsqlVirtualWalError::AlreadyAttached);
         }
 
         let manager_impl = Box::new(WalManagerImpl::new(self.hook.clone(), self.config.clone()));
         let storage = unsafe { WalManagerStorage::create(manager_impl)? };
         state.manager = Some(storage);
+        debug!(wal_name = %self.config.name, "Successfully attached virtual WAL");
         Ok(())
     }
 
     /// Detach the virtual WAL manager and release its reference in libsql.
+    #[instrument(skip(self), fields(wal_name = %self.config.name))]
     pub fn detach(&self) -> Result<(), LibsqlVirtualWalError> {
+        info!(wal_name = %self.config.name, "Detaching virtual WAL from libsql");
+
         let mut state = self
             .state
             .lock()
@@ -175,13 +198,19 @@ impl LibsqlVirtualWal {
         let mut storage = state
             .manager
             .take()
-            .ok_or(LibsqlVirtualWalError::NotAttached)?;
+            .ok_or_else(|| {
+                warn!(wal_name = %self.config.name, "Virtual WAL not attached");
+                LibsqlVirtualWalError::NotAttached
+            })?;
         unsafe { storage.release() };
+        debug!(wal_name = %self.config.name, "Successfully detached virtual WAL");
         Ok(())
     }
 
     /// Perform a checkpoint request initiated by libsql.
+    #[instrument(skip(self), fields(wal_name = %self.config.name))]
     pub fn checkpoint(&self) -> Result<(), LibsqlVirtualWalError> {
+        debug!(wal_name = %self.config.name, "Checkpoint requested");
         self.hook.on_checkpoint().map_err(Into::into)
     }
 
@@ -410,6 +439,7 @@ impl WalImpl {
             if let (Some(cache), Some(key)) = (self.page_cache.as_ref(), self.page_cache_key(pgno))
             {
                 cache.insert(key, bytes.clone());
+                trace!(frame_id, pgno, "Stored frame in page cache");
             }
 
             let entry = FrameEntry::new(pgno, bytes);
@@ -430,6 +460,7 @@ impl WalImpl {
                     .is_some()
                 {
                     self.remove_page_cache_entry(replaced.page_no);
+                    trace!(frame_id, old_pgno = replaced.page_no, "Replaced frame in cache");
                 }
             }
 
@@ -437,6 +468,8 @@ impl WalImpl {
             state.order.push_back(frame_id);
             state.total_bytes += entry_len;
             self.enforce_limit_locked(&mut state);
+        } else {
+            trace!(frame_id, pgno, size = data.len(), "Skipped caching frame (too large)");
         }
 
         self.bump_max_page(pgno);
@@ -456,6 +489,9 @@ impl WalImpl {
     }
 
     fn clear(&self) {
+        let frame_count = self.frames.len();
+        debug!(frame_count, "Clearing WAL frame cache");
+
         if let (Some(cache), Some(object_id)) =
             (self.page_cache.as_ref(), self.page_cache_object_id)
         {
@@ -464,9 +500,11 @@ impl WalImpl {
                 .iter()
                 .map(|entry| *entry.key())
                 .collect();
+            let page_count = keys.len();
             for pgno in keys {
                 cache.remove(&PageCacheKey::libsql_wal(object_id, pgno as u64));
             }
+            debug!(pages_cleared = page_count, "Cleared pages from page cache");
         }
         self.frames.clear();
         self.page_to_frame.clear();
@@ -558,11 +596,15 @@ unsafe extern "C" fn wal_manager_x_open(
     out_wal: *mut libsql_wal,
 ) -> c_int {
     if manager_ptr.is_null() || out_wal.is_null() {
+        error!("Invalid null pointer in wal_manager_x_open");
         return SQLITE_MISUSE;
     }
 
     let manager = unsafe { WalManagerImpl::from_raw(manager_ptr) };
+    info!(page_size = manager.page_size(), "Opening virtual WAL");
+
     if let Err(err) = manager.hook().on_open() {
+        error!(?err, "WAL hook on_open failed");
         return hook_error_to_sqlite(err);
     }
 
@@ -577,6 +619,7 @@ unsafe extern "C" fn wal_manager_x_open(
         (*out_wal).methods = wal_methods();
         (*out_wal).pData = Box::into_raw(wal) as *mut wal_impl;
     }
+    debug!("Virtual WAL opened successfully");
     SQLITE_OK
 }
 
@@ -946,14 +989,23 @@ unsafe extern "C" fn wal_manager_x_close(
     _z_buf: *mut c_uchar,
 ) -> c_int {
     if wal_ptr.is_null() || manager_ptr.is_null() {
+        error!("Invalid null pointer in wal_manager_x_close");
         return SQLITE_MISUSE;
     }
 
+    info!("Closing virtual WAL");
     let _manager = unsafe { WalManagerImpl::from_raw(manager_ptr) };
     let wal = unsafe { Box::from_raw(wal_ptr as *mut WalImpl) };
+    let frame_count = wal.frames.len();
     let result = match wal.hook().on_close() {
-        Ok(()) => SQLITE_OK,
-        Err(err) => hook_error_to_sqlite(err),
+        Ok(()) => {
+            debug!(frame_count, "Virtual WAL closed successfully");
+            SQLITE_OK
+        }
+        Err(err) => {
+            error!(?err, frame_count, "WAL hook on_close failed");
+            hook_error_to_sqlite(err)
+        }
     };
     drop(wal);
     result
@@ -1093,6 +1145,7 @@ unsafe extern "C" fn wal_x_frames(
     _written: *mut c_int,
 ) -> c_int {
     if wal_ptr.is_null() {
+        error!("Invalid null pointer in wal_x_frames");
         return SQLITE_MISUSE;
     }
 
@@ -1103,6 +1156,7 @@ unsafe extern "C" fn wal_x_frames(
     while let Some((pgno, frame)) = iter.next() {
         let frame_vec = frame.to_vec();
         if let Err(err) = wal.hook().on_frame(&frame_vec) {
+            error!(?err, pgno, frames_written, "WAL hook on_frame failed");
             return hook_error_to_sqlite(err);
         }
         let frame_id = wal.allocate_frame_id();
@@ -1114,6 +1168,7 @@ unsafe extern "C" fn wal_x_frames(
         unsafe { *_written = frames_written };
     }
 
+    debug!(frames_written, "WAL frames written successfully");
     SQLITE_OK
 }
 
@@ -1134,16 +1189,24 @@ unsafe extern "C" fn wal_x_checkpoint(
     _cb_ctx: *mut c_void,
 ) -> c_int {
     if wal_ptr.is_null() {
+        error!("Invalid null pointer in wal_x_checkpoint");
         return SQLITE_MISUSE;
     }
 
     let wal = unsafe { WalImpl::from_raw(wal_ptr) };
+    let frame_count = wal.frames.len();
+    info!(frame_count, "WAL checkpoint initiated");
+
     match wal.hook().on_checkpoint() {
         Ok(()) => {
             wal.clear();
+            debug!(frame_count, "WAL checkpoint completed successfully");
             SQLITE_OK
         }
-        Err(err) => hook_error_to_sqlite(err),
+        Err(err) => {
+            error!(?err, frame_count, "WAL checkpoint failed");
+            hook_error_to_sqlite(err)
+        }
     }
 }
 

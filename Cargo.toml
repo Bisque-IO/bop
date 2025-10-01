@@ -72,7 +72,7 @@ thiserror = "2.0"
 tokio = "1"
 tokio-test = "0.4"
 tokio-util = "0.7"
-tracing = { version = "0.1", default-features = false }
+tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 tracing-subscriber = "0.3"
 vertx-cluster = { path = "crates/vertx-cluster", version = "0.1.0" }
 zstd = "0.13"

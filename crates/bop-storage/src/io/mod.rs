@@ -8,6 +8,7 @@ mod direct;
 pub use direct::{DirectIoBuffer, DirectIoDriver};
 
 use thiserror::Error;
+use tracing::{debug, error, info, instrument, trace, warn};
 
 /// Enumeration of supported storage I/O backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -252,9 +253,19 @@ pub struct IoRegistry {
 }
 
 impl IoRegistry {
+    #[instrument(level = "info", skip(default_backend), fields(backend = ?default_backend))]
     pub fn new(default_backend: IoBackendKind) -> Self {
         #[cfg(any(unix, target_os = "windows"))]
         let direct = DirectIoDriver::new().ok().map(Arc::new);
+
+        #[cfg(any(unix, target_os = "windows"))]
+        if direct.is_some() {
+            info!(backend = ?IoBackendKind::DirectIo, "Direct I/O driver initialized");
+        } else {
+            warn!(backend = ?IoBackendKind::DirectIo, "Direct I/O driver unavailable");
+        }
+
+        info!(default_backend = ?default_backend, "I/O registry initialized");
 
         Self {
             default_backend,
@@ -268,12 +279,21 @@ impl IoRegistry {
         self.default_backend
     }
 
+    #[instrument(level = "debug", skip(self), fields(requested = ?requested, default = ?self.default_backend))]
     pub fn resolve(&self, requested: Option<IoBackendKind>) -> IoResult<SharedIoDriver> {
         let backend = requested.unwrap_or(self.default_backend);
+        debug!(backend = ?backend, "Resolving I/O driver");
+
         match backend {
-            IoBackendKind::Std => Ok(self.std_driver.clone()),
+            IoBackendKind::Std => {
+                debug!(backend = ?IoBackendKind::Std, "Using standard I/O driver");
+                Ok(self.std_driver.clone())
+            }
             IoBackendKind::DirectIo => self.resolve_direct(),
-            IoBackendKind::IoUring => Err(IoError::BackendUnavailable { backend }),
+            IoBackendKind::IoUring => {
+                warn!(backend = ?IoBackendKind::IoUring, "I/O URing backend not available");
+                Err(IoError::BackendUnavailable { backend })
+            }
         }
     }
 }
@@ -282,15 +302,22 @@ impl IoRegistry {
     #[cfg(any(unix, target_os = "windows"))]
     fn resolve_direct(&self) -> IoResult<SharedIoDriver> {
         match &self.direct {
-            Some(driver) => Ok(driver.clone()),
-            None => Err(IoError::BackendUnavailable {
-                backend: IoBackendKind::DirectIo,
-            }),
+            Some(driver) => {
+                debug!(backend = ?IoBackendKind::DirectIo, "Using direct I/O driver");
+                Ok(driver.clone())
+            }
+            None => {
+                warn!(backend = ?IoBackendKind::DirectIo, "Direct I/O driver unavailable");
+                Err(IoError::BackendUnavailable {
+                    backend: IoBackendKind::DirectIo,
+                })
+            }
         }
     }
 
     #[cfg(not(any(unix, target_os = "windows")))]
     fn resolve_direct(&self) -> IoResult<SharedIoDriver> {
+        warn!(backend = ?IoBackendKind::DirectIo, "Direct I/O not supported on this platform");
         Err(IoError::BackendUnavailable {
             backend: IoBackendKind::DirectIo,
         })
@@ -315,10 +342,19 @@ impl std::fmt::Debug for StdIoDriver {
 }
 
 impl IoDriver for StdIoDriver {
+    #[instrument(level = "debug", skip(self, options), fields(path = ?path, backend = "Std"))]
     fn open(&self, path: &Path, options: &IoOpenOptions) -> IoResult<Box<dyn IoFile>> {
         let path = path.to_path_buf();
         let options = options.clone();
-        let file = open_file(&path, &options).map_err(IoError::from)?;
+
+        debug!(path = ?path, read = options.read, write = options.write, "Opening file with standard I/O");
+
+        let file = open_file(&path, &options).map_err(|e| {
+            error!(path = ?path, error = %e, "Failed to open file");
+            IoError::from(e)
+        })?;
+
+        debug!(path = ?path, "File opened successfully");
         Ok(Box::new(StdIoFile::new(file)))
     }
 
@@ -340,7 +376,11 @@ impl StdIoFile {
 }
 
 impl IoFile for StdIoFile {
+    #[instrument(level = "trace", skip(self, bufs), fields(offset, num_bufs = bufs.len()))]
     fn readv_at(&self, offset: u64, bufs: &mut [IoVecMut<'_>]) -> IoResult<usize> {
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        trace!(offset, size_bytes = total_len, num_bufs = bufs.len(), "Reading vectored data");
+
         let mut current_offset = offset;
         let mut total = 0usize;
 
@@ -348,8 +388,12 @@ impl IoFile for StdIoFile {
             let slice = buf.as_mut_slice();
             let mut consumed = 0usize;
             while consumed < slice.len() {
-                let read = read_at(self.file.as_ref(), &mut slice[consumed..], current_offset)?;
+                let read = read_at(self.file.as_ref(), &mut slice[consumed..], current_offset).map_err(|e| {
+                    error!(offset = current_offset, error = %e, "Read failed");
+                    IoError::from(e)
+                })?;
                 if read == 0 {
+                    trace!(bytes_read = total, "Read complete (EOF)");
                     return Ok(total);
                 }
                 consumed += read;
@@ -358,11 +402,16 @@ impl IoFile for StdIoFile {
             }
         }
 
+        trace!(bytes_read = total, "Read complete");
         Ok(total)
     }
 
+    #[instrument(level = "trace", skip(self, bufs), fields(offset, num_bufs = bufs.len()))]
     fn writev_at(&self, offset: u64, bufs: &[IoVec<'_>]) -> IoResult<usize> {
         use std::io::{Error, ErrorKind};
+
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        trace!(offset, size_bytes = total_len, num_bufs = bufs.len(), "Writing vectored data");
 
         let mut current_offset = offset;
         let mut total = 0usize;
@@ -371,8 +420,12 @@ impl IoFile for StdIoFile {
             let slice = buf.as_slice();
             let mut written = 0usize;
             while written < slice.len() {
-                let count = write_at(self.file.as_ref(), &slice[written..], current_offset)?;
+                let count = write_at(self.file.as_ref(), &slice[written..], current_offset).map_err(|e| {
+                    error!(offset = current_offset, error = %e, "Write failed");
+                    IoError::from(e)
+                })?;
                 if count == 0 {
+                    error!(offset = current_offset, "Write returned zero bytes");
                     return Err(IoError::Io(Error::new(
                         ErrorKind::WriteZero,
                         "write returned zero bytes",
@@ -384,15 +437,30 @@ impl IoFile for StdIoFile {
             }
         }
 
+        trace!(bytes_written = total, "Write complete");
         Ok(total)
     }
 
+    #[instrument(level = "debug", skip(self), fields(offset, len))]
     fn allocate(&self, offset: u64, len: u64) -> IoResult<()> {
-        preallocate(self.file.as_ref(), offset, len).map_err(IoError::from)
+        debug!(offset, size_bytes = len, "Allocating file space");
+        preallocate(self.file.as_ref(), offset, len).map_err(|e| {
+            error!(offset, len, error = %e, "File allocation failed");
+            IoError::from(e)
+        })?;
+        debug!(offset, size_bytes = len, "File space allocated");
+        Ok(())
     }
 
+    #[instrument(level = "debug", skip(self))]
     fn flush(&self) -> IoResult<()> {
-        sync_file_data(self.file.as_ref()).map_err(IoError::from)
+        debug!("Flushing file to disk");
+        sync_file_data(self.file.as_ref()).map_err(|e| {
+            error!(error = %e, "File flush failed");
+            IoError::from(e)
+        })?;
+        debug!("File flushed successfully");
+        Ok(())
     }
 }
 

@@ -16,7 +16,16 @@ use bop_storage::{
 use tempfile::TempDir;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing subscriber to see trace output
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_line_number(true)
+        .init();
+
     println!("=== AOF Integration Example ===\n");
+    println!("📊 Tracing enabled at DEBUG level\n");
 
     // Step 1: Set up manifest and manager
     println!("1. Creating Manager with Manifest...");

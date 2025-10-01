@@ -16,6 +16,7 @@ use std::io;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use tracing::{debug, error, info, instrument, trace, warn};
 
 #[cfg(test)]
 use std::path::PathBuf;
@@ -101,8 +102,10 @@ pub struct DirectIoDriver {
 }
 
 impl DirectIoDriver {
+    #[instrument(level = "info")]
     pub fn new() -> io::Result<Self> {
         let alignment = platform_alignment().unwrap_or(FALLBACK_ALIGNMENT).max(1);
+        info!(alignment_bytes = alignment, "Initializing direct I/O driver");
         Ok(Self {
             contract: AlignmentContract::new(IoBackendKind::DirectIo, alignment),
         })
@@ -116,17 +119,21 @@ impl DirectIoDriver {
     ///
     /// The requested length must already be a multiple of [`Self::alignment`]; callers must pad
     /// any residual tail data themselves before issuing a direct write.
+    #[instrument(level = "debug", skip(self), fields(alignment = self.alignment()))]
     pub fn allocate(&self, len: usize) -> IoResult<DirectIoBuffer> {
+        debug!(size_bytes = len, alignment = self.alignment(), "Allocating aligned buffer");
         self.contract.require_len(len)?;
         let mut buffer = DirectIoBuffer::new(len, self.alignment())?;
         if !buffer.is_empty() {
             buffer.as_mut_slice().fill(0);
         }
+        debug!(size_bytes = len, "Aligned buffer allocated");
         Ok(buffer)
     }
 
     fn ensure_supported(&self, options: &IoOpenOptions) -> IoResult<()> {
         if options.append {
+            warn!(backend = ?IoBackendKind::DirectIo, "Append mode not supported");
             return Err(IoError::UnsupportedOperation {
                 backend: IoBackendKind::DirectIo,
                 operation: "append",
@@ -168,17 +175,32 @@ impl std::fmt::Debug for DirectIoDriver {
 }
 
 impl IoDriver for DirectIoDriver {
+    #[instrument(level = "debug", skip(self, options), fields(path = ?path, backend = "DirectIo", alignment = self.contract.alignment()))]
     fn open(&self, path: &Path, options: &IoOpenOptions) -> IoResult<Box<dyn IoFile>> {
+        debug!(path = ?path, read = options.read, write = options.write, alignment = self.contract.alignment(), "Opening file with direct I/O");
+
         self.ensure_supported(options)?;
 
         if options.create {
             if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir).map_err(IoError::from)?;
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    error!(path = ?path, error = %e, "Failed to create parent directories");
+                    IoError::from(e)
+                })?;
             }
         }
 
-        let file = self.open_aligned(path, options).map_err(IoError::from)?;
-        configure_after_open(&file).map_err(IoError::from)?;
+        let file = self.open_aligned(path, options).map_err(|e| {
+            error!(path = ?path, error = %e, "Failed to open file with direct I/O");
+            IoError::from(e)
+        })?;
+
+        configure_after_open(&file).map_err(|e| {
+            error!(path = ?path, error = %e, "Failed to configure direct I/O");
+            IoError::from(e)
+        })?;
+
+        debug!(path = ?path, "File opened successfully with direct I/O");
         Ok(Box::new(DirectIoFile::new(file, self.contract)))
     }
 
@@ -210,16 +232,21 @@ impl IoFile for DirectIoFile {
 
         self.contract.require_offset(offset)?;
         self.contract.require_len(len)?;
+        warn!(backend = ?IoBackendKind::DirectIo, "read_at not supported, use readv_at with aligned buffer");
         Err(IoError::UnsupportedOperation {
             backend: IoBackendKind::DirectIo,
             operation: "read_at",
         })
     }
 
+    #[instrument(level = "trace", skip(self, bufs), fields(offset, num_bufs = bufs.len(), backend = "DirectIo"))]
     fn readv_at(&self, offset: u64, bufs: &mut [IoVecMut<'_>]) -> IoResult<usize> {
         if bufs.is_empty() {
             return Ok(0);
         }
+
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        trace!(offset, size_bytes = total_len, num_bufs = bufs.len(), alignment = self.contract.alignment(), "Reading vectored data with direct I/O");
 
         self.contract.require_offset(offset)?;
 
@@ -241,8 +268,12 @@ impl IoFile for DirectIoFile {
 
             let mut slice = buf.as_mut_slice();
             while !slice.is_empty() {
-                let read = read_into(&self.file, current_offset, slice)?;
+                let read = read_into(&self.file, current_offset, slice).map_err(|e| {
+                    error!(offset = current_offset, error = %e, "Direct I/O read failed");
+                    e
+                })?;
                 if read == 0 {
+                    trace!(bytes_read = total, "Direct I/O read complete (EOF)");
                     return Ok(total);
                 }
                 total += read;
@@ -251,13 +282,18 @@ impl IoFile for DirectIoFile {
             }
         }
 
+        trace!(bytes_read = total, "Direct I/O read complete");
         Ok(total)
     }
 
+    #[instrument(level = "trace", skip(self, bufs), fields(offset, num_bufs = bufs.len(), backend = "DirectIo"))]
     fn writev_at(&self, offset: u64, bufs: &[IoVec<'_>]) -> IoResult<usize> {
         if bufs.is_empty() {
             return Ok(0);
         }
+
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        trace!(offset, size_bytes = total_len, num_bufs = bufs.len(), alignment = self.contract.alignment(), "Writing vectored data with direct I/O");
 
         self.contract.require_offset(offset)?;
 
@@ -279,8 +315,12 @@ impl IoFile for DirectIoFile {
 
             while !slice.is_empty() {
                 let written =
-                    write_once(&self.file, current_offset, slice).map_err(IoError::from)?;
+                    write_once(&self.file, current_offset, slice).map_err(|e| {
+                        error!(offset = current_offset, error = %e, "Direct I/O write failed");
+                        IoError::from(e)
+                    })?;
                 if written == 0 {
+                    error!(offset = current_offset, "Direct I/O write returned zero bytes");
                     return Err(IoError::Io(std::io::Error::new(
                         std::io::ErrorKind::WriteZero,
                         "direct I/O write returned zero",
@@ -292,16 +332,21 @@ impl IoFile for DirectIoFile {
             }
         }
 
+        trace!(bytes_written = total, "Direct I/O write complete");
         Ok(total)
     }
 
+    #[instrument(level = "debug", skip(self), fields(offset, len, backend = "DirectIo"))]
     fn allocate(&self, offset: u64, len: u64) -> IoResult<()> {
+        debug!(offset, size_bytes = len, alignment = self.contract.alignment(), "Allocating file space with direct I/O");
+
         self.contract.require_offset(offset)?;
         if len == 0 {
             return Ok(());
         }
 
         let len_usize = usize::try_from(len).map_err(|_| {
+            error!(offset, len, "Allocation length exceeds usize");
             IoError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "allocation length exceeds usize",
@@ -310,11 +355,24 @@ impl IoFile for DirectIoFile {
 
         self.contract.require_len(len_usize)?;
 
-        preallocate(self.file.as_ref(), offset, len).map_err(IoError::from)
+        preallocate(self.file.as_ref(), offset, len).map_err(|e| {
+            error!(offset, len, error = %e, "Direct I/O file allocation failed");
+            IoError::from(e)
+        })?;
+
+        debug!(offset, size_bytes = len, "File space allocated with direct I/O");
+        Ok(())
     }
 
+    #[instrument(level = "debug", skip(self), fields(backend = "DirectIo"))]
     fn flush(&self) -> IoResult<()> {
-        sync_file_data(self.file.as_ref()).map_err(IoError::from)
+        debug!("Flushing file to disk with direct I/O");
+        sync_file_data(self.file.as_ref()).map_err(|e| {
+            error!(error = %e, "Direct I/O file flush failed");
+            IoError::from(e)
+        })?;
+        debug!("File flushed successfully with direct I/O");
+        Ok(())
     }
 }
 

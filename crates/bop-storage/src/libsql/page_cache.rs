@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
+use tracing::{debug, info, instrument, trace};
 
 static NEXT_CACHE_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -178,15 +179,23 @@ where
     K: Eq + Hash + Clone + 'static,
 {
     /// Construct a cache using the provided configuration.
+    #[instrument(skip(config), fields(capacity_bytes = ?config.capacity_bytes))]
     pub fn new(config: PageCacheConfig) -> Self {
+        info!(capacity_bytes = ?config.capacity_bytes, "Creating page cache");
         Self::with_observer(config, None)
     }
 
     /// Construct a cache with the supplied configuration and observer hooks.
+    #[instrument(skip(config, observer), fields(capacity_bytes = ?config.capacity_bytes, has_observer = observer.is_some()))]
     pub fn with_observer(
         config: PageCacheConfig,
         observer: Option<Arc<dyn PageCacheObserver<K>>>,
     ) -> Self {
+        info!(
+            capacity_bytes = ?config.capacity_bytes,
+            has_observer = observer.is_some(),
+            "Creating page cache with observer"
+        );
         Self {
             config,
             frames: DashMap::new(),
@@ -211,13 +220,16 @@ where
             .lock()
             .expect("page cache eviction state poisoned");
 
+        let is_replacement = self.frames.contains_key(&key);
         if let Some(previous) = self.frames.insert(key.clone(), frame.clone()) {
             eviction.total_bytes = eviction
                 .total_bytes
                 .saturating_sub(previous.len())
                 .saturating_add(frame_len);
+            trace!(frame_len, old_len = previous.len(), "Replaced page in cache");
         } else {
             eviction.total_bytes = eviction.total_bytes.saturating_add(frame_len);
+            trace!(frame_len, "Inserted new page into cache");
         }
 
         eviction.order.push_back(EvictionEntry {
@@ -310,8 +322,9 @@ where
             return;
         };
 
+        let mut total_evicted = 0;
         loop {
-            let (evicted, needs_more) = {
+            let (evicted, needs_more, current_bytes) = {
                 let mut eviction = self
                     .eviction
                     .lock()
@@ -341,10 +354,12 @@ where
                 }
 
                 let needs_more = eviction.total_bytes > limit && evicted.is_some();
-                (evicted, needs_more)
+                (evicted, needs_more, eviction.total_bytes)
             };
 
             if let Some((key, frame)) = evicted {
+                total_evicted += 1;
+                trace!(size = frame.len(), current_bytes, limit, "Evicted page from cache");
                 if let Some(observer) = &self.observer {
                     observer.on_evict(&key, frame.as_slice());
                 }
@@ -353,6 +368,9 @@ where
             }
 
             if !needs_more {
+                if total_evicted > 0 {
+                    debug!(total_evicted, current_bytes, limit, "Cache capacity enforced");
+                }
                 break;
             }
         }

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use tokio::task::JoinError;
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::chunk_quota::{ChunkQuotaError, ChunkQuotaGuard, ChunkStorageQuota};
 use crate::io::{IoError, IoFile, IoOpenOptions, IoVec, SharedIoDriver};
@@ -187,13 +188,16 @@ impl fmt::Debug for LocalChunkStore {
 }
 
 impl LocalChunkStore {
+    #[instrument(skip(quota, io, runtime), fields(root_dir = %config.root_dir.display(), max_cache_bytes = config.max_cache_bytes))]
     pub(crate) fn new(
         config: LocalChunkStoreConfig,
         quota: Arc<ChunkStorageQuota>,
         io: SharedIoDriver,
         runtime: Arc<StorageRuntime>,
     ) -> Result<Self, LocalChunkStoreError> {
+        debug!("creating local chunk store");
         fs::create_dir_all(&config.root_dir)?;
+        info!("local chunk store created successfully");
         Ok(Self {
             config,
             quota,
@@ -205,6 +209,7 @@ impl LocalChunkStore {
     }
 
     /// Returns the cached chunk handle if present.
+    #[instrument(skip(self), fields(db_id = key.db_id, chunk_id = key.chunk_id, generation = key.generation))]
     pub fn get(&self, key: &LocalChunkKey) -> Option<LocalChunkHandle> {
         let mut state = self.state.lock().expect("local chunk store mutex poisoned");
         if let Some(handle) = state.entries.get_mut(key).map(|entry| {
@@ -215,28 +220,43 @@ impl LocalChunkStore {
             }
         }) {
             state.touch(key);
+            trace!(size_bytes = handle.size_bytes, "cache hit");
+            debug!(size_bytes = handle.size_bytes, path = %handle.path.display(), "chunk retrieved from cache");
             Some(handle)
         } else {
+            trace!("cache miss");
             None
         }
     }
 
+    #[instrument(skip(self), fields(db_id = key.db_id, chunk_id = key.chunk_id, generation = key.generation))]
     pub async fn open_read_only(
         &self,
         key: &LocalChunkKey,
     ) -> Result<Box<dyn IoFile>, LocalChunkStoreError> {
-        let handle = self.get(key).ok_or(LocalChunkStoreError::ChunkNotFound {
-            chunk_id: key.chunk_id,
-            generation: key.generation,
+        trace!("opening chunk for read-only access");
+        let handle = self.get(key).ok_or_else(|| {
+            debug!("chunk not found in cache");
+            LocalChunkStoreError::ChunkNotFound {
+                chunk_id: key.chunk_id,
+                generation: key.generation,
+            }
         })?;
-        self.open_with_options_async(handle.path, IoOpenOptions::read_only())
-            .await
+        let result = self.open_with_options_async(handle.path.clone(), IoOpenOptions::read_only())
+            .await;
+        match &result {
+            Ok(_) => debug!(path = %handle.path.display(), "chunk opened successfully"),
+            Err(e) => error!(error = ?e, path = %handle.path.display(), "failed to open chunk"),
+        }
+        result
     }
 
+    #[instrument(skip(self), fields(db_id = key.db_id, chunk_id = key.chunk_id, generation = key.generation))]
     pub async fn create_temp_writer(
         &self,
         key: &LocalChunkKey,
     ) -> Result<(Box<dyn IoFile>, PathBuf), LocalChunkStoreError> {
+        trace!("creating temporary writer");
         let temp_path = self.temporary_path(key);
         if let Some(parent) = temp_path.parent() {
             fs::create_dir_all(parent)?;
@@ -244,6 +264,7 @@ impl LocalChunkStore {
         let file = self
             .open_with_options_async(temp_path.clone(), IoOpenOptions::write_only())
             .await?;
+        debug!(temp_path = %temp_path.display(), "temporary writer created");
         Ok((file, temp_path))
     }
 
@@ -264,14 +285,19 @@ impl LocalChunkStore {
     }
 
     /// Returns `true` if the chunk is currently cached.
+    #[instrument(skip(self), fields(db_id = key.db_id, chunk_id = key.chunk_id, generation = key.generation))]
     pub fn contains(&self, key: &LocalChunkKey) -> bool {
         let state = self.state.lock().expect("local chunk store mutex poisoned");
-        state.entries.contains_key(key)
+        let contains = state.entries.contains_key(key);
+        trace!(contains, "checked cache for chunk");
+        contains
     }
 
     /// Waits for a chunk to be available, either from cache or by waiting for an in-flight download.
     /// Returns the handle if the chunk becomes available within a reasonable timeout.
+    #[instrument(skip(self), fields(db_id = key.db_id, chunk_id = key.chunk_id, generation = key.generation, timeout_ms = timeout.as_millis()))]
     pub fn get_or_wait(&self, key: &LocalChunkKey, timeout: Duration) -> Option<LocalChunkHandle> {
+        trace!("waiting for chunk to become available");
         let deadline = Instant::now() + timeout;
         let mut state = self.state.lock().expect("local chunk store mutex poisoned");
 
@@ -285,20 +311,24 @@ impl LocalChunkStore {
                 }
             }) {
                 state.touch(key);
+                debug!(size_bytes = handle.size_bytes, "chunk available from cache");
                 return Some(handle);
             }
 
             // If not downloading, return None so caller can initiate download
             if !state.is_downloading(key) {
+                trace!("chunk not downloading, caller should initiate");
                 return None;
             }
 
             // Wait for download to complete
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                debug!("wait timeout expired");
                 return None;
             }
 
+            trace!(remaining_ms = remaining.as_millis(), "waiting for download to complete");
             let (new_state, timeout_result) = self.download_notify
                 .wait_timeout(state, remaining)
                 .expect("local chunk store mutex poisoned");
@@ -306,6 +336,7 @@ impl LocalChunkStore {
             state = new_state;
 
             if timeout_result.timed_out() {
+                debug!("wait timed out");
                 return None;
             }
         }
@@ -313,12 +344,14 @@ impl LocalChunkStore {
 
     /// Hydrates a chunk into the cache from a reader containing uncompressed bytes.
     /// This method coordinates with concurrent callers to ensure only one download happens.
+    #[instrument(skip(self, reader), fields(db_id = key.db_id, chunk_id = key.chunk_id, generation = key.generation, expected_len))]
     pub fn insert_from_reader<R: Read + ?Sized>(
         &self,
         key: LocalChunkKey,
         expected_len: u64,
         reader: &mut R,
     ) -> Result<LocalChunkHandle, LocalChunkStoreError> {
+        trace!("attempting to insert chunk from reader");
         {
             let mut state = self.state.lock().expect("local chunk store mutex poisoned");
             if let Some(handle) = state.entries.get_mut(&key).map(|entry| {
@@ -329,19 +362,26 @@ impl LocalChunkStore {
                 }
             }) {
                 state.touch(&key);
+                debug!(size_bytes = handle.size_bytes, "chunk already in cache, skipping insert");
                 return Ok(handle);
             }
             if !state.start_download(key.clone()) {
+                debug!("chunk is currently being downloaded by another caller");
                 return Err(LocalChunkStoreError::ChunkBusy {
                     chunk_id: key.chunk_id,
                     generation: key.generation,
                 });
             }
+            trace!("download started, acquired exclusive lock");
         }
 
         let reserve_guard = match self.quota.try_acquire(expected_len) {
-            Ok(guard) => guard,
+            Ok(guard) => {
+                trace!(size_bytes = expected_len, "quota acquired");
+                guard
+            }
             Err(err) => {
+                error!(size_bytes = expected_len, error = ?err, "failed to acquire quota");
                 let mut state = self.state.lock().expect("local chunk store mutex poisoned");
                 state.finish_download(&key);
                 self.download_notify.notify_all();
@@ -351,6 +391,7 @@ impl LocalChunkStore {
 
         let temp_path = self.temporary_path(&key);
         let final_path = self.final_path(&key);
+        trace!(temp_path = %temp_path.display(), final_path = %final_path.display(), "preparing to write chunk");
         if let Some(parent) = final_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -360,10 +401,14 @@ impl LocalChunkStore {
             .open(&temp_path, &IoOpenOptions::write_only())
             .map_err(LocalChunkStoreError::IoDriver)?;
         let _ = temp_file.allocate(0, expected_len);
+        trace!(size_bytes = expected_len, "writing chunk data to temporary file");
+        let start = Instant::now();
         let copied = write_stream_to_file(reader, temp_file.as_mut())?;
+        let duration = start.elapsed();
         drop(temp_file);
 
         if copied != expected_len {
+            warn!(expected_bytes = expected_len, actual_bytes = copied, "unexpected chunk length, removing temporary file");
             let _ = fs::remove_file(&temp_path);
             let mut state = self.state.lock().expect("local chunk store mutex poisoned");
             state.finish_download(&key);
@@ -374,12 +419,16 @@ impl LocalChunkStore {
             });
         }
 
+        debug!(size_bytes = copied, duration_ms = duration.as_millis(), "chunk data written successfully");
+        trace!("renaming temporary file to final path");
         fs::rename(&temp_path, &final_path)?;
 
         let mut state = self.state.lock().expect("local chunk store mutex poisoned");
         state.finish_download(&key);
 
+        trace!(needed_bytes = expected_len, "checking if eviction is needed");
         if let Err(err) = self.evict_to_fit_with_lock(&mut state, expected_len) {
+            error!(needed_bytes = expected_len, error = ?err, "failed to evict enough space");
             drop(state);
             let _ = fs::remove_file(&final_path);
             return Err(err);
@@ -398,6 +447,9 @@ impl LocalChunkStore {
         state.entries.insert(key.clone(), entry);
         state.touch(&key);
 
+        let cache_size = state.used_bytes;
+        let cache_entries = state.entries.len();
+
         let handle = LocalChunkHandle {
             path: final_path,
             size_bytes: expected_len,
@@ -406,6 +458,7 @@ impl LocalChunkStore {
         drop(state);
         self.download_notify.notify_all();
 
+        info!(size_bytes = expected_len, cache_size, cache_entries, "chunk successfully inserted into cache");
         Ok(handle)
     }
 
@@ -415,20 +468,31 @@ impl LocalChunkStore {
         needed_bytes: u64,
     ) -> Result<(), LocalChunkStoreError> {
         let mut available = self.config.max_cache_bytes.saturating_sub(state.used_bytes);
+        let initial_available = available;
 
         if available >= needed_bytes {
+            trace!(available, needed_bytes, "sufficient space available, no eviction needed");
             return Ok(());
         }
+
+        debug!(available = initial_available, needed_bytes, used_bytes = state.used_bytes, max_cache_bytes = self.config.max_cache_bytes, "eviction required");
+        let mut evicted_count = 0;
+        let mut evicted_bytes = 0u64;
+        let mut skipped_downloading = 0;
+        let mut skipped_min_age = 0;
 
         while available < needed_bytes {
             let candidate = match state.lru.pop_front() {
                 Some(k) => k,
                 None => {
+                    warn!(needed_bytes, available, evicted_count, evicted_bytes, "quota exhausted, no more eviction candidates");
                     return Err(LocalChunkStoreError::QuotaExhausted { needed_bytes });
                 }
             };
 
             if state.is_downloading(&candidate) {
+                trace!(db_id = candidate.db_id, chunk_id = candidate.chunk_id, "skipping candidate, currently downloading");
+                skipped_downloading += 1;
                 continue;
             }
 
@@ -439,19 +503,25 @@ impl LocalChunkStore {
             };
 
             if should_keep {
+                trace!(db_id = candidate.db_id, chunk_id = candidate.chunk_id, "skipping candidate, below minimum eviction age");
+                skipped_min_age += 1;
                 state.lru.push_back(candidate);
                 continue;
             }
 
             if let Some(entry) = state.entries.remove(&candidate) {
-                let _ = fs::remove_file(&entry.path);
                 let size = entry.size_bytes;
+                trace!(db_id = candidate.db_id, chunk_id = candidate.chunk_id, generation = candidate.generation, size_bytes = size, "evicting chunk");
+                let _ = fs::remove_file(&entry.path);
                 state.used_bytes = state.used_bytes.saturating_sub(size);
                 available = self.config.max_cache_bytes.saturating_sub(state.used_bytes);
+                evicted_count += 1;
+                evicted_bytes += size;
                 // dropping entry releases the quota guard
             }
         }
 
+        debug!(evicted_count, evicted_bytes, skipped_downloading, skipped_min_age, available, "eviction completed successfully");
         Ok(())
     }
 
@@ -477,6 +547,7 @@ fn write_stream_to_file<R: Read + ?Sized>(
     let mut total = 0u64;
     let mut offset = 0u64;
     let mut buffer = [0u8; 1 << 20];
+    let mut chunks_written = 0;
     loop {
         let read = reader.read(&mut buffer)?;
         if read == 0 {
@@ -488,8 +559,15 @@ fn write_stream_to_file<R: Read + ?Sized>(
             .map_err(LocalChunkStoreError::IoDriver)?;
         total = total.saturating_add(written as u64);
         offset = offset.saturating_add(written as u64);
+        chunks_written += 1;
+
+        if chunks_written % 100 == 0 {
+            trace!(bytes_written = total, chunks = chunks_written, "streaming write progress");
+        }
     }
+    trace!(total_bytes = total, chunks = chunks_written, "flushing file");
     file.flush().map_err(LocalChunkStoreError::IoDriver)?;
+    debug!(total_bytes = total, chunks = chunks_written, "stream write completed");
     Ok(total)
 }
 
