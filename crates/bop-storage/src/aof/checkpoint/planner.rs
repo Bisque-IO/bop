@@ -28,7 +28,7 @@ impl TailChunkDescriptor {
 
 /// Context required to plan an append-only checkpoint.
 #[derive(Debug, Clone)]
-pub struct AppendOnlyPlannerContext {
+pub struct AofPlannerContext {
     pub db_id: DbId,
     pub current_generation: Generation,
     pub wal_low_lsn: u64,
@@ -37,7 +37,7 @@ pub struct AppendOnlyPlannerContext {
 
 /// Planned work for an append-only checkpoint.
 #[derive(Debug, Clone)]
-pub struct AppendOnlyPlan {
+pub struct AofPlan {
     pub db_id: DbId,
     pub target_generation: Generation,
     pub wal_range: (u64, u64),
@@ -45,7 +45,7 @@ pub struct AppendOnlyPlan {
     pub estimated_size_bytes: u64,
 }
 
-impl AppendOnlyPlan {
+impl AofPlan {
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty()
     }
@@ -61,18 +61,14 @@ pub struct ChunkPlan {
 
 /// Planner that converts tail chunk descriptors into checkpoint work.
 #[derive(Debug, Default, Clone)]
-pub struct AppendOnlyPlanner;
+pub struct AofPlanner;
 
-impl AppendOnlyPlanner {
+impl AofPlanner {
     pub fn new() -> Self {
         Self
     }
 
-    pub fn plan(
-        &self,
-        context: &AppendOnlyPlannerContext,
-        chunks: &[TailChunkDescriptor],
-    ) -> AppendOnlyPlan {
+    pub fn plan(&self, context: &AofPlannerContext, chunks: &[TailChunkDescriptor]) -> AofPlan {
         let target_generation = context.current_generation + 1;
         let mut planned_chunks = Vec::new();
         let mut estimated_size_bytes = 0u64;
@@ -91,7 +87,7 @@ impl AppendOnlyPlanner {
             estimated_size_bytes += chunk.size_bytes;
         }
 
-        AppendOnlyPlan {
+        AofPlan {
             db_id: context.db_id,
             target_generation,
             wal_range: (context.wal_low_lsn, context.wal_high_lsn),

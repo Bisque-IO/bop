@@ -24,7 +24,7 @@
   - Upload stubs ready for async S3
 
 ### T3 - Manifest Writer (100% ✅)
-- **Files**: [manifest_ops.rs](../src/manifest/manifest_ops.rs), [operations.rs](../src/manifest/operations.rs)
+- **Files**: [manifest_ops.rs](../../src/manifest/manifest_ops.rs), [operations.rs](../../src/manifest/operations.rs)
 - **Status**: Production-ready
 - **Tests**: 5 passing
 - **Features**:
@@ -380,9 +380,9 @@ Before M2 (Durability Enhancements):
 
 ## References
 
-- [Checkpointing Design](./checkpointing_design.md)
-- [Checkpointing Plan](./checkpointing_plan.md)
+- [Checkpointing Design](checkpointing_design.md)
+- [Checkpointing Plan](checkpointing_plan.md)
 - [T1 Planner Implementation](../src/checkpoint/planner.rs)
 - [T2 Executor Implementation](../src/checkpoint/executor.rs)
-- [T3 Manifest Operations](../src/manifest/operations.rs)
+- [T3 Manifest Operations](../../src/manifest/operations.rs)
 - [T5 Truncation Implementation](../src/checkpoint/truncation.rs)

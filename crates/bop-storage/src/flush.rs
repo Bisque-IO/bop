@@ -2,7 +2,6 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -13,7 +12,8 @@ use thiserror::Error;
 use tokio::time::sleep;
 
 use crate::runtime::StorageRuntime;
-use crate::wal::{WalSegment, WalSegmentError};
+use crate::aof::{AofWalSegment, AofWalSegmentError};
+use crate::manifest::{DbId, Manifest, AofStateKey, AofStateRecord};
 
 /// Configuration options for the flush controller.
 #[derive(Debug, Clone)]
@@ -86,35 +86,12 @@ impl From<crate::IoError> for FlushProcessError {
     }
 }
 
-impl From<WalSegmentError> for FlushProcessError {
-    fn from(value: WalSegmentError) -> Self {
+impl From<AofWalSegmentError> for FlushProcessError {
+    fn from(value: AofWalSegmentError) -> Self {
         Self::Segment(value.to_string())
     }
 }
 
-/// Trait used by the flush controller to persist durability progress to an external manifest.
-pub trait FlushSink: Send + Sync {
-    fn apply_flush(&self, request: FlushSinkRequest) -> Result<(), FlushSinkError>;
-}
-
-/// Error returned by [`FlushSink`] implementations.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum FlushSinkError {
-    #[error("{0}")]
-    Message(String),
-}
-
-impl From<String> for FlushSinkError {
-    fn from(value: String) -> Self {
-        Self::Message(value)
-    }
-}
-
-impl From<&str> for FlushSinkError {
-    fn from(value: &str) -> Self {
-        Self::Message(value.to_string())
-    }
-}
 
 /// Controller coordinating WAL durability flushes.
 pub struct FlushController {
@@ -125,7 +102,8 @@ pub struct FlushController {
 impl FlushController {
     pub(crate) fn new(
         runtime: Arc<StorageRuntime>,
-        sink: Arc<dyn FlushSink>,
+        manifest: Arc<Manifest>,
+        db_id: DbId,
         config: FlushControllerConfig,
     ) -> Self {
         let capacity = config.queue_capacity.max(1);
@@ -133,7 +111,8 @@ impl FlushController {
         let sender = Arc::new(sender);
         let state = Arc::new(FlushControllerState::new(
             runtime,
-            sink,
+            manifest,
+            db_id,
             config,
             sender.clone(),
         ));
@@ -144,7 +123,7 @@ impl FlushController {
         }
     }
 
-    pub fn enqueue(&self, segment: Arc<WalSegment>) -> Result<(), FlushScheduleError> {
+    pub fn enqueue(&self, segment: Arc<AofWalSegment>) -> Result<(), FlushScheduleError> {
         self.state.push_task(segment, 0)
     }
 
@@ -182,7 +161,8 @@ impl fmt::Debug for FlushController {
 
 struct FlushControllerState {
     runtime: Arc<StorageRuntime>,
-    sink: Arc<dyn FlushSink>,
+    manifest: Arc<Manifest>,
+    db_id: DbId,
     sender: Arc<MTx<FlushTask>>,
     pending: AtomicUsize,
     metrics: FlushControllerMetrics,
@@ -194,13 +174,15 @@ struct FlushControllerState {
 impl FlushControllerState {
     fn new(
         runtime: Arc<StorageRuntime>,
-        sink: Arc<dyn FlushSink>,
+        manifest: Arc<Manifest>,
+        db_id: DbId,
         config: FlushControllerConfig,
         sender: Arc<MTx<FlushTask>>,
     ) -> Self {
         Self {
             runtime,
-            sink,
+            manifest,
+            db_id,
             sender,
             pending: AtomicUsize::new(0),
             metrics: FlushControllerMetrics::default(),
@@ -232,7 +214,7 @@ impl FlushControllerState {
         }
     }
 
-    fn push_task(&self, segment: Arc<WalSegment>, attempt: u32) -> Result<(), FlushScheduleError> {
+    fn push_task(&self, segment: Arc<AofWalSegment>, attempt: u32) -> Result<(), FlushScheduleError> {
         if self.is_shutdown() || self.runtime.is_shutdown() {
             return Err(FlushScheduleError::Closed);
         }
@@ -261,7 +243,7 @@ impl FlushControllerState {
         Ok(())
     }
 
-    fn schedule_retry(self: &Arc<Self>, segment: Arc<WalSegment>, attempt: u32) -> bool {
+    fn schedule_retry(self: &Arc<Self>, segment: Arc<AofWalSegment>, attempt: u32) -> bool {
         if self.is_shutdown() || self.runtime.is_shutdown() {
             return false;
         }
@@ -367,116 +349,17 @@ impl FlushControllerMetrics {
 #[derive(Debug)]
 pub(crate) enum FlushTask {
     Segment {
-        segment: Arc<WalSegment>,
+        segment: Arc<AofWalSegment>,
         attempt: u32,
     },
     Completion {
-        segment: Arc<WalSegment>,
+        segment: Arc<AofWalSegment>,
         attempt: u32,
-        result: Result<ProcessOutcome, FlushProcessError>,
-    },
-    SinkAck {
-        segment: Arc<WalSegment>,
-        attempt: u32,
-        target: u64,
-        result: Result<(), FlushSinkError>,
+        result: Result<(), FlushProcessError>,
     },
     Shutdown,
 }
 
-pub struct FlushSinkRequest {
-    pub segment: Arc<WalSegment>,
-    pub target: u64,
-    pub responder: FlushSinkResponder,
-}
-
-struct FlushSinkResponderInner {
-    sender: Arc<MTx<FlushTask>>,
-    segment: Arc<WalSegment>,
-    attempt: u32,
-    target: u64,
-    responded: AtomicBool,
-}
-
-pub struct FlushSinkResponder {
-    inner: Arc<FlushSinkResponderInner>,
-    notify_on_drop: bool,
-}
-
-impl Clone for FlushSinkResponder {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            notify_on_drop: self.notify_on_drop,
-        }
-    }
-}
-
-impl FlushSinkResponder {
-    pub(crate) fn new(
-        sender: Arc<MTx<FlushTask>>,
-        segment: Arc<WalSegment>,
-        attempt: u32,
-        target: u64,
-    ) -> Self {
-        Self {
-            inner: Arc::new(FlushSinkResponderInner {
-                sender,
-                segment,
-                attempt,
-                target,
-                responded: AtomicBool::new(false),
-            }),
-            notify_on_drop: false,
-        }
-    }
-
-    pub(crate) fn for_request(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            notify_on_drop: true,
-        }
-    }
-
-    pub fn succeed(&self) {
-        self.send_result(Ok(()));
-    }
-
-    pub fn fail(&self, error: FlushSinkError) {
-        self.send_result(Err(error));
-    }
-
-    fn send_result(&self, result: Result<(), FlushSinkError>) {
-        if self.inner.responded.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let _ = self.inner.sender.send(FlushTask::SinkAck {
-            segment: self.inner.segment.clone(),
-            attempt: self.inner.attempt,
-            target: self.inner.target,
-            result,
-        });
-    }
-}
-
-impl Drop for FlushSinkResponder {
-    fn drop(&mut self) {
-        if !self.notify_on_drop {
-            return;
-        }
-        if self.inner.responded.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let _ = self.inner.sender.send(FlushTask::SinkAck {
-            segment: self.inner.segment.clone(),
-            attempt: self.inner.attempt,
-            target: self.inner.target,
-            result: Err(FlushSinkError::Message(
-                "flush sink responder dropped without completion".to_string(),
-            )),
-        });
-    }
-}
 
 fn spawn_flush_worker(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>) -> JoinHandle<()> {
     thread::Builder::new()
@@ -536,92 +419,28 @@ fn flush_worker_main(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>) 
                     active -= 1;
                 }
 
-                let mut clear_queue = true;
-
                 if shutting_down {
                     segment.clear_flush_queue();
-                    clear_queue = false;
                 } else {
                     match result {
-                        Ok(ProcessOutcome::Completed) | Ok(ProcessOutcome::Idle) => {
-                            state.metrics.record_completed();
-                        }
-                        Ok(ProcessOutcome::Reschedule) => {
-                            state.metrics.record_completed();
-                            if !state.runtime.is_shutdown() {
-                                let depth_hint = backlog.len();
-                                let _ = segment.try_enqueue_flush(depth_hint);
-                                backlog.push_front(QueuedFlush {
-                                    segment: segment.clone(),
-                                    attempt: 0,
-                                });
-                                segment.update_flush_queue_depth(backlog.len());
-                            }
-                        }
-                        Ok(ProcessOutcome::AwaitAck) => {
-                            clear_queue = false;
-                        }
-                        Err(ref error) => {
-                            state.metrics.record_failure(error);
-                            if !state.runtime.is_shutdown() {
-                                let retry_attempt = attempt.saturating_add(1);
-                                state.schedule_retry(segment.clone(), retry_attempt);
-                            }
-                        }
-                    }
-                }
-
-                if clear_queue {
-                    segment.clear_flush_queue();
-                }
-
-                drain_flush_backlog(
-                    &state,
-                    &mut backlog,
-                    &mut active,
-                    max_concurrent,
-                    shutting_down,
-                );
-
-                if shutting_down && active == 0 {
-                    break;
-                }
-            }
-            Ok(FlushTask::SinkAck {
-                segment,
-                attempt,
-                target,
-                result,
-            }) => {
-                match result {
-                    Ok(()) => match segment.mark_durable(target) {
                         Ok(()) => {
                             state.metrics.record_completed();
                             segment.clear_flush_queue();
+
+                            // If there's more pending, re-enqueue
                             if !state.runtime.is_shutdown() && segment.pending_flush_target() > 0 {
                                 let _ = state.push_task(segment.clone(), 0);
                             }
                         }
-                        Err(err) => {
-                            let process_error = FlushProcessError::from(err);
-                            state.metrics.record_failure(&process_error);
-                            segment.restore_flush_target(target);
+                        Err(ref error) => {
+                            state.metrics.record_failure(error);
                             segment.clear_flush_queue();
+
+                            // Schedule retry on error
                             if !state.runtime.is_shutdown() {
                                 let retry_attempt = attempt.saturating_add(1);
                                 state.schedule_retry(segment.clone(), retry_attempt);
                             }
-                        }
-                    },
-                    Err(error) => {
-                        state
-                            .metrics
-                            .record_failure(&FlushProcessError::Sink(error.to_string()));
-                        segment.restore_flush_target(target);
-                        segment.clear_flush_queue();
-                        if !state.runtime.is_shutdown() {
-                            let retry_attempt = attempt.saturating_add(1);
-                            state.schedule_retry(segment.clone(), retry_attempt);
                         }
                     }
                 }
@@ -652,36 +471,26 @@ fn flush_worker_main(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>) 
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ProcessOutcome {
-    Idle,
-    Completed,
-    Reschedule,
-    AwaitAck,
-}
 
 fn run_flush_job(
     state: &Arc<FlushControllerState>,
-    segment: Arc<WalSegment>,
-    attempt: u32,
-) -> Result<ProcessOutcome, FlushProcessError> {
-    let mut processed = false;
-    let mut awaiting_ack = false;
-
+    segment: Arc<AofWalSegment>,
+    _attempt: u32,
+) -> Result<(), FlushProcessError> {
     loop {
         let target = match segment.take_flush_target() {
             Some(target) => target,
-            None => break,
+            None => return Ok(()),
         };
 
         if target <= segment.durable_size() {
-            processed = true;
-            break;
+            continue;
         }
 
         let io = segment.io();
         let start = Instant::now();
 
+        // Flush to disk
         if let Err(error) = io.flush() {
             segment.restore_flush_target(target);
             return Err(FlushProcessError::from(error));
@@ -690,43 +499,39 @@ fn run_flush_job(
         let duration = start.elapsed();
         segment.set_last_flush_duration(duration);
 
-        let responder =
-            FlushSinkResponder::new(state.sender.clone(), segment.clone(), attempt, target);
-        let request = FlushSinkRequest {
-            segment: segment.clone(),
-            target,
-            responder: responder.for_request(),
-        };
+        // Update manifest asynchronously via worker (batched with other ops)
+        let key = AofStateKey::new(state.db_id);
+        let mut record = state
+            .manifest
+            .aof_state(state.db_id)
+            .map_err(|err| FlushProcessError::Sink(err.to_string()))?
+            .unwrap_or_else(AofStateRecord::default);
 
-        if let Err(error) = apply_flush_sink(state.sink.as_ref(), request) {
-            responder.fail(error.clone());
-            awaiting_ack = true;
-            processed = true;
-            break;
+        // Only update if we're advancing the LSN
+        if target > record.last_applied_lsn {
+            record.last_applied_lsn = target;
+
+            // Fire-and-forget commit - manifest worker batches these updates
+            let mut txn = state.manifest.begin_with_capacity(1);
+            txn.put_aof_state(key, record);
+            txn.commit_async()
+                .map_err(|err| FlushProcessError::Sink(err.to_string()))?;
         }
 
-        awaiting_ack = true;
-        processed = true;
-    }
-
-    if awaiting_ack {
-        Ok(ProcessOutcome::AwaitAck)
-    } else if segment.pending_flush_target() > 0 {
-        Ok(ProcessOutcome::Reschedule)
-    } else if processed {
-        Ok(ProcessOutcome::Completed)
-    } else {
-        Ok(ProcessOutcome::Idle)
+        // Mark segment as durable (manifest update queued asynchronously)
+        segment
+            .mark_durable(target)
+            .map_err(|err| FlushProcessError::from(err))?;
     }
 }
 
 #[derive(Debug)]
 struct QueuedFlush {
-    segment: Arc<WalSegment>,
+    segment: Arc<AofWalSegment>,
     attempt: u32,
 }
 
-fn spawn_flush_job(state: &Arc<FlushControllerState>, segment: Arc<WalSegment>, attempt: u32) {
+fn spawn_flush_job(state: &Arc<FlushControllerState>, segment: Arc<AofWalSegment>, attempt: u32) {
     let runtime = state.runtime.clone();
     let sender = state.sender.clone();
     let state = state.clone();
@@ -763,33 +568,20 @@ fn drain_flush_backlog(
     }
 }
 
-fn apply_flush_sink(sink: &dyn FlushSink, request: FlushSinkRequest) -> Result<(), FlushSinkError> {
-    match panic::catch_unwind(AssertUnwindSafe(|| sink.apply_flush(request))) {
-        Ok(result) => result,
-        Err(payload) => Err(FlushSinkError::Message(panic_message(payload))),
-    }
-}
-
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(msg) = payload.downcast_ref::<&str>() {
-        msg.to_string()
-    } else if let Some(msg) = payload.downcast_ref::<String>() {
-        msg.clone()
-    } else {
-        "unknown panic".to_string()
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
+
+    use tempfile::TempDir;
 
     use crate::IoFile;
     use crate::io::{IoError, IoResult, IoVec, IoVecMut};
+    use crate::manifest::{Manifest, ManifestOptions};
     use crate::runtime::StorageRuntimeOptions;
 
     #[derive(Debug, Default)]
@@ -834,98 +626,56 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct MockFlushSink {
-        calls: Mutex<Vec<u64>>,
-        fail_next: AtomicBool,
-    }
+    struct AlwaysFailIoFile;
 
-    impl MockFlushSink {
-        fn fail_once(&self) {
-            self.fail_next.store(true, Ordering::SeqCst);
+    impl IoFile for AlwaysFailIoFile {
+        fn readv_at(&self, _offset: u64, _bufs: &mut [IoVecMut<'_>]) -> IoResult<usize> {
+            Ok(0)
         }
 
-        fn calls(&self) -> Vec<u64> {
-            self.calls.lock().unwrap().clone()
+        fn writev_at(&self, _offset: u64, bufs: &[IoVec<'_>]) -> IoResult<usize> {
+            Ok(bufs.iter().map(IoVec::len).sum())
         }
-    }
 
-    impl FlushSink for MockFlushSink {
-        fn apply_flush(&self, request: FlushSinkRequest) -> Result<(), FlushSinkError> {
-            let FlushSinkRequest {
-                target, responder, ..
-            } = request;
-            if self.fail_next.swap(false, Ordering::SeqCst) {
-                responder.fail(FlushSinkError::Message("sink failure".into()));
-            } else {
-                self.calls.lock().unwrap().push(target);
-                responder.succeed();
-            }
+        fn allocate(&self, _offset: u64, _len: u64) -> IoResult<()> {
             Ok(())
         }
-    }
 
-    #[derive(Default)]
-    struct AlwaysFailFlushSink;
-
-    impl FlushSink for AlwaysFailFlushSink {
-        fn apply_flush(&self, request: FlushSinkRequest) -> Result<(), FlushSinkError> {
-            let FlushSinkRequest { responder, .. } = request;
-            responder.fail("permanent failure".into());
-            Ok(())
+        fn flush(&self) -> IoResult<()> {
+            Err(IoError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "always fail flush",
+            )))
         }
     }
 
-    #[derive(Default)]
-    struct AsyncAckFlushSink {
-        calls: Mutex<Vec<u64>>,
-        responders: Mutex<Vec<FlushSinkResponder>>,
-    }
-
-    impl AsyncAckFlushSink {
-        fn pending_count(&self) -> usize {
-            self.responders.lock().unwrap().len()
-        }
-
-        fn ack_next(&self) -> bool {
-            match self.responders.lock().unwrap().pop() {
-                Some(responder) => {
-                    responder.succeed();
-                    true
-                }
-                None => false,
-            }
-        }
-
-        fn calls(&self) -> Vec<u64> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl FlushSink for AsyncAckFlushSink {
-        fn apply_flush(&self, request: FlushSinkRequest) -> Result<(), FlushSinkError> {
-            let FlushSinkRequest {
-                target, responder, ..
-            } = request;
-            self.calls.lock().unwrap().push(target);
-            self.responders.lock().unwrap().push(responder);
-            Ok(())
-        }
-    }
     fn runtime() -> Arc<StorageRuntime> {
         StorageRuntime::create(StorageRuntimeOptions::default()).expect("create runtime")
     }
 
-    fn wal_segment(io: Arc<dyn IoFile>, preallocated: u64) -> Arc<WalSegment> {
-        Arc::new(WalSegment::new(io, 0, preallocated))
+    fn manifest() -> (Arc<Manifest>, TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest =
+            Arc::new(Manifest::open(dir.path(), ManifestOptions::default()).expect("manifest"));
+        (manifest, dir)
+    }
+
+    fn wal_segment(io: Arc<dyn IoFile>, preallocated: u64) -> Arc<AofWalSegment> {
+        Arc::new(AofWalSegment::new(io, 0, preallocated))
     }
 
     #[test]
     fn flushes_segment_to_durable() {
         let runtime = runtime();
+        let (manifest, _dir) = manifest();
         let io = Arc::new(MockIoFile::default());
-        let sink = Arc::new(MockFlushSink::default());
-        let controller =
-            FlushController::new(runtime, sink.clone(), FlushControllerConfig::default());
+        let db_id = 1;
+        let controller = FlushController::new(
+            runtime,
+            manifest.clone(),
+            db_id,
+            FlushControllerConfig::default(),
+        );
         let segment = wal_segment(io.clone(), 1024);
 
         segment.mark_written(512).unwrap();
@@ -937,7 +687,25 @@ mod tests {
 
         assert_eq!(segment.durable_size(), 512);
         assert_eq!(io.flush_count(), 1);
-        assert_eq!(sink.calls(), vec![512]);
+
+        // Wait for manifest to be updated (async commit)
+        wait_for(
+            || {
+                manifest
+                    .aof_state(db_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.last_applied_lsn >= 512)
+                    .unwrap_or(false)
+            },
+            Duration::from_secs(1),
+        );
+
+        // Verify manifest was updated
+        let state = manifest.aof_state(db_id).expect("read aof state");
+        assert!(state.is_some());
+        assert_eq!(state.unwrap().last_applied_lsn, 512);
+
         let snapshot = controller.snapshot();
         assert_eq!(snapshot.enqueued, 1);
         assert_eq!(snapshot.completed, 1);
@@ -951,13 +719,14 @@ mod tests {
     #[test]
     fn flush_failure_retries_until_success() {
         let runtime = runtime();
+        let (manifest, _dir) = manifest();
         let io = Arc::new(MockIoFile::default());
         io.fail_once();
-        let sink = Arc::new(MockFlushSink::default());
+        let db_id = 2;
         let mut config = FlushControllerConfig::default();
         config.initial_backoff = Duration::from_millis(0);
         config.max_backoff = Duration::from_millis(0);
-        let controller = FlushController::new(runtime, sink.clone(), config);
+        let controller = FlushController::new(runtime, manifest.clone(), db_id, config);
         let segment = wal_segment(io.clone(), 1024);
 
         segment.mark_written(256).unwrap();
@@ -968,7 +737,25 @@ mod tests {
         wait_for(|| segment.durable_size() == 256, Duration::from_secs(1));
 
         assert_eq!(io.flush_count(), 1);
-        assert_eq!(sink.calls(), vec![256]);
+
+        // Wait for manifest to be updated (async commit)
+        wait_for(
+            || {
+                manifest
+                    .aof_state(db_id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.last_applied_lsn >= 256)
+                    .unwrap_or(false)
+            },
+            Duration::from_secs(1),
+        );
+
+        // Verify manifest was updated
+        let state = manifest.aof_state(db_id).expect("read aof state");
+        assert!(state.is_some());
+        assert_eq!(state.unwrap().last_applied_lsn, 256);
+
         assert!(controller.snapshot().failed >= 1);
         assert!(controller.snapshot().retries >= 1);
 
@@ -976,42 +763,17 @@ mod tests {
     }
 
     #[test]
-    fn sink_failure_triggers_retry() {
-        let runtime = runtime();
-        let io = Arc::new(MockIoFile::default());
-        let sink = Arc::new(MockFlushSink::default());
-        sink.fail_once();
-        let mut config = FlushControllerConfig::default();
-        config.initial_backoff = Duration::from_millis(0);
-        config.max_backoff = Duration::from_millis(0);
-        let controller = FlushController::new(runtime, sink.clone(), config);
-        let segment = wal_segment(io.clone(), 2048);
-
-        segment.mark_written(300).unwrap();
-        assert!(segment.request_flush(300).unwrap());
-
-        controller.enqueue(segment.clone()).unwrap();
-
-        wait_for(|| segment.durable_size() == 300, Duration::from_secs(1));
-
-        assert_eq!(segment.durable_size(), 300);
-        assert_eq!(io.flush_count(), 2);
-        assert_eq!(sink.calls(), vec![300]);
-        assert!(controller.snapshot().failed >= 1);
-
-        controller.shutdown();
-    }
-
-    #[test]
     fn retry_limit_is_enforced() {
         let runtime = runtime();
-        let io = Arc::new(MockIoFile::default());
-        let sink = Arc::new(AlwaysFailFlushSink::default());
+        let (manifest, _dir) = manifest();
+        let io = Arc::new(AlwaysFailIoFile::default());
+        let db_id = 3;
+
         let mut config = FlushControllerConfig::default();
         config.initial_backoff = Duration::from_millis(0);
         config.max_backoff = Duration::from_millis(0);
         config.max_retry_attempts = 2;
-        let controller = FlushController::new(runtime, sink.clone(), config.clone());
+        let controller = FlushController::new(runtime, manifest.clone(), db_id, config.clone());
         let segment = wal_segment(io.clone(), 1024);
 
         segment.mark_written(128).unwrap();
@@ -1027,47 +789,6 @@ mod tests {
         wait_for(|| !segment.is_flush_enqueued(), Duration::from_secs(1));
         assert_eq!(segment.durable_size(), 0);
         assert!(controller.snapshot().failed >= 1);
-
-        controller.shutdown();
-    }
-
-    #[test]
-    fn awaits_sink_ack_before_marking_durable() {
-        let runtime = runtime();
-        let io = Arc::new(MockIoFile::default());
-        let sink = Arc::new(AsyncAckFlushSink::default());
-        let controller =
-            FlushController::new(runtime, sink.clone(), FlushControllerConfig::default());
-        let segment = wal_segment(io.clone(), 1024);
-
-        segment.mark_written(512).unwrap();
-        assert!(segment.request_flush(512).unwrap());
-
-        controller.enqueue(segment.clone()).unwrap();
-
-        wait_for(|| sink.pending_count() == 1, Duration::from_secs(1));
-
-        assert_eq!(segment.durable_size(), 0);
-        let snapshot_before_ack = controller.snapshot();
-        assert_eq!(snapshot_before_ack.enqueued, 1);
-        assert_eq!(snapshot_before_ack.completed, 0);
-
-        assert!(sink.ack_next());
-
-        wait_for(|| segment.durable_size() == 512, Duration::from_secs(1));
-        wait_for(
-            || controller.snapshot().completed == 1,
-            Duration::from_secs(1),
-        );
-
-        let snapshot = controller.snapshot();
-        assert_eq!(snapshot.enqueued, 1);
-        assert_eq!(snapshot.completed, 1);
-        assert_eq!(snapshot.failed, 0);
-        assert_eq!(snapshot.retries, 0);
-        assert_eq!(snapshot.pending_queue_depth, 0);
-        assert_eq!(io.flush_count(), 1);
-        assert_eq!(sink.calls(), vec![512]);
 
         controller.shutdown();
     }

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::manifest::{ChunkId, Generation};
 
-use super::planner::{AppendOnlyPlan, ChunkPlan};
+use super::planner::{AofPlan, ChunkPlan};
 
 /// Prepared chunk ready for publication.
 #[derive(Debug, Clone)]
@@ -29,7 +29,7 @@ impl AppendOnlyExecutor {
 
     pub fn prepare_chunks(
         &self,
-        plan: &AppendOnlyPlan,
+        plan: &AofPlan,
     ) -> Result<Vec<PreparedChunk>, AppendOnlyExecutionError> {
         let mut prepared = Vec::with_capacity(plan.chunks.len());
 

@@ -23,14 +23,16 @@
 //! All operations within a batch are applied atomically in a single LMDB transaction.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use bincode::serde::encode_to_vec;
 use heed::{Env, RwTxn};
 use serde::{Deserialize, Serialize};
 
 use super::change_log::ChangeLogState;
+
+#[cfg(feature = "libsql")]
+use super::tables::LibSqlSnapshotRecord;
+
 use super::tables::{
     CHANGE_RECORD_VERSION, CHUNK_REFCOUNT_VERSION, ChunkId, ChunkRefcountRecord,
     ComponentGeneration, ComponentId, GENERATION_RECORD_VERSION, GenerationRecord,

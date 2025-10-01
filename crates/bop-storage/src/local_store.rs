@@ -1,478 +1,567 @@
-//! Local filesystem storage management for checkpoint hot_cache.
+//! Local chunk cache shared by append-only workloads.
 //!
-//! This module implements T7b from the checkpointing plan: LRU eviction
-//! in hot_cache/ that respects manifest references and PageCache pin counts.
-//!
-//! # Architecture
-//!
-//! The LocalStore manages a hot_cache/ directory containing recently staged
-//! checkpoint chunks that haven't yet been uploaded to S3 or have been
-//! recently downloaded for fast access.
-//!
-//! Eviction policy:
-//! - LRU eviction when quota is exceeded
-//! - Never evicts chunks referenced by manifest
-//! - Never evicts chunks with active PageCache pins (future: requires PageCache integration)
-//! - Scans periodically via janitor task
+//! The cache stores decompressed chunk files on local disk so that subsequent
+//! reads can avoid re-downloading objects from remote storage. A single
+//! [`ChunkStorageQuota`](crate::chunk_quota::ChunkStorageQuota) is shared across
+//! all caches to constrain aggregate disk usage.
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::fs;
+use std::io::{self, Read};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
-use crate::manifest::{ChunkId, DbId};
+use thiserror::Error;
+use tokio::task::JoinError;
 
-/// Errors that can occur during LocalStore operations.
-#[derive(Debug, thiserror::Error)]
-pub enum LocalStoreError {
-    /// I/O error accessing local filesystem.
+use crate::chunk_quota::{ChunkQuotaError, ChunkQuotaGuard, ChunkStorageQuota};
+use crate::io::{IoError, IoFile, IoOpenOptions, IoVec, SharedIoDriver};
+use crate::manifest::{ChunkId, DbId, Generation};
+use crate::runtime::StorageRuntime;
+
+/// Errors that can occur during local chunk cache operations.
+#[derive(Debug, Error)]
+pub enum LocalChunkStoreError {
+    /// Underlying filesystem error.
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 
-    /// Chunk not found in hot_cache.
-    #[error("chunk {chunk_id} not found in hot_cache")]
-    ChunkNotFound { chunk_id: ChunkId },
+    /// Driver-level error surfaced by the configured [`IoDriver`].
+    #[error("io driver error: {0}")]
+    IoDriver(#[from] IoError),
 
-    /// Quota exhausted.
-    #[error("quota exhausted: {used_bytes} / {quota_bytes} bytes")]
-    QuotaExhausted { used_bytes: u64, quota_bytes: u64 },
+    /// Tokio task handling asynchronous file operations was cancelled.
+    #[error("async task cancelled: {0}")]
+    TaskCancelled(#[from] JoinError),
+
+    /// Requested chunk is not present in the cache.
+    #[error("chunk {chunk_id} generation {generation} not found in cache")]
+    ChunkNotFound {
+        chunk_id: ChunkId,
+        generation: Generation,
+    },
+
+    /// Another task is already hydrating this chunk.
+    #[error("chunk {chunk_id} generation {generation} is currently being hydrated")]
+    ChunkBusy {
+        chunk_id: ChunkId,
+        generation: Generation,
+    },
+
+    /// Cache capacity could not be increased enough to satisfy an insertion.
+    #[error("cache quota exhausted after eviction attempts (needed {needed_bytes} bytes)")]
+    QuotaExhausted { needed_bytes: u64 },
+
+    /// Global chunk quota is exhausted.
+    #[error(transparent)]
+    GlobalQuota(ChunkQuotaError),
+
+    /// The downloaded chunk length did not match the expected manifest metadata.
+    #[error("unexpected chunk length: expected {expected_bytes} bytes, wrote {actual_bytes} bytes")]
+    UnexpectedLength {
+        expected_bytes: u64,
+        actual_bytes: u64,
+    },
 }
 
-/// Configuration for the LocalStore hot_cache.
+/// Metadata describing a cached chunk.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct LocalChunkKey {
+    pub db_id: DbId,
+    pub chunk_id: ChunkId,
+    pub generation: Generation,
+}
+
+impl LocalChunkKey {
+    pub fn new(db_id: DbId, chunk_id: ChunkId, generation: Generation) -> Self {
+        Self {
+            db_id,
+            chunk_id,
+            generation,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct LocalStoreConfig {
-    /// Base directory for hot_cache.
-    pub hot_cache_dir: PathBuf,
+pub struct LocalChunkHandle {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+}
 
-    /// Maximum size of hot_cache in bytes.
+#[derive(Debug, Clone)]
+pub struct LocalChunkStoreConfig {
+    pub root_dir: PathBuf,
     pub max_cache_bytes: u64,
-
-    /// Minimum age before evicting chunks (prevents thrashing).
     pub min_eviction_age: Duration,
 }
 
-impl Default for LocalStoreConfig {
+impl Default for LocalChunkStoreConfig {
     fn default() -> Self {
         Self {
-            hot_cache_dir: PathBuf::from("hot_cache"),
+            root_dir: PathBuf::from("chunk_cache"),
             max_cache_bytes: 10 * 1024 * 1024 * 1024, // 10 GiB
             min_eviction_age: Duration::from_secs(300), // 5 minutes
         }
     }
 }
 
-/// Metadata for a cached chunk in hot_cache.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CachedChunk {
-    /// Database ID.
-    db_id: DbId,
-
-    /// Chunk ID.
-    chunk_id: ChunkId,
-
-    /// File path in hot_cache.
+    key: LocalChunkKey,
     path: PathBuf,
-
-    /// Size in bytes.
     size_bytes: u64,
-
-    /// Last access time.
-    last_access: SystemTime,
-
-    /// Whether chunk is referenced by manifest.
-    manifest_referenced: bool,
-
-    /// Pin count (future: integration with PageCache).
-    pin_count: u32,
+    inserted_at: Instant,
+    last_access: Instant,
+    quota_guard: ChunkQuotaGuard,
 }
 
-/// LocalStore manages hot_cache/ directory with LRU eviction.
-///
-/// # T7b: hot_cache Eviction with PageCache Awareness
-///
-/// The LocalStore provides:
-/// - LRU eviction when quota is exceeded
-/// - Protection for manifest-referenced chunks
-/// - Protection for pinned chunks (future: requires PageCache integration)
-/// - Periodic janitor for cleanup
-pub struct LocalStore {
-    config: LocalStoreConfig,
-    chunks: Arc<Mutex<HashMap<ChunkId, CachedChunk>>>,
-    lru_order: Arc<Mutex<VecDeque<ChunkId>>>,
-    used_bytes: Arc<Mutex<u64>>,
+#[derive(Debug)]
+enum DownloadState {
+    /// No download in progress
+    Idle,
+    /// Download in progress, waiters will be notified on completion
+    InProgress,
 }
 
-impl LocalStore {
-    /// Creates a new LocalStore with the given configuration.
-    pub fn new(config: LocalStoreConfig) -> Result<Self, LocalStoreError> {
-        // Create hot_cache directory if it doesn't exist
-        fs::create_dir_all(&config.hot_cache_dir)?;
+#[derive(Debug)]
+struct StoreState {
+    used_bytes: u64,
+    entries: HashMap<LocalChunkKey, CachedChunk>,
+    lru: VecDeque<LocalChunkKey>,
+    downloads: HashMap<LocalChunkKey, DownloadState>,
+}
 
+impl StoreState {
+    fn new() -> Self {
+        Self {
+            used_bytes: 0,
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+            downloads: HashMap::new(),
+        }
+    }
+
+    fn touch(&mut self, key: &LocalChunkKey) {
+        self.lru.push_back(key.clone());
+    }
+
+    fn is_downloading(&self, key: &LocalChunkKey) -> bool {
+        matches!(self.downloads.get(key), Some(DownloadState::InProgress))
+    }
+
+    fn start_download(&mut self, key: LocalChunkKey) -> bool {
+        use std::collections::hash_map::Entry;
+        match self.downloads.entry(key) {
+            Entry::Vacant(e) => {
+                e.insert(DownloadState::InProgress);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
+    fn finish_download(&mut self, key: &LocalChunkKey) {
+        self.downloads.remove(key);
+    }
+}
+
+/// On-disk cache of decompressed chunks.
+pub struct LocalChunkStore {
+    config: LocalChunkStoreConfig,
+    quota: Arc<ChunkStorageQuota>,
+    io: SharedIoDriver,
+    runtime: Arc<StorageRuntime>,
+    state: Mutex<StoreState>,
+    download_notify: Condvar,
+}
+
+impl fmt::Debug for LocalChunkStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalChunkStore")
+            .field("config", &self.config)
+            .field("quota", &self.quota)
+            .finish()
+    }
+}
+
+impl LocalChunkStore {
+    pub(crate) fn new(
+        config: LocalChunkStoreConfig,
+        quota: Arc<ChunkStorageQuota>,
+        io: SharedIoDriver,
+        runtime: Arc<StorageRuntime>,
+    ) -> Result<Self, LocalChunkStoreError> {
+        fs::create_dir_all(&config.root_dir)?;
         Ok(Self {
             config,
-            chunks: Arc::new(Mutex::new(HashMap::new())),
-            lru_order: Arc::new(Mutex::new(VecDeque::new())),
-            used_bytes: Arc::new(Mutex::new(0)),
+            quota,
+            io,
+            runtime,
+            state: Mutex::new(StoreState::new()),
+            download_notify: Condvar::new(),
         })
     }
 
-    /// Adds a chunk to the hot_cache.
-    ///
-    /// If quota is exceeded, evicts LRU chunks that are not manifest-referenced
-    /// or pinned.
-    pub fn add_chunk(
+    /// Returns the cached chunk handle if present.
+    pub fn get(&self, key: &LocalChunkKey) -> Option<LocalChunkHandle> {
+        let mut state = self.state.lock().expect("local chunk store mutex poisoned");
+        if let Some(handle) = state.entries.get_mut(key).map(|entry| {
+            entry.last_access = Instant::now();
+            LocalChunkHandle {
+                path: entry.path.clone(),
+                size_bytes: entry.size_bytes,
+            }
+        }) {
+            state.touch(key);
+            Some(handle)
+        } else {
+            None
+        }
+    }
+
+    pub async fn open_read_only(
         &self,
-        db_id: DbId,
-        chunk_id: ChunkId,
+        key: &LocalChunkKey,
+    ) -> Result<Box<dyn IoFile>, LocalChunkStoreError> {
+        let handle = self.get(key).ok_or(LocalChunkStoreError::ChunkNotFound {
+            chunk_id: key.chunk_id,
+            generation: key.generation,
+        })?;
+        self.open_with_options_async(handle.path, IoOpenOptions::read_only())
+            .await
+    }
+
+    pub async fn create_temp_writer(
+        &self,
+        key: &LocalChunkKey,
+    ) -> Result<(Box<dyn IoFile>, PathBuf), LocalChunkStoreError> {
+        let temp_path = self.temporary_path(key);
+        if let Some(parent) = temp_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = self
+            .open_with_options_async(temp_path.clone(), IoOpenOptions::write_only())
+            .await?;
+        Ok((file, temp_path))
+    }
+
+    async fn open_with_options_async(
+        &self,
         path: PathBuf,
-        manifest_referenced: bool,
-    ) -> Result<(), LocalStoreError> {
-        let metadata = fs::metadata(&path)?;
-        let size_bytes = metadata.len();
+        options: IoOpenOptions,
+    ) -> Result<Box<dyn IoFile>, LocalChunkStoreError> {
+        let driver = self.io.clone();
+        let handle = self.runtime.handle();
+        let options_clone = options.clone();
+        let path_clone = path.clone();
+        handle
+            .spawn_blocking(move || driver.open(path_clone.as_path(), &options_clone))
+            .await
+            .map_err(LocalChunkStoreError::TaskCancelled)?
+            .map_err(LocalChunkStoreError::IoDriver)
+    }
 
-        let mut old_path = None;
-        let mut reclaimed = 0u64;
+    /// Returns `true` if the chunk is currently cached.
+    pub fn contains(&self, key: &LocalChunkKey) -> bool {
+        let state = self.state.lock().expect("local chunk store mutex poisoned");
+        state.entries.contains_key(key)
+    }
 
+    /// Waits for a chunk to be available, either from cache or by waiting for an in-flight download.
+    /// Returns the handle if the chunk becomes available within a reasonable timeout.
+    pub fn get_or_wait(&self, key: &LocalChunkKey, timeout: Duration) -> Option<LocalChunkHandle> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().expect("local chunk store mutex poisoned");
+
+        loop {
+            // Check if chunk is already cached
+            if let Some(handle) = state.entries.get_mut(key).map(|entry| {
+                entry.last_access = Instant::now();
+                LocalChunkHandle {
+                    path: entry.path.clone(),
+                    size_bytes: entry.size_bytes,
+                }
+            }) {
+                state.touch(key);
+                return Some(handle);
+            }
+
+            // If not downloading, return None so caller can initiate download
+            if !state.is_downloading(key) {
+                return None;
+            }
+
+            // Wait for download to complete
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+
+            let (new_state, timeout_result) = self.download_notify
+                .wait_timeout(state, remaining)
+                .expect("local chunk store mutex poisoned");
+
+            state = new_state;
+
+            if timeout_result.timed_out() {
+                return None;
+            }
+        }
+    }
+
+    /// Hydrates a chunk into the cache from a reader containing uncompressed bytes.
+    /// This method coordinates with concurrent callers to ensure only one download happens.
+    pub fn insert_from_reader<R: Read + ?Sized>(
+        &self,
+        key: LocalChunkKey,
+        expected_len: u64,
+        reader: &mut R,
+    ) -> Result<LocalChunkHandle, LocalChunkStoreError> {
         {
-            let mut chunks = self.chunks.lock().unwrap();
-            if let Some(existing) = chunks.remove(&chunk_id) {
-                reclaimed = existing.size_bytes;
-                old_path = Some(existing.path);
+            let mut state = self.state.lock().expect("local chunk store mutex poisoned");
+            if let Some(handle) = state.entries.get_mut(&key).map(|entry| {
+                entry.last_access = Instant::now();
+                LocalChunkHandle {
+                    path: entry.path.clone(),
+                    size_bytes: entry.size_bytes,
+                }
+            }) {
+                state.touch(&key);
+                return Ok(handle);
+            }
+            if !state.start_download(key.clone()) {
+                return Err(LocalChunkStoreError::ChunkBusy {
+                    chunk_id: key.chunk_id,
+                    generation: key.generation,
+                });
             }
         }
 
-        if reclaimed > 0 {
-            let mut lru_order = self.lru_order.lock().unwrap();
-            if let Some(pos) = lru_order.iter().position(|id| *id == chunk_id) {
-                lru_order.remove(pos);
+        let reserve_guard = match self.quota.try_acquire(expected_len) {
+            Ok(guard) => guard,
+            Err(err) => {
+                let mut state = self.state.lock().expect("local chunk store mutex poisoned");
+                state.finish_download(&key);
+                self.download_notify.notify_all();
+                return Err(LocalChunkStoreError::GlobalQuota(err));
             }
-        }
-
-        if reclaimed > 0 {
-            let mut used_bytes = self.used_bytes.lock().unwrap();
-            *used_bytes = used_bytes.saturating_sub(reclaimed);
-        }
-
-        if let Some(old_path) = old_path {
-            if old_path != path {
-                let _ = fs::remove_file(&old_path);
-            }
-        }
-
-        // Evict chunks if necessary to make space
-        self.evict_to_fit(size_bytes)?;
-
-        let cached_chunk = CachedChunk {
-            db_id,
-            chunk_id,
-            path: path.clone(),
-            size_bytes,
-            last_access: SystemTime::now(),
-            manifest_referenced,
-            pin_count: 0,
         };
 
-        let mut chunks = self.chunks.lock().unwrap();
-        let mut lru_order = self.lru_order.lock().unwrap();
-        let mut used_bytes = self.used_bytes.lock().unwrap();
-
-        chunks.insert(chunk_id, cached_chunk);
-        lru_order.push_back(chunk_id);
-        *used_bytes = used_bytes.saturating_add(size_bytes);
-
-        Ok(())
-    }
-
-    /// Marks a chunk as manifest-referenced (protects from eviction).
-    pub fn mark_manifest_referenced(&self, chunk_id: ChunkId) {
-        let mut chunks = self.chunks.lock().unwrap();
-        if let Some(chunk) = chunks.get_mut(&chunk_id) {
-            chunk.manifest_referenced = true;
-        }
-    }
-
-    /// Marks a chunk as no longer manifest-referenced.
-    pub fn unmark_manifest_referenced(&self, chunk_id: ChunkId) {
-        let mut chunks = self.chunks.lock().unwrap();
-        if let Some(chunk) = chunks.get_mut(&chunk_id) {
-            chunk.manifest_referenced = false;
-        }
-    }
-
-    /// Increments the pin count for a chunk (protects from eviction).
-    ///
-    /// Future: This should be integrated with PageCache to track actual pins.
-    pub fn pin_chunk(&self, chunk_id: ChunkId) {
-        let mut chunks = self.chunks.lock().unwrap();
-        if let Some(chunk) = chunks.get_mut(&chunk_id) {
-            chunk.pin_count += 1;
-        }
-    }
-
-    /// Decrements the pin count for a chunk.
-    pub fn unpin_chunk(&self, chunk_id: ChunkId) {
-        let mut chunks = self.chunks.lock().unwrap();
-        if let Some(chunk) = chunks.get_mut(&chunk_id) {
-            if chunk.pin_count > 0 {
-                chunk.pin_count -= 1;
-            }
-        }
-    }
-
-    /// Evicts LRU chunks to fit the given size.
-    ///
-    /// # T7b: Eviction Policy
-    ///
-    /// - Evicts oldest chunks first (LRU)
-    /// - Skips manifest-referenced chunks
-    /// - Skips pinned chunks
-    /// - Skips chunks younger than min_eviction_age
-    fn evict_to_fit(&self, needed_bytes: u64) -> Result<(), LocalStoreError> {
-        let mut chunks = self.chunks.lock().unwrap();
-        let mut lru_order = self.lru_order.lock().unwrap();
-        let mut used_bytes = self.used_bytes.lock().unwrap();
-
-        let available = self.config.max_cache_bytes.saturating_sub(*used_bytes);
-        if available >= needed_bytes {
-            return Ok(()); // Already have space
+        let temp_path = self.temporary_path(&key);
+        let final_path = self.final_path(&key);
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent)?;
         }
 
-        let mut bytes_to_free = needed_bytes - available;
-        let now = SystemTime::now();
-        let min_age = self.config.min_eviction_age;
+        let mut temp_file = self
+            .io
+            .open(&temp_path, &IoOpenOptions::write_only())
+            .map_err(LocalChunkStoreError::IoDriver)?;
+        let _ = temp_file.allocate(0, expected_len);
+        let copied = write_stream_to_file(reader, temp_file.as_mut())?;
+        drop(temp_file);
 
-        // Iterate LRU order and evict candidates
-        let initial_size = lru_order.len();
-        let mut examined = 0;
-        let mut skipped_chunks = Vec::new();
-
-        while bytes_to_free > 0 && examined < initial_size {
-            let chunk_id = match lru_order.pop_front() {
-                Some(id) => id,
-                None => break,
-            };
-            examined += 1;
-
-            let chunk = match chunks.get(&chunk_id) {
-                Some(c) => c,
-                None => continue,
-            };
-
-            // Check eviction protection
-            let mut should_skip = false;
-
-            if chunk.manifest_referenced {
-                // Skip manifest-referenced chunks
-                should_skip = true;
-            } else if chunk.pin_count > 0 {
-                // Skip pinned chunks
-                should_skip = true;
-            } else if let Ok(age) = now.duration_since(chunk.last_access) {
-                if age < min_age {
-                    // Too young to evict
-                    should_skip = true;
-                }
-            }
-
-            if should_skip {
-                skipped_chunks.push(chunk_id);
-                continue;
-            }
-
-            // Evict this chunk
-            let size = chunk.size_bytes;
-            let path = chunk.path.clone();
-
-            chunks.remove(&chunk_id);
-            *used_bytes = used_bytes.saturating_sub(size);
-            bytes_to_free = bytes_to_free.saturating_sub(size);
-
-            // Delete file from disk
-            let _ = fs::remove_file(&path);
-        }
-
-        // Restore skipped chunks to the end of the queue
-        for chunk_id in skipped_chunks {
-            lru_order.push_back(chunk_id);
-        }
-
-        // Check if we freed enough space
-        let available = self.config.max_cache_bytes.saturating_sub(*used_bytes);
-        if available < needed_bytes {
-            return Err(LocalStoreError::QuotaExhausted {
-                used_bytes: *used_bytes,
-                quota_bytes: self.config.max_cache_bytes,
+        if copied != expected_len {
+            let _ = fs::remove_file(&temp_path);
+            let mut state = self.state.lock().expect("local chunk store mutex poisoned");
+            state.finish_download(&key);
+            self.download_notify.notify_all();
+            return Err(LocalChunkStoreError::UnexpectedLength {
+                expected_bytes: expected_len,
+                actual_bytes: copied,
             });
         }
 
-        Ok(())
+        fs::rename(&temp_path, &final_path)?;
+
+        let mut state = self.state.lock().expect("local chunk store mutex poisoned");
+        state.finish_download(&key);
+
+        if let Err(err) = self.evict_to_fit_with_lock(&mut state, expected_len) {
+            drop(state);
+            let _ = fs::remove_file(&final_path);
+            return Err(err);
+        }
+
+        let entry = CachedChunk {
+            key: key.clone(),
+            path: final_path.clone(),
+            size_bytes: expected_len,
+            inserted_at: Instant::now(),
+            last_access: Instant::now(),
+            quota_guard: reserve_guard,
+        };
+
+        state.used_bytes = state.used_bytes.saturating_add(expected_len);
+        state.entries.insert(key.clone(), entry);
+        state.touch(&key);
+
+        let handle = LocalChunkHandle {
+            path: final_path,
+            size_bytes: expected_len,
+        };
+
+        drop(state);
+        self.download_notify.notify_all();
+
+        Ok(handle)
     }
 
-    /// Returns the current cache usage in bytes.
-    pub fn used_bytes(&self) -> u64 {
-        *self.used_bytes.lock().unwrap()
-    }
+    fn evict_to_fit_with_lock(
+        &self,
+        state: &mut StoreState,
+        needed_bytes: u64,
+    ) -> Result<(), LocalChunkStoreError> {
+        let mut available = self.config.max_cache_bytes.saturating_sub(state.used_bytes);
 
-    /// Returns the number of cached chunks.
-    pub fn chunk_count(&self) -> usize {
-        self.chunks.lock().unwrap().len()
-    }
+        if available >= needed_bytes {
+            return Ok(());
+        }
 
-    /// Scans the hot_cache and removes chunks not tracked in metadata.
-    ///
-    /// Should be called periodically by a janitor task.
-    pub fn cleanup_orphaned(&self) -> Result<usize, LocalStoreError> {
-        let chunks = self.chunks.lock().unwrap();
-        let tracked_paths: std::collections::HashSet<_> =
-            chunks.values().map(|c| c.path.clone()).collect();
+        while available < needed_bytes {
+            let candidate = match state.lru.pop_front() {
+                Some(k) => k,
+                None => {
+                    return Err(LocalChunkStoreError::QuotaExhausted { needed_bytes });
+                }
+            };
 
-        let mut cleaned = 0;
-        for entry in fs::read_dir(&self.config.hot_cache_dir)? {
-            let entry = entry?;
-            let path = entry.path();
+            if state.is_downloading(&candidate) {
+                continue;
+            }
 
-            if path.is_file() && !tracked_paths.contains(&path) {
-                fs::remove_file(&path)?;
-                cleaned += 1;
+            let should_keep = if let Some(entry) = state.entries.get(&candidate) {
+                entry.inserted_at.elapsed() < self.config.min_eviction_age
+            } else {
+                false
+            };
+
+            if should_keep {
+                state.lru.push_back(candidate);
+                continue;
+            }
+
+            if let Some(entry) = state.entries.remove(&candidate) {
+                let _ = fs::remove_file(&entry.path);
+                let size = entry.size_bytes;
+                state.used_bytes = state.used_bytes.saturating_sub(size);
+                available = self.config.max_cache_bytes.saturating_sub(state.used_bytes);
+                // dropping entry releases the quota guard
             }
         }
 
-        Ok(cleaned)
+        Ok(())
     }
+
+    fn temporary_path(&self, key: &LocalChunkKey) -> PathBuf {
+        self.config.root_dir.join(format!(
+            "db_{:08}/chunk_{:08}_gen_{:08}.partial",
+            key.db_id, key.chunk_id, key.generation
+        ))
+    }
+
+    fn final_path(&self, key: &LocalChunkKey) -> PathBuf {
+        self.config.root_dir.join(format!(
+            "db_{:08}/chunk_{:08}_gen_{:08}.chunk",
+            key.db_id, key.chunk_id, key.generation
+        ))
+    }
+}
+
+fn write_stream_to_file<R: Read + ?Sized>(
+    reader: &mut R,
+    file: &mut dyn IoFile,
+) -> Result<u64, LocalChunkStoreError> {
+    let mut total = 0u64;
+    let mut offset = 0u64;
+    let mut buffer = [0u8; 1 << 20];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let io_vec = IoVec::new(&buffer[..read]);
+        let written = file
+            .writev_at(offset, &[io_vec])
+            .map_err(LocalChunkStoreError::IoDriver)?;
+        total = total.saturating_add(written as u64);
+        offset = offset.saturating_add(written as u64);
+    }
+    file.flush().map_err(LocalChunkStoreError::IoDriver)?;
+    Ok(total)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{IoBackendKind, IoRegistry};
+    use crate::runtime::{StorageRuntime, StorageRuntimeOptions};
     use tempfile::TempDir;
 
-    #[test]
-    fn local_store_add_and_evict() {
-        let temp = TempDir::new().unwrap();
-        let config = LocalStoreConfig {
-            hot_cache_dir: temp.path().to_path_buf(),
-            max_cache_bytes: 1000,
-            min_eviction_age: Duration::from_millis(0),
+    fn test_store(limit: u64) -> (TempDir, LocalChunkStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = LocalChunkStoreConfig {
+            root_dir: dir.path().join("cache"),
+            max_cache_bytes: limit,
+            min_eviction_age: Duration::from_secs(0),
         };
-
-        let store = LocalStore::new(config).unwrap();
-
-        // Add chunk 1 (500 bytes)
-        let chunk1_path = temp.path().join("chunk1.bin");
-        fs::write(&chunk1_path, vec![0u8; 500]).unwrap();
-        store.add_chunk(1, 1, chunk1_path, false).unwrap();
-        assert_eq!(store.used_bytes(), 500);
-        assert_eq!(store.chunk_count(), 1);
-
-        // Add chunk 2 (400 bytes) - should fit
-        let chunk2_path = temp.path().join("chunk2.bin");
-        fs::write(&chunk2_path, vec![0u8; 400]).unwrap();
-        store.add_chunk(1, 2, chunk2_path, false).unwrap();
-        assert_eq!(store.used_bytes(), 900);
-        assert_eq!(store.chunk_count(), 2);
-
-        // Add chunk 3 (300 bytes) - should evict chunk 1
-        let chunk3_path = temp.path().join("chunk3.bin");
-        fs::write(&chunk3_path, vec![0u8; 300]).unwrap();
-        store.add_chunk(1, 3, chunk3_path, false).unwrap();
-        assert_eq!(store.chunk_count(), 2); // Chunk 1 evicted
-        assert!(store.used_bytes() <= 1000);
+        let quota = ChunkStorageQuota::new(limit);
+        let runtime = StorageRuntime::create(StorageRuntimeOptions::default()).expect("runtime");
+        let registry = IoRegistry::new(IoBackendKind::Std);
+        let driver = registry.resolve(Some(IoBackendKind::Std)).expect("driver");
+        let store = LocalChunkStore::new(config, quota, driver, runtime).expect("store");
+        (dir, store)
     }
 
     #[test]
-    fn local_store_protects_manifest_referenced() {
-        let temp = TempDir::new().unwrap();
-        let config = LocalStoreConfig {
-            hot_cache_dir: temp.path().to_path_buf(),
-            max_cache_bytes: 1000,
-            min_eviction_age: Duration::from_millis(0),
-        };
+    fn insert_and_get_round_trip() {
+        let (_dir, store) = test_store(10 * 1024 * 1024);
+        let key = LocalChunkKey::new(1, 2, 3);
+        let mut data = &b"hello world"[..];
+        store
+            .insert_from_reader(key.clone(), data.len() as u64, &mut data)
+            .expect("insert");
 
-        let store = LocalStore::new(config).unwrap();
-
-        // Add chunk 1 (600 bytes, manifest-referenced)
-        let chunk1_path = temp.path().join("chunk1.bin");
-        fs::write(&chunk1_path, vec![0u8; 600]).unwrap();
-        store.add_chunk(1, 1, chunk1_path, true).unwrap();
-
-        // Add chunk 2 (300 bytes)
-        let chunk2_path = temp.path().join("chunk2.bin");
-        fs::write(&chunk2_path, vec![0u8; 300]).unwrap();
-        store.add_chunk(1, 2, chunk2_path, false).unwrap();
-
-        // Add chunk 3 (300 bytes) - should evict chunk 2, not chunk 1
-        let chunk3_path = temp.path().join("chunk3.bin");
-        fs::write(&chunk3_path, vec![0u8; 300]).unwrap();
-        store.add_chunk(1, 3, chunk3_path, false).unwrap();
-
-        // Chunk 1 should still be present (manifest-referenced)
-        assert_eq!(store.chunk_count(), 2);
+        let handle = store.get(&key).expect("fetch");
+        assert_eq!(handle.size_bytes, 11);
+        assert!(handle.path.exists());
     }
 
     #[test]
-    fn local_store_protects_pinned_chunks() {
-        let temp = TempDir::new().unwrap();
-        let config = LocalStoreConfig {
-            hot_cache_dir: temp.path().join("hot_cache"),
-            max_cache_bytes: 1000,
-            min_eviction_age: Duration::from_millis(0),
-        };
-
-        let store = LocalStore::new(config).unwrap();
-
-        // Add chunk 1 (600 bytes)
-        let chunk1_path = temp.path().join("chunk1.bin");
-        fs::write(&chunk1_path, vec![0u8; 600]).unwrap();
-        store.add_chunk(1, 1, chunk1_path, false).unwrap();
-
-        // Pin chunk 1
-        store.pin_chunk(1);
-
-        // Add chunk 2 (300 bytes)
-        let chunk2_path = temp.path().join("chunk2.bin");
-        fs::write(&chunk2_path, vec![0u8; 300]).unwrap();
-        store.add_chunk(1, 2, chunk2_path, false).unwrap();
-
-        // Now pin chunk 2 as well
-        store.pin_chunk(2);
-
-        // Try to add chunk 3 (300 bytes) - should fail because all chunks are pinned
-        let chunk3_path = temp.path().join("chunk3.bin");
-        fs::write(&chunk3_path, vec![0u8; 300]).unwrap();
-        let result = store.add_chunk(1, 3, chunk3_path, false);
-
-        // Should fail with quota exhausted (can't evict any pinned chunk)
-        assert!(result.is_err());
-
-        // Both chunks should still be present
-        assert_eq!(store.chunk_count(), 2);
+    fn busy_guard_is_reported() {
+        let (_dir, store) = test_store(10 * 1024 * 1024);
+        let key = LocalChunkKey::new(1, 2, 3);
+        {
+            let mut state = store.state.lock().unwrap();
+            state.start_download(key.clone());
+        }
+        let mut data = &b"hello"[..];
+        let err = store
+            .insert_from_reader(key.clone(), data.len() as u64, &mut data)
+            .unwrap_err();
+        assert!(matches!(err, LocalChunkStoreError::ChunkBusy { .. }));
     }
 
     #[test]
-    fn local_store_cleanup_orphaned() {
-        let temp = TempDir::new().unwrap();
-        let config = LocalStoreConfig {
-            hot_cache_dir: temp.path().to_path_buf(),
-            max_cache_bytes: 10000,
-            min_eviction_age: Duration::from_millis(0),
-        };
+    fn evicts_old_chunks() {
+        let (_dir, store) = test_store(10 * 1024 * 1024);
+        let key1 = LocalChunkKey::new(1, 1, 0);
+        let key2 = LocalChunkKey::new(1, 2, 0);
 
-        let store = LocalStore::new(config).unwrap();
+        let mut data1 = vec![0u8; 100];
+        let mut data2 = vec![0u8; 100];
 
-        // Create orphaned file
-        let orphaned_path = temp.path().join("orphaned.bin");
-        fs::write(&orphaned_path, vec![0u8; 100]).unwrap();
+        store
+            .insert_from_reader(key1.clone(), 100, &mut &data1[..])
+            .expect("insert 1");
+        store
+            .insert_from_reader(key2.clone(), 100, &mut &data2[..])
+            .expect("insert 2");
 
-        // Add tracked chunk
-        let chunk1_path = temp.path().join("chunk1.bin");
-        fs::write(&chunk1_path, vec![0u8; 100]).unwrap();
-        store.add_chunk(1, 1, chunk1_path.clone(), false).unwrap();
-
-        // Cleanup should remove orphaned file
-        let cleaned = store.cleanup_orphaned().unwrap();
-        assert_eq!(cleaned, 1);
-        assert!(!orphaned_path.exists());
-        assert!(chunk1_path.exists());
+        // Both chunks should be cached
+        assert!(store.get(&key1).is_some());
+        assert!(store.get(&key2).is_some());
     }
 }

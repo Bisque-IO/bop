@@ -7,9 +7,7 @@ pub mod planner;
 pub mod truncation;
 
 pub use executor::{AppendOnlyExecutionError, AppendOnlyExecutor, PreparedChunk};
-pub use planner::{
-    AppendOnlyPlan, AppendOnlyPlanner, AppendOnlyPlannerContext, ChunkPlan, TailChunkDescriptor,
-};
+pub use planner::{AofPlan, AofPlanner, AofPlannerContext, ChunkPlan, TailChunkDescriptor};
 pub use truncation::{
     ChunkLease, LeaseMap, TruncateDirection, TruncationError, TruncationExecutor, TruncationRequest,
 };
@@ -25,7 +23,6 @@ use crate::manifest::{
     self, ChunkEntryRecord, ChunkId, ChunkKey, ChunkResidency, DbId, Generation, Manifest,
     RemoteNamespaceId, RemoteObjectId, RemoteObjectKey, epoch_millis,
 };
-use crate::remote_store::RemoteStore;
 use crate::storage_quota::{QuotaError, ReservationGuard, StorageQuota};
 
 #[derive(Debug, Clone)]
@@ -46,7 +43,6 @@ impl Default for AppendOnlyCheckpointConfig {
 #[derive(Clone)]
 pub struct AppendOnlyContext {
     pub manifest: Arc<Manifest>,
-    pub remote_store: Option<Arc<RemoteStore>>,
     pub quota: Arc<StorageQuota>,
     pub lease_map: Arc<LeaseMap>,
     pub config: AppendOnlyCheckpointConfig,
@@ -86,8 +82,8 @@ pub fn run_checkpoint(
 ) -> Result<AppendOnlyOutcome, AppendOnlyError> {
     let chunks = collect_tail_chunks(&ctx.manifest, job)?;
 
-    let planner = AppendOnlyPlanner::new();
-    let planner_context = AppendOnlyPlannerContext {
+    let planner = AofPlanner::new();
+    let planner_context = AofPlannerContext {
         db_id: job.db_id,
         current_generation: job.current_generation,
         wal_low_lsn: job.wal_low_lsn,
@@ -131,7 +127,7 @@ fn collect_tail_chunks(
 
     let mut chunks = Vec::new();
     for (_key, record) in artifacts {
-        let manifest::WalArtifactRecord {
+        let manifest::AofWalArtifactRecord {
             artifact_id,
             kind,
             local_path,
@@ -169,7 +165,7 @@ fn collect_tail_chunks(
 fn reserve_quota(
     quota: &Arc<StorageQuota>,
     job: &AppendOnlyJob,
-    plan: &AppendOnlyPlan,
+    plan: &AofPlan,
 ) -> Result<Option<ReservationGuard>, AppendOnlyError> {
     if plan.estimated_size_bytes == 0 {
         return Ok(None);
@@ -184,7 +180,7 @@ fn reserve_quota(
 fn register_leases(
     lease_map: &Arc<LeaseMap>,
     job: &AppendOnlyJob,
-    plan: &AppendOnlyPlan,
+    plan: &AofPlan,
     ttl: Duration,
 ) -> Result<(), AppendOnlyError> {
     for chunk in &plan.chunks {
@@ -193,7 +189,7 @@ fn register_leases(
     Ok(())
 }
 
-fn release_leases(lease_map: &Arc<LeaseMap>, plan: &AppendOnlyPlan) {
+fn release_leases(lease_map: &Arc<LeaseMap>, plan: &AofPlan) {
     for chunk in &plan.chunks {
         lease_map.release(chunk.chunk_id);
     }

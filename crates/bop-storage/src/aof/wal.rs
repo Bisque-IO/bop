@@ -7,20 +7,21 @@ use thiserror::Error;
 
 use crate::{IoFile, IoVec};
 
-/// Write-ahead log facade for DB instances.
-/// Wal is broken down into Segments. The is always 1 tail segment where new records
+/// Write-ahead log for AOF (Append-Only File) instances.
+///
+/// The AOF WAL is broken down into segments. There is always 1 tail segment where new records
 /// are appended to and 1 segment that is archiving when checkpointing.
 ///
 /// Checkpointing involves sealing the current tail segment and starting a new tail segment.
 /// Then, the old tail segment can be archived by merging Slabs (zstd compressed) in with Chunk files
-/// and uploading to S3 storage.
+/// and uploading to remote storage.
 #[derive(Debug)]
-pub struct Wal {
+pub struct AofWal {
     last_sequence: AtomicU64,
 }
 
-impl Wal {
-    /// Create a new WAL handle.
+impl AofWal {
+    /// Create a new AOF WAL handle.
     pub fn new() -> Self {
         Self {
             last_sequence: AtomicU64::new(0),
@@ -32,28 +33,27 @@ impl Wal {
         self.last_sequence.store(sequence, Ordering::Relaxed);
     }
 
-    /// Produce a diagnostic snapshot of WAL progress.
-    pub fn diagnostics(&self) -> WalDiagnostics {
-        WalDiagnostics {
+    /// Produce a diagnostic snapshot of AOF WAL progress.
+    pub fn diagnostics(&self) -> AofWalDiagnostics {
+        AofWalDiagnostics {
             last_sequence: self.last_sequence(),
         }
     }
 
-    /// Return the most recent sequence number tracked by this WAL.
+    /// Return the most recent sequence number tracked by this AOF WAL.
     pub fn last_sequence(&self) -> u64 {
         self.last_sequence.load(Ordering::Relaxed)
     }
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct WalDiagnostics {
+pub struct AofWalDiagnostics {
     pub last_sequence: u64,
 }
 
-/// Borrowed or owned chunk of WAL bytes scheduled for I/O.
+/// Owned chunk of WAL bytes scheduled for I/O.
 pub enum WriteChunk {
     Owned(Vec<u8>),
-    Borrowed(IoVec<'static>),
     Raw {
         ptr: *const u8,
         len: usize,
@@ -68,8 +68,20 @@ impl fmt::Debug for WriteChunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WriteChunk::Owned(data) => f.debug_tuple("Owned").field(&data.len()).finish(),
-            WriteChunk::Borrowed(_) => f.debug_tuple("Borrowed").finish(),
             WriteChunk::Raw { len, .. } => f.debug_tuple("Raw").field(len).finish(),
+        }
+    }
+}
+
+impl Clone for WriteChunk {
+    fn clone(&self) -> Self {
+        match self {
+            WriteChunk::Owned(data) => WriteChunk::Owned(data.clone()),
+            WriteChunk::Raw { ptr, len, .. } => {
+                // SAFETY: ptr is valid for reads of len bytes
+                let slice = unsafe { std::slice::from_raw_parts(*ptr, *len) };
+                WriteChunk::Owned(slice.to_vec())
+            }
         }
     }
 }
@@ -79,7 +91,6 @@ impl WriteChunk {
     pub fn len(&self) -> usize {
         match self {
             WriteChunk::Owned(data) => data.len(),
-            WriteChunk::Borrowed(vec) => vec.len(),
             WriteChunk::Raw { len, .. } => *len,
         }
     }
@@ -93,7 +104,6 @@ impl WriteChunk {
     pub fn as_io_vec(&self) -> IoVec<'_> {
         match self {
             WriteChunk::Owned(data) => IoVec::new(data.as_slice()),
-            WriteChunk::Borrowed(vec) => *vec,
             WriteChunk::Raw { ptr, len, .. } => {
                 // The caller promises the pointer is valid for reads while the chunk is alive.
                 // SAFETY: guaranteed by WriteChunk::Raw construction contract.
@@ -207,6 +217,35 @@ impl WalSegmentBuffers {
         Some(std::mem::take(&mut *guard))
     }
 
+    /// Atomically swap active and standby buffers and take the data for writing.
+    /// This is called by the write controller to get data without explicit staging.
+    fn take_active_batch(&self) -> Option<WriteBatch> {
+        let active_idx = self.active.load(Ordering::Acquire);
+        let standby_idx = 1 - active_idx;
+
+        // Lock both buffers (we need to hold both locks to prevent races)
+        let (mut active_guard, _standby_guard) = if active_idx == 0 {
+            let first = self.slots[0].lock().expect("wal buffer mutex poisoned");
+            let second = self.slots[1].lock().expect("wal buffer mutex poisoned");
+            (first, second)
+        } else {
+            let first = self.slots[0].lock().expect("wal buffer mutex poisoned");
+            let second = self.slots[1].lock().expect("wal buffer mutex poisoned");
+            (second, first)
+        };
+
+        // If active is empty, nothing to take
+        if active_guard.is_empty() {
+            return None;
+        }
+
+        // Swap active to standby atomically
+        self.active.store(standby_idx, Ordering::Release);
+
+        // Take the data from what was active (now standby)
+        Some(std::mem::take(&mut *active_guard))
+    }
+
     fn staged_len(&self) -> usize {
         let index = self.staged.load(Ordering::Acquire);
         if index == STAGED_NONE {
@@ -275,8 +314,8 @@ impl QueueInstrumentation {
     }
 }
 
-/// WAL segment state machine tracking logical offsets and buffering for writes/flushes.
-pub struct WalSegment {
+/// AOF WAL segment state machine tracking logical offsets and buffering for writes/flushes.
+pub struct AofWalSegment {
     io: Arc<dyn IoFile>,
     base_offset: u64,
     preallocated_size: AtomicU64,
@@ -292,10 +331,20 @@ pub struct WalSegment {
 
     last_write_batch_bytes: AtomicUsize,
     last_flush_duration_ns: AtomicU64,
+
+    // Write rate tracking for adaptive chunk sizing
+    created_at_micros: u64,
+    total_bytes_written: AtomicU64,
+    write_rate_bytes_per_sec: AtomicU64,
 }
 
-impl WalSegment {
+impl AofWalSegment {
     pub fn new(io: Arc<dyn IoFile>, base_offset: u64, preallocated_size: u64) -> Self {
+        let created_at_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+
         Self {
             io,
             base_offset,
@@ -309,6 +358,9 @@ impl WalSegment {
             flush_queue: QueueInstrumentation::default(),
             last_write_batch_bytes: AtomicUsize::new(0),
             last_flush_duration_ns: AtomicU64::new(0),
+            created_at_micros,
+            total_bytes_written: AtomicU64::new(0),
+            write_rate_bytes_per_sec: AtomicU64::new(0),
         }
     }
 
@@ -345,7 +397,7 @@ impl WalSegment {
         self.preallocated_size.fetch_add(bytes, Ordering::AcqRel);
     }
 
-    pub fn reserve_pending(&self, bytes: u64) -> Result<(), WalSegmentError> {
+    pub fn reserve_pending(&self, bytes: u64) -> Result<(), AofWalSegmentError> {
         loop {
             let written = self.written_size.load(Ordering::Acquire);
             let pending = self.pending_size.load(Ordering::Acquire);
@@ -353,15 +405,15 @@ impl WalSegment {
 
             let new_pending = pending
                 .checked_add(bytes)
-                .ok_or(WalSegmentError::IntegerOverflow)?;
+                .ok_or(AofWalSegmentError::IntegerOverflow)?;
             let committed = written
                 .checked_add(new_pending)
-                .ok_or(WalSegmentError::IntegerOverflow)?;
+                .ok_or(AofWalSegmentError::IntegerOverflow)?;
 
             if committed > preallocated {
                 let occupied = written.saturating_add(pending);
                 let available = preallocated.saturating_sub(occupied);
-                return Err(WalSegmentError::InsufficientCapacity { bytes, available });
+                return Err(AofWalSegmentError::InsufficientCapacity { bytes, available });
             }
 
             match self.pending_size.compare_exchange(
@@ -376,11 +428,11 @@ impl WalSegment {
         }
     }
 
-    pub fn release_pending(&self, bytes: u64) -> Result<(), WalSegmentError> {
+    pub fn release_pending(&self, bytes: u64) -> Result<(), AofWalSegmentError> {
         loop {
             let current = self.pending_size.load(Ordering::Acquire);
             if current < bytes {
-                return Err(WalSegmentError::PendingUnderflow { current, bytes });
+                return Err(AofWalSegmentError::PendingUnderflow { current, bytes });
             }
             let next = current - bytes;
             match self.pending_size.compare_exchange(
@@ -395,14 +447,14 @@ impl WalSegment {
         }
     }
 
-    pub fn mark_written(&self, bytes: u64) -> Result<(), WalSegmentError> {
+    pub fn mark_written(&self, bytes: u64) -> Result<(), AofWalSegmentError> {
         loop {
             let current = self.written_size.load(Ordering::Acquire);
             let next = current
                 .checked_add(bytes)
-                .ok_or(WalSegmentError::IntegerOverflow)?;
+                .ok_or(AofWalSegmentError::IntegerOverflow)?;
             if next > self.preallocated_size() {
-                return Err(WalSegmentError::WrittenExceedsPreallocated { next });
+                return Err(AofWalSegmentError::WrittenExceedsPreallocated { next });
             }
             match self.written_size.compare_exchange(
                 current,
@@ -410,16 +462,43 @@ impl WalSegment {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    // Update write rate tracking
+                    self.update_write_rate(bytes);
+                    return Ok(());
+                }
                 Err(_) => continue,
             }
         }
     }
 
-    pub fn mark_durable(&self, new_durable: u64) -> Result<(), WalSegmentError> {
+    fn update_write_rate(&self, bytes_written: u64) {
+        // Update total bytes written
+        self.total_bytes_written.fetch_add(bytes_written, Ordering::Relaxed);
+
+        // Calculate elapsed time since segment creation
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+
+        let elapsed_micros = now_micros.saturating_sub(self.created_at_micros);
+        if elapsed_micros == 0 {
+            return;
+        }
+
+        // Calculate write rate: bytes per second
+        let total_bytes = self.total_bytes_written.load(Ordering::Relaxed);
+        let elapsed_secs = elapsed_micros as f64 / 1_000_000.0;
+        let rate_bytes_per_sec = (total_bytes as f64 / elapsed_secs) as u64;
+
+        self.write_rate_bytes_per_sec.store(rate_bytes_per_sec, Ordering::Relaxed);
+    }
+
+    pub fn mark_durable(&self, new_durable: u64) -> Result<(), AofWalSegmentError> {
         let written = self.written_size();
         if new_durable > written {
-            return Err(WalSegmentError::DurableBeyondWritten {
+            return Err(AofWalSegmentError::DurableBeyondWritten {
                 written,
                 new_durable,
             });
@@ -427,7 +506,7 @@ impl WalSegment {
         loop {
             let current = self.durable_size.load(Ordering::Acquire);
             if new_durable < current {
-                return Err(WalSegmentError::DurableRegression {
+                return Err(AofWalSegmentError::DurableRegression {
                     current,
                     new_durable,
                 });
@@ -457,6 +536,11 @@ impl WalSegment {
 
     pub fn take_staged_batch(&self) -> Option<WriteBatch> {
         self.buffers.take_staged()
+    }
+
+    /// Atomically take the active batch for writing (no staging required).
+    pub fn take_active_batch(&self) -> Option<WriteBatch> {
+        self.buffers.take_active_batch()
     }
 
     pub fn restore_active_batch(&self, batch: WriteBatch) {
@@ -507,9 +591,19 @@ impl WalSegment {
         self.flush_queue.depth()
     }
 
-    pub fn request_flush(&self, durable_target: u64) -> Result<bool, WalSegmentError> {
+    /// Returns the current write rate in bytes per second.
+    pub fn write_rate_bytes_per_sec(&self) -> u64 {
+        self.write_rate_bytes_per_sec.load(Ordering::Relaxed)
+    }
+
+    /// Returns the timestamp when this segment was created (microseconds since UNIX epoch).
+    pub fn created_at_micros(&self) -> u64 {
+        self.created_at_micros
+    }
+
+    pub fn request_flush(&self, durable_target: u64) -> Result<bool, AofWalSegmentError> {
         if durable_target > self.written_size() {
-            return Err(WalSegmentError::DurableBeyondWritten {
+            return Err(AofWalSegmentError::DurableBeyondWritten {
                 written: self.written_size(),
                 new_durable: durable_target,
             });
@@ -560,8 +654,8 @@ impl WalSegment {
         Duration::from_nanos(self.last_flush_duration_ns.load(Ordering::Relaxed))
     }
 
-    pub fn snapshot(&self) -> WalSegmentSnapshot {
-        WalSegmentSnapshot {
+    pub fn snapshot(&self) -> AofWalSegmentSnapshot {
+        AofWalSegmentSnapshot {
             preallocated_size: self.preallocated_size(),
             pending_size: self.pending_size(),
             written_size: self.written_size(),
@@ -572,11 +666,13 @@ impl WalSegment {
             last_write_batch_bytes: self.last_write_batch_bytes(),
             last_flush_duration: self.last_flush_duration(),
             staged_bytes: self.staged_bytes(),
+            created_at_micros: self.created_at_micros,
+            write_rate_bytes_per_sec: self.write_rate_bytes_per_sec(),
         }
     }
 }
 
-impl fmt::Debug for WalSegment {
+impl fmt::Debug for AofWalSegment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WalSegment")
             .field("base_offset", &self.base_offset)
@@ -590,7 +686,7 @@ impl fmt::Debug for WalSegment {
 }
 
 #[derive(Debug, Clone)]
-pub struct WalSegmentSnapshot {
+pub struct AofWalSegmentSnapshot {
     pub preallocated_size: u64,
     pub pending_size: u64,
     pub written_size: u64,
@@ -601,10 +697,12 @@ pub struct WalSegmentSnapshot {
     pub last_write_batch_bytes: usize,
     pub last_flush_duration: Duration,
     pub staged_bytes: usize,
+    pub created_at_micros: u64,
+    pub write_rate_bytes_per_sec: u64,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum WalSegmentError {
+pub enum AofWalSegmentError {
     #[error("integer overflow while updating segment state")]
     IntegerOverflow,
     #[error("segment lacks capacity for reservation: requested={bytes} available={available}")]
@@ -623,11 +721,11 @@ fn total_chunk_len(chunks: &[WriteChunk]) -> usize {
     chunks.iter().map(WriteChunk::len).sum()
 }
 
-impl fmt::Display for WalSegmentSnapshot {
+impl fmt::Display for AofWalSegmentSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "WalSegmentSnapshot(preallocated={}, pending={}, written={}, durable={}, staged={}, write_queue={}, flush_queue={}, pending_flush_target={}, last_batch={}, last_flush_ns={})",
+            "AofWalSegmentSnapshot(preallocated={}, pending={}, written={}, durable={}, staged={}, write_queue={}, flush_queue={}, pending_flush_target={}, last_batch={}, last_flush_ns={})",
             self.preallocated_size,
             self.pending_size,
             self.written_size,
@@ -669,8 +767,8 @@ mod tests {
         }
     }
 
-    fn segment(preallocated: u64) -> WalSegment {
-        WalSegment::new(Arc::new(NoopIoFile::default()), 0, preallocated)
+    fn segment(preallocated: u64) -> AofWalSegment {
+        AofWalSegment::new(Arc::new(NoopIoFile::default()), 0, preallocated)
     }
 
     #[test]
@@ -742,7 +840,7 @@ mod tests {
         let segment = segment(512);
         segment.mark_written(256).unwrap();
         match segment.request_flush(300) {
-            Err(WalSegmentError::DurableBeyondWritten {
+            Err(AofWalSegmentError::DurableBeyondWritten {
                 written,
                 new_durable,
             }) => {

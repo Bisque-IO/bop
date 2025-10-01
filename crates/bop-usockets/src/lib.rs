@@ -1,3 +1,4 @@
+#![feature(thread_id_value)]
 #![allow(dead_code)]
 
 #[cfg(feature = "usockets-udp")]

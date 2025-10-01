@@ -4,7 +4,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::page_cache::{
+use super::page_cache::{
     PageCache, PageCacheKey, PageCacheMetricsSnapshot, allocate_cache_object_id,
 };
 use dashmap::DashMap;
@@ -587,7 +587,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    use crate::page_cache::{PageCache, PageCacheConfig, PageCacheKey, allocate_cache_object_id};
+    use crate::libsql::page_cache::{PageCache, PageCacheConfig, PageCacheKey, allocate_cache_object_id};
 
     #[derive(Default)]
     struct MockWalHook {

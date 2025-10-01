@@ -6,7 +6,7 @@
 //! The moodycamel concurrent queue is one of the fastest lock-free queues
 //! available, and this wrapper provides safe Rust access to it.
 
-use bop_mpmc::mpmc::{ArcQueue, BlockingQueue, BoxQueue, MpmcResult, Queue};
+use bop_mpmc::{ArcQueue, BlockingQueue, BoxQueue, MpmcResult, Queue};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};

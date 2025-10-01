@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::IoFile;
 use crate::runtime::StorageRuntime;
-use crate::wal::{WalSegment, WalSegmentError, WriteBatch, WriteChunk};
+use crate::aof::{AofWalSegment, AofWalSegmentError, WriteBatch, WriteChunk};
 
 /// Configuration options for the write controller.
 #[derive(Debug, Clone)]
@@ -89,8 +89,8 @@ impl From<crate::IoError> for WriteProcessError {
     }
 }
 
-impl From<WalSegmentError> for WriteProcessError {
-    fn from(value: WalSegmentError) -> Self {
+impl From<AofWalSegmentError> for WriteProcessError {
+    fn from(value: AofWalSegmentError) -> Self {
         Self::Segment(value.to_string())
     }
 }
@@ -294,7 +294,7 @@ impl WriteController {
         }
     }
 
-    pub fn enqueue(&self, segment: Arc<WalSegment>) -> Result<(), WriteScheduleError> {
+    pub fn enqueue(&self, segment: Arc<AofWalSegment>) -> Result<(), WriteScheduleError> {
         self.schedule(segment)
     }
 
@@ -317,21 +317,17 @@ impl WriteController {
         }
     }
 
-    fn schedule(&self, segment: Arc<WalSegment>) -> Result<(), WriteScheduleError> {
+    fn schedule(&self, segment: Arc<AofWalSegment>) -> Result<(), WriteScheduleError> {
         if self.state.is_shutdown() || self.state.runtime.is_shutdown() {
             return Err(WriteScheduleError::Closed);
         }
 
         self.state.try_acquire_slot()?;
 
-        let depth = self.state.pending.fetch_add(1, Ordering::AcqRel) + 1;
-        if !segment.try_enqueue_write(depth) {
-            self.state.pending.fetch_sub(1, Ordering::AcqRel);
-            self.state.release_slot();
-            return Ok(());
-        }
-
         self.state.metrics.record_enqueued();
+
+        let depth = self.state.pending.fetch_add(1, Ordering::AcqRel) + 1;
+        segment.update_write_queue_depth(depth);
 
         if self
             .sender
@@ -340,7 +336,6 @@ impl WriteController {
         {
             self.state.pending.fetch_sub(1, Ordering::AcqRel);
             self.state.release_slot();
-            segment.clear_write_queue();
             return Err(WriteScheduleError::Closed);
         }
 
@@ -509,9 +504,9 @@ impl WriteControllerMetrics {
 
 #[derive(Debug)]
 enum WriteTask {
-    Segment(Arc<WalSegment>),
+    Segment(Arc<AofWalSegment>),
     Completion {
-        segment: Arc<WalSegment>,
+        segment: Arc<AofWalSegment>,
         result: Result<usize, WriteProcessError>,
     },
     Shutdown,
@@ -525,7 +520,7 @@ fn spawn_write_worker(
     thread::Builder::new()
         .name("bop-storage-write".into())
         .spawn(move || {
-            let mut backlog: VecDeque<Arc<WalSegment>> = VecDeque::new();
+            let mut backlog: VecDeque<Arc<AofWalSegment>> = VecDeque::new();
             let mut active = 0usize;
             let mut shutting_down = false;
             let max_concurrent = state.max_concurrent;
@@ -624,7 +619,7 @@ fn spawn_write_worker(
 fn spawn_write_job(
     state: &Arc<WriteControllerState>,
     sender: &MTx<WriteTask>,
-    segment: Arc<WalSegment>,
+    segment: Arc<AofWalSegment>,
 ) {
     let runtime = state.runtime.clone();
     let sender = sender.clone();
@@ -634,9 +629,9 @@ fn spawn_write_job(
     });
 }
 
-fn run_write_job(segment: Arc<WalSegment>) -> Result<usize, WriteProcessError> {
+fn run_write_job(segment: Arc<AofWalSegment>) -> Result<usize, WriteProcessError> {
     let batch = segment
-        .take_staged_batch()
+        .take_active_batch()
         .ok_or(WriteProcessError::MissingBatch)?;
 
     let expected = batch_len(&batch);
@@ -799,8 +794,8 @@ mod tests {
         StorageRuntime::create(StorageRuntimeOptions::default()).expect("create runtime")
     }
 
-    fn wal_segment(io: Arc<dyn IoFile>, preallocated: u64) -> Arc<WalSegment> {
-        Arc::new(WalSegment::new(io, 0, preallocated))
+    fn wal_segment(io: Arc<dyn IoFile>, preallocated: u64) -> Arc<AofWalSegment> {
+        Arc::new(AofWalSegment::new(io, 0, preallocated))
     }
 
     #[test]
@@ -859,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn processes_staged_batch() {
+    fn processes_active_batch() {
         let runtime = runtime();
         let controller = WriteController::new(runtime.clone(), WriteControllerConfig::default());
         let io = Arc::new(MockIoFile::default());
@@ -867,7 +862,6 @@ mod tests {
 
         segment.reserve_pending(3).unwrap();
         segment.with_active_batch(|batch| batch.push(WriteChunk::Owned(vec![1, 2, 3])));
-        segment.stage_active_batch().unwrap();
 
         controller.enqueue(segment.clone()).unwrap();
 
@@ -890,18 +884,16 @@ mod tests {
 
         segment.reserve_pending(3).unwrap();
         segment.with_active_batch(|batch| batch.push(WriteChunk::Owned(vec![1, 2, 3])));
-        segment.stage_active_batch().unwrap();
 
         controller.enqueue(segment.clone()).unwrap();
 
-        // allow worker to observe failure
-        wait_for(|| segment.staged_bytes() == 0, Duration::from_secs(1));
+        // Wait a bit for the write to be attempted and fail
+        std::thread::sleep(Duration::from_millis(50));
 
         assert_eq!(segment.pending_size(), 3);
         assert_eq!(segment.written_size(), 0);
 
-        // restage and succeed
-        segment.stage_active_batch().unwrap();
+        // The batch was restored, enqueue again to retry
         controller.enqueue(segment.clone()).unwrap();
         wait_for(|| segment.written_size() == 3, Duration::from_secs(1));
         assert_eq!(segment.pending_size(), 0);
@@ -924,7 +916,6 @@ mod tests {
         for segment in &segments {
             segment.reserve_pending(1).unwrap();
             segment.with_active_batch(|batch| batch.push(WriteChunk::Owned(vec![1])));
-            segment.stage_active_batch().unwrap();
         }
 
         controller.enqueue(segments[0].clone()).unwrap();

@@ -6,15 +6,17 @@ use crossfire::{MTx, Rx, mpsc};
 use dashmap::{DashMap, mapref::entry::Entry};
 use thiserror::Error;
 
-use crate::db::{DB, DBInner, DbConfig, DbDiagnostics, DbId};
+use crate::aof::{Aof, AofConfig, AofDiagnostics, AofId, AofInner};
+use crate::chunk_quota::ChunkStorageQuota;
 use crate::flush::FlushControllerSnapshot;
 use crate::io::{IoBackendKind, IoError, IoRegistry, IoResult, SharedIoDriver};
+use crate::local_store::LocalChunkStoreError;
 use crate::manifest::{Manifest, ManifestError};
-use crate::page_cache::{PageCache, PageCacheConfig, PageCacheKey, PageCacheMetricsSnapshot};
 use crate::runtime::{StorageRuntime, StorageRuntimeOptions};
 use crate::write::WriteControllerSnapshot;
 
 const DEFAULT_QUEUE_CAPACITY: usize = 64;
+const DEFAULT_CHUNK_CACHE_LIMIT_BYTES: u64 = 64 * 1024 * 1024 * 1024; // 64 GiB
 
 type ManagerJob = Box<dyn FnOnce() + Send + 'static>;
 
@@ -30,17 +32,19 @@ pub struct ManagerClosedError;
 pub enum ManagerError {
     #[error("manager is closed")]
     Closed,
-    #[error("database already open: {0}")]
-    DbAlreadyExists(DbId),
-    #[error("database not found: {0}")]
-    DbNotFound(DbId),
+    #[error("aof already open: {0}")]
+    AofAlreadyExists(AofId),
+    #[error("aof not found: {0}")]
+    AofNotFound(AofId),
     #[error(transparent)]
     Io(#[from] IoError),
+    #[error("chunk store error: {0}")]
+    ChunkStore(LocalChunkStoreError),
 }
 
 #[derive(Debug, Clone)]
 pub struct ControllerDiagnostics {
-    pub db_id: DbId,
+    pub aof_id: AofId,
     pub write: WriteControllerSnapshot,
     pub flush: FlushControllerSnapshot,
 }
@@ -49,9 +53,8 @@ pub struct ControllerDiagnostics {
 pub struct ManagerDiagnostics {
     pub active_pods: usize,
     pub jobs_executed: u64,
-    pub page_cache: PageCacheMetricsSnapshot,
     pub default_io_backend: IoBackendKind,
-    pub pods: Vec<DbDiagnostics>,
+    pub pods: Vec<AofDiagnostics>,
     pub controllers: Vec<ControllerDiagnostics>,
 }
 
@@ -63,13 +66,13 @@ pub struct Manager {
 pub(crate) struct ManagerInner {
     sender: MTx<ManagerCommand>,
     worker: Mutex<Option<JoinHandle<()>>>,
-    pods: DashMap<DbId, Arc<DBInner>>,
+    pods: DashMap<AofId, Arc<AofInner>>,
     closed: AtomicBool,
     jobs_executed: AtomicU64,
-    page_cache: Arc<PageCache<PageCacheKey>>,
     io_registry: IoRegistry,
     runtime: Arc<StorageRuntime>,
     manifest: Arc<Manifest>,
+    chunk_quota: Arc<ChunkStorageQuota>,
     next_db_id: AtomicU32,
 }
 
@@ -82,34 +85,30 @@ impl Manager {
 
     /// Create a manager using the provided manifest handle and queue capacity.
     pub fn with_capacity(manifest: Arc<Manifest>, capacity: usize) -> Self {
-        Self::with_capacity_and_cache(manifest, capacity, PageCacheConfig::default())
+        Self::with_capacity_and_cache(manifest, capacity)
     }
 
     /// Create a manager with explicit queue capacity, cache configuration, and shared manifest.
-    pub fn with_capacity_and_cache(
-        manifest: Arc<Manifest>,
-        capacity: usize,
-        cache_config: PageCacheConfig,
-    ) -> Self {
-        Self::with_capacity_cache_backend(manifest, capacity, cache_config, IoBackendKind::Std)
+    pub fn with_capacity_and_cache(manifest: Arc<Manifest>, capacity: usize) -> Self {
+        Self::with_capacity_cache_backend(manifest, capacity, IoBackendKind::Std)
     }
 
     /// Create a manager with explicit queue, cache, manifest, and default I/O backend configuration.
     pub fn with_capacity_cache_backend(
         manifest: Arc<Manifest>,
         capacity: usize,
-        cache_config: PageCacheConfig,
         default_backend: IoBackendKind,
     ) -> Self {
         let (sender, receiver) = mpsc::bounded_blocking(capacity.max(1));
         let runtime = StorageRuntime::create(StorageRuntimeOptions::default())
             .expect("failed to initialize storage runtime");
+        let chunk_quota = ChunkStorageQuota::new(DEFAULT_CHUNK_CACHE_LIMIT_BYTES);
         let inner = Arc::new(ManagerInner::new(
             sender,
-            cache_config,
             default_backend,
             runtime,
             manifest,
+            chunk_quota,
         ));
         let worker = spawn_worker(receiver, Arc::downgrade(&inner));
         *inner.worker.lock().expect("manager worker mutex poisoned") = Some(worker);
@@ -130,32 +129,34 @@ impl Manager {
     }
 
     /// Open or register a storage pod described by `config`.
-    pub fn open_db(&self, mut config: DbConfig) -> Result<DB, ManagerError> {
+    pub fn open_db(&self, mut config: AofConfig) -> Result<Aof, ManagerError> {
         if self.inner.is_closed() {
             return Err(ManagerError::Closed);
         }
 
         let db_id = if let Some(id) = config.id() {
-            self.inner.observe_explicit_db_id(id);
+            self.inner.observe_explicit_aof_id(id);
             id
         } else {
-            let id = self.inner.allocate_db_id();
+            let id = self.inner.allocate_aof_id();
             config.assign_id(id);
             id
         };
 
         match self.inner.pods.entry(db_id) {
-            Entry::Occupied(_) => Err(ManagerError::DbAlreadyExists(db_id)),
+            Entry::Occupied(_) => Err(ManagerError::AofAlreadyExists(db_id)),
             Entry::Vacant(entry) => {
                 let driver = self.inner.resolve_io(config.io_backend())?;
-                let pod = DBInner::bootstrap(
+                let pod = AofInner::bootstrap(
                     config,
                     driver,
                     self.inner.clone(),
                     self.inner.runtime(),
                     self.inner.manifest.clone(),
-                );
-                let handle = DB::from_arc(pod.clone());
+                    self.inner.chunk_quota(),
+                )
+                .map_err(ManagerError::ChunkStore)?;
+                let handle = Aof::from_arc(pod.clone());
                 entry.insert(pod);
                 Ok(handle)
             }
@@ -163,20 +164,20 @@ impl Manager {
     }
 
     /// Fetch an already-opened pod by identifier.
-    pub fn get_db(&self, id: &DbId) -> Option<DB> {
+    pub fn get_db(&self, id: &AofId) -> Option<Aof> {
         self.inner
             .pods
             .get(id)
-            .map(|pod| DB::from_arc(pod.value().clone()))
+            .map(|pod| Aof::from_arc(pod.value().clone()))
     }
 
     /// Close a pod and remove it from the registry.
-    pub fn close_db(&self, id: &DbId) -> Result<(), ManagerError> {
+    pub fn close_db(&self, id: &AofId) -> Result<(), ManagerError> {
         let removed = self
             .inner
             .pods
             .remove(id)
-            .ok_or_else(|| ManagerError::DbNotFound(id.clone()))?;
+            .ok_or_else(|| ManagerError::AofNotFound(id.clone()))?;
         let (_, pod) = removed;
         pod.close();
         Ok(())
@@ -203,7 +204,7 @@ impl Manager {
         let controllers = pods
             .iter()
             .map(|pod| ControllerDiagnostics {
-                db_id: pod.id,
+                aof_id: pod.id,
                 write: pod.write_controller.clone(),
                 flush: pod.flush_controller.clone(),
             })
@@ -212,7 +213,6 @@ impl Manager {
         ManagerDiagnostics {
             active_pods: pods.len(),
             jobs_executed: self.inner.jobs_executed(),
-            page_cache: self.inner.page_cache.metrics(),
             default_io_backend: self.inner.default_io_backend(),
             pods,
             controllers,
@@ -222,7 +222,7 @@ impl Manager {
     /// Seed the database id allocator from the manifest's current maximum id.
     pub fn seed_db_ids_from_manifest(&self, manifest: &Manifest) -> Result<(), ManifestError> {
         if let Some(max_id) = manifest.max_db_id()? {
-            self.inner.observe_explicit_db_id(DbId::new(max_id));
+            self.inner.observe_explicit_aof_id(AofId::new(max_id));
         }
         Ok(())
     }
@@ -231,10 +231,10 @@ impl Manager {
 impl ManagerInner {
     fn new(
         sender: MTx<ManagerCommand>,
-        cache_config: PageCacheConfig,
         default_backend: IoBackendKind,
         runtime: Arc<StorageRuntime>,
         manifest: Arc<Manifest>,
+        chunk_quota: Arc<ChunkStorageQuota>,
     ) -> Self {
         Self {
             sender,
@@ -242,10 +242,10 @@ impl ManagerInner {
             pods: DashMap::new(),
             closed: AtomicBool::new(false),
             jobs_executed: AtomicU64::new(0),
-            page_cache: Arc::new(PageCache::new(cache_config)),
             io_registry: IoRegistry::new(default_backend),
             runtime,
             manifest,
+            chunk_quota,
             next_db_id: AtomicU32::new(0),
         }
     }
@@ -271,6 +271,10 @@ impl ManagerInner {
         self.io_registry.default_backend()
     }
 
+    fn chunk_quota(&self) -> Arc<ChunkStorageQuota> {
+        self.chunk_quota.clone()
+    }
+
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
@@ -293,7 +297,7 @@ impl ManagerInner {
     }
 
     fn clear_pods(&self) {
-        let keys: Vec<DbId> = self.pods.iter().map(|entry| entry.key().clone()).collect();
+        let keys: Vec<AofId> = self.pods.iter().map(|entry| entry.key().clone()).collect();
         for key in keys {
             if let Some((_, pod)) = self.pods.remove(&key) {
                 pod.close();
@@ -303,10 +307,6 @@ impl ManagerInner {
 
     fn shutdown_runtime(&self) {
         self.runtime.shutdown();
-    }
-
-    pub(crate) fn page_cache(&self) -> Arc<PageCache<PageCacheKey>> {
-        self.page_cache.clone()
     }
 
     pub(crate) fn runtime(&self) -> Arc<StorageRuntime> {
@@ -321,19 +321,19 @@ impl ManagerInner {
         self.jobs_executed.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn deregister_pod(&self, id: &DbId) {
+    pub(crate) fn deregister_pod(&self, id: &AofId) {
         self.pods.remove(id);
     }
 
-    fn allocate_db_id(&self) -> DbId {
+    fn allocate_aof_id(&self) -> AofId {
         let next = self
             .next_db_id
             .fetch_add(1, Ordering::SeqCst)
             .saturating_add(1);
-        DbId::new(next)
+        AofId::new(next)
     }
 
-    fn observe_explicit_db_id(&self, id: DbId) {
+    fn observe_explicit_aof_id(&self, id: AofId) {
         let mut current = self.next_db_id.load(Ordering::SeqCst);
         let target = id.get();
         while target > current {
@@ -380,7 +380,7 @@ fn spawn_worker(receiver: Rx<ManagerCommand>, inner: Weak<ManagerInner>) -> Join
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{DbConfig, DbId};
+    use crate::aof::{AofConfig, AofId};
     use crate::manifest::{Manifest, ManifestOptions};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn open_and_fetch_pod() {
         let (manager, _guard) = test_manager();
-        let config = DbConfig::builder("pod-open").build();
+        let config = AofConfig::builder("pod-open").build();
         let db = manager.open_db(config).expect("open");
         let db_id = db.id();
         assert_eq!(manager.default_io_backend(), IoBackendKind::Std);
@@ -416,11 +416,11 @@ mod tests {
     #[test]
     fn duplicate_open_returns_error() {
         let (manager, _guard) = test_manager();
-        let config = DbConfig::builder("dup").id(DbId::new(42)).build();
+        let config = AofConfig::builder("dup").id(AofId::new(42)).build();
         manager.open_db(config.clone()).expect("first open");
         let result = manager.open_db(config);
         match result {
-            Err(ManagerError::DbAlreadyExists(id)) => assert_eq!(id.get(), 42),
+            Err(ManagerError::AofAlreadyExists(id)) => assert_eq!(id.get(), 42),
             Err(other) => panic!("expected duplicate error, got {other:?}"),
             Ok(_) => panic!("expected duplicate error, got Ok"),
         }
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn shutdown_deregisters_pods() {
         let (manager, _guard) = test_manager();
-        let config = DbConfig::builder("shutdown").build();
+        let config = AofConfig::builder("shutdown").build();
         let db = manager.open_db(config).expect("open");
         let db_id = db.id();
         manager.shutdown();
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn submit_job_can_access_pod() {
         let (manager, _guard) = test_manager();
-        let config = DbConfig::builder("job").build();
+        let config = AofConfig::builder("job").build();
         let db = manager.open_db(config).expect("open");
         let db_id = db.id();
 
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn requesting_unavailable_backend_returns_error() {
         let (manager, _guard) = test_manager();
-        let config = DbConfig::builder("io-uring")
+        let config = AofConfig::builder("io-uring")
             .io_backend(IoBackendKind::IoUring)
             .build();
 
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn diagnostics_capture_pod_metrics() {
         let (manager, _guard) = test_manager();
-        let config = DbConfig::builder("diag").build();
+        let config = AofConfig::builder("diag").build();
         let db = manager.open_db(config).expect("open");
         let db_id = db.id();
         assert_eq!(db.name(), "diag");
@@ -498,12 +498,12 @@ mod tests {
         assert_eq!(pod.io_backend, IoBackendKind::Std);
         assert_eq!(pod.name, "diag");
         assert_eq!(pod.wal.last_sequence, 1);
-        assert!(pod.page_store.cache_object_id > 0);
+        assert!(!pod.is_closed);
         assert_eq!(diagnostics.controllers.len(), 1);
         let controller = diagnostics
             .controllers
             .iter()
-            .find(|c| c.db_id == db_id)
+            .find(|c| c.aof_id == db_id)
             .expect("controller diagnostics");
         assert_eq!(
             controller.write.pending_queue_depth,
@@ -525,10 +525,9 @@ mod tests {
         let manager = Manager::with_capacity_cache_backend(
             manifest,
             DEFAULT_QUEUE_CAPACITY,
-            PageCacheConfig::default(),
             IoBackendKind::DirectIo,
         );
-        let config = DbConfig::builder("direct-diag")
+        let config = AofConfig::builder("direct-diag")
             .io_backend(IoBackendKind::DirectIo)
             .build();
 
@@ -563,7 +562,7 @@ mod tests {
     #[test]
     fn close_db_removes_pod() {
         let (manager, _guard) = test_manager();
-        let config = DbConfig::builder("close").build();
+        let config = AofConfig::builder("close").build();
         let db = manager.open_db(config).expect("open");
         let db_id = db.id();
         manager.close_db(&db_id).expect("close");
@@ -573,15 +572,15 @@ mod tests {
 
     #[test]
     fn seed_db_ids_from_manifest_uses_max_id() {
-        use crate::manifest::{DbDescriptorRecord, ManifestOptions};
+        use crate::manifest::{AofDescriptorRecord, ManifestOptions};
 
         let (manager, _guard) = test_manager();
         let dir = tempfile::tempdir().expect("tempdir");
         let manifest = Manifest::open(dir.path(), ManifestOptions::default()).expect("manifest");
 
         let mut txn = manifest.begin();
-        txn.put_db(3, DbDescriptorRecord::default());
-        txn.put_db(7, DbDescriptorRecord::default());
+        txn.put_aof_db(3, AofDescriptorRecord::default());
+        txn.put_aof_db(7, AofDescriptorRecord::default());
         txn.commit().expect("commit");
 
         manager
@@ -589,7 +588,7 @@ mod tests {
             .expect("seed ids");
 
         let db = manager
-            .open_db(DbConfig::builder("seeded").build())
+            .open_db(AofConfig::builder("seeded").build())
             .expect("open");
 
         assert_eq!(db.id().get(), 8);

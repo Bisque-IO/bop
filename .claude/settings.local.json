@@ -30,7 +30,13 @@
       "Bash(cargo build:*)",
       "Bash(git checkout:*)",
       "Bash(cargo fmt:*)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test --lib local_store::tests::evicts_old_chunks)",
+      "Bash(git mv:*)",
+      "Bash(git rm:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(python3:*)"
     ],
     "deny": [],
     "ask": []
