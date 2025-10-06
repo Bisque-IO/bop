@@ -268,7 +268,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> MpmcBlocking<T
         if empty {
             self.inner
                 .waker
-                .try_clear_word_bit_if_empty(signal.index(), signal.value());
+                .try_unmark_if_empty(signal.index(), signal.value());
             // self.inner.waker.decrement();
         }
 
@@ -315,8 +315,8 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> MpmcBlocking<T
     }
 
     /// Get or create the thread-local SPSC queue for this producer
-    pub fn get_producer_queue(&self) -> (*const SegSpsc<T, P, NUM_SEGS_P2>, usize) {
-        self.with_producer_queue(|producer, producer_id| {
+    pub fn get_local_producer(&self) -> (*const SegSpsc<T, P, NUM_SEGS_P2>, usize) {
+        self.with_local_producer(|producer, producer_id| {
             (producer as *const SegSpsc<T, P, NUM_SEGS_P2>, producer_id)
         })
     }
@@ -329,7 +329,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> MpmcBlocking<T
     /// # Safety
     ///
     /// The closure should not store the queue reference beyond its execution.
-    pub fn with_producer_queue<F, R>(&self, f: F) -> R
+    pub fn with_local_producer<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&SegSpsc<T, P, NUM_SEGS_P2>, usize) -> R,
     {
@@ -455,7 +455,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> MpmcBlocking<T
             return Err(PushError::Closed(value));
         }
 
-        self.with_producer_queue(|queue, _| queue.try_push(value))
+        self.with_local_producer(|queue, _| queue.try_push(value))
     }
 
     /// Push a value onto the queue (spins if full)
@@ -467,7 +467,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> MpmcBlocking<T
             return Err(PushError::Closed(value));
         }
 
-        self.with_producer_queue(move |queue, _| {
+        self.with_local_producer(move |queue, _| {
             // Spin until we can push
             loop {
                 if let Ok(()) = queue.try_push(value) {
@@ -484,7 +484,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> MpmcBlocking<T
             return Err(PushError::Closed(()));
         }
 
-        self.with_producer_queue(|queue, _| queue.try_push_n(values))
+        self.with_local_producer(|queue, _| queue.try_push_n(values))
     }
 
     /// Create a new producer handle that bypasses all thread-local caching
@@ -772,7 +772,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> MpmcBlocking<T
             if empty {
                 self.inner
                     .waker
-                    .try_clear_word_bit_if_empty(signal.index(), signal.value());
+                    .try_unmark_if_empty(signal.index(), signal.value());
                 // self.inner.waker.decrement();
             }
 
@@ -892,7 +892,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> MpmcBlocking<T
                 if empty {
                     self.inner
                         .waker
-                        .try_clear_word_bit_if_empty(signal.index(), signal.value());
+                        .try_unmark_if_empty(signal.index(), signal.value());
                     // self.inner.waker.decrement();
                 }
                 continue;

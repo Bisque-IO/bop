@@ -447,35 +447,3 @@ fn main() {
     println!("Benchmark complete!");
     println!("{}", "=".repeat(70));
 }
-
-/*
---- Multi-Drain Blocking Tests ---
-
-MPMC blocking multi-drain: QUEUE_SIZE = 8192, PRODUCERS = 16, DRAINERS = 8, ITEMS_PER_PRODUCER = 20,000,000, BATCH_SIZE = 8192
-Producer 15 pushed all
-Producer 13 pushed all
-Producer 12 pushed all
-Producer 14 pushed all
-Producer 11 pushed all
-Producer 5 pushed all
-Producer 10 pushed all
-Producer 9 pushed all
-Producer 8 pushed all
-Producer 7 pushed all
-Producer 0 pushed all
-Producer 6 pushed all
-Producer 2 pushed all
-Producer 1 pushed all
-Producer 4 pushed all
-Producer 3 pushed all
-Drainer 7 drained 40498795 items
-Drainer 5 drained 39562197 items
-Drainer 4 drained 42888561 items
-Drainer 3 drained 40540362 items
-Drainer 6 drained 43004840 items
-Drainer 1 drained 38828938 items
-Drainer 2 drained 36755296 items
-Drainer 0 drained 37921011 items
-Multi-Drain Blocking MPMC<8192,16 prod,8 drain>:       0.97 ns/op      1,025,661,736 ops/sec
-Expected items: 320000000, Actual drained: 320000000
-*/

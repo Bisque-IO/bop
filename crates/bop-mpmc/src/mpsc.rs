@@ -38,7 +38,7 @@ struct Slot<T> {
 ///   which makes it in particular possible to support queues with a capacity of
 ///   1 without special-casing.
 ///
-pub(super) struct Queue<T> {
+pub(super) struct MpscQueue<T> {
     /// Buffer position of the slot to which the next value will be written.
     ///
     /// The position stores the buffer index in the least significant bits and a
@@ -65,9 +65,9 @@ pub(super) struct Queue<T> {
     closed_channel_mask: usize,
 }
 
-impl<T> Queue<T> {
+impl<T> MpscQueue<T> {
     /// Creates a new `Inner`.
-    pub(super) fn new(capacity: usize) -> Queue<T> {
+    pub fn new(capacity: usize) -> MpscQueue<T> {
         assert!(capacity >= 1, "the capacity must be 1 or greater");
 
         assert!(
@@ -88,7 +88,7 @@ impl<T> Queue<T> {
         let closed_channel_mask = capacity.next_power_of_two();
         let right_mask = (closed_channel_mask << 1).wrapping_sub(1);
 
-        Queue {
+        MpscQueue {
             enqueue_pos: CachePadded::new(AtomicUsize::new(0)),
             dequeue_pos: CachePadded::new(UnsafeCell::new(0)),
             buffer: buffer.into(),
@@ -98,7 +98,7 @@ impl<T> Queue<T> {
     }
 
     /// Attempts to push an item in the queue.
-    pub(super) fn push(&self, value: T) -> Result<(), PushError<T>> {
+    pub fn push(&self, value: T) -> Result<(), PushError<T>> {
         let mut enqueue_pos = self.enqueue_pos.load(Ordering::Relaxed);
 
         loop {
@@ -171,16 +171,19 @@ impl<T> Queue<T> {
 
             // Only this thread can access the dequeue position so there is no
             // need to increment the position atomically with a `fetch_add`.
-            self.dequeue_pos
-                .with_mut(|p| *p = self.next_queue_pos(dequeue_pos));
+            unsafe {
+                self.dequeue_pos
+                    .with_mut(|p| *p = self.next_queue_pos(dequeue_pos));
 
-            // Read the value from the slot and set the stamp to the value of
-            // the dequeue position increased by one sequence increment.
-            let value = slot.value.with(|v| v.read().assume_init());
-            slot.stamp
-                .store(stamp.wrapping_add(self.right_mask), Ordering::Release);
+                // Read the value from the slot and set the stamp to the value of
+                // the dequeue position increased by one sequence increment.
+                let value = slot.value.with(|v| v.read().assume_init());
 
-            Ok(value)
+                slot.stamp
+                    .store(stamp.wrapping_add(self.right_mask), Ordering::Release);
+
+                Ok(value)
+            }
         } else {
             // Check whether the queue was closed. Even if the closed flag is
             // set and the slot is empty, there might still be a producer that
@@ -253,7 +256,7 @@ impl<T> Queue<T> {
         }
     }
 }
-impl<T> Drop for Queue<T> {
+impl<T> Drop for MpscQueue<T> {
     fn drop(&mut self) {
         // Drop all values in the queue.
         //
@@ -263,8 +266,8 @@ impl<T> Drop for Queue<T> {
     }
 }
 
-unsafe impl<T: Send> Send for Queue<T> {}
-unsafe impl<T: Send> Sync for Queue<T> {}
+unsafe impl<T: Send> Send for MpscQueue<T> {}
+unsafe impl<T: Send> Sync for MpscQueue<T> {}
 
 #[cfg(all(test, any(not(miri))))]
 mod test_utils {
@@ -276,7 +279,7 @@ mod test_utils {
     ///
     /// This is a safe queue producer proxy used for testing purposes only.
     pub(super) struct Producer<T> {
-        inner: crate::loom_exports::sync::Arc<Queue<T>>,
+        inner: crate::loom_exports::sync::Arc<MpscQueue<T>>,
     }
     impl<T> Producer<T> {
         /// Attempts to push an item into the queue.
@@ -307,7 +310,7 @@ mod test_utils {
     ///
     /// This is a safe queue consumer proxy used for testing purposes only.
     pub(super) struct Consumer<T> {
-        inner: crate::loom_exports::sync::Arc<Queue<T>>,
+        inner: crate::loom_exports::sync::Arc<MpscQueue<T>>,
     }
     impl<T> Consumer<T> {
         /// Attempts to pop an item from the queue.
@@ -324,7 +327,7 @@ mod test_utils {
     }
 
     pub(super) fn queue<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
-        let inner = crate::loom_exports::sync::Arc::new(Queue::new(capacity));
+        let inner = crate::loom_exports::sync::Arc::new(MpscQueue::new(capacity));
 
         let producer = Producer {
             inner: inner.clone(),

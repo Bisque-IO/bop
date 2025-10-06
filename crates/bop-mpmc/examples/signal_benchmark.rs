@@ -2,7 +2,7 @@
 //!
 //! Benchmarks different implementations of find_nearest functions for signal bit selection.
 
-use bop_mpmc::signal::{
+use bop_mpmc::bits::{
     find_nearest_by_distance, find_nearest_by_distance_branchless, find_nearest_by_distance0,
     find_nearest_set_bit,
 };
