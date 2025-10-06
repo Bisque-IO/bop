@@ -16,8 +16,8 @@ use thiserror::Error;
 use tracing::{debug, error, instrument, trace, warn};
 
 use crate::IoFile;
-use crate::runtime::StorageRuntime;
 use crate::aof::{AofWalSegment, AofWalSegmentError, WriteBatch, WriteChunk};
+use crate::runtime::StorageRuntime;
 
 /// Configuration options for the write controller.
 #[derive(Debug, Clone)]

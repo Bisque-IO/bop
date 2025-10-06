@@ -13,14 +13,19 @@ mod vfs;
 mod virtual_wal;
 
 pub use libsql_ffi::RefCountedWalManager;
-pub use page_cache::{PageCache, PageCacheConfig, PageCacheKey, PageCacheMetricsSnapshot, PageCacheNamespace, allocate_cache_object_id};
+pub use page_cache::{
+    PageCache, PageCacheConfig, PageCacheKey, PageCacheMetricsSnapshot, PageCacheNamespace,
+    allocate_cache_object_id,
+};
 pub use vfs::{LibsqlVfs, LibsqlVfsBuilder, LibsqlVfsConfig, LibsqlVfsError};
 pub use virtual_wal::{
     LibsqlVirtualWal, LibsqlVirtualWalError, LibsqlWalHook, LibsqlWalHookError, VirtualWalConfig,
 };
 
 /// Identifier for a LibSQL database instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct LibSqlId(u32);
 
 impl LibSqlId {

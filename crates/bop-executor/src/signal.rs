@@ -17,6 +17,7 @@ pub struct Signal {
 
 struct SignalInner {
     value: AtomicU64,
+    _pad: [u8; 120],
 }
 
 impl Signal {
@@ -28,22 +29,27 @@ impl Signal {
         Self {
             inner: Arc::new(SignalInner {
                 value: AtomicU64::new(value),
+                _pad: [0; 120],
             }),
         }
     }
 
+    #[inline(always)]
     pub fn load(&self, ordering: Ordering) -> u64 {
         self.inner.value.load(ordering)
     }
 
+    #[inline(always)]
     pub fn size(&self) -> u64 {
         self.load(Ordering::Relaxed).count_ones() as u64
     }
 
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.load(Ordering::Relaxed).count_ones() == 0
     }
 
+    #[inline(always)]
     pub fn set(&self, index: u64) -> SignalSetResult {
         let bit = 1u64 << index;
         let previous = self.inner.value.fetch_or(bit, Ordering::AcqRel);
@@ -53,12 +59,14 @@ impl Signal {
         }
     }
 
+    #[inline(always)]
     pub fn acquire(&self, index: u64) -> bool {
         let bit = 1u64 << index;
         let previous = self.inner.value.fetch_and(!bit, Ordering::AcqRel);
         (previous & bit) == bit
     }
 
+    #[inline(always)]
     pub fn is_set(&self, index: u64) -> bool {
         let bit = 1u64 << index;
         (self.load(Ordering::Relaxed) & bit) != 0

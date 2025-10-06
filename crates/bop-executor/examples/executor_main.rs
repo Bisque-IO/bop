@@ -1,5 +1,5 @@
 use std::hint::spin_loop;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -198,9 +198,13 @@ fn run_slot_demo() {
     let slot = group
         .reserve()
         .expect("signal group should provide at least one slot");
+    let slot2 = group
+        .reserve()
+        .expect("signal group should provide at least two slots");
+    slot2.schedule();
 
     unsafe fn reschedule(_: *mut ()) -> SlotState {
-        SlotState::Idle
+        SlotState::Scheduled
     }
     slot.set_worker(reschedule, std::ptr::null_mut());
 
@@ -209,27 +213,74 @@ fn run_slot_demo() {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_worker = Arc::clone(&stop);
     let worker_slot = Arc::clone(&slot);
+    let worker_slot2 = Arc::clone(&worker_slot);
+
+    let counter = Arc::new(AtomicU64::new(0));
+    let signal_test = Arc::new(AtomicU64::new(0));
 
     thread::scope(|scope| {
+        let cnt = Arc::clone(&counter);
         scope.spawn(move || {
-            while !stop_worker.load(Ordering::Relaxed) {
-                if signal.acquire(index) {
-                    worker_slot.execute();
-                } else {
-                    spin_loop();
-                }
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                println!("waker count: {}", counter.swap(0, Ordering::Relaxed));
             }
         });
+        // scope.spawn(move || {
+        //     loop {
+        //         if signal.acquire(index) {
+        //             worker_slot.execute();
+        //         } else {
+        //             // spin_loop();
+        //             // spin_loop();
+        //             // spin_loop();
+        //             // spin_loop();
+        //             // spin_loop();
+        //         }
+        //     }
+        // });
+
+        for _ in 0..1 {
+            let my_slot = Arc::clone(&worker_slot);
+            let signal_test0 = Arc::clone(&signal_test);
+            scope.spawn(move || {
+                loop {
+                    // my_slot.schedule();
+                    signal_test0.store(1, Ordering::SeqCst);
+                    // std::hint::spin_loop();
+                }
+            });
+        }
 
         let schedule_slot = Arc::clone(&slot);
-        benchmark("slot::schedule", 8, 5, 100_000_000, move |_, _, _| {
-            let _ = schedule_slot.schedule();
+        schedule_slot.schedule();
+        let sig = schedule_slot.signal().clone();
+
+        benchmark("slot::schedule", 1, 5, 1_000_000_000, move |_, _, _| {
+            // let _ = schedule_slot.schedule();
+            // if sig.acquire(index) {
+            //     schedule_slot.execute();
+            //     cnt.fetch_add(1, Ordering::Relaxed);
+            // }
+
+            if signal_test.swap(0, Ordering::SeqCst) == 1 {
+                // schedule_slot.execute();
+                cnt.fetch_add(1, Ordering::SeqCst);
+            } else {
+                std::hint::spin_loop();
+                // std::hint::spin_loop();
+                // std::hint::spin_loop();
+                // std::hint::spin_loop();
+                // std::hint::spin_loop();
+            }
+            // let _ = schedule_slot.count();
         });
 
         stop.store(true, Ordering::Relaxed);
     });
 
     println!("waker counter {}", slot.waker().load());
+    println!("waker counter {}", slot.count());
 }
 
 fn main() {

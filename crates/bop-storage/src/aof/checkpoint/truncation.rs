@@ -338,8 +338,7 @@ impl LeaseMap {
                 if poll_count % 10 == 0 {
                     debug!(
                         elapsed_ms = elapsed.as_millis(),
-                        poll_count,
-                        "still waiting for blocking leases to clear"
+                        poll_count, "still waiting for blocking leases to clear"
                     );
                 }
 
@@ -351,8 +350,7 @@ impl LeaseMap {
                 // Not blocked - truncation can proceed
                 info!(
                     elapsed_ms = start.elapsed().as_millis(),
-                    poll_count,
-                    "truncation unblocked, can proceed"
+                    poll_count, "truncation unblocked, can proceed"
                 );
                 return Ok(());
             }
@@ -371,7 +369,11 @@ impl LeaseMap {
         let removed = before_count - after_count;
 
         if removed > 0 {
-            debug!(removed_count = removed, remaining_count = after_count, "cleaned up expired leases");
+            debug!(
+                removed_count = removed,
+                remaining_count = after_count,
+                "cleaned up expired leases"
+            );
         } else {
             trace!("no expired leases to clean up");
         }
@@ -530,7 +532,10 @@ impl TruncationExecutor {
         // by a separate GC job that reads the change_log.
 
         // Step 5: Return affected chunks
-        info!(deleted_count = affected.len(), "truncation execution completed successfully");
+        info!(
+            deleted_count = affected.len(),
+            "truncation execution completed successfully"
+        );
         Ok(affected)
     }
 

@@ -288,7 +288,11 @@ impl WalSegmentBuffers {
             .lock()
             .expect("wal buffer mutex poisoned");
         if guard.is_empty() {
-            trace!(bytes, chunks = batch.len(), "restored batch to active buffer");
+            trace!(
+                bytes,
+                chunks = batch.len(),
+                "restored batch to active buffer"
+            );
             *guard = batch;
             return;
         }
@@ -489,8 +493,7 @@ impl AofWalSegment {
             if current < bytes {
                 error!(
                     bytes,
-                    current,
-                    "pending underflow: attempting to release more than reserved"
+                    current, "pending underflow: attempting to release more than reserved"
                 );
                 return Err(AofWalSegmentError::PendingUnderflow { current, bytes });
             }
@@ -550,7 +553,8 @@ impl AofWalSegment {
 
     fn update_write_rate(&self, bytes_written: u64) {
         // Update total bytes written
-        self.total_bytes_written.fetch_add(bytes_written, Ordering::Relaxed);
+        self.total_bytes_written
+            .fetch_add(bytes_written, Ordering::Relaxed);
 
         // Calculate elapsed time since segment creation
         let now_micros = std::time::SystemTime::now()
@@ -568,7 +572,8 @@ impl AofWalSegment {
         let elapsed_secs = elapsed_micros as f64 / 1_000_000.0;
         let rate_bytes_per_sec = (total_bytes as f64 / elapsed_secs) as u64;
 
-        self.write_rate_bytes_per_sec.store(rate_bytes_per_sec, Ordering::Relaxed);
+        self.write_rate_bytes_per_sec
+            .store(rate_bytes_per_sec, Ordering::Relaxed);
     }
 
     #[instrument(skip(self))]
@@ -782,8 +787,7 @@ impl AofWalSegment {
         } else {
             trace!(
                 durable_target,
-                previous,
-                "flush already pending with higher target"
+                previous, "flush already pending with higher target"
             );
         }
         Ok(needs_flush)

@@ -79,7 +79,10 @@ impl AofCursor {
 
     /// Set the timeout for waiting on chunk hydration.
     pub fn with_hydration_timeout(mut self, timeout: Duration) -> Self {
-        trace!(timeout_ms = timeout.as_millis(), "setting hydration timeout");
+        trace!(
+            timeout_ms = timeout.as_millis(),
+            "setting hydration timeout"
+        );
         self.hydration_timeout = timeout;
         self
     }
@@ -118,7 +121,11 @@ impl AofCursor {
         debug!(target_chunk_id, "loading new chunk for seek operation");
         self.load_chunk(target_chunk_id)?;
         self.current_lsn = lsn;
-        debug!(lsn, chunk_id = target_chunk_id, "seek completed successfully");
+        debug!(
+            lsn,
+            chunk_id = target_chunk_id,
+            "seek completed successfully"
+        );
 
         Ok(())
     }
@@ -157,27 +164,33 @@ impl AofCursor {
         let to_read = buf.len().min(remaining_in_chunk);
 
         if to_read == 0 {
-            warn!(chunk_id, position = self.current_lsn, "at chunk boundary, no bytes to read");
+            warn!(
+                chunk_id,
+                position = self.current_lsn,
+                "at chunk boundary, no bytes to read"
+            );
             return Ok(0);
         }
 
-        let file = self.current_chunk_file.as_mut()
-            .ok_or_else(|| {
-                error!(chunk_id, "chunk file not loaded");
-                AofReaderError::ChunkNotFound(chunk_id)
-            })?;
+        let file = self.current_chunk_file.as_mut().ok_or_else(|| {
+            error!(chunk_id, "chunk file not loaded");
+            AofReaderError::ChunkNotFound(chunk_id)
+        })?;
 
         // Read from the file at the correct offset
         trace!(chunk_offset, to_read, "reading from chunk file");
         let io_buf = IoVecMut::new(&mut buf[..to_read]);
-        let read = file.readv_at(chunk_offset, &mut [io_buf])
-            .map_err(|e| {
-                error!(error = ?e, chunk_id, chunk_offset, to_read, "I/O read failed");
-                AofReaderError::IoDriver(e)
-            })?;
+        let read = file.readv_at(chunk_offset, &mut [io_buf]).map_err(|e| {
+            error!(error = ?e, chunk_id, chunk_offset, to_read, "I/O read failed");
+            AofReaderError::IoDriver(e)
+        })?;
 
         self.current_lsn += read as u64;
-        debug!(bytes_read = read, new_position = self.current_lsn, "read completed successfully");
+        debug!(
+            bytes_read = read,
+            new_position = self.current_lsn,
+            "read completed successfully"
+        );
 
         Ok(read)
     }
@@ -204,7 +217,11 @@ impl AofCursor {
                 )));
             }
             offset += read;
-            trace!(offset, remaining = buf.len() - offset, "partial read in read_exact");
+            trace!(
+                offset,
+                remaining = buf.len() - offset,
+                "partial read in read_exact"
+            );
         }
         debug!(bytes_read = buf.len(), "exact read completed successfully");
         Ok(())
@@ -235,7 +252,11 @@ impl AofCursor {
 
         // Wait if another thread is downloading
         trace!("chunk not in cache, waiting for concurrent download if in progress");
-        if let Some(handle) = self.aof.local_chunks.get_or_wait(&key, self.hydration_timeout) {
+        if let Some(handle) = self
+            .aof
+            .local_chunks
+            .get_or_wait(&key, self.hydration_timeout)
+        {
             debug!(path = ?handle.path, size_bytes = handle.size_bytes, "chunk became available after waiting");
             self.open_chunk_file(chunk_id, handle)?;
             return Ok(());
@@ -262,13 +283,10 @@ impl AofCursor {
 
         // Try to ensure the chunk is available
         // This is a simplified version - full implementation would query manifest
-        let _remote_store = self.aof.remote_chunks.as_ref()
-            .ok_or_else(|| {
-                error!("no remote chunk store configured");
-                AofReaderError::HydrationFailed(
-                    "no remote chunk store configured".to_string()
-                )
-            })?;
+        let _remote_store = self.aof.remote_chunks.as_ref().ok_or_else(|| {
+            error!("no remote chunk store configured");
+            AofReaderError::HydrationFailed("no remote chunk store configured".to_string())
+        })?;
 
         // TODO: Query manifest for chunk metadata to build RemoteChunkSpec
         // For now, return an error
@@ -287,13 +305,17 @@ impl AofCursor {
         handle: LocalChunkHandle,
     ) -> Result<(), AofReaderError> {
         trace!("opening chunk file for reading");
-        let file = self.aof.io.open(
-            handle.path.as_path(),
-            &crate::io::IoOpenOptions::read_only(),
-        ).map_err(|e| {
-            error!(error = ?e, "failed to open chunk file");
-            e
-        })?;
+        let file = self
+            .aof
+            .io
+            .open(
+                handle.path.as_path(),
+                &crate::io::IoOpenOptions::read_only(),
+            )
+            .map_err(|e| {
+                error!(error = ?e, "failed to open chunk file");
+                e
+            })?;
 
         self.current_chunk_id = Some(chunk_id);
         self.current_chunk_handle = Some(handle);
@@ -322,14 +344,16 @@ impl AofCursor {
 
 impl Read for AofCursor {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        trace!(buf_len = buf.len(), position = self.current_lsn, "Read trait implementation called");
-        self.read(buf).map_err(|e| {
-            match e {
-                AofReaderError::Io(io_err) => io_err,
-                other => {
-                    error!(error = ?other, "converting AofReaderError to io::Error");
-                    io::Error::new(io::ErrorKind::Other, other)
-                }
+        trace!(
+            buf_len = buf.len(),
+            position = self.current_lsn,
+            "Read trait implementation called"
+        );
+        self.read(buf).map_err(|e| match e {
+            AofReaderError::Io(io_err) => io_err,
+            other => {
+                error!(error = ?other, "converting AofReaderError to io::Error");
+                io::Error::new(io::ErrorKind::Other, other)
             }
         })
     }
@@ -361,17 +385,18 @@ impl Seek for AofCursor {
             }
         };
 
-        self.seek(target_lsn).map_err(|e| {
-            match e {
-                AofReaderError::Io(io_err) => io_err,
-                other => {
-                    error!(error = ?other, "converting AofReaderError to io::Error in Seek trait");
-                    io::Error::new(io::ErrorKind::Other, other)
-                }
+        self.seek(target_lsn).map_err(|e| match e {
+            AofReaderError::Io(io_err) => io_err,
+            other => {
+                error!(error = ?other, "converting AofReaderError to io::Error in Seek trait");
+                io::Error::new(io::ErrorKind::Other, other)
             }
         })?;
 
-        debug!(final_position = self.current_lsn, "Seek trait implementation completed");
+        debug!(
+            final_position = self.current_lsn,
+            "Seek trait implementation completed"
+        );
         Ok(self.current_lsn)
     }
 }

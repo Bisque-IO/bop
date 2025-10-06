@@ -112,10 +112,12 @@ impl RemoteChunkStore {
             RemoteChunkError::Io(e)
         })?;
 
-        let handle = local.insert_from_reader(spec.cache_key(), spec.uncompressed_size, &mut decoder).map_err(|e| {
-            error!(error = ?e, "failed to insert decompressed chunk into local cache");
-            e
-        })?;
+        let handle = local
+            .insert_from_reader(spec.cache_key(), spec.uncompressed_size, &mut decoder)
+            .map_err(|e| {
+                error!(error = ?e, "failed to insert decompressed chunk into local cache");
+                e
+            })?;
 
         debug!(
             compressed_size = spec.compressed_size,
@@ -141,19 +143,20 @@ impl RemoteChunkStore {
     ) -> Result<RemoteUploadResult, RemoteChunkError> {
         trace!("starting chunk compression and upload");
 
-        let uncompressed_size = std::fs::metadata(&request.local_path).map_err(|e| {
-            error!(error = ?e, "failed to get file metadata");
-            RemoteChunkError::Io(e)
-        })?.len();
+        let uncompressed_size = std::fs::metadata(&request.local_path)
+            .map_err(|e| {
+                error!(error = ?e, "failed to get file metadata");
+                RemoteChunkError::Io(e)
+            })?
+            .len();
 
         // Compress to a temporary buffer
         let mut compressed = Vec::new();
         {
-            let mut encoder = Encoder::new(&mut compressed, 3)
-                .map_err(|e| {
-                    error!(error = %e, "failed to create compression encoder");
-                    RemoteChunkError::Compression(e.to_string())
-                })?;
+            let mut encoder = Encoder::new(&mut compressed, 3).map_err(|e| {
+                error!(error = %e, "failed to create compression encoder");
+                RemoteChunkError::Compression(e.to_string())
+            })?;
 
             let mut source = File::open(&request.local_path).map_err(|e| {
                 error!(error = ?e, "failed to open source file");
@@ -165,11 +168,10 @@ impl RemoteChunkStore {
                 RemoteChunkError::Io(e)
             })?;
 
-            encoder.finish()
-                .map_err(|e| {
-                    error!(error = %e, "failed to finalize compression");
-                    RemoteChunkError::Compression(e.to_string())
-                })?;
+            encoder.finish().map_err(|e| {
+                error!(error = %e, "failed to finalize compression");
+                RemoteChunkError::Compression(e.to_string())
+            })?;
         }
 
         let compressed_size = compressed.len() as u64;
@@ -183,15 +185,16 @@ impl RemoteChunkStore {
         // Upload compressed data
         trace!("uploading compressed chunk to remote storage");
         let mut cursor = std::io::Cursor::new(compressed);
-        self.fetcher.upload(&request.remote_key, &mut cursor, compressed_size).map_err(|e| {
-            error!(error = ?e, "failed to upload chunk to remote storage");
-            e
-        })?;
+        self.fetcher
+            .upload(&request.remote_key, &mut cursor, compressed_size)
+            .map_err(|e| {
+                error!(error = ?e, "failed to upload chunk to remote storage");
+                e
+            })?;
 
         debug!(
             compressed_size,
-            uncompressed_size,
-            "chunk upload completed successfully"
+            uncompressed_size, "chunk upload completed successfully"
         );
 
         Ok(RemoteUploadResult {
@@ -236,18 +239,19 @@ impl RemoteChunkStore {
     ) -> Result<(Vec<u8>, u64, u64), RemoteChunkError> {
         trace!("starting file compression");
 
-        let uncompressed_size = std::fs::metadata(local_path).map_err(|e| {
-            error!(error = ?e, "failed to get file metadata");
-            RemoteChunkError::Io(e)
-        })?.len();
+        let uncompressed_size = std::fs::metadata(local_path)
+            .map_err(|e| {
+                error!(error = ?e, "failed to get file metadata");
+                RemoteChunkError::Io(e)
+            })?
+            .len();
 
         let mut compressed = Vec::new();
         {
-            let mut encoder = Encoder::new(&mut compressed, compression_level)
-                .map_err(|e| {
-                    error!(error = %e, "failed to create compression encoder");
-                    RemoteChunkError::Compression(e.to_string())
-                })?;
+            let mut encoder = Encoder::new(&mut compressed, compression_level).map_err(|e| {
+                error!(error = %e, "failed to create compression encoder");
+                RemoteChunkError::Compression(e.to_string())
+            })?;
 
             let mut source = File::open(local_path).map_err(|e| {
                 error!(error = ?e, "failed to open source file");
@@ -259,11 +263,10 @@ impl RemoteChunkStore {
                 RemoteChunkError::Io(e)
             })?;
 
-            encoder.finish()
-                .map_err(|e| {
-                    error!(error = %e, "failed to finalize compression");
-                    RemoteChunkError::Compression(e.to_string())
-                })?;
+            encoder.finish().map_err(|e| {
+                error!(error = %e, "failed to finalize compression");
+                RemoteChunkError::Compression(e.to_string())
+            })?;
         }
 
         let compressed_size = compressed.len() as u64;

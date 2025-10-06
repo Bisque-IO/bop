@@ -4,11 +4,14 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bop_mpmc::BlockingQueue;
+use bop_mpmc::{BlockingArcQueue, BlockingQueue};
 use crossfire::mpsc;
 
-const DEFAULT_OPS_PER_THREAD: usize = 100_000;
+const DEFAULT_OPS_PER_THREAD: usize = 1_000_000;
 const DEFAULT_QUEUE_CAPACITY: usize = 1024;
+
+// #[global_allocator]
+// static ALLOC: bop_allocator::BopAllocator = bop_allocator::BopAllocator;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -20,6 +23,15 @@ fn main() {
         .get(2)
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_QUEUE_CAPACITY);
+
+    // println!(
+    //     "\n# bop-mpmc::BlockingArcQueue throughput\n# ops_per_thread={}",
+    //     ops_per_thread
+    // );
+    // println!("threads,total_ops,elapsed_ms,ops_per_sec");
+    // for producers in 1..=8 {
+    //     run_bop_mpmc_arc_case(producers, ops_per_thread);
+    // }
 
     println!(
         "# crossfire::mpsc bounded_blocking throughput\n# ops_per_thread={} queue_capacity={}",
@@ -109,6 +121,56 @@ fn run_bop_mpmc_case(producers: usize, ops_per_thread: usize) {
         while consumer.dequeue().is_none() {
             std::hint::spin_loop();
         }
+    }
+    let elapsed = start.elapsed();
+
+    for handle in handles {
+        handle.join().expect("producer thread panicked");
+    }
+
+    report(producers, counter.load(Ordering::Relaxed), elapsed);
+}
+
+fn run_bop_mpmc_arc_case(producers: usize, ops_per_thread: usize) {
+    let queue = Arc::new(BlockingArcQueue::new().expect("failed to create bop-mpmc queue"));
+    let mut expected = producers * ops_per_thread;
+    let counter = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(producers + 1));
+
+    let mut handles = Vec::with_capacity(producers);
+    for _ in 0..producers {
+        let queue = queue.clone();
+        let barrier = barrier.clone();
+        let counter = counter.clone();
+        handles.push(thread::spawn(move || {
+            let producer = queue
+                .create_producer_token()
+                .expect("failed to create producer token");
+            barrier.wait();
+            for _ in 0..ops_per_thread {
+                producer.enqueue(Arc::new(1));
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }));
+    }
+
+    let consumer = queue
+        .create_consumer_token()
+        .expect("failed to create consumer token");
+
+    barrier.wait();
+    let start = Instant::now();
+    loop {
+        let items = consumer
+            .dequeue_bulk_wait(128, std::time::Duration::from_secs(5))
+            .expect("panic message");
+        if items.len() >= expected {
+            break;
+        }
+        expected = expected - items.len() as usize;
+        // while consumer.dequeue().is_none() {
+        //     std::hint::spin_loop();
+        // }
     }
     let elapsed = start.elapsed();
 

@@ -78,8 +78,13 @@ impl<'a> ManifestTxn<'a> {
 
     /// Upsert a LibSQL chunk delta.
     #[cfg(feature = "libsql")]
-    pub fn upsert_chunk_delta(&mut self, key: ChunkDeltaKey, value: LibSqlChunkDeltaRecord) -> &mut Self {
-        self.ops.push(ManifestOp::UpsertLibSqlChunkDelta { key, value });
+    pub fn upsert_chunk_delta(
+        &mut self,
+        key: ChunkDeltaKey,
+        value: LibSqlChunkDeltaRecord,
+    ) -> &mut Self {
+        self.ops
+            .push(ManifestOp::UpsertLibSqlChunkDelta { key, value });
         self
     }
 
@@ -110,7 +115,8 @@ impl<'a> ManifestTxn<'a> {
         key: WalArtifactKey,
         record: AofWalArtifactRecord,
     ) -> &mut Self {
-        self.ops.push(ManifestOp::UpsertAofWalArtifact { key, record });
+        self.ops
+            .push(ManifestOp::UpsertAofWalArtifact { key, record });
         self
     }
 
@@ -127,7 +133,8 @@ impl<'a> ManifestTxn<'a> {
         key: WalArtifactKey,
         record: LibSqlWalArtifactRecord,
     ) -> &mut Self {
-        self.ops.push(ManifestOp::UpsertLibSqlWalArtifact { key, record });
+        self.ops
+            .push(ManifestOp::UpsertLibSqlWalArtifact { key, record });
         self
     }
 
@@ -305,7 +312,10 @@ impl<'a> ManifestTxn<'a> {
             return Ok(());
         }
 
-        debug!(ops_count = self.ops.len(), "Committing transaction asynchronously");
+        debug!(
+            ops_count = self.ops.len(),
+            "Committing transaction asynchronously"
+        );
 
         let batch = ManifestBatch {
             ops: self.ops.drain(..).collect(),

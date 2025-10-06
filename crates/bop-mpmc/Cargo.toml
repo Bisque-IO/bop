@@ -3,6 +3,33 @@ name = "bop-mpmc"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+loom = []
+
 [dependencies]
+async-task = "4.7"
+bop-allocator = { workspace = true }
 bop-sys = { workspace = true }
+crossbeam = { workspace = true }
+crossbeam-queue = "0.3"
+crossbeam-utils = "0.8"
+dashmap = "6.1"
+futures-core = "0.3"
+futures-lite = "2.6"
+hashbrown = "0.16"
 thiserror = { workspace = true }
+rand = { workspace = true }
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[dev-dependencies]
+bop-allocator = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(ignore_leaks)'] }
+
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+waker-fn = "1.1"

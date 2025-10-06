@@ -40,7 +40,17 @@
       "Bash(cargo tree:*)",
       "Bash(cargo metadata:*)",
       "Bash(python -c \"import sys, json; data = json.load(sys.stdin); tracing = [p for p in data[''''packages''''] if p[''''name''''] == ''''tracing''''][0] if [p for p in data[''''packages''''] if p[''''name''''] == ''''tracing''''] else None; print(''''Features:'''', tracing[''''features''''] if tracing else ''''Not found'''')\")",
-      "Bash(cargo expand:*)"
+      "Bash(cargo expand:*)",
+      "Bash(cargo clean:*)",
+      "Bash(del:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test --lib mpmc::tests::test_segment_pop_no_segment_available -- --exact --nocapture)",
+      "Bash(RUST_BACKTRACE=1 cargo run --package bop-mpmc --example minimal_spsc_executor_benchmark --release)",
+      "Bash(target/release/examples/minimal_spsc_executor_benchmark.exe:*)",
+      "Bash(echo \"Exit code: $?\")",
+      "Bash(echo:*)",
+      "Bash(rustc:*)",
+      "Bash(pkill:*)",
+      "Bash(taskkill:*)"
     ],
     "deny": [],
     "ask": []

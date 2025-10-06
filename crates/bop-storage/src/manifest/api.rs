@@ -254,7 +254,8 @@ impl Manifest {
             self.env.resize(new_size)?;
         }
 
-        self.current_map_size.store(new_size as u64, Ordering::Release);
+        self.current_map_size
+            .store(new_size as u64, Ordering::Release);
 
         info!(
             old_size = current,
@@ -526,9 +527,13 @@ impl Manifest {
             + data.chunk_entries.len() * 2
             + {
                 #[cfg(feature = "libsql")]
-                { data.chunk_deltas.len() }
+                {
+                    data.chunk_deltas.len()
+                }
                 #[cfg(not(feature = "libsql"))]
-                { 0 }
+                {
+                    0
+                }
             }
             + data.wal_artifacts.len();
         let mut txn = self.begin_with_capacity(capacity.max(4));

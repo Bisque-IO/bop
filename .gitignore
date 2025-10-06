@@ -81,3 +81,4 @@ lib/zstd/.github/
 
 lib/zlib/.github/
 target/
+/aof_example_dir

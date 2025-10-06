@@ -20,9 +20,9 @@ crc64fast-nvme = { workspace = true }
 bincode = { version = '2.0', features = ['serde'] }
 generator = '0.8'
 crossfire = '2.1'
-# bop-allocator = { workspace = true }
+bop-allocator = { workspace = true }
 bop-mpmc = { workspace = true }
-snmalloc-rs = "0.3.8"
+#snmalloc-rs = "0.3.8"
 libsql-ffi = { version = '0.9.24', optional = true, default-features = false }
 bytemuck = { version = '1.15', features = ['derive'] }
 dashmap = { version = '6.1' }
@@ -30,11 +30,12 @@ tokio = { version = '1.47', features = ['rt-multi-thread', 'sync', 'time', 'fs',
 tokio-util = '0.7'
 uuid = { version = '1.10', features = ['serde', 'v4'] }
 rust-s3 = { version = '0.37', features = ['tokio-rustls-tls'], default-features = false }
-bytes = '1.5'
+bytes = '1.10'
 zstd = "0.13"
 tracing = { workspace = true }
 
 [dev-dependencies]
+bop-allocator = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 

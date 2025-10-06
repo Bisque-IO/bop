@@ -226,7 +226,11 @@ where
                 .total_bytes
                 .saturating_sub(previous.len())
                 .saturating_add(frame_len);
-            trace!(frame_len, old_len = previous.len(), "Replaced page in cache");
+            trace!(
+                frame_len,
+                old_len = previous.len(),
+                "Replaced page in cache"
+            );
         } else {
             eviction.total_bytes = eviction.total_bytes.saturating_add(frame_len);
             trace!(frame_len, "Inserted new page into cache");
@@ -359,7 +363,10 @@ where
 
             if let Some((key, frame)) = evicted {
                 total_evicted += 1;
-                trace!(size = frame.len(), current_bytes, limit, "Evicted page from cache");
+                trace!(
+                    size = frame.len(),
+                    current_bytes, limit, "Evicted page from cache"
+                );
                 if let Some(observer) = &self.observer {
                     observer.on_evict(&key, frame.as_slice());
                 }
@@ -369,7 +376,10 @@ where
 
             if !needs_more {
                 if total_evicted > 0 {
-                    debug!(total_evicted, current_bytes, limit, "Cache capacity enforced");
+                    debug!(
+                        total_evicted,
+                        current_bytes, limit, "Cache capacity enforced"
+                    );
                 }
                 break;
             }

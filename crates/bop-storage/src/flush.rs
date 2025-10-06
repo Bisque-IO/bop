@@ -12,9 +12,9 @@ use thiserror::Error;
 use tokio::time::sleep;
 use tracing::{debug, error, instrument, trace, warn};
 
-use crate::runtime::StorageRuntime;
 use crate::aof::{AofWalSegment, AofWalSegmentError};
-use crate::manifest::{DbId, Manifest, AofStateKey, AofStateRecord};
+use crate::manifest::{AofStateKey, AofStateRecord, DbId, Manifest};
+use crate::runtime::StorageRuntime;
 
 /// Configuration options for the flush controller.
 #[derive(Debug, Clone)]
@@ -92,7 +92,6 @@ impl From<AofWalSegmentError> for FlushProcessError {
         Self::Segment(value.to_string())
     }
 }
-
 
 /// Controller coordinating WAL durability flushes.
 pub struct FlushController {
@@ -220,7 +219,11 @@ impl FlushControllerState {
         }
     }
 
-    fn push_task(&self, segment: Arc<AofWalSegment>, attempt: u32) -> Result<(), FlushScheduleError> {
+    fn push_task(
+        &self,
+        segment: Arc<AofWalSegment>,
+        attempt: u32,
+    ) -> Result<(), FlushScheduleError> {
         if self.is_shutdown() || self.runtime.is_shutdown() {
             return Err(FlushScheduleError::Closed);
         }
@@ -366,7 +369,6 @@ pub(crate) enum FlushTask {
     Shutdown,
 }
 
-
 fn spawn_flush_worker(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>) -> JoinHandle<()> {
     thread::Builder::new()
         .name("bop-storage-flush".into())
@@ -483,7 +485,6 @@ fn flush_worker_main(receiver: Rx<FlushTask>, state: Arc<FlushControllerState>) 
     }
 }
 
-
 #[instrument(skip(state, segment), fields(db_id = state.db_id))]
 fn run_flush_job(
     state: &Arc<FlushControllerState>,
@@ -500,7 +501,11 @@ fn run_flush_job(
         };
 
         if target <= segment.durable_size() {
-            trace!(target, durable_size = segment.durable_size(), "target already durable, skipping");
+            trace!(
+                target,
+                durable_size = segment.durable_size(),
+                "target already durable, skipping"
+            );
             continue;
         }
 
@@ -529,20 +534,27 @@ fn run_flush_job(
 
         // Only update if we're advancing the LSN
         if target > record.last_applied_lsn {
-            trace!(old_lsn = record.last_applied_lsn, new_lsn = target, "updating manifest LSN");
+            trace!(
+                old_lsn = record.last_applied_lsn,
+                new_lsn = target,
+                "updating manifest LSN"
+            );
             record.last_applied_lsn = target;
 
             // Fire-and-forget commit - manifest worker batches these updates
             let mut txn = state.manifest.begin_with_capacity(1);
             txn.put_aof_state(key, record);
-            txn.commit_async()
-                .map_err(|err| {
-                    error!(error = %err, "manifest async commit failed");
-                    FlushProcessError::Sink(err.to_string())
-                })?;
+            txn.commit_async().map_err(|err| {
+                error!(error = %err, "manifest async commit failed");
+                FlushProcessError::Sink(err.to_string())
+            })?;
             debug!(target, "manifest LSN updated");
         } else {
-            trace!(target, current_lsn = record.last_applied_lsn, "LSN not advanced, skipping manifest update");
+            trace!(
+                target,
+                current_lsn = record.last_applied_lsn,
+                "LSN not advanced, skipping manifest update"
+            );
         }
 
         // Mark segment as durable (manifest update queued asynchronously)
@@ -595,13 +607,12 @@ fn drain_flush_backlog(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use tempfile::TempDir;

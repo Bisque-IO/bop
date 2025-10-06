@@ -135,7 +135,8 @@ pub(crate) struct ManifestTables {
 
     /// LibSQL database descriptor records, indexed by DbId.
     #[cfg(feature = "libsql")]
-    pub(crate) libsql_db: Database<U64<heed::byteorder::BigEndian>, SerdeBincode<LibSqlDescriptorRecord>>,
+    pub(crate) libsql_db:
+        Database<U64<heed::byteorder::BigEndian>, SerdeBincode<LibSqlDescriptorRecord>>,
 
     /// AOF state records, indexed by DbId.
     pub(crate) aof_state: Database<U32<heed::byteorder::BigEndian>, SerdeBincode<AofStateRecord>>,
@@ -203,8 +204,7 @@ pub(crate) struct ManifestTables {
 
     /// AOF chunk records indexed by (AofId, start_lsn).
     /// This allows efficient lookup of which chunk contains a given LSN.
-    pub(crate) aof_chunks:
-        Database<U128<heed::byteorder::BigEndian>, SerdeBincode<AofChunkRecord>>,
+    pub(crate) aof_chunks: Database<U128<heed::byteorder::BigEndian>, SerdeBincode<AofChunkRecord>>,
 
     /// LibSQL chunk records indexed by (LibSqlId, chunk_id).
     /// This tracks chunks for LibSQL database instances.
@@ -882,7 +882,6 @@ pub struct RuntimeStateRecord {
     /// Timestamp when this instance started.
     pub started_at_epoch_ms: u64,
 }
-
 
 /// Metadata record for an AOF chunk.
 ///

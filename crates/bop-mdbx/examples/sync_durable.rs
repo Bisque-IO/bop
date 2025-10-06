@@ -1,10 +1,15 @@
 use bop_mdbx::{
     DbFlags, Dbi, Env as MdbxEnv, EnvFlags, OptionKey, PutFlags, Txn, TxnFlags, del, put,
 };
-use heed::{Database, Env as HeedEnv, EnvFlags as HeedEnvFlags, EnvOpenOptions, types::ByteSlice};
+use heed::{Database, Env as HeedEnv, EnvFlags as HeedEnvFlags, EnvOpenOptions};
 use std::error::Error;
-use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
+
+use diatomic_waker::DiatomicWaker;
 
 const VALUE: &[u8] = b"0123456789abcdef";
 const PRELOAD: u64 = 1_000;
@@ -116,18 +121,21 @@ fn run_mdbx_delete(iterations: u64) -> Result<(), Box<dyn Error>> {
 }
 
 // ----- Heed helpers -----
-type HeedDb = Database<ByteSlice, ByteSlice>;
+type HeedDb = Database<
+    heed::types::U64<heed::byteorder::BigEndian>,
+    heed::types::U64<heed::byteorder::BigEndian>,
+>;
 
 fn setup_heed_env() -> Result<(HeedEnv, HeedDb, tempfile::TempDir), Box<dyn Error>> {
     let dir = tempdir()?;
     let mut options = EnvOpenOptions::new();
     options.map_size(MAP_SIZE as usize).max_dbs(2);
-    unsafe {
-        options.flags(HeedEnvFlags::SYNC_DURABLE);
-    }
+    // unsafe {
+    //     // options.flags(HeedEnvFlags::);
+    // }
     let env = unsafe { options.open(dir.path())? };
     let mut wtxn = env.write_txn()?;
-    let db = env.create_database::<ByteSlice, ByteSlice>(&mut wtxn, Some("bench"))?;
+    let db = env.create_database::<heed::types::U64<heed::byteorder::BigEndian>, heed::types::U64<heed::byteorder::BigEndian>>(&mut wtxn, Some("bench"))?;
     wtxn.commit()?;
     Ok((env, db, dir))
 }
@@ -138,8 +146,7 @@ fn run_heed_insert(iterations: u64, batch: u64) -> Result<(), Box<dyn Error>> {
     for i in 0..iterations {
         let mut wtxn = env.write_txn()?;
         for j in 0..batch {
-            let key = ((i * batch) + j).to_le_bytes();
-            db.put(&mut wtxn, &key, VALUE)?;
+            db.put(&mut wtxn, &i, &j)?;
         }
         wtxn.commit()?;
     }
@@ -153,7 +160,6 @@ fn run_heed_insert(iterations: u64, batch: u64) -> Result<(), Box<dyn Error>> {
         total_ops as f64 / elapsed.as_secs_f64()
     );
     env.force_sync()?;
-    drop(db);
     drop(env);
     drop(dir);
     Ok(())
@@ -164,16 +170,14 @@ fn run_heed_update(iterations: u64) -> Result<(), Box<dyn Error>> {
     {
         let mut wtxn = env.write_txn()?;
         for i in 0..PRELOAD {
-            let key = i.to_le_bytes();
-            db.put(&mut wtxn, &key, VALUE)?;
+            db.put(&mut wtxn, &i, &i)?;
         }
         wtxn.commit()?;
     }
     let start = Instant::now();
     for i in 0..iterations {
-        let key = (i % PRELOAD).to_le_bytes();
         let mut wtxn = env.write_txn()?;
-        db.put(&mut wtxn, &key, VALUE)?;
+        db.put(&mut wtxn, &i, &i)?;
         wtxn.commit()?;
     }
     let elapsed = start.elapsed();
@@ -184,7 +188,6 @@ fn run_heed_update(iterations: u64) -> Result<(), Box<dyn Error>> {
         iterations as f64 / elapsed.as_secs_f64()
     );
     env.force_sync()?;
-    drop(db);
     drop(env);
     drop(dir);
     Ok(())
@@ -195,17 +198,15 @@ fn run_heed_delete(iterations: u64) -> Result<(), Box<dyn Error>> {
     {
         let mut wtxn = env.write_txn()?;
         for i in 0..PRELOAD {
-            let key = i.to_le_bytes();
-            db.put(&mut wtxn, &key, VALUE)?;
+            db.put(&mut wtxn, &i, &i)?;
         }
         wtxn.commit()?;
     }
     let start = Instant::now();
     for i in 0..iterations {
-        let key = (i % PRELOAD).to_le_bytes();
         let mut wtxn = env.write_txn()?;
-        db.delete(&mut wtxn, &key)?;
-        db.put(&mut wtxn, &key, VALUE)?;
+        db.delete(&mut wtxn, &i)?;
+        db.put(&mut wtxn, &i, &i)?;
         wtxn.commit()?;
     }
     let elapsed = start.elapsed();
@@ -216,13 +217,73 @@ fn run_heed_delete(iterations: u64) -> Result<(), Box<dyn Error>> {
         iterations as f64 / elapsed.as_secs_f64()
     );
     env.force_sync()?;
-    drop(db);
     drop(env);
     drop(dir);
     Ok(())
 }
 
+fn run_diatomic_waker(producers: usize, ops_per_thread: usize) {
+    let queue = Arc::new(DiatomicWaker::new());
+    let expected = producers * ops_per_thread;
+    let counter = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(producers + 1));
+
+    let mut handles = Vec::with_capacity(producers);
+    for _ in 0..producers {
+        let queue = queue.clone();
+        let barrier = barrier.clone();
+        let counter = counter.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            for _ in 0..ops_per_thread {
+                queue.notify();
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }));
+    }
+
+    barrier.wait();
+    let start = Instant::now();
+    loop {
+        if counter.load(Ordering::Relaxed) < expected {
+            std::thread::yield_now();
+            // std::thread::yield_now();
+            // std::thread::yield_now();
+            // std::thread::yield_now();
+            // std::thread::yield_now();
+        } else {
+            break;
+        }
+    }
+    let elapsed = start.elapsed();
+
+    for handle in handles {
+        handle.join().expect("producer thread panicked");
+    }
+
+    report(producers, counter.load(Ordering::Relaxed), elapsed);
+}
+
+fn report(producers: usize, total_ops: usize, elapsed: Duration) {
+    let elapsed_ms = elapsed.as_secs_f64() * 1_000.0;
+    let ops_per_sec = if elapsed.as_secs_f64() > 0.0 {
+        total_ops as f64 / elapsed.as_secs_f64()
+    } else {
+        f64::INFINITY
+    };
+
+    println!(
+        "{producers},{total_ops},{elapsed_ms:.3},{ops_per_sec:.0}",
+        producers = producers,
+        total_ops = total_ops,
+        elapsed_ms = elapsed_ms,
+        ops_per_sec = ops_per_sec,
+    );
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    run_diatomic_waker(4, 10_000_000);
+
     println!("mdbx sync durable benchmark (iterations={})", ITERATIONS);
     run_mdbx_insert(ITERATIONS, 1)?;
     run_mdbx_insert(ITERATIONS, 100)?;

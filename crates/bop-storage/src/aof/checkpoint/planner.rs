@@ -22,15 +22,13 @@ impl TailChunkDescriptor {
         let overlaps = if self.end_lsn <= wal_low_lsn {
             trace!(
                 end_lsn = self.end_lsn,
-                wal_low_lsn,
-                "chunk ends before WAL range"
+                wal_low_lsn, "chunk ends before WAL range"
             );
             false
         } else if self.start_lsn >= wal_high_lsn {
             trace!(
                 start_lsn = self.start_lsn,
-                wal_high_lsn,
-                "chunk starts after WAL range"
+                wal_high_lsn, "chunk starts after WAL range"
             );
             false
         } else {

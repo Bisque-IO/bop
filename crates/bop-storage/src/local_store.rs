@@ -242,7 +242,8 @@ impl LocalChunkStore {
                 generation: key.generation,
             }
         })?;
-        let result = self.open_with_options_async(handle.path.clone(), IoOpenOptions::read_only())
+        let result = self
+            .open_with_options_async(handle.path.clone(), IoOpenOptions::read_only())
             .await;
         match &result {
             Ok(_) => debug!(path = %handle.path.display(), "chunk opened successfully"),
@@ -328,8 +329,12 @@ impl LocalChunkStore {
                 return None;
             }
 
-            trace!(remaining_ms = remaining.as_millis(), "waiting for download to complete");
-            let (new_state, timeout_result) = self.download_notify
+            trace!(
+                remaining_ms = remaining.as_millis(),
+                "waiting for download to complete"
+            );
+            let (new_state, timeout_result) = self
+                .download_notify
                 .wait_timeout(state, remaining)
                 .expect("local chunk store mutex poisoned");
 
@@ -362,7 +367,10 @@ impl LocalChunkStore {
                 }
             }) {
                 state.touch(&key);
-                debug!(size_bytes = handle.size_bytes, "chunk already in cache, skipping insert");
+                debug!(
+                    size_bytes = handle.size_bytes,
+                    "chunk already in cache, skipping insert"
+                );
                 return Ok(handle);
             }
             if !state.start_download(key.clone()) {
@@ -401,14 +409,21 @@ impl LocalChunkStore {
             .open(&temp_path, &IoOpenOptions::write_only())
             .map_err(LocalChunkStoreError::IoDriver)?;
         let _ = temp_file.allocate(0, expected_len);
-        trace!(size_bytes = expected_len, "writing chunk data to temporary file");
+        trace!(
+            size_bytes = expected_len,
+            "writing chunk data to temporary file"
+        );
         let start = Instant::now();
         let copied = write_stream_to_file(reader, temp_file.as_mut())?;
         let duration = start.elapsed();
         drop(temp_file);
 
         if copied != expected_len {
-            warn!(expected_bytes = expected_len, actual_bytes = copied, "unexpected chunk length, removing temporary file");
+            warn!(
+                expected_bytes = expected_len,
+                actual_bytes = copied,
+                "unexpected chunk length, removing temporary file"
+            );
             let _ = fs::remove_file(&temp_path);
             let mut state = self.state.lock().expect("local chunk store mutex poisoned");
             state.finish_download(&key);
@@ -419,14 +434,21 @@ impl LocalChunkStore {
             });
         }
 
-        debug!(size_bytes = copied, duration_ms = duration.as_millis(), "chunk data written successfully");
+        debug!(
+            size_bytes = copied,
+            duration_ms = duration.as_millis(),
+            "chunk data written successfully"
+        );
         trace!("renaming temporary file to final path");
         fs::rename(&temp_path, &final_path)?;
 
         let mut state = self.state.lock().expect("local chunk store mutex poisoned");
         state.finish_download(&key);
 
-        trace!(needed_bytes = expected_len, "checking if eviction is needed");
+        trace!(
+            needed_bytes = expected_len,
+            "checking if eviction is needed"
+        );
         if let Err(err) = self.evict_to_fit_with_lock(&mut state, expected_len) {
             error!(needed_bytes = expected_len, error = ?err, "failed to evict enough space");
             drop(state);
@@ -458,7 +480,10 @@ impl LocalChunkStore {
         drop(state);
         self.download_notify.notify_all();
 
-        info!(size_bytes = expected_len, cache_size, cache_entries, "chunk successfully inserted into cache");
+        info!(
+            size_bytes = expected_len,
+            cache_size, cache_entries, "chunk successfully inserted into cache"
+        );
         Ok(handle)
     }
 
@@ -471,11 +496,20 @@ impl LocalChunkStore {
         let initial_available = available;
 
         if available >= needed_bytes {
-            trace!(available, needed_bytes, "sufficient space available, no eviction needed");
+            trace!(
+                available,
+                needed_bytes, "sufficient space available, no eviction needed"
+            );
             return Ok(());
         }
 
-        debug!(available = initial_available, needed_bytes, used_bytes = state.used_bytes, max_cache_bytes = self.config.max_cache_bytes, "eviction required");
+        debug!(
+            available = initial_available,
+            needed_bytes,
+            used_bytes = state.used_bytes,
+            max_cache_bytes = self.config.max_cache_bytes,
+            "eviction required"
+        );
         let mut evicted_count = 0;
         let mut evicted_bytes = 0u64;
         let mut skipped_downloading = 0;
@@ -485,13 +519,23 @@ impl LocalChunkStore {
             let candidate = match state.lru.pop_front() {
                 Some(k) => k,
                 None => {
-                    warn!(needed_bytes, available, evicted_count, evicted_bytes, "quota exhausted, no more eviction candidates");
+                    warn!(
+                        needed_bytes,
+                        available,
+                        evicted_count,
+                        evicted_bytes,
+                        "quota exhausted, no more eviction candidates"
+                    );
                     return Err(LocalChunkStoreError::QuotaExhausted { needed_bytes });
                 }
             };
 
             if state.is_downloading(&candidate) {
-                trace!(db_id = candidate.db_id, chunk_id = candidate.chunk_id, "skipping candidate, currently downloading");
+                trace!(
+                    db_id = candidate.db_id,
+                    chunk_id = candidate.chunk_id,
+                    "skipping candidate, currently downloading"
+                );
                 skipped_downloading += 1;
                 continue;
             }
@@ -503,7 +547,11 @@ impl LocalChunkStore {
             };
 
             if should_keep {
-                trace!(db_id = candidate.db_id, chunk_id = candidate.chunk_id, "skipping candidate, below minimum eviction age");
+                trace!(
+                    db_id = candidate.db_id,
+                    chunk_id = candidate.chunk_id,
+                    "skipping candidate, below minimum eviction age"
+                );
                 skipped_min_age += 1;
                 state.lru.push_back(candidate);
                 continue;
@@ -511,7 +559,13 @@ impl LocalChunkStore {
 
             if let Some(entry) = state.entries.remove(&candidate) {
                 let size = entry.size_bytes;
-                trace!(db_id = candidate.db_id, chunk_id = candidate.chunk_id, generation = candidate.generation, size_bytes = size, "evicting chunk");
+                trace!(
+                    db_id = candidate.db_id,
+                    chunk_id = candidate.chunk_id,
+                    generation = candidate.generation,
+                    size_bytes = size,
+                    "evicting chunk"
+                );
                 let _ = fs::remove_file(&entry.path);
                 state.used_bytes = state.used_bytes.saturating_sub(size);
                 available = self.config.max_cache_bytes.saturating_sub(state.used_bytes);
@@ -521,7 +575,14 @@ impl LocalChunkStore {
             }
         }
 
-        debug!(evicted_count, evicted_bytes, skipped_downloading, skipped_min_age, available, "eviction completed successfully");
+        debug!(
+            evicted_count,
+            evicted_bytes,
+            skipped_downloading,
+            skipped_min_age,
+            available,
+            "eviction completed successfully"
+        );
         Ok(())
     }
 
@@ -562,20 +623,32 @@ fn write_stream_to_file<R: Read + ?Sized>(
         chunks_written += 1;
 
         if chunks_written % 100 == 0 {
-            trace!(bytes_written = total, chunks = chunks_written, "streaming write progress");
+            trace!(
+                bytes_written = total,
+                chunks = chunks_written,
+                "streaming write progress"
+            );
         }
     }
-    trace!(total_bytes = total, chunks = chunks_written, "flushing file");
+    trace!(
+        total_bytes = total,
+        chunks = chunks_written,
+        "flushing file"
+    );
     file.flush().map_err(LocalChunkStoreError::IoDriver)?;
-    debug!(total_bytes = total, chunks = chunks_written, "stream write completed");
+    debug!(
+        total_bytes = total,
+        chunks = chunks_written,
+        "stream write completed"
+    );
     Ok(total)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{IoBackendKind, IoRegistry};
     use crate::runtime::{StorageRuntime, StorageRuntimeOptions};
+    use crate::{IoBackendKind, IoRegistry};
     use tempfile::TempDir;
 
     fn test_store(limit: u64) -> (TempDir, LocalChunkStore) {

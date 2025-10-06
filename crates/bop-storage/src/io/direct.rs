@@ -105,7 +105,10 @@ impl DirectIoDriver {
     #[instrument(level = "info")]
     pub fn new() -> io::Result<Self> {
         let alignment = platform_alignment().unwrap_or(FALLBACK_ALIGNMENT).max(1);
-        info!(alignment_bytes = alignment, "Initializing direct I/O driver");
+        info!(
+            alignment_bytes = alignment,
+            "Initializing direct I/O driver"
+        );
         Ok(Self {
             contract: AlignmentContract::new(IoBackendKind::DirectIo, alignment),
         })
@@ -121,7 +124,11 @@ impl DirectIoDriver {
     /// any residual tail data themselves before issuing a direct write.
     #[instrument(level = "debug", skip(self), fields(alignment = self.alignment()))]
     pub fn allocate(&self, len: usize) -> IoResult<DirectIoBuffer> {
-        debug!(size_bytes = len, alignment = self.alignment(), "Allocating aligned buffer");
+        debug!(
+            size_bytes = len,
+            alignment = self.alignment(),
+            "Allocating aligned buffer"
+        );
         self.contract.require_len(len)?;
         let mut buffer = DirectIoBuffer::new(len, self.alignment())?;
         if !buffer.is_empty() {
@@ -246,7 +253,13 @@ impl IoFile for DirectIoFile {
         }
 
         let total_len: usize = bufs.iter().map(|b| b.len()).sum();
-        trace!(offset, size_bytes = total_len, num_bufs = bufs.len(), alignment = self.contract.alignment(), "Reading vectored data with direct I/O");
+        trace!(
+            offset,
+            size_bytes = total_len,
+            num_bufs = bufs.len(),
+            alignment = self.contract.alignment(),
+            "Reading vectored data with direct I/O"
+        );
 
         self.contract.require_offset(offset)?;
 
@@ -293,7 +306,13 @@ impl IoFile for DirectIoFile {
         }
 
         let total_len: usize = bufs.iter().map(|b| b.len()).sum();
-        trace!(offset, size_bytes = total_len, num_bufs = bufs.len(), alignment = self.contract.alignment(), "Writing vectored data with direct I/O");
+        trace!(
+            offset,
+            size_bytes = total_len,
+            num_bufs = bufs.len(),
+            alignment = self.contract.alignment(),
+            "Writing vectored data with direct I/O"
+        );
 
         self.contract.require_offset(offset)?;
 
@@ -314,13 +333,15 @@ impl IoFile for DirectIoFile {
             let mut slice = buf.as_slice();
 
             while !slice.is_empty() {
-                let written =
-                    write_once(&self.file, current_offset, slice).map_err(|e| {
-                        error!(offset = current_offset, error = %e, "Direct I/O write failed");
-                        IoError::from(e)
-                    })?;
+                let written = write_once(&self.file, current_offset, slice).map_err(|e| {
+                    error!(offset = current_offset, error = %e, "Direct I/O write failed");
+                    IoError::from(e)
+                })?;
                 if written == 0 {
-                    error!(offset = current_offset, "Direct I/O write returned zero bytes");
+                    error!(
+                        offset = current_offset,
+                        "Direct I/O write returned zero bytes"
+                    );
                     return Err(IoError::Io(std::io::Error::new(
                         std::io::ErrorKind::WriteZero,
                         "direct I/O write returned zero",
@@ -338,7 +359,12 @@ impl IoFile for DirectIoFile {
 
     #[instrument(level = "debug", skip(self), fields(offset, len, backend = "DirectIo"))]
     fn allocate(&self, offset: u64, len: u64) -> IoResult<()> {
-        debug!(offset, size_bytes = len, alignment = self.contract.alignment(), "Allocating file space with direct I/O");
+        debug!(
+            offset,
+            size_bytes = len,
+            alignment = self.contract.alignment(),
+            "Allocating file space with direct I/O"
+        );
 
         self.contract.require_offset(offset)?;
         if len == 0 {
@@ -360,7 +386,11 @@ impl IoFile for DirectIoFile {
             IoError::from(e)
         })?;
 
-        debug!(offset, size_bytes = len, "File space allocated with direct I/O");
+        debug!(
+            offset,
+            size_bytes = len,
+            "File space allocated with direct I/O"
+        );
         Ok(())
     }
 

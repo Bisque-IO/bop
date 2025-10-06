@@ -33,13 +33,20 @@ pub struct Slot {
     signal: Signal,
     index: u64,
     flags: AtomicU8,
+    _pad: [u8; 63],
     cpu_time: AtomicU64,
     cpu_time_overhead: AtomicU64,
     counter: AtomicU64,
+    _pad2: [u8; 56],
     contention: AtomicU64,
     cpu_time_enabled: AtomicBool,
     data: AtomicPtr<()>,
-    worker: AtomicUsize,
+    // worker: AtomicUsize,
+    worker: SlotWorker,
+}
+
+unsafe fn reschedule(_: *mut ()) -> SlotState {
+    SlotState::Scheduled
 }
 
 impl Slot {
@@ -49,16 +56,30 @@ impl Slot {
             signal,
             index,
             flags: AtomicU8::new(SlotState::Idle as u8),
+            _pad: [0; 63],
             cpu_time: AtomicU64::new(0),
             cpu_time_overhead: AtomicU64::new(0),
             counter: AtomicU64::new(0),
+            _pad2: [0; 56],
             contention: AtomicU64::new(0),
             cpu_time_enabled: AtomicBool::new(false),
             data: AtomicPtr::new(null_mut()),
-            worker: AtomicUsize::new(0),
+            // worker: AtomicUsize::new(0),
+            worker: reschedule,
         }
     }
 
+    #[inline(always)]
+    pub fn count(&self) -> u64 {
+        self.counter.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn count_reset(&self) -> u64 {
+        self.counter.swap(0u64, Ordering::Relaxed)
+    }
+
+    #[inline(always)]
     pub fn schedule(&self) -> bool {
         if (self.flags.load(Ordering::Acquire) & SlotState::Scheduled as u8)
             != SlotState::Idle as u8
@@ -76,7 +97,7 @@ impl Slot {
         if scheduled_nor_executing {
             let SignalSetResult { was_empty, was_set } = self.signal.set(self.index);
             if was_empty && was_set {
-                self.waker.increment();
+                // self.waker.increment();
             }
             true
         } else {
@@ -84,23 +105,26 @@ impl Slot {
         }
     }
 
+    #[inline(always)]
     pub fn execute(&self) -> SlotState {
         self.flags
             .store(SlotState::Executing as u8, Ordering::Release);
         self.counter.fetch_add(1, Ordering::Relaxed);
 
-        let data_ptr = self.data.load(Ordering::Acquire);
-        let result = match self.worker() {
-            Some(worker) => unsafe { worker(data_ptr) },
-            None => SlotState::Idle,
-        };
+        // let data_ptr = self.data.load(Ordering::Acquire);
+        // let result = match self.worker() {
+        //     Some(worker) => unsafe { worker(std::ptr::null_mut()) },
+        //     None => SlotState::Idle,
+        // };
+        // let result = unsafe { reschedule(std::ptr::null_mut()) };
+        let result = SlotState::Scheduled;
 
         if result == SlotState::Scheduled {
             self.flags
                 .store(SlotState::Scheduled as u8, Ordering::Release);
             let SignalSetResult { was_empty, was_set } = self.signal.set(self.index);
             if was_empty && was_set {
-                self.waker.increment();
+                // self.waker.increment();
             }
         } else {
             let after_flags = self
@@ -116,12 +140,12 @@ impl Slot {
 
     pub fn set_worker(&self, worker: SlotWorker, data: *mut ()) {
         debug_assert_eq!(mem::size_of::<SlotWorker>(), mem::size_of::<usize>());
-        self.worker.store(worker as usize, Ordering::Release);
+        // self.worker.store(worker as usize, Ordering::Release);
         self.data.store(data, Ordering::Release);
     }
 
     pub fn clear_worker(&self) {
-        self.worker.store(0, Ordering::Release);
+        // self.worker.store(0, Ordering::Release);
         self.data.store(null_mut(), Ordering::Release);
     }
 
@@ -145,14 +169,15 @@ impl Slot {
         self.contention.load(Ordering::Relaxed)
     }
 
-    fn worker(&self) -> Option<SlotWorker> {
-        let ptr = self.worker.load(Ordering::Acquire);
-        if ptr == 0 {
-            None
-        } else {
-            Some(unsafe { mem::transmute::<usize, SlotWorker>(ptr) })
-        }
-    }
+    // #[inline(always)]
+    // fn worker(&self) -> Option<SlotWorker> {
+    //     let ptr = self.worker.load(Ordering::Acquire);
+    //     if ptr == 0 {
+    //         None
+    //     } else {
+    //         Some(unsafe { mem::transmute::<usize, SlotWorker>(ptr) })
+    //     }
+    // }
 }
 
 #[cfg(test)]

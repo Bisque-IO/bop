@@ -66,7 +66,10 @@ fn retry_with_expansion(
 ) -> Result<Vec<HashMap<ComponentId, Generation>>, ManifestError> {
     const MAX_RETRIES: usize = 3;
 
-    trace!(pending_count = pending.len(), "Attempting to commit pending operations");
+    trace!(
+        pending_count = pending.len(),
+        "Attempting to commit pending operations"
+    );
 
     for attempt in 0..MAX_RETRIES {
         let result = commit_pending(
@@ -96,9 +99,10 @@ fn retry_with_expansion(
                         max_size = max_map_size,
                         "LMDB database full at maximum size"
                     );
-                    return Err(ManifestError::CommitFailed(
-                        format!("LMDB database full at maximum size {} bytes", max_map_size)
-                    ));
+                    return Err(ManifestError::CommitFailed(format!(
+                        "LMDB database full at maximum size {} bytes",
+                        max_map_size
+                    )));
                 }
 
                 // Expand the map
@@ -130,7 +134,7 @@ fn retry_with_expansion(
 
     error!("Failed to commit after multiple map expansion attempts");
     Err(ManifestError::CommitFailed(
-        "Failed to commit after multiple map expansion attempts".to_string()
+        "Failed to commit after multiple map expansion attempts".to_string(),
     ))
 }
 
@@ -359,13 +363,21 @@ pub(super) fn worker_loop(
             match command {
                 ManifestCommand::Apply { batch, completion } => {
                     let batch_id = batch_journal_counter.fetch_add(1, Ordering::SeqCst) + 1;
-                    trace!(batch_id, ops_count = batch.ops.len(), "Persisting batch to journal");
+                    trace!(
+                        batch_id,
+                        ops_count = batch.ops.len(),
+                        "Persisting batch to journal"
+                    );
                     if let Err(err) = persist_pending_batch(&env, &tables, batch_id, &batch) {
                         error!(batch_id, error = ?err, "Failed to persist batch");
                         let _ = completion.send(Err(err));
                         continue;
                     }
-                    debug!(batch_id, ops_count = batch.ops.len(), "Batch added to pending queue");
+                    debug!(
+                        batch_id,
+                        ops_count = batch.ops.len(),
+                        "Batch added to pending queue"
+                    );
                     pending.push(PendingCommit {
                         id: batch_id,
                         batch,
@@ -376,7 +388,11 @@ pub(super) fn worker_loop(
                     }
                 }
                 ManifestCommand::Wait(request) => {
-                    debug!(component = request.component, target = request.target, "Generation wait request");
+                    debug!(
+                        component = request.component,
+                        target = request.target,
+                        "Generation wait request"
+                    );
                     handle_wait_request(&mut waiters, request, &generations);
                 }
                 ManifestCommand::RegisterCursor(request) => {
@@ -402,7 +418,11 @@ pub(super) fn worker_loop(
                     }
                 }
                 ManifestCommand::AcknowledgeCursor(request) => {
-                    trace!(cursor_id = request.cursor_id, sequence = request.sequence, "Acknowledging cursor in worker");
+                    trace!(
+                        cursor_id = request.cursor_id,
+                        sequence = request.sequence,
+                        "Acknowledging cursor in worker"
+                    );
                     let result = acknowledge_cursor(
                         &env,
                         &tables,
@@ -440,9 +460,7 @@ pub(super) fn worker_loop(
             let total_ops: usize = pending.iter().map(|p| p.batch.ops.len()).sum();
             info!(
                 batch_count,
-                total_ops,
-                shutdown,
-                "Committing pending batches"
+                total_ops, shutdown, "Committing pending batches"
             );
 
             // Retry commit with map expansion on MDB_FULL errors

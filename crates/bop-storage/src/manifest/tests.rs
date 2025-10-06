@@ -36,7 +36,11 @@ fn lmdb_keys_iterate_in_numeric_order() {
     }
 
     #[cfg(feature = "libsql")]
-    fn snapshot_record(db_id: DbId, snapshot_id: SnapshotId, chunk_id: ChunkId) -> LibSqlSnapshotRecord {
+    fn snapshot_record(
+        db_id: DbId,
+        snapshot_id: SnapshotId,
+        chunk_id: ChunkId,
+    ) -> LibSqlSnapshotRecord {
         LibSqlSnapshotRecord {
             record_version: SNAPSHOT_RECORD_VERSION,
             db_id,
@@ -205,13 +209,7 @@ fn lmdb_keys_iterate_in_numeric_order() {
         .unwrap();
 
     #[cfg(not(feature = "libsql"))]
-    let (
-        aof_state_keys,
-        chunk_keys,
-        wal_artifact_keys,
-        pending_keys,
-        metric_keys,
-    ) = manifest
+    let (aof_state_keys, chunk_keys, wal_artifact_keys, pending_keys, metric_keys) = manifest
         .read(|tables, txn| {
             let aof_state = {
                 let mut cursor = tables.aof_state.iter(txn)?;
@@ -253,13 +251,7 @@ fn lmdb_keys_iterate_in_numeric_order() {
                 }
                 out
             };
-            Ok((
-                aof_state,
-                chunk,
-                artifacts,
-                pending,
-                metrics,
-            ))
+            Ok((aof_state, chunk, artifacts, pending, metrics))
         })
         .unwrap();
 

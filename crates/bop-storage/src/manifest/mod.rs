@@ -105,20 +105,22 @@ mod worker;
 
 // Re-export public types from tables
 pub use tables::{
-    AofChunkRecord, ChangeCursorId, ChangeSequence, ChunkDeltaKey,
-    ChunkEntryRecord, ChunkId, ChunkKey, ChunkRefcountRecord, ChunkResidency,
-    AofDescriptorRecord, ComponentGeneration, ComponentId, CompressionCodec, CompressionConfig,
-    DbId, DbLifecycle, EncryptionAlgorithm, EncryptionConfig, Generation,
-    GenerationRecord, JobDurableState, JobId, JobKind, JobPayload, JobRecord,
-    ManifestChangeRecord, ManifestDbOptions, MetricDelta, MetricKey, MetricRecord, PendingJobKey,
-    RemoteNamespaceId, RemoteNamespaceRecord, RemoteObjectId, RemoteObjectKey, RemoteObjectKind,
-    RetentionPolicy, RuntimeStateRecord, SnapshotChunkKind, SnapshotChunkRef, SnapshotId,
-    SnapshotKey, WalArtifactId, WalArtifactKey, WalArtifactKind,
-    AofWalArtifactRecord, AofStateKey, AofStateRecord,
+    AofChunkRecord, AofDescriptorRecord, AofStateKey, AofStateRecord, AofWalArtifactRecord,
+    ChangeCursorId, ChangeSequence, ChunkDeltaKey, ChunkEntryRecord, ChunkId, ChunkKey,
+    ChunkRefcountRecord, ChunkResidency, ComponentGeneration, ComponentId, CompressionCodec,
+    CompressionConfig, DbId, DbLifecycle, EncryptionAlgorithm, EncryptionConfig, Generation,
+    GenerationRecord, JobDurableState, JobId, JobKind, JobPayload, JobRecord, ManifestChangeRecord,
+    ManifestDbOptions, MetricDelta, MetricKey, MetricRecord, PendingJobKey, RemoteNamespaceId,
+    RemoteNamespaceRecord, RemoteObjectId, RemoteObjectKey, RemoteObjectKind, RetentionPolicy,
+    RuntimeStateRecord, SnapshotChunkKind, SnapshotChunkRef, SnapshotId, SnapshotKey,
+    WalArtifactId, WalArtifactKey, WalArtifactKind,
 };
 
 #[cfg(feature = "libsql")]
-pub use tables::{LibSqlChunkDeltaRecord, LibSqlChunkRecord, LibSqlDescriptorRecord, LibSqlSnapshotRecord, LibSqlWalArtifactRecord};
+pub use tables::{
+    LibSqlChunkDeltaRecord, LibSqlChunkRecord, LibSqlDescriptorRecord, LibSqlSnapshotRecord,
+    LibSqlWalArtifactRecord,
+};
 
 // Re-export internal types and constants from tables
 pub(crate) use tables::{
@@ -129,9 +131,7 @@ pub(crate) use tables::{
 pub use tables::epoch_millis;
 
 // Re-export types from submodules
-pub use api::{
-    ChangeBatchPage, ChangeCursorSnapshot, ChangeCursorStart,
-};
+pub use api::{ChangeBatchPage, ChangeCursorSnapshot, ChangeCursorStart};
 
 #[cfg(feature = "libsql")]
 pub use api::{DeltaLocation, PageLocation};
@@ -213,9 +213,9 @@ pub struct ManifestOptions {
 impl Default for ManifestOptions {
     fn default() -> Self {
         Self {
-            initial_map_size: 64 * 1024 * 1024,  // 64 MB initial
-            max_map_size: 16 * 1024 * 1024 * 1024,  // 16 GB maximum
-            max_dbs: 32,  // Increased to accommodate additional tables (aof_chunks, etc.)
+            initial_map_size: 64 * 1024 * 1024,    // 64 MB initial
+            max_map_size: 16 * 1024 * 1024 * 1024, // 16 GB maximum
+            max_dbs: 32, // Increased to accommodate additional tables (aof_chunks, etc.)
             queue_capacity: 128,
             commit_latency: Duration::from_millis(5),
             change_log_cache_object_id: None,

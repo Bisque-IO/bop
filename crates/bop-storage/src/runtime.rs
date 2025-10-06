@@ -47,8 +47,10 @@ impl StorageRuntime {
     ))]
     pub fn create(options: StorageRuntimeOptions) -> Result<Arc<Self>, StorageRuntimeError> {
         info!("creating storage runtime");
-        debug!("runtime configuration: worker_threads={:?}, shutdown_timeout={:?}",
-               options.worker_threads, options.shutdown_timeout);
+        debug!(
+            "runtime configuration: worker_threads={:?}, shutdown_timeout={:?}",
+            options.worker_threads, options.shutdown_timeout
+        );
 
         let mut builder = Builder::new_multi_thread();
         builder.enable_all();
@@ -137,17 +139,25 @@ impl StorageRuntime {
             match Arc::try_unwrap(runtime) {
                 Ok(runtime) => {
                     if Handle::try_current().is_ok() {
-                        info!("shutting down runtime in background (called from within tokio runtime)");
+                        info!(
+                            "shutting down runtime in background (called from within tokio runtime)"
+                        );
                         runtime.shutdown_background();
                     } else {
-                        info!("shutting down runtime with timeout: {:?}", self.shutdown_timeout);
+                        info!(
+                            "shutting down runtime with timeout: {:?}",
+                            self.shutdown_timeout
+                        );
                         runtime.shutdown_timeout(self.shutdown_timeout);
                     }
                     info!("storage runtime shutdown complete");
                 }
                 Err(runtime) => {
                     let count = Arc::strong_count(&runtime);
-                    warn!("cannot shutdown runtime: still {} strong references exist", count);
+                    warn!(
+                        "cannot shutdown runtime: still {} strong references exist",
+                        count
+                    );
                     debug_assert!(
                         Arc::strong_count(&runtime) == 1,
                         "storage runtime shutdown called while runtime still shared",

@@ -195,13 +195,10 @@ impl LibsqlVirtualWal {
             .state
             .lock()
             .expect("libsql virtual WAL state poisoned");
-        let mut storage = state
-            .manager
-            .take()
-            .ok_or_else(|| {
-                warn!(wal_name = %self.config.name, "Virtual WAL not attached");
-                LibsqlVirtualWalError::NotAttached
-            })?;
+        let mut storage = state.manager.take().ok_or_else(|| {
+            warn!(wal_name = %self.config.name, "Virtual WAL not attached");
+            LibsqlVirtualWalError::NotAttached
+        })?;
         unsafe { storage.release() };
         debug!(wal_name = %self.config.name, "Successfully detached virtual WAL");
         Ok(())
@@ -460,7 +457,11 @@ impl WalImpl {
                     .is_some()
                 {
                     self.remove_page_cache_entry(replaced.page_no);
-                    trace!(frame_id, old_pgno = replaced.page_no, "Replaced frame in cache");
+                    trace!(
+                        frame_id,
+                        old_pgno = replaced.page_no,
+                        "Replaced frame in cache"
+                    );
                 }
             }
 
@@ -469,7 +470,12 @@ impl WalImpl {
             state.total_bytes += entry_len;
             self.enforce_limit_locked(&mut state);
         } else {
-            trace!(frame_id, pgno, size = data.len(), "Skipped caching frame (too large)");
+            trace!(
+                frame_id,
+                pgno,
+                size = data.len(),
+                "Skipped caching frame (too large)"
+            );
         }
 
         self.bump_max_page(pgno);
@@ -630,7 +636,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    use crate::libsql::page_cache::{PageCache, PageCacheConfig, PageCacheKey, allocate_cache_object_id};
+    use crate::libsql::page_cache::{
+        PageCache, PageCacheConfig, PageCacheKey, allocate_cache_object_id,
+    };
 
     #[derive(Default)]
     struct MockWalHook {

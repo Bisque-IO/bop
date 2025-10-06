@@ -379,7 +379,12 @@ impl IoFile for StdIoFile {
     #[instrument(level = "trace", skip(self, bufs), fields(offset, num_bufs = bufs.len()))]
     fn readv_at(&self, offset: u64, bufs: &mut [IoVecMut<'_>]) -> IoResult<usize> {
         let total_len: usize = bufs.iter().map(|b| b.len()).sum();
-        trace!(offset, size_bytes = total_len, num_bufs = bufs.len(), "Reading vectored data");
+        trace!(
+            offset,
+            size_bytes = total_len,
+            num_bufs = bufs.len(),
+            "Reading vectored data"
+        );
 
         let mut current_offset = offset;
         let mut total = 0usize;
@@ -388,10 +393,11 @@ impl IoFile for StdIoFile {
             let slice = buf.as_mut_slice();
             let mut consumed = 0usize;
             while consumed < slice.len() {
-                let read = read_at(self.file.as_ref(), &mut slice[consumed..], current_offset).map_err(|e| {
-                    error!(offset = current_offset, error = %e, "Read failed");
-                    IoError::from(e)
-                })?;
+                let read = read_at(self.file.as_ref(), &mut slice[consumed..], current_offset)
+                    .map_err(|e| {
+                        error!(offset = current_offset, error = %e, "Read failed");
+                        IoError::from(e)
+                    })?;
                 if read == 0 {
                     trace!(bytes_read = total, "Read complete (EOF)");
                     return Ok(total);
@@ -411,7 +417,12 @@ impl IoFile for StdIoFile {
         use std::io::{Error, ErrorKind};
 
         let total_len: usize = bufs.iter().map(|b| b.len()).sum();
-        trace!(offset, size_bytes = total_len, num_bufs = bufs.len(), "Writing vectored data");
+        trace!(
+            offset,
+            size_bytes = total_len,
+            num_bufs = bufs.len(),
+            "Writing vectored data"
+        );
 
         let mut current_offset = offset;
         let mut total = 0usize;
@@ -420,10 +431,11 @@ impl IoFile for StdIoFile {
             let slice = buf.as_slice();
             let mut written = 0usize;
             while written < slice.len() {
-                let count = write_at(self.file.as_ref(), &slice[written..], current_offset).map_err(|e| {
-                    error!(offset = current_offset, error = %e, "Write failed");
-                    IoError::from(e)
-                })?;
+                let count = write_at(self.file.as_ref(), &slice[written..], current_offset)
+                    .map_err(|e| {
+                        error!(offset = current_offset, error = %e, "Write failed");
+                        IoError::from(e)
+                    })?;
                 if count == 0 {
                     error!(offset = current_offset, "Write returned zero bytes");
                     return Err(IoError::Io(Error::new(

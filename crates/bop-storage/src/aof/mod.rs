@@ -5,9 +5,9 @@ pub mod reader;
 mod wal;
 
 pub use checkpoint::{
-    AofPlanner, AofPlannerContext, AppendOnlyCheckpointConfig, AppendOnlyContext, AppendOnlyError,
-    AppendOnlyJob, AppendOnlyOutcome, LeaseMap, TruncateDirection, TruncationError,
-    TruncationRequest, run_checkpoint,
+    AofCheckpointConfig, AofCheckpointContext, AofCheckpointError, AofCheckpointJob,
+    AofCheckpointOutcome, AofPlanner, AofPlannerContext, LeaseMap, TruncateDirection,
+    TruncationError, TruncationRequest, run_checkpoint,
 };
 pub use reader::{AofCursor, AofReaderError};
 pub use wal::{
@@ -30,9 +30,7 @@ use std::{env, fmt};
 use thiserror::Error;
 
 use crate::chunk_quota::ChunkStorageQuota;
-use crate::flush::{
-    FlushController, FlushControllerConfig, FlushControllerSnapshot,
-};
+use crate::flush::{FlushController, FlushControllerConfig, FlushControllerSnapshot};
 use crate::io::{IoBackendKind, IoError, SharedIoDriver};
 use crate::local_store::{
     LocalChunkHandle, LocalChunkStore, LocalChunkStoreConfig, LocalChunkStoreError,
@@ -46,12 +44,12 @@ const DEFAULT_CHUNK_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
 const DEFAULT_CHUNK_CACHE_MIN_AGE_SECS: u64 = 300; // 5 minutes
 
 use crate::runtime::StorageRuntime;
-use crate::write::{
-    WriteController, WriteControllerConfig, WriteControllerSnapshot,
-};
+use crate::write::{WriteController, WriteControllerConfig, WriteControllerSnapshot};
 
 /// Identifier for a storage pod/database instance managed by `Manager`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct AofId(u32);
 
 impl AofId {
@@ -172,7 +170,7 @@ pub struct AofConfig {
     data_dir: PathBuf,
     wal_dir: PathBuf,
     chunk_size_bytes: u64,
-    pre_allocate_threshold: f64,  // 0.0 to 1.0, fraction of chunk fullness
+    pre_allocate_threshold: f64, // 0.0 to 1.0, fraction of chunk fullness
     io_backend: Option<IoBackendKind>,
     chunk_cache_dir: Option<PathBuf>,
     chunk_cache_bytes: Option<u64>,
@@ -256,7 +254,7 @@ impl AofConfigBuilder {
             data_dir: None,
             wal_dir: None,
             chunk_size_bytes: DEFAULT_CHUNK_SIZE_BYTES,
-            pre_allocate_threshold: 0.5,  // Default: 50%
+            pre_allocate_threshold: 0.5, // Default: 50%
             chunk_cache_dir: None,
             chunk_cache_bytes: None,
             chunk_cache_min_age: None,
@@ -530,14 +528,23 @@ impl Aof {
     /// Note: This is primarily for internal use and testing.
     #[allow(dead_code)]
     pub(crate) fn tail_segment(&self) -> Option<Arc<AofWalSegment>> {
-        self.inner.tail_state.lock().expect("tail state mutex poisoned").segment.clone()
+        self.inner
+            .tail_state
+            .lock()
+            .expect("tail state mutex poisoned")
+            .segment
+            .clone()
     }
 
     /// Seal the current tail segment and prepare it for checkpointing.
     /// This converts the mutable tail into an immutable sealed chunk.
     /// Returns the sealed segment and updates the base LSN for the next segment.
     pub fn seal_tail(&self) -> Option<Arc<AofWalSegment>> {
-        let mut state = self.inner.tail_state.lock().expect("tail state mutex poisoned");
+        let mut state = self
+            .inner
+            .tail_state
+            .lock()
+            .expect("tail state mutex poisoned");
         let sealed = state.segment.take();
         if sealed.is_some() {
             // Update base LSN for next segment
@@ -732,12 +739,11 @@ impl AofInner {
         let segment = state.segment.as_ref().unwrap();
 
         // Reserve space in the segment
-        segment.reserve_pending(chunk_len)
-            .map_err(|e| AofError::LocalChunk(
-                crate::local_store::LocalChunkStoreError::Io(
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                )
-            ))?;
+        segment.reserve_pending(chunk_len).map_err(|e| {
+            AofError::LocalChunk(crate::local_store::LocalChunkStoreError::Io(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            ))
+        })?;
 
         // Add to active batch and enqueue if it was empty
         let was_empty = segment.with_active_batch(|batch| {
@@ -749,7 +755,8 @@ impl AofInner {
         // Enqueue if batch transitioned from empty to non-empty
         // This guarantees exactly one enqueue per batch cycle
         if was_empty {
-            self.write_controller.enqueue(segment.clone())
+            self.write_controller
+                .enqueue(segment.clone())
                 .map_err(|_| AofError::Closed)?;
         }
 
@@ -791,12 +798,11 @@ impl AofInner {
 
         let segment = state.segment.as_ref().unwrap();
 
-        segment.reserve_pending(total_len as u64)
-            .map_err(|e| AofError::LocalChunk(
-                crate::local_store::LocalChunkStoreError::Io(
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                )
-            ))?;
+        segment.reserve_pending(total_len as u64).map_err(|e| {
+            AofError::LocalChunk(crate::local_store::LocalChunkStoreError::Io(
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            ))
+        })?;
 
         // Add to active batch and check if we need to enqueue
         let was_empty = segment.with_active_batch(|batch| {
@@ -809,7 +815,8 @@ impl AofInner {
 
         // Only enqueue if batch was empty (transitioning from 0→1 entries)
         if was_empty {
-            self.write_controller.enqueue(segment.clone())
+            self.write_controller
+                .enqueue(segment.clone())
                 .map_err(|_| AofError::Closed)?;
         }
 
@@ -832,7 +839,7 @@ impl AofInner {
         if let Some(segment) = state.segment.clone() {
             let target = state.tail_lsn - state.base_lsn;
             let base_lsn = state.base_lsn;
-            drop(state);  // Release lock before waiting
+            drop(state); // Release lock before waiting
 
             // Wait for writes to complete
             let timeout = std::time::Duration::from_secs(10);
@@ -840,23 +847,23 @@ impl AofInner {
             while segment.written_size() < target {
                 if start.elapsed() > timeout {
                     return Err(AofError::LocalChunk(
-                        crate::local_store::LocalChunkStoreError::Io(
-                            std::io::Error::new(std::io::ErrorKind::TimedOut, "write timeout")
-                        )
+                        crate::local_store::LocalChunkStoreError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "write timeout",
+                        )),
                     ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
 
             // Request flush
-            if segment.request_flush(target)
-                .map_err(|e| AofError::LocalChunk(
-                    crate::local_store::LocalChunkStoreError::Io(
-                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                    )
-                ))?
-            {
-                self.flush_controller.enqueue(segment.clone())
+            if segment.request_flush(target).map_err(|e| {
+                AofError::LocalChunk(crate::local_store::LocalChunkStoreError::Io(
+                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                ))
+            })? {
+                self.flush_controller
+                    .enqueue(segment.clone())
                     .map_err(|_| AofError::Closed)?;
             }
 
@@ -865,9 +872,10 @@ impl AofInner {
             while segment.durable_size() < target {
                 if start.elapsed() > timeout {
                     return Err(AofError::LocalChunk(
-                        crate::local_store::LocalChunkStoreError::Io(
-                            std::io::Error::new(std::io::ErrorKind::TimedOut, "flush timeout")
-                        )
+                        crate::local_store::LocalChunkStoreError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "flush timeout",
+                        )),
                     ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -935,7 +943,11 @@ impl AofInner {
         // Calculate adaptive chunk size based on current segment's write rate
         let write_rate = segment.write_rate_bytes_per_sec();
         let next_size = calculate_adaptive_chunk_size(
-            if write_rate > 0 { Some(write_rate) } else { None },
+            if write_rate > 0 {
+                Some(write_rate)
+            } else {
+                None
+            },
             self.chunk_size_bytes,
         );
 
@@ -969,24 +981,18 @@ impl AofInner {
 
         // Ensure directory exists
         if let Some(parent) = segment_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| AofError::LocalChunk(
-                    crate::local_store::LocalChunkStoreError::Io(e)
-                ))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AofError::LocalChunk(crate::local_store::LocalChunkStoreError::Io(e))
+            })?;
         }
 
         // Open file for writing
-        let file = self.io.open(
-            &segment_path,
-            &crate::io::IoOpenOptions::write_only(),
-        )?;
+        let file = self
+            .io
+            .open(&segment_path, &crate::io::IoOpenOptions::write_only())?;
 
         // Create segment with specified size
-        let segment = Arc::new(AofWalSegment::new(
-            Arc::from(file),
-            base_lsn,
-            size,
-        ));
+        let segment = Arc::new(AofWalSegment::new(Arc::from(file), base_lsn, size));
 
         Ok(segment)
     }
@@ -1168,7 +1174,8 @@ mod tests {
         let db_id = db.id().get();
 
         // Append some data
-        db.append(WriteChunk::Owned(vec![0u8; 256])).expect("append");
+        db.append(WriteChunk::Owned(vec![0u8; 256]))
+            .expect("append");
 
         // Sync to make it durable
         let durable = db.sync().expect("sync");

@@ -186,14 +186,10 @@ impl Manager {
     #[instrument(skip(self), fields(db_id = ?id))]
     pub fn close_db(&self, id: &AofId) -> Result<(), ManagerError> {
         debug!("closing database");
-        let removed = self
-            .inner
-            .pods
-            .remove(id)
-            .ok_or_else(|| {
-                warn!("database not found");
-                ManagerError::AofNotFound(id.clone())
-            })?;
+        let removed = self.inner.pods.remove(id).ok_or_else(|| {
+            warn!("database not found");
+            ManagerError::AofNotFound(id.clone())
+        })?;
         let (_, pod) = removed;
         pod.close();
         info!("database closed successfully");

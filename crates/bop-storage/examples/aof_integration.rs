@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use bop_storage::{
-    AofConfig, Manager, Manifest, ManifestOptions,
-    MIN_CHUNK_SIZE_BYTES, MAX_CHUNK_SIZE_BYTES, DEFAULT_CHUNK_SIZE_BYTES,
+    AofConfig, DEFAULT_CHUNK_SIZE_BYTES, MAX_CHUNK_SIZE_BYTES, MIN_CHUNK_SIZE_BYTES, Manager,
+    Manifest, ManifestOptions,
 };
 use tempfile::TempDir;
 
@@ -35,7 +35,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&temp_dir)?;
     let manifest_path = temp_dir.join("manifest");
     let options = ManifestOptions::default();
-    println!("   → Initial map_size: {} MiB", options.initial_map_size / (1024 * 1024));
+    println!(
+        "   → Initial map_size: {} MiB",
+        options.initial_map_size / (1024 * 1024)
+    );
     let manifest = Arc::new(Manifest::open(&manifest_path, options)?);
     let manager = Manager::new(manifest.clone());
     println!("   ✓ Manager created\n");
@@ -51,7 +54,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let aof = manager.open_db(aof_config)?;
     println!("   ✓ AOF created with ID: {}", aof.id());
-    println!("   ✓ Chunk size: {} bytes ({} KB)", aof.chunk_size_bytes(), aof.chunk_size_bytes() / 1024);
+    println!(
+        "   ✓ Chunk size: {} bytes ({} KB)",
+        aof.chunk_size_bytes(),
+        aof.chunk_size_bytes() / 1024
+    );
     println!();
 
     // Step 3: Write data across multiple chunks
@@ -61,7 +68,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let write_size = (CHUNK_SIZE / writes_per_chunk as u64) as usize;
     let total_writes = writes_per_chunk * num_chunks;
 
-    println!("   → Writing {} batches of {} bytes each", total_writes, write_size);
+    println!(
+        "   → Writing {} batches of {} bytes each",
+        total_writes, write_size
+    );
     println!("   → Expected to span {} chunks", num_chunks);
     println!();
 
@@ -69,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Create test data with a recognizable pattern
         let mut data = vec![0u8; write_size];
         for (idx, byte) in data.iter_mut().enumerate() {
-            *byte = 'A' as u8;// ((i * 256 + idx % 256) & 0xFF) as u8;
+            *byte = 'A' as u8; // ((i * 256 + idx % 256) & 0xFF) as u8;
         }
 
         // Append data - tail segment is managed automatically!
@@ -78,8 +88,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let chunk_id = aof.chunk_id_for_lsn(lsn);
         let chunk_offset = aof.chunk_offset(lsn);
 
-        println!("   Write #{}: LSN={} → Chunk {} @ offset {}",
-                 i + 1, lsn, chunk_id, chunk_offset);
+        println!(
+            "   Write #{}: LSN={} → Chunk {} @ offset {}",
+            i + 1,
+            lsn,
+            chunk_id,
+            chunk_offset
+        );
 
         // Optionally sync to ensure durability
         if (i + 1) % writes_per_chunk == 0 {
@@ -92,7 +107,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let durable_bytes = aof.durable_lsn();
 
     println!();
-    println!("   ✓ Wrote {} bytes across {} chunks", total_bytes, num_chunks);
+    println!(
+        "   ✓ Wrote {} bytes across {} chunks",
+        total_bytes, num_chunks
+    );
     println!("   ✓ Durable up to LSN {}", durable_bytes);
     println!();
 
@@ -108,8 +126,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let end_lsn = aof.chunk_end_lsn(chunk_id);
         let offset = aof.chunk_offset(lsn);
 
-        println!("   LSN {} → Chunk {} [{}..{}), offset {}",
-                 lsn, chunk_id, start_lsn, end_lsn, offset);
+        println!(
+            "   LSN {} → Chunk {} [{}..{}), offset {}",
+            lsn, chunk_id, start_lsn, end_lsn, offset
+        );
     }
     println!();
 
@@ -129,7 +149,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let batch_lsn = aof.append_batch(&batch_data)?;
     println!("   ✓ Batch appended at LSN {}", batch_lsn);
-    println!("   ✓ Total size: {} bytes", batch_data.iter().map(|d| d.len()).sum::<usize>());
+    println!(
+        "   ✓ Total size: {} bytes",
+        batch_data.iter().map(|d| d.len()).sum::<usize>()
+    );
     aof.sync()?;
     println!();
 
@@ -151,8 +174,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Step 8: Demonstrate chunk size validation
     println!("8. Chunk size configuration...");
     println!("   → Minimum: {} KB", MIN_CHUNK_SIZE_BYTES / 1024);
-    println!("   → Maximum: {} GB", MAX_CHUNK_SIZE_BYTES / (1024 * 1024 * 1024));
-    println!("   → Default: {} MB", DEFAULT_CHUNK_SIZE_BYTES / (1024 * 1024));
+    println!(
+        "   → Maximum: {} GB",
+        MAX_CHUNK_SIZE_BYTES / (1024 * 1024 * 1024)
+    );
+    println!(
+        "   → Default: {} MB",
+        DEFAULT_CHUNK_SIZE_BYTES / (1024 * 1024)
+    );
     println!("   → Current: {} KB", aof.chunk_size_bytes() / 1024);
     println!();
 

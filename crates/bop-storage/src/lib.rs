@@ -14,12 +14,12 @@ mod storage_quota;
 mod write;
 
 pub use aof::{
-    Aof, AofConfig, AofCursor, AofDiagnostics, AofId, AofPlanner, AofPlannerContext,
-    AofReaderError, AofWal, AofWalDiagnostics, AofWalSegment, AofWalSegmentError,
-    AofWalSegmentSnapshot, AppendOnlyCheckpointConfig, AppendOnlyContext, AppendOnlyError,
-    AppendOnlyJob, AppendOnlyOutcome, LeaseMap, StagedBatchStats, TruncateDirection,
+    Aof, AofCheckpointConfig, AofCheckpointContext, AofCheckpointError, AofCheckpointJob,
+    AofCheckpointOutcome, AofConfig, AofCursor, AofDiagnostics, AofId, AofPlanner,
+    AofPlannerContext, AofReaderError, AofWal, AofWalDiagnostics, AofWalSegment,
+    AofWalSegmentError, AofWalSegmentSnapshot, DEFAULT_CHUNK_SIZE_BYTES, LeaseMap,
+    MAX_CHUNK_SIZE_BYTES, MIN_CHUNK_SIZE_BYTES, StagedBatchStats, TAIL_CHUNK_ID, TruncateDirection,
     TruncationError, TruncationRequest, WriteBatch, WriteBufferError, WriteChunk, run_checkpoint,
-    TAIL_CHUNK_ID, DEFAULT_CHUNK_SIZE_BYTES, MAX_CHUNK_SIZE_BYTES, MIN_CHUNK_SIZE_BYTES,
 };
 
 pub use chunk_quota::{ChunkQuotaError, ChunkQuotaGuard, ChunkStorageQuota};
@@ -45,9 +45,9 @@ pub use local_store::{
 pub use manager::{
     ControllerDiagnostics, Manager, ManagerClosedError, ManagerDiagnostics, ManagerError,
 };
-pub use manifest::{Manifest, ManifestOptions};
 #[cfg(feature = "libsql")]
 pub use manifest::{DeltaLocation, LibSqlChunkRecord, PageLocation};
+pub use manifest::{Manifest, ManifestOptions};
 pub use remote_chunk::{
     RemoteChunkError, RemoteChunkFetcher, RemoteChunkSpec, RemoteChunkStore, RemoteUploadRequest,
     RemoteUploadResult,

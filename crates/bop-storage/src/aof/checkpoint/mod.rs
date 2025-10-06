@@ -26,12 +26,12 @@ use crate::manifest::{
 use crate::storage_quota::{QuotaError, ReservationGuard, StorageQuota};
 
 #[derive(Debug, Clone)]
-pub struct AppendOnlyCheckpointConfig {
+pub struct AofCheckpointConfig {
     pub remote_namespace_id: Option<RemoteNamespaceId>,
     pub lease_ttl: Duration,
 }
 
-impl Default for AppendOnlyCheckpointConfig {
+impl Default for AofCheckpointConfig {
     fn default() -> Self {
         Self {
             remote_namespace_id: None,
@@ -41,15 +41,15 @@ impl Default for AppendOnlyCheckpointConfig {
 }
 
 #[derive(Clone)]
-pub struct AppendOnlyContext {
+pub struct AofCheckpointContext {
     pub manifest: Arc<Manifest>,
     pub quota: Arc<StorageQuota>,
     pub lease_map: Arc<LeaseMap>,
-    pub config: AppendOnlyCheckpointConfig,
+    pub config: AofCheckpointConfig,
 }
 
 #[derive(Debug, Clone)]
-pub struct AppendOnlyJob {
+pub struct AofCheckpointJob {
     pub job_id: manifest::JobId,
     pub db_id: DbId,
     pub current_generation: Generation,
@@ -58,13 +58,13 @@ pub struct AppendOnlyJob {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct AppendOnlyOutcome {
+pub struct AofCheckpointOutcome {
     pub chunks_processed: usize,
     pub bytes_processed: u64,
 }
 
 #[derive(Debug, Error)]
-pub enum AppendOnlyError {
+pub enum AofCheckpointError {
     #[error("manifest error: {0}")]
     Manifest(String),
     #[error(transparent)]
@@ -77,9 +77,9 @@ pub enum AppendOnlyError {
 
 /// Runs an append-only checkpoint job end to end.
 pub fn run_checkpoint(
-    ctx: &AppendOnlyContext,
-    job: &AppendOnlyJob,
-) -> Result<AppendOnlyOutcome, AppendOnlyError> {
+    ctx: &AofCheckpointContext,
+    job: &AofCheckpointJob,
+) -> Result<AofCheckpointOutcome, AofCheckpointError> {
     let chunks = collect_tail_chunks(&ctx.manifest, job)?;
 
     let planner = AofPlanner::new();
@@ -92,7 +92,7 @@ pub fn run_checkpoint(
     let plan = planner.plan(&planner_context, &chunks);
 
     if plan.is_empty() {
-        return Ok(AppendOnlyOutcome::default());
+        return Ok(AofCheckpointOutcome::default());
     }
 
     let _quota_guard = reserve_quota(&ctx.quota, job, &plan)?;
@@ -111,7 +111,7 @@ pub fn run_checkpoint(
 
     release_leases(&ctx.lease_map, &plan);
 
-    Ok(AppendOnlyOutcome {
+    Ok(AofCheckpointOutcome {
         chunks_processed: published,
         bytes_processed: plan.estimated_size_bytes,
     })
@@ -119,11 +119,11 @@ pub fn run_checkpoint(
 
 fn collect_tail_chunks(
     manifest: &Arc<Manifest>,
-    job: &AppendOnlyJob,
-) -> Result<Vec<TailChunkDescriptor>, AppendOnlyError> {
+    job: &AofCheckpointJob,
+) -> Result<Vec<TailChunkDescriptor>, AofCheckpointError> {
     let artifacts = manifest
         .wal_artifacts(job.db_id)
-        .map_err(|err| AppendOnlyError::Manifest(err.to_string()))?;
+        .map_err(|err| AofCheckpointError::Manifest(err.to_string()))?;
 
     let mut chunks = Vec::new();
     for (_key, record) in artifacts {
@@ -164,9 +164,9 @@ fn collect_tail_chunks(
 
 fn reserve_quota(
     quota: &Arc<StorageQuota>,
-    job: &AppendOnlyJob,
+    job: &AofCheckpointJob,
     plan: &AofPlan,
-) -> Result<Option<ReservationGuard>, AppendOnlyError> {
+) -> Result<Option<ReservationGuard>, AofCheckpointError> {
     if plan.estimated_size_bytes == 0 {
         return Ok(None);
     }
@@ -174,15 +174,15 @@ fn reserve_quota(
     quota
         .reserve(job.db_id, job.job_id, plan.estimated_size_bytes)
         .map(Some)
-        .map_err(AppendOnlyError::from)
+        .map_err(AofCheckpointError::from)
 }
 
 fn register_leases(
     lease_map: &Arc<LeaseMap>,
-    job: &AppendOnlyJob,
+    job: &AofCheckpointJob,
     plan: &AofPlan,
     ttl: Duration,
-) -> Result<(), AppendOnlyError> {
+) -> Result<(), AofCheckpointError> {
     for chunk in &plan.chunks {
         lease_map.register(chunk.chunk_id, plan.target_generation, job.job_id, ttl)?;
     }
@@ -200,7 +200,7 @@ fn publish_chunks(
     remote_namespace_id: Option<RemoteNamespaceId>,
     db_id: DbId,
     chunks: &[PreparedChunk],
-) -> Result<usize, AppendOnlyError> {
+) -> Result<usize, AofCheckpointError> {
     let mut txn = manifest.begin();
 
     for prepared in chunks {
@@ -220,7 +220,7 @@ fn publish_chunks(
     }
 
     txn.commit()
-        .map_err(|err| AppendOnlyError::Manifest(err.to_string()))?;
+        .map_err(|err| AofCheckpointError::Manifest(err.to_string()))?;
 
     Ok(chunks.len())
 }
