@@ -1,26 +1,60 @@
-//! Low-level executor primitives ported from the Odin implementation in odin/executor.
+#![feature(portable_simd)]
+#![feature(thread_id_value)]
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
+//! # MPMC Queue Wrapper
 //!
-//! The crate mirrors the layout of the original modules (signal, slot, selector, and waker)
-//! and keeps the API surface intentionally low-level so higher level schedulers can be built
-//! on top. Some parts of the original Odin sources were stubs (e.g. signal group reservation
-//! and executor scheduling), so the matching Rust types currently expose placeholders until
-//! the upstream logic is completed.
+//! High-performance multi-producer multi-consumer queue implementation using
+//! the moodycamel C++ library through BOP's C API.
+//!
+//! This module provides safe Rust wrappers around the high-performance moodycamel
+//! concurrent queue, offering both non-blocking and blocking variants.
+//!
+//! ## Features
+//!
+//! - **Lock-free**: Non-blocking operations for maximum performance
+//! - **Thread-safe**: Multiple producers and consumers can operate concurrently
+//! - **Token-based optimization**: Producer/consumer tokens for better performance
+//! - **Bulk operations**: Efficient batch enqueue/dequeue operations
+//! - **Blocking variant**: Optional blocking operations with timeout support
+//! - **Memory efficient**: Zero-copy operations where possible
 
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
-
-pub mod async_task;
-// pub mod async_task_adapter;
-pub mod executor;
+pub mod bits;
+// pub mod deque;
+mod loom_exports;
+pub mod mpmc;
+pub mod mpsc;
+pub mod seg_spmc;
+pub mod seg_spsc;
 pub mod selector;
 pub mod signal;
-pub mod slot;
+pub mod spsc;
+pub mod timer_wheel;
 pub mod waker;
 
-pub use executor::{ExecuteError, Executor};
-pub use selector::Selector;
-pub use signal::{
-    SIGNAL_CAPACITY, Signal, SignalGroup, SignalSetResult, signal_nearest,
-    signal_nearest_branchless,
-};
-pub use slot::{Slot, SlotState, SlotWorker};
-pub use waker::Waker;
+pub use mpmc::*;
+pub use signal::*;
+pub use spsc::*;
+pub use waker::*;
+
+/// Error occurring when pushing into a queue is unsuccessful.
+#[derive(Debug, Eq, PartialEq)]
+pub enum PushError<T> {
+    /// The queue is full.
+    Full(T),
+    /// The receiver has been dropped.
+    Closed(T),
+}
+
+/// Error occurring when popping from a queue is unsuccessful.
+#[derive(Debug, Eq, PartialEq)]
+pub enum PopError {
+    /// The queue is empty.
+    Empty,
+    /// All senders have been dropped and the queue is empty.
+    Closed,
+    ///
+    Timeout,
+}

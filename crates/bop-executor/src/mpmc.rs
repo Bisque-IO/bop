@@ -131,13 +131,13 @@ struct MpmcTLS {
     // 1. Smaller QueueCache struct (8-byte pointer vs large embedded HashMap)
     // 2. Better cache locality for thread_local storage
     // 3. Heap allocation only when HashMap is actually used
-    entries: Box<hashbrown::HashMap<usize, (usize, *const (), CloseFn)>>,
+    entries: Box<std::collections::HashMap<usize, (usize, *const (), CloseFn)>>,
 }
 
 impl MpmcTLS {
     fn new() -> Self {
         Self {
-            entries: Box::new(hashbrown::HashMap::new()),
+            entries: Box::new(std::collections::HashMap::new()),
         }
     }
 }

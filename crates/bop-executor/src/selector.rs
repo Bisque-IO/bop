@@ -1,6 +1,5 @@
-use rand::Rng;
-
 use crate::signal::{SIGNAL_CAPACITY, SIGNAL_MASK};
+use rand::RngCore;
 
 const RND_MULTIPLIER: u64 = 0x5DEECE66D;
 const RND_ADDEND: u64 = 0xB;
@@ -13,14 +12,15 @@ pub struct Selector {
     pub signal: u64,
     pub bit: u64,
     pub bit_count: u64,
+    pub misses: u64,
     pub contention: u64,
     pub seed: u64,
+    pub cached: *mut (),
 }
 
 impl Selector {
     pub fn new() -> Self {
-        let mut rng = rand::rng();
-        let seed: u64 = rng.random();
+        let seed: u64 = rand::rng().next_u64();
         let mut selector = Self {
             owned: 0,
             value: 0,
@@ -28,8 +28,10 @@ impl Selector {
             signal: 0,
             bit: 0,
             bit_count: 0,
+            misses: 0,
             contention: 0,
             seed,
+            cached: std::ptr::null_mut(),
         };
         selector.next_map();
         selector
@@ -57,8 +59,26 @@ impl Selector {
             self.next_map();
             return self.bit;
         }
+        self.signal = self.next();
         self.bit = self.bit.wrapping_add(1);
         self.bit_count += 1;
         self.bit & SIGNAL_MASK
     }
+
+    // pub fn next_map(&mut self) -> u64 {
+    //     self.signal = self.signal + 1;
+    //     self.bit = 0;
+    //     self.bit_count = 1;
+    //     self.signal
+    // }
+    //
+    // pub fn next_select(&mut self) -> u64 {
+    //     if self.bit_count >= SIGNAL_CAPACITY {
+    //         self.next_map();
+    //         return self.bit;
+    //     }
+    //     self.bit = self.bit.wrapping_add(1);
+    //     self.bit_count += 1;
+    //     self.bit_count
+    // }
 }

@@ -1,5 +1,9 @@
 #![feature(portable_simd)]
 #![feature(thread_id_value)]
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 //! # MPMC Queue Wrapper
 //!
 //! High-performance multi-producer multi-consumer queue implementation using
@@ -18,7 +22,7 @@
 //! - **Memory efficient**: Zero-copy operations where possible
 
 pub mod bits;
-pub mod deque;
+// pub mod deque;
 mod loom_exports;
 pub mod moody;
 pub mod mpmc;
@@ -28,6 +32,7 @@ pub mod seg_spsc;
 pub mod selector;
 pub mod signal;
 pub mod spsc;
+pub mod timer_wheel;
 pub mod waker;
 
 pub use mpmc::*;

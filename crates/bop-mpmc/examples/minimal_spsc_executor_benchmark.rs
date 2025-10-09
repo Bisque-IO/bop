@@ -8,15 +8,15 @@
 //! Uses thread-local executor model similar to MpmcBlocking's producer management.
 
 use bop_mpmc::selector::Selector;
-use bop_mpmc::{Mpmc, PushError, EXECUTING, IDLE, SCHEDULED};
+use bop_mpmc::{EXECUTING, IDLE, Mpmc, PushError, SCHEDULED};
 use futures_lite::FutureExt;
 use std::cell::UnsafeCell;
 use std::future::Future;
 use std::mem::MaybeUninit;
 use std::ops::{Add, Sub};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -294,21 +294,23 @@ impl Executor {
         let core_ids = core_affinity::get_core_ids().unwrap();
 
         // Create a thread for each active CPU core.
-        let worker_handles = core_ids.into_iter().filter(|id| id.lt(&core_affinity::CoreId { id: 8 })).map(|id| {
-
-
-            println!("core id: {:?}", id);
-            let inner_clone = Arc::clone(&inner);
-            let shutdown_clone = Arc::clone(&shutdown);
-            thread::spawn(move || {
-                // Pin this thread to a single CPU core.
-                let res = core_affinity::set_for_current(id);
-                // if (res) {
-                //     // Do more work after this.
-                // }
-                Self::worker_loop(0, inner_clone, shutdown_clone);
+        let worker_handles = core_ids
+            .into_iter()
+            .filter(|id| id.lt(&core_affinity::CoreId { id: 8 }))
+            .map(|id| {
+                println!("core id: {:?}", id);
+                let inner_clone = Arc::clone(&inner);
+                let shutdown_clone = Arc::clone(&shutdown);
+                thread::spawn(move || {
+                    // Pin this thread to a single CPU core.
+                    let res = core_affinity::set_for_current(id);
+                    // if (res) {
+                    //     // Do more work after this.
+                    // }
+                    Self::worker_loop(0, inner_clone, shutdown_clone);
+                })
             })
-        }).collect::<Vec<_>>();
+            .collect::<Vec<_>>();
 
         // Spawn worker threads
         // let mut worker_handles = Vec::new();
@@ -369,9 +371,7 @@ impl Executor {
                         }
                         Poll::Pending => {
                             if *(*task_ptr.get()).yielded.get() {
-                                (*task_ptr.get())
-                                    .flags
-                                    .store(SCHEDULED, Ordering::Release);
+                                (*task_ptr.get()).flags.store(SCHEDULED, Ordering::Release);
                                 // loop {
                                 //     match producer.try_push(task_ptr) {
                                 //         Ok(_) => break,
@@ -433,7 +433,6 @@ impl Executor {
                         }
                     }
                 }
-
 
                 enqueue.clear();
             }
@@ -637,101 +636,116 @@ fn main() {
     //     polls as f64 / duration.as_secs_f64() / 1_000_000.0
     // );
 
-    // {
-    //     println!("=== Tokio: 4 threads - 1000 tasks × 10K yields ===");
-    //     let tasks_count = 200_000;
-    //     let task_counters: Arc<Vec<_>> = Arc::new((0..tasks_count).map(|_| Arc::new(AtomicUsize::new(0))).collect());
-    //     let runtime = Arc::new(tokio::runtime::Builder::new_multi_thread().worker_threads(8).enable_all().build().unwrap());
-    //     // let runtime = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
-    //
-    //     let start_threads: Vec<_> = (0..1)
-    //         .map(|_i| {
-    //             let task_counters = Arc::clone(&task_counters);
-    //             let runtime = Arc::clone(&runtime);
-    //             std::thread::spawn(move || {
-    //                 for task_id in 0..tasks_count {
-    //                     runtime.spawn(YieldNTimes::new(100_000, task_counters[task_id].clone()));
-    //                 }
-    //             })
-    //         })
-    //         .collect();
-    //
-    //     // for _ in 0..1000 {
-    //     //     executor.spawn(YieldNTimes::new(10_000, poll_count.clone()));
-    //     // }
-    //     for h in start_threads {
-    //         h.join().unwrap();
-    //     }
-    //     println!("started threads");
-    //
-    //     let mut starting_count = 0;
-    //     for counter in task_counters.iter() {
-    //         starting_count += counter.load(Ordering::Relaxed);
-    //     }
-    //     let start = Instant::now();
-    //
-    //     let mut last_count = 0;
-    //     let mut _stall_iterations = 0;
-    //
-    //     let mut current_window = 0;
-    //     let mut next_target = start.add(Duration::from_secs(1));
-    //     let mut current_start = start;
-    //
-    //     loop {
-    //         thread::sleep(Duration::from_millis(1));
-    //
-    //         let mut current = 0;
-    //         for counter in task_counters.iter() {
-    //             current += counter.load(Ordering::Relaxed);
-    //         }
-    //
-    //         if current >= 10_000_000_000 {
-    //             break;
-    //         }
-    //
-    //         if current == last_count {
-    //             _stall_iterations += 1;
-    //         } else {
-    //             _stall_iterations = 0;
-    //         }
-    //
-    //         last_count = current;
-    //
-    //         let now = Instant::now();
-    //         if now.ge(&next_target) {
-    //             println!(
-    //                 "  Throughput: {:.2}M polls/sec",
-    //                 (current - current_window) as f64 / (now.sub(current_start)).as_secs_f64() / 1_000_000.0
-    //             );
-    //             next_target = now.add(Duration::from_secs(1));
-    //             current_start = now;
-    //             current_window = current;
-    //         }
-    //     }
-    //
-    //     let duration = start.elapsed();
-    //     let mut polls = 0;
-    //     for counter in task_counters.iter() {
-    //         polls += counter.load(Ordering::Relaxed);
-    //     }
-    //     polls -= starting_count;
-    //
-    //     println!("  Threads: 4");
-    //     println!("  Tasks: 1000");
-    //     println!("  Polls: {}", polls);
-    //     println!("  Duration: {:?}", duration);
-    //     println!(
-    //         "  Throughput: {:.2}M polls/sec",
-    //         polls as f64 / duration.as_secs_f64() / 1_000_000.0
-    //     );
-    //
-    // }
+    {
+        println!("=== Tokio: 4 threads - 1000 tasks × 10K yields ===");
+        let tasks_count = 200_000;
+        let task_counters: Arc<Vec<_>> = Arc::new(
+            (0..tasks_count)
+                .map(|_| Arc::new(AtomicUsize::new(0)))
+                .collect(),
+        );
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(8)
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        // let runtime = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+
+        let start_threads: Vec<_> = (0..1)
+            .map(|_i| {
+                let task_counters = Arc::clone(&task_counters);
+                let runtime = Arc::clone(&runtime);
+                std::thread::spawn(move || {
+                    for task_id in 0..tasks_count {
+                        runtime.spawn(YieldNTimes::new(100_000, task_counters[task_id].clone()));
+                    }
+                })
+            })
+            .collect();
+
+        // for _ in 0..1000 {
+        //     executor.spawn(YieldNTimes::new(10_000, poll_count.clone()));
+        // }
+        for h in start_threads {
+            h.join().unwrap();
+        }
+        println!("started threads");
+
+        let mut starting_count = 0;
+        for counter in task_counters.iter() {
+            starting_count += counter.load(Ordering::Relaxed);
+        }
+        let start = Instant::now();
+
+        let mut last_count = 0;
+        let mut _stall_iterations = 0;
+
+        let mut current_window = 0;
+        let mut next_target = start.add(Duration::from_secs(1));
+        let mut current_start = start;
+
+        loop {
+            thread::sleep(Duration::from_millis(1));
+
+            let mut current = 0;
+            for counter in task_counters.iter() {
+                current += counter.load(Ordering::Relaxed);
+            }
+
+            if current >= 10_000_000_000 {
+                break;
+            }
+
+            if current == last_count {
+                _stall_iterations += 1;
+            } else {
+                _stall_iterations = 0;
+            }
+
+            last_count = current;
+
+            let now = Instant::now();
+            if now.ge(&next_target) {
+                println!(
+                    "  Throughput: {:.2}M polls/sec",
+                    (current - current_window) as f64
+                        / (now.sub(current_start)).as_secs_f64()
+                        / 1_000_000.0
+                );
+                next_target = now.add(Duration::from_secs(1));
+                current_start = now;
+                current_window = current;
+            }
+        }
+
+        let duration = start.elapsed();
+        let mut polls = 0;
+        for counter in task_counters.iter() {
+            polls += counter.load(Ordering::Relaxed);
+        }
+        polls -= starting_count;
+
+        println!("  Threads: 4");
+        println!("  Tasks: 1000");
+        println!("  Polls: {}", polls);
+        println!("  Duration: {:?}", duration);
+        println!(
+            "  Throughput: {:.2}M polls/sec",
+            polls as f64 / duration.as_secs_f64() / 1_000_000.0
+        );
+    }
 
     // Test 3: 4 threads, 1000 tasks × 10K yields each
     {
         println!("=== Test 3: 4 threads - 1000 tasks × 10K yields ===");
         let tasks_count = 200_000;
-        let task_counters: Arc<Vec<_>> = Arc::new((0..tasks_count).map(|_| Arc::new(AtomicUsize::new(0))).collect());
+        let task_counters: Arc<Vec<_>> = Arc::new(
+            (0..tasks_count)
+                .map(|_| Arc::new(AtomicUsize::new(0)))
+                .collect(),
+        );
         let executor = Arc::new(Executor::new(24));
 
         let start_threads: Vec<_> = (0..1)
@@ -791,7 +805,9 @@ fn main() {
             if now.ge(&next_target) {
                 println!(
                     "  Throughput: {:.2}M polls/sec",
-                    (current - current_window) as f64 / (now.sub(current_start)).as_secs_f64() / 1_000_000.0
+                    (current - current_window) as f64
+                        / (now.sub(current_start)).as_secs_f64()
+                        / 1_000_000.0
                 );
                 next_target = now.add(Duration::from_secs(1));
                 current_start = now;
