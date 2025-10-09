@@ -157,35 +157,32 @@ fn stress_test_seg_spsc_push_slow<const P: usize, const NUM_SEGS_P2: usize>(
     );
 
     // SegSpsc benchmark with Arc and concurrent access
-    let queue = Arc::new(SegSpsc::<usize, P, NUM_SEGS_P2>::new());
+    let (producer, consumer) = SegSpsc::<usize, P, NUM_SEGS_P2>::new();
     let start = Instant::now();
 
     // Producer thread - starts on its own thread
-    let producer = {
-        let queue = queue.clone();
-        thread::spawn(move || {
-            for i in 0..iters {
-                while queue.try_push(i).is_err() {
-                    std::hint::spin_loop();
-                }
-                if i % rate == 0 {
-                    std::thread::sleep(sleep);
-                }
+    let producer_thread = thread::spawn(move || {
+        for i in 0..iters {
+            while producer.try_push(i).is_err() {
+                std::hint::spin_loop();
             }
-        })
-    };
+            if i % rate == 0 {
+                std::thread::sleep(sleep);
+            }
+        }
+    });
 
     // Consumer on main thread - runs immediately after spawning producer
     let mut count = 0;
     while count < iters {
-        if queue.try_pop().is_some() {
+        if consumer.try_pop().is_some() {
             count += 1;
         } else {
             std::hint::spin_loop();
         }
     }
 
-    producer.join().unwrap();
+    producer_thread.join().unwrap();
     let duration = start.elapsed();
 
     // Calculate metrics
@@ -194,8 +191,8 @@ fn stress_test_seg_spsc_push_slow<const P: usize, const NUM_SEGS_P2: usize>(
     let ops_per_sec = (1_000_000_000.0 / ns_per_op) as u64;
 
     // Get allocation statistics
-    let fresh_allocs = queue.fresh_allocations();
-    let pool_reuses = queue.pool_reuses();
+    let fresh_allocs = consumer.fresh_allocations();
+    let pool_reuses = consumer.pool_reuses();
 
     println!(
         "SegSpsc<P={}, SEG={}>: {:>10.2} ns/op    {:>15} ops/sec    Capacity: {}",
@@ -241,61 +238,55 @@ fn stress_test_seg_spsc_push<const P: usize, const NUM_SEGS_P2: usize>(iters: us
     {
         let iters = 1_000_000;
         // SegSpsc benchmark with Arc and concurrent access
-        let queue = Arc::new(SegSpsc::<usize, P, NUM_SEGS_P2>::new());
+        let (producer, consumer) = SegSpsc::<usize, P, NUM_SEGS_P2>::new();
         let start = Instant::now();
 
         // Producer thread - starts on its own thread
-        let producer = {
-            let queue = queue.clone();
-            thread::spawn(move || {
-                for i in 0..iters {
-                    while queue.try_push(i).is_err() {
-                        std::hint::spin_loop();
-                    }
+        let producer_thread = thread::spawn(move || {
+            for i in 0..iters {
+                while producer.try_push(i).is_err() {
+                    std::hint::spin_loop();
                 }
-            })
-        };
+            }
+        });
 
         // Consumer on main thread - runs immediately after spawning producer
         let mut count = 0;
         while count < iters {
-            if queue.try_pop().is_some() {
+            if consumer.try_pop().is_some() {
                 count += 1;
             } else {
                 std::hint::spin_loop();
             }
         }
 
-        producer.join().unwrap();
+        producer_thread.join().unwrap();
     }
 
     // SegSpsc benchmark with Arc and concurrent access
-    let queue = Arc::new(SegSpsc::<usize, P, NUM_SEGS_P2>::new());
+    let (producer, consumer) = SegSpsc::<usize, P, NUM_SEGS_P2>::new();
     let start = Instant::now();
 
     // Producer thread - starts on its own thread
-    let producer = {
-        let queue = queue.clone();
-        thread::spawn(move || {
-            for i in 0..iters {
-                while queue.try_push(i).is_err() {
-                    std::hint::spin_loop();
-                }
+    let producer_thread = thread::spawn(move || {
+        for i in 0..iters {
+            while producer.try_push(i).is_err() {
+                std::hint::spin_loop();
             }
-        })
-    };
+        }
+    });
 
     // Consumer on main thread - runs immediately after spawning producer
     let mut count = 0;
     while count < iters {
-        if queue.try_pop().is_some() {
+        if consumer.try_pop().is_some() {
             count += 1;
         } else {
             std::hint::spin_loop();
         }
     }
 
-    producer.join().unwrap();
+    producer_thread.join().unwrap();
     let duration = start.elapsed();
 
     // Calculate metrics
@@ -304,8 +295,8 @@ fn stress_test_seg_spsc_push<const P: usize, const NUM_SEGS_P2: usize>(iters: us
     let ops_per_sec = (1_000_000_000.0 / ns_per_op) as u64;
 
     // Get allocation statistics
-    let fresh_allocs = queue.fresh_allocations();
-    let pool_reuses = queue.pool_reuses();
+    let fresh_allocs = consumer.fresh_allocations();
+    let pool_reuses = consumer.pool_reuses();
 
     println!(
         "SegSpsc<P={}, SEG={}>: {:>10.2} ns/op    {:>15} ops/sec    Capacity: {}",
@@ -352,20 +343,17 @@ fn stress_test_seg_spsc_batch_pop<const P: usize, const NUM_SEGS_P2: usize>(
     );
 
     // SegSpsc batch benchmark with Arc and concurrent access
-    let queue = Arc::new(SegSpsc::<usize, P, NUM_SEGS_P2>::new());
+    let (producer, consumer) = SegSpsc::<usize, P, NUM_SEGS_P2>::new();
     let start = Instant::now();
 
     // Producer thread - starts on its own thread
-    let producer = {
-        let queue = queue.clone();
-        thread::spawn(move || {
-            for i in 0..iters {
-                while queue.try_push(i).is_err() {
-                    std::hint::spin_loop();
-                }
+    let producer_thread = thread::spawn(move || {
+        for i in 0..iters {
+            while producer.try_push(i).is_err() {
+                std::hint::spin_loop();
             }
-        })
-    };
+        }
+    });
 
     // Consumer on main thread - runs immediately after spawning producer
     let mut consumed = 0;
@@ -373,7 +361,7 @@ fn stress_test_seg_spsc_batch_pop<const P: usize, const NUM_SEGS_P2: usize>(
     batch.resize(batch_size, 0);
     while consumed < iters {
         loop {
-            match queue.try_pop_n(&mut batch) {
+            match consumer.try_pop_n(&mut batch) {
                 Ok(popped) => {
                     consumed += popped;
                     batch.resize(batch_size, 0);
@@ -388,7 +376,7 @@ fn stress_test_seg_spsc_batch_pop<const P: usize, const NUM_SEGS_P2: usize>(
         }
     }
 
-    producer.join().unwrap();
+    producer_thread.join().unwrap();
     let duration = start.elapsed();
 
     // Calculate metrics
@@ -397,8 +385,8 @@ fn stress_test_seg_spsc_batch_pop<const P: usize, const NUM_SEGS_P2: usize>(
     let ops_per_sec = (1_000_000_000.0 / ns_per_op) as u64;
 
     // Get allocation statistics
-    let fresh_allocs = queue.fresh_allocations();
-    let pool_reuses = queue.pool_reuses();
+    let fresh_allocs = consumer.fresh_allocations();
+    let pool_reuses = consumer.pool_reuses();
 
     println!(
         "SegSpscBatch<P={}, SEG={}>: {:>10.2} ns/op    {:>15} ops/sec    Batch: {}",
@@ -433,34 +421,31 @@ fn stress_test_seg_spsc_batch_push<const P: usize, const NUM_SEGS_P2: usize>(
     );
 
     // SegSpsc batch benchmark with Arc and concurrent access
-    let queue = Arc::new(SegSpsc::<usize, P, NUM_SEGS_P2>::new());
+    let (producer, consumer) = SegSpsc::<usize, P, NUM_SEGS_P2>::new();
     let start = Instant::now();
 
     // Producer thread - starts on its own thread
-    let producer = {
-        let queue = queue.clone();
-        thread::spawn(move || {
-            let mut produced = 0;
-            let mut batch = Vec::<usize>::new();
-            batch.resize(batch_size, 0);
-            while produced < iters {
-                loop {
-                    match queue.try_push_n(&batch) {
-                        Ok(pushed) => {
-                            produced += pushed;
-                            batch.resize(batch_size, 0);
-                            if pushed > 0 {
-                                break;
-                            }
+    let producer_thread = thread::spawn(move || {
+        let mut produced = 0;
+        let mut batch = Vec::<usize>::new();
+        batch.resize(batch_size, 0);
+        while produced < iters {
+            loop {
+                match producer.try_push_n(&batch) {
+                    Ok(pushed) => {
+                        produced += pushed;
+                        batch.resize(batch_size, 0);
+                        if pushed > 0 {
+                            break;
                         }
-                        Err(_) => {
-                            std::hint::spin_loop();
-                        }
+                    }
+                    Err(_) => {
+                        std::hint::spin_loop();
                     }
                 }
             }
-        })
-    };
+        }
+    });
 
     // Consumer on main thread - runs immediately after spawning producer
     let mut consumed = 0;
@@ -468,7 +453,7 @@ fn stress_test_seg_spsc_batch_push<const P: usize, const NUM_SEGS_P2: usize>(
     batch.resize(batch_size, 0);
     while consumed < iters {
         loop {
-            match queue.try_pop_n(&mut batch) {
+            match consumer.try_pop_n(&mut batch) {
                 Ok(popped) => {
                     consumed += popped;
                     batch.resize(batch_size, 0);
@@ -483,7 +468,7 @@ fn stress_test_seg_spsc_batch_push<const P: usize, const NUM_SEGS_P2: usize>(
         }
     }
 
-    producer.join().unwrap();
+    producer_thread.join().unwrap();
     let duration = start.elapsed();
 
     // Calculate metrics
@@ -492,8 +477,8 @@ fn stress_test_seg_spsc_batch_push<const P: usize, const NUM_SEGS_P2: usize>(
     let ops_per_sec = (1_000_000_000.0 / ns_per_op) as u64;
 
     // Get allocation statistics
-    let fresh_allocs = queue.fresh_allocations();
-    let pool_reuses = queue.pool_reuses();
+    let fresh_allocs = consumer.fresh_allocations();
+    let pool_reuses = consumer.pool_reuses();
 
     println!(
         "SegSpscBatch<P={}, SEG={}>: {:>10.2} ns/op    {:>15} ops/sec    Batch: {}",
@@ -528,27 +513,24 @@ fn stress_test_seg_spsc_batch_pop_single_push<const P: usize, const NUM_SEGS_P2:
     );
 
     // SegSpsc batch benchmark with Arc and concurrent access
-    let queue = Arc::new(SegSpsc::<usize, P, NUM_SEGS_P2>::new());
+    let (producer, consumer) = SegSpsc::<usize, P, NUM_SEGS_P2>::new();
     let start = Instant::now();
 
     // Producer thread - starts on its own thread
-    let producer = {
-        let queue = queue.clone();
-        thread::spawn(move || {
-            for i in 0..iters {
-                while queue.try_push(i).is_err() {
-                    std::hint::spin_loop();
-                }
+    let producer_thread = thread::spawn(move || {
+        for i in 0..iters {
+            while producer.try_push(i).is_err() {
+                std::hint::spin_loop();
             }
-        })
-    };
+        }
+    });
 
     // Consumer on main thread - runs immediately after spawning producer
     let mut consumed = 0;
     let mut buffer = vec![0usize; batch_size];
     while consumed < iters {
         loop {
-            match queue.try_pop_n(&mut buffer) {
+            match consumer.try_pop_n(&mut buffer) {
                 Ok(popped) => {
                     buffer.clear();
                     consumed += popped;
@@ -563,7 +545,7 @@ fn stress_test_seg_spsc_batch_pop_single_push<const P: usize, const NUM_SEGS_P2:
         }
     }
 
-    producer.join().unwrap();
+    producer_thread.join().unwrap();
     let duration = start.elapsed();
 
     // Calculate metrics
@@ -572,8 +554,8 @@ fn stress_test_seg_spsc_batch_pop_single_push<const P: usize, const NUM_SEGS_P2:
     let ops_per_sec = (1_000_000_000.0 / ns_per_op) as u64;
 
     // Get allocation statistics
-    let fresh_allocs = queue.fresh_allocations();
-    let pool_reuses = queue.pool_reuses();
+    let fresh_allocs = consumer.fresh_allocations();
+    let pool_reuses = consumer.pool_reuses();
 
     println!(
         "SegSpscBatch<P={}, SEG={}>: {:>10.2} ns/op    {:>15} ops/sec    Batch: {}",
@@ -608,46 +590,42 @@ fn seg_spsc_consume_in_place_benchmark<const P: usize, const NUM_SEGS_P2: usize>
     );
 
     // SegSpsc zero-copy benchmark with Arc and concurrent access
-    let queue = Arc::new(SegSpsc::<usize, P, NUM_SEGS_P2>::new());
-
     {
+        let (producer, consumer) = SegSpsc::<usize, P, NUM_SEGS_P2>::new();
         let iters = 1_000_000;
         let start = Instant::now();
         // Producer thread - starts on its own thread
-        let producer = {
-            let queue = queue.clone();
-            thread::spawn(move || {
-                for i in 0..iters {
-                    while queue.try_push(i).is_err() {
-                        std::hint::spin_loop();
-                    }
+        let producer_thread = thread::spawn(move || {
+            for i in 0..iters {
+                while producer.try_push(i).is_err() {
+                    std::hint::spin_loop();
                 }
-            })
-        };
+            }
+        });
 
         // Consumer on main thread - runs immediately after spawning producer with zero-copy
         let mut batch = Vec::<usize>::new();
         batch.resize(4096, 0);
         let mut consumed = 0;
         while consumed < iters {
-            let result = queue.consume_in_place(consume_batch, |chunk| chunk.len());
+            let result = consumer.consume_in_place(consume_batch, |chunk| chunk.len());
             consumed += result;
             if result == 0 {
                 std::hint::spin_loop();
             }
         }
 
-        producer.join().unwrap();
+        producer_thread.join().unwrap();
     }
 
+    let (producer, consumer) = SegSpsc::<usize, P, NUM_SEGS_P2>::new();
     let start = Instant::now();
 
     // Producer thread - starts on its own thread
-    let producer = {
-        let queue = queue.clone();
+    let producer_thread = {
         thread::spawn(move || {
             for i in 0..iters {
-                while queue.try_push(i).is_err() {
+                while producer.try_push(i).is_err() {
                     std::hint::spin_loop();
                 }
             }
@@ -659,14 +637,14 @@ fn seg_spsc_consume_in_place_benchmark<const P: usize, const NUM_SEGS_P2: usize>
     batch.resize(4096, 0);
     let mut consumed = 0;
     while consumed < iters {
-        let result = queue.consume_in_place(consume_batch, |chunk| chunk.len());
+        let result = consumer.consume_in_place(consume_batch, |chunk| chunk.len());
         consumed += result;
         if result == 0 {
             std::hint::spin_loop();
         }
     }
 
-    producer.join().unwrap();
+    producer_thread.join().unwrap();
     let duration = start.elapsed();
 
     // Calculate metrics
@@ -675,8 +653,8 @@ fn seg_spsc_consume_in_place_benchmark<const P: usize, const NUM_SEGS_P2: usize>
     let ops_per_sec = (1_000_000_000.0 / ns_per_op) as u64;
 
     // Get allocation statistics
-    let fresh_allocs = queue.fresh_allocations();
-    let pool_reuses = queue.pool_reuses();
+    let fresh_allocs = consumer.fresh_allocations();
+    let pool_reuses = consumer.pool_reuses();
 
     println!(
         "SegSpscConsume<P={}, SEG={}>: {:>10.2} ns/op    {:>15} ops/sec    ConsumeBatch: {}",
@@ -713,11 +691,11 @@ fn main() {
     println!("\n--- SegSpsc Zero-Copy Consume Tests ---");
     // seg_spsc_consume_in_place_benchmark::<8, 8>(50_000_000, 64);
     // seg_spsc_consume_in_place_benchmark::<8, 8>(50_000_000, 256);
-    seg_spsc_consume_in_place_benchmark::<4, 12>(50_000_000, 32);
+    seg_spsc_consume_in_place_benchmark::<8, 12>(50_000_000, 1);
 
-    println!("\n--- Basic DRO SPSC Tests ---");
-    stress_test_dro_spsc_push::<256>(100_000_000);
-    drain_with_benchmark_dro::<256>(100_000_000);
+    // println!("\n--- Basic DRO SPSC Tests ---");
+    // stress_test_dro_spsc_push::<256>(100_000_000);
+    // drain_with_benchmark_dro::<256>(100_000_000);
 
     // SegSpsc benchmarks
     println!("\n--- SegSpsc Single Item Tests ---");
@@ -726,6 +704,8 @@ fn main() {
     stress_test_seg_spsc_push::<4, 14>(50_000_000);
     stress_test_seg_spsc_push::<6, 14>(50_000_000);
     stress_test_seg_spsc_push::<5, 14>(50_000_000);
+    stress_test_seg_spsc_push::<5, 12>(50_000_000);
+    stress_test_seg_spsc_push::<8, 12>(50_000_000);
 
     // println!("\n--- SegSpsc Batch Pop Operations Tests ---");
     // stress_test_seg_spsc_batch_pop_single_push::<8, 8>(50_000_000, 64);

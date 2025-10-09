@@ -8,7 +8,7 @@ type Queue = SegSpsc<u64, P, NUM_SEGS_P2>;
 fn main() {
     println!("Testing SegSpsc close functionality...");
 
-    let q = Queue::new();
+    let q = Queue::new_unsafe();
 
     // Initially not closed
     assert!(!q.is_closed());

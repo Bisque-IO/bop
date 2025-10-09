@@ -1,5 +1,4 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[inline(always)]
 pub fn size(value: &AtomicU64) -> u64 {
@@ -35,6 +34,9 @@ pub fn acquire(value: &AtomicU64, index: u64) -> bool {
 
 #[inline(always)]
 pub fn try_acquire(value: &AtomicU64, index: u64) -> (u64, u64, bool) {
+    if !is_set(value, index) {
+        return (0, 0, false);
+    }
     let bit = 1u64 << index;
     let previous = value.fetch_and(!bit, Ordering::AcqRel);
     (bit, previous, (previous & bit) == bit)
@@ -250,6 +252,7 @@ pub fn find_nearest_by_distance(value: u64, start_index: u64) -> u64 {
 
 pub fn find_nearest(value: u64, signal_index: u64) -> u64 {
     find_nearest_by_distance(value, signal_index)
+    // find_nearest_set_bit(value, signal_index)
 }
 
 #[cfg(test)]

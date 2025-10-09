@@ -1,4 +1,69 @@
-//! Append-only storage engine components.
+//! Append-only file (AOF) storage engine.
+//!
+//! This module implements a high-performance, durable append-only storage system
+//! with support for:
+//! - **Write batching**: Efficient grouped writes with double-buffering
+//! - **Adaptive chunking**: Variable-sized chunks based on write velocity
+//! - **Checkpointing**: Sealing and archiving completed chunks
+//! - **Remote storage**: Integration with object storage backends
+//! - **Local caching**: LRU cache for frequently accessed chunks
+//! - **Durability**: `fsync`-based persistence guarantees
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────┐
+//! │                    Aof (Handle)                       │
+//! └──────────────────────────────────────────────────────┘
+//!                           │
+//!                           ▼
+//! ┌──────────────────────────────────────────────────────┐
+//! │                    AofInner                           │
+//! │  ┌────────────────┬──────────────┬─────────────────┐ │
+//! │  │ WAL Segments   │  Controllers │  Chunk Stores   │ │
+//! │  │ (TailState)    │  (Write/Flush)│ (Local/Remote) │ │
+//! │  └────────────────┴──────────────┴─────────────────┘ │
+//! └──────────────────────────────────────────────────────┘
+//!         │                    │                │
+//!         ▼                    ▼                ▼
+//!  ┌────────────┐      ┌─────────────┐  ┌──────────────┐
+//!  │ WAL Segment│      │Write/Flush  │  │LocalChunkStore│
+//!  │  (Active)  │      │  Queues     │  │ RemoteChunkStore│
+//!  └────────────┘      └─────────────┘  └──────────────┘
+//! ```
+//!
+//! # Lifecycle
+//!
+//! 1. **Bootstrap**: Create AOF instance with configuration
+//! 2. **Writing**: Append data to the active tail segment
+//! 3. **Flushing**: Async controllers ensure durability
+//! 4. **Checkpointing**: Seal completed chunks and upload to remote storage
+//! 5. **Reading**: Sequential or random access via cursors
+//! 6. **Shutdown**: Close AOF, flush pending writes, clean up resources
+//!
+//! # Example
+//!
+//! ```no_run
+//! use bop_storage::aof::{AofConfig, WriteChunk};
+//! use bop_storage::Manager;
+//!
+//! // Create manager and open AOF
+//! let manager = Manager::new(manifest);
+//! let config = AofConfig::builder("my-aof")
+//!     .chunk_size_bytes(64 * 1024 * 1024)
+//!     .build();
+//! let aof = manager.open_db(config)?;
+//!
+//! // Append data
+//! let lsn = aof.append(WriteChunk::Owned(vec![1, 2, 3]))?;
+//!
+//! // Ensure durability
+//! let durable_lsn = aof.sync()?;
+//!
+//! // Read data
+//! let mut cursor = aof.open_cursor();
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 pub mod checkpoint;
 pub mod reader;
@@ -40,27 +105,45 @@ use crate::manifest::{DbId, Manifest};
 use crate::remote_chunk::{
     RemoteChunkError, RemoteChunkFetcher, RemoteChunkSpec, RemoteChunkStore,
 };
-const DEFAULT_CHUNK_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
-const DEFAULT_CHUNK_CACHE_MIN_AGE_SECS: u64 = 300; // 5 minutes
+/// Default maximum size for the local chunk cache (10 GiB).
+const DEFAULT_CHUNK_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Default minimum age before a cached chunk can be evicted (5 minutes).
+const DEFAULT_CHUNK_CACHE_MIN_AGE_SECS: u64 = 300;
 
 use crate::runtime::StorageRuntime;
 use crate::write::{WriteController, WriteControllerConfig, WriteControllerSnapshot};
 
-/// Identifier for a storage pod/database instance managed by `Manager`.
+/// Unique identifier for an AOF instance within a storage manager.
+///
+/// Each AOF managed by a [`Manager`](crate::Manager) is assigned a unique `AofId`.
+/// This ID is used for:
+/// - Manifest entries and metadata tracking
+/// - Chunk ownership and validation
+/// - Directory organization on disk
+/// - Remote storage key prefixes
+///
+/// # Note
+///
+/// IDs are currently `u32` values, supporting up to 4 billion AOF instances.
+/// In distributed systems, IDs should be coordinated across nodes to prevent conflicts.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 pub struct AofId(u32);
 
 impl AofId {
+    /// Creates a new `AofId` from a `u32` value.
     pub const fn new(id: u32) -> Self {
         Self(id)
     }
 
+    /// Returns the raw `u32` value of this ID.
     pub fn get(self) -> u32 {
         self.0
     }
 
+    /// Converts this ID to a `u64` for use in calculations.
     pub fn as_u64(self) -> u64 {
         self.0 as u64
     }
@@ -90,27 +173,73 @@ impl From<AofId> for u64 {
     }
 }
 
-/// Errors produced by storage pod operations.
+/// Errors that can occur during AOF operations.
+///
+/// These errors cover the full lifecycle of AOF operations including
+/// appends, syncs, checkpoints, and chunk management.
 #[derive(Debug, Error)]
 pub enum AofError {
+    /// The AOF instance has been closed and cannot accept operations.
+    ///
+    /// Operations on a closed AOF will fail immediately. To resume operations,
+    /// the AOF must be reopened via the [`Manager`](crate::Manager).
     #[error("database is closed")]
     Closed,
+
+    /// Error from the local chunk storage system.
+    ///
+    /// This includes disk I/O errors, cache eviction failures, and quota violations.
     #[error("local chunk store error: {0}")]
     LocalChunk(#[from] LocalChunkStoreError),
+
+    /// Error from remote chunk operations (fetch, upload, etc.).
+    ///
+    /// This typically indicates network failures, authentication issues, or
+    /// object storage backend problems.
     #[error("remote chunk error: {0}")]
     RemoteChunk(#[from] RemoteChunkError),
+
+    /// Low-level I/O error from the storage backend.
     #[error("I/O error: {0}")]
     Io(#[from] IoError),
+
+    /// Attempted to fetch a remote chunk without a configured fetcher.
+    ///
+    /// The AOF was created without remote storage support. To enable remote
+    /// chunks, configure a `RemoteChunkFetcher` via [`AofConfigBuilder::with_remote_fetcher`].
     #[error("remote chunk fetcher is not configured")]
     MissingRemoteFetcher,
+
+    /// Chunk spec references a different database ID.
+    ///
+    /// This indicates an attempt to load a chunk from a different AOF instance.
+    /// Chunk specs must match the AOF's database ID.
     #[error("chunk spec targets db {db_id} but this AOF has id {aof_id}")]
-    WrongDatabase { db_id: DbId, aof_id: AofId },
+    WrongDatabase {
+        /// The database ID in the chunk spec.
+        db_id: DbId,
+        /// The actual ID of this AOF instance.
+        aof_id: AofId,
+    },
 }
 
-/// Chunk size constraints for AOF instances.
-pub const MIN_CHUNK_SIZE_BYTES: u64 = 64 * 1024; // 64 KB (2^16)
-pub const MAX_CHUNK_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GB (2^32)
-pub const DEFAULT_CHUNK_SIZE_BYTES: u64 = 64 * 1024 * 1024; // 64 MB
+/// Minimum chunk size (64 KB = 2^16 bytes).
+///
+/// Smaller chunks increase metadata overhead and reduce I/O efficiency.
+pub const MIN_CHUNK_SIZE_BYTES: u64 = 64 * 1024;
+
+/// Maximum chunk size (4 GB = 2^32 bytes).
+///
+/// Larger chunks may cause memory pressure and increase checkpoint latency.
+pub const MAX_CHUNK_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Default chunk size (64 MB).
+///
+/// This provides a reasonable balance between:
+/// - Metadata overhead (smaller chunks = more metadata)
+/// - Memory usage (larger chunks = more RAM during I/O)
+/// - Checkpoint latency (larger chunks take longer to seal)
+pub const DEFAULT_CHUNK_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Calculate the optimal chunk size based on recent write velocity.
 ///
@@ -162,76 +291,119 @@ pub fn calculate_adaptive_chunk_size(
     size.clamp(MIN_CHUNK_SIZE_BYTES, MAX_CHUNK_SIZE_BYTES)
 }
 
-/// Configuration used when constructing a new storage pod.
+/// Configuration for creating a new AOF instance.
+///
+/// Use [`AofConfig::builder`] to construct configurations with a fluent API.
+///
+/// # Example
+///
+/// ```no_run
+/// use bop_storage::aof::AofConfig;
+/// use std::time::Duration;
+///
+/// let config = AofConfig::builder("my-database")
+///     .chunk_size_bytes(128 * 1024 * 1024) // 128 MB chunks
+///     .pre_allocate_threshold(0.75)        // Pre-allocate at 75% full
+///     .chunk_cache_bytes(5 * 1024 * 1024 * 1024) // 5 GB cache
+///     .chunk_cache_min_eviction_age(Duration::from_secs(600))
+///     .build();
+/// ```
 #[derive(Clone)]
 pub struct AofConfig {
+    /// Unique identifier (assigned by Manager if not provided).
     id: Option<AofId>,
+    /// Human-readable name for this AOF.
     name: String,
+    /// Directory for storing sealed chunks and metadata.
     data_dir: PathBuf,
+    /// Directory for active WAL segments.
     wal_dir: PathBuf,
+    /// Target size for each chunk in bytes.
     chunk_size_bytes: u64,
-    pre_allocate_threshold: f64, // 0.0 to 1.0, fraction of chunk fullness
+    /// Fraction (0.0-1.0) of chunk fullness that triggers pre-allocation of next chunk.
+    pre_allocate_threshold: f64,
+    /// I/O backend to use (defaults to platform best choice).
     io_backend: Option<IoBackendKind>,
+    /// Directory for local chunk cache.
     chunk_cache_dir: Option<PathBuf>,
+    /// Maximum bytes to use for chunk caching.
     chunk_cache_bytes: Option<u64>,
+    /// Minimum age before cached chunks can be evicted.
     chunk_cache_min_age: Option<Duration>,
+    /// Remote storage fetcher for chunk hydration.
     remote_fetcher: Option<Arc<dyn RemoteChunkFetcher>>,
 }
 
 impl AofConfig {
+    /// Creates a new configuration builder with the specified name.
     pub fn builder(name: impl Into<String>) -> AofConfigBuilder {
         AofConfigBuilder::new(name.into())
     }
 
+    /// Returns the AOF ID, if assigned.
     pub fn id(&self) -> Option<AofId> {
         self.id
     }
 
+    /// Returns the AOF name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the data directory path.
     pub fn data_dir(&self) -> &PathBuf {
         &self.data_dir
     }
 
+    /// Returns the WAL directory path.
     pub fn wal_dir(&self) -> &PathBuf {
         &self.wal_dir
     }
 
+    /// Returns the chunk size in bytes.
     pub fn chunk_size_bytes(&self) -> u64 {
         self.chunk_size_bytes
     }
 
+    /// Returns the pre-allocation threshold (0.0-1.0).
     pub fn pre_allocate_threshold(&self) -> f64 {
         self.pre_allocate_threshold
     }
 
+    /// Returns the configured I/O backend, if any.
     pub fn io_backend(&self) -> Option<IoBackendKind> {
         self.io_backend
     }
 
+    /// Returns the chunk cache directory, if configured.
     pub fn chunk_cache_dir(&self) -> Option<&PathBuf> {
         self.chunk_cache_dir.as_ref()
     }
 
+    /// Returns the chunk cache size limit, if configured.
     pub fn chunk_cache_bytes(&self) -> Option<u64> {
         self.chunk_cache_bytes
     }
 
+    /// Returns the minimum cache eviction age, if configured.
     pub fn chunk_cache_min_age(&self) -> Option<Duration> {
         self.chunk_cache_min_age
     }
 
+    /// Returns the remote chunk fetcher, if configured.
     pub fn remote_fetcher(&self) -> Option<&Arc<dyn RemoteChunkFetcher>> {
         self.remote_fetcher.as_ref()
     }
 
+    /// Assigns an ID to this configuration (internal use by Manager).
     pub(crate) fn assign_id(&mut self, id: AofId) {
         self.id = Some(id);
     }
 }
 
+/// Builder for [`AofConfig`] with a fluent API.
+///
+/// Created via [`AofConfig::builder`].
 pub struct AofConfigBuilder {
     id: Option<AofId>,
     name: String,
@@ -354,6 +526,12 @@ impl fmt::Debug for AofConfig {
     }
 }
 
+/// Converts a name to a filesystem-safe slug.
+///
+/// - Converts to lowercase
+/// - Replaces non-alphanumeric characters with hyphens
+/// - Removes leading/trailing hyphens
+/// - Returns "aof" if the result is empty
 fn slugify(name: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = false;
@@ -377,68 +555,198 @@ fn slugify(name: &str) -> String {
     }
 }
 
+/// Diagnostic snapshot of an AOF instance's state.
+///
+/// This structure provides a comprehensive view of the AOF's current state,
+/// including I/O backend, closure status, and controller statistics. It's
+/// useful for monitoring, debugging, and observability.
+///
+/// Obtained via [`Aof::diagnostics`].
 #[derive(Debug, Clone)]
 pub struct AofDiagnostics {
+    /// The AOF's unique identifier.
     pub id: AofId,
+    /// The AOF's human-readable name.
     pub name: String,
+    /// The I/O backend being used.
     pub io_backend: IoBackendKind,
+    /// Whether the AOF has been closed.
     pub is_closed: bool,
+    /// WAL progress and sequence tracking.
     pub wal: AofWalDiagnostics,
+    /// Write controller statistics (queue depth, throughput, etc.).
     pub write_controller: WriteControllerSnapshot,
+    /// Flush controller statistics (pending flushes, latency, etc.).
     pub flush_controller: FlushControllerSnapshot,
 }
 
-/// Top-level handle to a storage pod instance backed by `Arc<AofInner>`.
+/// Thread-safe handle to an AOF instance.
+///
+/// `Aof` is a lightweight, cloneable handle backed by `Arc<AofInner>`. All clones
+/// reference the same underlying AOF instance. Operations are thread-safe and can
+/// be called from multiple threads concurrently.
+///
+/// # LSN Tracking
+///
+/// The AOF tracks two key LSN values:
+/// - **Tail LSN**: The highest allocated LSN (data may still be in buffers)
+/// - **Durable LSN**: The highest LSN confirmed on persistent storage
+///
+/// The invariant `durable_lsn <= tail_lsn` always holds.
+///
+/// # Lifecycle
+///
+/// 1. Create via [`Manager::open_db`](crate::Manager::open_db)
+/// 2. Append data with [`append`](Self::append) or [`append_batch`](Self::append_batch)
+/// 3. Ensure durability with [`sync`](Self::sync)
+/// 4. Create checkpoints with [`checkpoint`](Self::checkpoint)
+/// 5. Read data with [`open_cursor`](Self::open_cursor)
+/// 6. Close with [`close`](Self::close) when done
+///
+/// # Example
+///
+/// ```no_run
+/// # use bop_storage::aof::{AofConfig, WriteChunk};
+/// # use bop_storage::Manager;
+/// # let manager = Manager::new(std::sync::Arc::new(
+/// #     bop_storage::manifest::Manifest::open(
+/// #         std::path::Path::new("/tmp"),
+/// #         bop_storage::manifest::ManifestOptions::default()
+/// #     ).unwrap()
+/// # ));
+/// let aof = manager.open_db(AofConfig::builder("logs").build())?;
+///
+/// // Write data
+/// let lsn = aof.append(WriteChunk::Owned(vec![1, 2, 3]))?;
+///
+/// // Ensure it's durable
+/// let durable_lsn = aof.sync()?;
+/// assert!(durable_lsn >= lsn);
+///
+/// // Read it back
+/// let mut cursor = aof.open_cursor();
+/// # Ok::<(), bop_storage::aof::AofError>(())
+/// ```
 #[derive(Clone)]
 pub struct Aof {
     inner: Arc<AofInner>,
 }
 
 impl Aof {
+    /// Creates an `Aof` handle from an `Arc<AofInner>` (internal use).
     pub(crate) fn from_arc(inner: Arc<AofInner>) -> Self {
         Self { inner }
     }
 
+    /// Returns the unique identifier for this AOF instance.
     pub fn id(&self) -> AofId {
         self.inner.id
     }
 
+    /// Returns the human-readable name of this AOF instance.
     pub fn name(&self) -> &str {
         &self.inner.name
     }
 
-    /// Append data to the AOF.
-    /// Returns the starting LSN where the data was written.
+    /// Appends a single chunk of data to the AOF.
+    ///
+    /// The data is buffered and written asynchronously by the write controller.
+    /// To ensure durability, call [`sync`](Self::sync) after appending.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The data chunk to append
+    ///
+    /// # Returns
+    ///
+    /// The starting LSN where the data was written.
+    ///
+    /// # Errors
+    ///
+    /// - [`AofError::Closed`]: The AOF has been closed
+    /// - Other errors if segment allocation or reservation fails
     pub fn append(&self, data: WriteChunk) -> Result<u64, AofError> {
         self.inner.append(data)
     }
 
-    /// Append multiple data chunks atomically.
-    /// Returns the starting LSN where the data was written.
+    /// Appends multiple chunks atomically to the AOF.
+    ///
+    /// All chunks are written contiguously at sequential LSNs. This is more
+    /// efficient than calling [`append`](Self::append) multiple times.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Slice of chunks to append
+    ///
+    /// # Returns
+    ///
+    /// The starting LSN of the first chunk.
+    ///
+    /// # Errors
+    ///
+    /// - [`AofError::Closed`]: The AOF has been closed
+    /// - Other errors if segment allocation or reservation fails
     pub fn append_batch(&self, data: &[WriteChunk]) -> Result<u64, AofError> {
         self.inner.append_batch(data)
     }
 
-    /// Ensure all appended data up to the returned LSN is durable.
+    /// Ensures all appended data is durable on persistent storage.
+    ///
+    /// This method blocks until:
+    /// 1. All buffered writes are flushed to disk
+    /// 2. An `fsync` operation completes successfully
+    ///
+    /// # Returns
+    ///
+    /// The highest durable LSN after the sync completes.
+    ///
+    /// # Errors
+    ///
+    /// - [`AofError::Closed`]: The AOF has been closed
+    /// - Timeout errors if writes or flushes don't complete within 10 seconds
     pub fn sync(&self) -> Result<u64, AofError> {
         self.inner.sync()
     }
 
-    /// Run a checkpoint to seal and upload completed chunks.
+    /// Runs a checkpoint to seal and prepare completed chunks for archival.
+    ///
+    /// Checkpointing involves:
+    /// 1. Marking the current position in the WAL
+    /// 2. Sealing completed chunks (future enhancement)
+    /// 3. Uploading sealed chunks to remote storage (future enhancement)
+    ///
+    /// # Errors
+    ///
+    /// - [`AofError::Closed`]: The AOF has been closed
     pub fn checkpoint(&self) -> Result<(), AofError> {
         self.inner.checkpoint()
     }
 
-    /// Get the current tail LSN (highest allocated position).
+    /// Returns the current tail LSN (highest allocated position).
+    ///
+    /// This represents the end of the logical log, including data that may
+    /// still be buffered in memory.
     pub fn tail_lsn(&self) -> u64 {
         self.inner.tail_lsn()
     }
 
-    /// Get the current durable LSN (highest fsynced position).
+    /// Returns the current durable LSN (highest fsync'd position).
+    ///
+    /// This represents the highest LSN guaranteed to survive crashes.
+    /// Always satisfies: `durable_lsn() <= tail_lsn()`.
     pub fn durable_lsn(&self) -> u64 {
         self.inner.durable_lsn()
     }
 
+    /// Closes this AOF instance.
+    ///
+    /// After closing:
+    /// - No new operations can be performed
+    /// - In-flight operations may fail
+    /// - Background controllers are shut down
+    /// - The AOF is deregistered from the manager
+    ///
+    /// Closing is idempotent - calling it multiple times is safe.
     pub fn close(&self) {
         self.inner.close();
     }
@@ -568,21 +876,32 @@ impl Aof {
     }
 }
 
-/// Tail segment state tracking.
+/// Tracks the state of the active tail segment and pre-allocated next segment.
+///
+/// The tail is the mutable, actively-written region of the AOF. This structure
+/// manages segment lifecycle including creation, writing, and pre-allocation of
+/// the next segment to minimize latency during chunk boundaries.
+///
+/// # Pre-allocation Strategy
+///
+/// When the current segment reaches a configured threshold (e.g., 75% full),
+/// the next segment is pre-allocated in the background. This ensures that when
+/// the current segment is sealed, the next one is immediately available.
 struct TailState {
-    /// Current active segment for writes.
+    /// Current active segment receiving writes.
     segment: Option<Arc<AofWalSegment>>,
-    /// Base LSN of the current segment.
+    /// Base LSN of the current segment (start of the logical chunk).
     base_lsn: u64,
-    /// Highest allocated LSN.
+    /// Highest allocated LSN (end of appended data, including buffered).
     tail_lsn: u64,
-    /// Next segment pre-allocation in progress.
+    /// Pre-allocated next segment (created when threshold is reached).
     next_segment: Option<Arc<AofWalSegment>>,
-    /// Base LSN for the next pre-allocated segment.
+    /// Base LSN where the next segment will start.
     next_base_lsn: u64,
 }
 
 impl TailState {
+    /// Creates a new empty tail state with all LSNs at zero.
     fn new() -> Self {
         Self {
             segment: None,
@@ -594,28 +913,81 @@ impl TailState {
     }
 }
 
+/// Internal shared state for an AOF instance.
+///
+/// This structure contains all the components needed to operate an AOF:
+/// - **Tail segment management**: Active write region
+/// - **Controllers**: Async write and flush workers
+/// - **Chunk stores**: Local cache and remote storage
+/// - **Manifest**: Metadata and state persistence
+/// - **WAL**: Write-ahead log tracking
+///
+/// `AofInner` is wrapped in `Arc` by [`Aof`] to enable cheap cloning and
+/// shared ownership across threads.
+///
+/// # Concurrency
+///
+/// - Multiple threads can append concurrently (tail_state is protected by Mutex)
+/// - Write and flush controllers run on background threads
+/// - Chunk stores are internally synchronized
+/// - Manifest updates are atomic
 pub(crate) struct AofInner {
+    /// Unique identifier for this AOF instance.
     id: AofId,
+    /// Human-readable name.
     name: String,
+    /// Configuration used to create this AOF.
     _config: AofConfig,
+    /// Target chunk size in bytes (may vary with adaptive sizing).
     chunk_size_bytes: u64,
+    /// Shared I/O driver for file operations.
     io: SharedIoDriver,
+    /// Write-ahead log for tracking progress.
     wal: AofWal,
-    /// Active tail segment for appends. This is the mutable region of the AOF.
+    /// Active tail segment state (protected by mutex for concurrent appends).
     tail_state: Mutex<TailState>,
+    /// Background worker for write I/O operations.
     write_controller: WriteController,
+    /// Background worker for flush/fsync operations.
     flush_controller: FlushController,
+    /// Runtime for spawning async tasks.
     #[allow(dead_code)]
     runtime: Arc<StorageRuntime>,
+    /// Weak reference to parent manager (for deregistration on close).
     manager: Weak<ManagerInner>,
+    /// Manifest for persisting metadata and chunk records.
     manifest: Arc<Manifest>,
+    /// Local chunk cache store.
     local_chunks: Arc<LocalChunkStore>,
+    /// Remote chunk store (optional, for cloud storage integration).
     remote_chunks: Option<RemoteChunkStore>,
+    /// Flag indicating whether this AOF has been closed.
     closed: AtomicBool,
+    /// Flag indicating whether this AOF has been deregistered from manager.
     deregistered: AtomicBool,
 }
 
 impl AofInner {
+    /// Bootstraps a new AOF instance with the given configuration and dependencies.
+    ///
+    /// This is called internally by [`Manager::open_db`](crate::Manager::open_db) to
+    /// initialize all components:
+    /// - Creates WAL and controllers
+    /// - Initializes chunk stores (local and remote)
+    /// - Registers with the manifest
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - AOF configuration (must have ID assigned)
+    /// * `io` - Shared I/O driver
+    /// * `manager` - Parent manager reference
+    /// * `runtime` - Runtime for async tasks
+    /// * `manifest` - Manifest for metadata
+    /// * `chunk_quota` - Global chunk storage quota
+    ///
+    /// # Returns
+    ///
+    /// An `Arc<AofInner>` ready for use, or an error if initialization fails.
     pub(crate) fn bootstrap(
         config: AofConfig,
         io: SharedIoDriver,

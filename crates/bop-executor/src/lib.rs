@@ -8,6 +8,8 @@
 
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
+pub mod async_task;
+// pub mod async_task_adapter;
 pub mod executor;
 pub mod selector;
 pub mod signal;

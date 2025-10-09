@@ -12,8 +12,10 @@ pub struct Selector {
     pub signal: u64,
     pub bit: u64,
     pub bit_count: u64,
+    pub misses: u64,
     pub contention: u64,
     pub seed: u64,
+    pub cached: *mut (),
 }
 
 impl Selector {
@@ -26,8 +28,10 @@ impl Selector {
             signal: 0,
             bit: 0,
             bit_count: 0,
+            misses: 0,
             contention: 0,
             seed,
+            cached: std::ptr::null_mut(),
         };
         selector.next_map();
         selector

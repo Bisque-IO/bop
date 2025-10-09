@@ -27,6 +27,7 @@ pub enum MpmcError {
 pub type MpmcResult<T> = Result<T, MpmcError>;
 
 /// Low-level MPMC queue for u64 values
+#[derive(Clone)]
 pub struct Queue {
     ptr: NonNull<bop_mpmc>,
 }

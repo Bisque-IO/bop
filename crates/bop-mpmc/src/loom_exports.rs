@@ -40,6 +40,11 @@ pub(crate) mod cell {
         pub(crate) fn with_mut<R>(&self, f: impl FnOnce(*mut T) -> R) -> R {
             f(self.0.get())
         }
+
+        #[inline(always)]
+        pub(crate) fn get(&self) -> *mut T {
+            self.0.get()
+        }
     }
 }
 

@@ -56,11 +56,6 @@ use crossbeam_utils::CachePadded;
 
 use crate::SignalWaker;
 
-/// Size of a CPU cache line in bytes (x86_64 standard).
-///
-/// Used for padding to prevent false sharing between hot producer/consumer paths.
-pub const CACHE_LINE_SIZE: usize = 64;
-
 /// Number of bits per signal word (64-bit atomic).
 ///
 /// Each signal word can track up to 64 queues. This matches the width of

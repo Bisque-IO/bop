@@ -1,7 +1,7 @@
 //! Simple benchmark to test that the close functionality doesn't break normal operations
 //! Uses the same parameters as the mpmc_benchmark to reproduce any segfaults
 
-use bop_mpmc::mpmc::MpmcBlocking;
+use bop_mpmc::mpmc::Mpmc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -19,7 +19,7 @@ fn test_close_functionality_under_load() {
         P, NUM_SEGS_P2
     );
 
-    let queue = Arc::new(MpmcBlocking::<usize, P, NUM_SEGS_P2>::new());
+    let queue = Arc::new(Mpmc::<usize, P, NUM_SEGS_P2>::new());
     let items_pushed = Arc::new(AtomicUsize::new(0));
     let items_popped = Arc::new(AtomicUsize::new(0));
 
@@ -34,7 +34,7 @@ fn test_close_functionality_under_load() {
             thread::spawn(move || {
                 let producer = queue.create_producer_handle().unwrap();
                 for i in 0..ITEMS_PER_PRODUCER {
-                    match producer.push(producer_id * ITEMS_PER_PRODUCER + i) {
+                    match producer.try_push(producer_id * ITEMS_PER_PRODUCER + i) {
                         Ok(_) => {
                             items_pushed.fetch_add(1, Ordering::Relaxed);
                         }
@@ -89,7 +89,7 @@ fn test_close_functionality_under_load() {
 
     // Test 2: Operation with close (should not crash)
     println!("Test 2: Operation with close");
-    let queue2 = Arc::new(MpmcBlocking::<usize, P, NUM_SEGS_P2>::new());
+    let queue2 = Arc::new(Mpmc::<usize, P, NUM_SEGS_P2>::new());
     let items_pushed2 = Arc::new(AtomicUsize::new(0));
     let items_popped2 = Arc::new(AtomicUsize::new(0));
 
@@ -103,7 +103,7 @@ fn test_close_functionality_under_load() {
                 let producer = queue.create_producer_handle().unwrap();
                 for i in 0..ITEMS_PER_PRODUCER / 2 {
                     // Only push half the items
-                    match producer.push(producer_id * (ITEMS_PER_PRODUCER / 2) + i) {
+                    match producer.try_push(producer_id * (ITEMS_PER_PRODUCER / 2) + i) {
                         Ok(_) => {
                             items_pushed.fetch_add(1, Ordering::Relaxed);
                         }
