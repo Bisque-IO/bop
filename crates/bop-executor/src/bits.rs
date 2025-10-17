@@ -27,6 +27,9 @@ pub fn set_with_bit(value: &AtomicU64, bit: u64) -> u64 {
 #[inline(always)]
 pub fn acquire(value: &AtomicU64, index: u64) -> bool {
     // let bit = 0x8000000000000000u64 >> index;
+    if !is_set(value, index) {
+        return false;
+    }
     let bit = 1u64 << index;
     let previous = value.fetch_and(!bit, Ordering::AcqRel);
     (previous & bit) == bit

@@ -9,7 +9,6 @@ repository = "https://github.com/bisque-io/bop"
 
 [dependencies]
 # Local dependencies
-bop-rs = { workspace = true }
 bop-sys = { workspace = true }
 
 # Serialization and data handling
@@ -31,9 +30,9 @@ multimap = { workspace = true }
 # Async support (optional dependencies)
 tokio = { workspace = true, features = ["full"], optional = true }
 
-# Networking dependencies  
-compio = { workspace = true }
-compio-tls = { workspace = true }
+# Networking dependencies
+# compio = { workspace = true }
+# compio-tls = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "std"] }

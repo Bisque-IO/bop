@@ -50,7 +50,18 @@
       "Bash(echo:*)",
       "Bash(rustc:*)",
       "Bash(pkill:*)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test --package bop-executor --lib timer_wheel::tests::test_spsc_basic_functionality -- --exact --nocapture)",
+      "Bash(do echo \"Run $i:\")",
+      "Bash(exit 1)",
+      "Bash(do echo \"Run $i\")",
+      "Bash({ echo \"FAILED on run $i\")",
+      "Bash(})",
+      "Bash(do printf \"Run %d: \" $i)",
+      "Bash(if [ -d \"crates/bop-executor/examples\" ])",
+      "Bash(then echo \"exists\")",
+      "Bash(else mkdir -p crates/bop-executor/examples)",
+      "Bash(fi)"
     ],
     "deny": [],
     "ask": []

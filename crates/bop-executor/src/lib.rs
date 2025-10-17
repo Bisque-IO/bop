@@ -22,22 +22,23 @@
 //! - **Memory efficient**: Zero-copy operations where possible
 
 pub mod bits;
-// pub mod deque;
-mod loom_exports;
+pub mod deque;
+pub mod loom_exports;
 pub mod mpmc;
 pub mod mpsc;
 pub mod seg_spmc;
 pub mod seg_spsc;
 pub mod selector;
 pub mod signal;
-pub mod spsc;
+pub mod summary_tree;
+pub mod task;
 pub mod timer_wheel;
+pub mod utils;
 pub mod waker;
+pub mod worker;
 
-pub use mpmc::*;
-pub use signal::*;
-pub use spsc::*;
-pub use waker::*;
+pub use summary_tree::*;
+pub use utils::*;
 
 /// Error occurring when pushing into a queue is unsuccessful.
 #[derive(Debug, Eq, PartialEq)]

@@ -9,8 +9,9 @@ use std::ptr;
 use std::sync::atomic::{self, AtomicIsize, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::utils::CachePadded;
 use crossbeam_epoch::{self as epoch, Atomic, Owned};
-use crossbeam_utils::{Backoff, CachePadded};
+use crossbeam_utils::Backoff;
 
 // Minimum buffer capacity.
 const MIN_CAP: usize = 64;
@@ -51,10 +52,12 @@ impl<T> Buffer<T> {
 
     /// Deallocates the buffer.
     unsafe fn dealloc(self) {
-        drop(Box::from_raw(ptr::slice_from_raw_parts_mut(
-            self.ptr.cast::<MaybeUninit<T>>(),
-            self.cap,
-        )));
+        drop(unsafe {
+            Box::from_raw(ptr::slice_from_raw_parts_mut(
+                self.ptr.cast::<MaybeUninit<T>>(),
+                self.cap,
+            ))
+        });
     }
 
     /// Returns a pointer to the task at the specified `index`.
@@ -62,7 +65,7 @@ impl<T> Buffer<T> {
         // `self.cap` is always a power of two.
         // We do all the loads at `MaybeUninit` because we might realize, after loading, that we
         // don't actually have the right to access this memory.
-        self.ptr.offset(index & (self.cap - 1) as isize)
+        unsafe { self.ptr.offset(index & (self.cap - 1) as isize) }
     }
 
     /// Writes `task` into the specified `index`.
@@ -72,7 +75,7 @@ impl<T> Buffer<T> {
     /// that would be more expensive and difficult to implement generically for all types `T`.
     /// Hence, as a hack, we use a volatile write instead.
     unsafe fn write(&self, index: isize, task: MaybeUninit<T>) {
-        ptr::write_volatile(self.at(index).cast::<MaybeUninit<T>>(), task)
+        unsafe { ptr::write_volatile(self.at(index).cast::<MaybeUninit<T>>(), task) }
     }
 
     /// Reads a task from the specified `index`.
@@ -82,7 +85,7 @@ impl<T> Buffer<T> {
     /// that would be more expensive and difficult to implement generically for all types `T`.
     /// Hence, as a hack, we use a volatile load instead.
     unsafe fn read(&self, index: isize) -> MaybeUninit<T> {
-        ptr::read_volatile(self.at(index).cast::<MaybeUninit<T>>())
+        unsafe { ptr::read_volatile(self.at(index).cast::<MaybeUninit<T>>()) }
     }
 }
 
@@ -294,7 +297,7 @@ impl<T> Worker<T> {
         let new = Buffer::alloc(new_cap);
         let mut i = f;
         while i != b {
-            ptr::copy_nonoverlapping(buffer.at(i), new.at(i), 1);
+            unsafe { ptr::copy_nonoverlapping(buffer.at(i), new.at(i), 1) };
             i = i.wrapping_add(1);
         }
 
@@ -308,7 +311,7 @@ impl<T> Worker<T> {
                 .swap(Owned::new(new).into_shared(guard), Ordering::Release, guard);
 
         // Destroy the old buffer later.
-        guard.defer_unchecked(move || old.into_owned().into_box().dealloc());
+        unsafe { guard.defer_unchecked(move || old.into_owned().into_box().dealloc()) };
 
         // If the buffer is very large, then flush the thread-local garbage in order to deallocate
         // it as soon as possible.
@@ -392,7 +395,7 @@ impl<T> Worker<T> {
     /// w.push(1);
     /// w.push(2);
     /// ```
-    pub fn push(&self, task: T) {
+    fn push_core(&self, task: T) -> bool {
         // Load the back index, front index, and buffer.
         let b = self.inner.back.load(Ordering::Relaxed);
         let f = self.inner.front.load(Ordering::Acquire);
@@ -400,6 +403,7 @@ impl<T> Worker<T> {
 
         // Calculate the length of the queue.
         let len = b.wrapping_sub(f);
+        let was_empty = len <= 0;
 
         // Is the queue full?
         if len >= buffer.cap as isize {
@@ -422,6 +426,16 @@ impl<T> Worker<T> {
         // This ordering could be `Relaxed`, but then thread sanitizer would falsely report data
         // races because it doesn't understand fences.
         self.inner.back.store(b.wrapping_add(1), Ordering::Release);
+
+        was_empty
+    }
+
+    pub fn push(&self, task: T) {
+        let _ = self.push_core(task);
+    }
+
+    pub fn push_with_status(&self, task: T) -> bool {
+        self.push_core(task)
     }
 
     /// Pops a task from the queue.
@@ -439,7 +453,7 @@ impl<T> Worker<T> {
     /// assert_eq!(w.pop(), Some(2));
     /// assert_eq!(w.pop(), None);
     /// ```
-    pub fn pop(&self) -> Option<T> {
+    fn pop_core(&self) -> (Option<T>, bool) {
         // Load the back and front index.
         let b = self.inner.back.load(Ordering::Relaxed);
         let f = self.inner.front.load(Ordering::Relaxed);
@@ -449,7 +463,7 @@ impl<T> Worker<T> {
 
         // Is the queue empty?
         if len <= 0 {
-            return None;
+            return (None, true);
         }
 
         match self.flavor {
@@ -461,7 +475,7 @@ impl<T> Worker<T> {
 
                 if b.wrapping_sub(new_f) < 0 {
                     self.inner.front.store(f, Ordering::Relaxed);
-                    return None;
+                    return (None, true);
                 }
 
                 unsafe {
@@ -474,7 +488,7 @@ impl<T> Worker<T> {
                         self.resize(buffer.cap / 2);
                     }
 
-                    Some(task)
+                    (Some(task), b.wrapping_sub(new_f) <= 0)
                 }
             }
 
@@ -495,11 +509,12 @@ impl<T> Worker<T> {
                 if len < 0 {
                     // The queue is empty. Restore the back index to the original task.
                     self.inner.back.store(b.wrapping_add(1), Ordering::Relaxed);
-                    None
+                    (None, true)
                 } else {
                     // Read the task to be popped.
                     let buffer = self.buffer.get();
                     let mut task = unsafe { Some(buffer.read(b)) };
+                    let mut was_last = false;
 
                     // Are we popping the last task from the queue?
                     if len == 0 {
@@ -517,10 +532,13 @@ impl<T> Worker<T> {
                         {
                             // Failed. We didn't pop anything. Reset to `None`.
                             task.take();
+                            self.inner.back.store(b.wrapping_add(1), Ordering::Relaxed);
+                            return (None, false);
                         }
 
                         // Restore the back index to the original task.
                         self.inner.back.store(b.wrapping_add(1), Ordering::Relaxed);
+                        was_last = true;
                     } else {
                         // Shrink the buffer if `len` is less than one fourth of the capacity.
                         if buffer.cap > MIN_CAP && len < buffer.cap as isize / 4 {
@@ -530,10 +548,20 @@ impl<T> Worker<T> {
                         }
                     }
 
-                    task.map(|t| unsafe { t.assume_init() })
+                    let result = task.take().map(|t| unsafe { t.assume_init() });
+                    let was_last = was_last && result.is_some();
+                    (result, was_last)
                 }
             }
         }
+    }
+
+    pub fn pop(&self) -> Option<T> {
+        self.pop_core().0
+    }
+
+    pub fn pop_with_status(&self) -> (Option<T>, bool) {
+        self.pop_core()
     }
 }
 
@@ -630,7 +658,7 @@ impl<T> Stealer<T> {
     /// assert_eq!(s.steal(), Steal::Success(1));
     /// assert_eq!(s.steal(), Steal::Success(2));
     /// ```
-    pub fn steal(&self) -> Steal<T> {
+    fn steal_core(&self) -> StealStatus<T> {
         // Load the front index.
         let f = self.inner.front.load(Ordering::Acquire);
 
@@ -650,7 +678,7 @@ impl<T> Stealer<T> {
 
         // Is the queue empty?
         if b.wrapping_sub(f) <= 0 {
-            return Steal::Empty;
+            return StealStatus::Empty;
         }
 
         // Load the buffer and read the task at the front.
@@ -667,11 +695,26 @@ impl<T> Stealer<T> {
                 .is_err()
         {
             // We didn't steal this task, forget it.
-            return Steal::Retry;
+            return StealStatus::Retry;
         }
 
-        // Return the stolen task.
-        Steal::Success(unsafe { task.assume_init() })
+        let was_last = b.wrapping_sub(f.wrapping_add(1)) <= 0;
+        StealStatus::Success {
+            task: unsafe { task.assume_init() },
+            was_last,
+        }
+    }
+
+    pub fn steal(&self) -> Steal<T> {
+        match self.steal_core() {
+            StealStatus::Empty => Steal::Empty,
+            StealStatus::Retry => Steal::Retry,
+            StealStatus::Success { task, .. } => Steal::Success(task),
+        }
+    }
+
+    pub fn steal_with_status(&self) -> StealStatus<T> {
+        self.steal_core()
     }
 
     /// Steals a batch of tasks and pushes them into another worker.
@@ -2061,6 +2104,11 @@ pub enum Steal<T> {
 
     /// The steal operation needs to be retried.
     Retry,
+}
+pub enum StealStatus<T> {
+    Empty,
+    Retry,
+    Success { task: T, was_last: bool },
 }
 
 impl<T> Steal<T> {

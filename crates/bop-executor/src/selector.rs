@@ -1,3 +1,4 @@
+use crate::bits;
 use crate::signal::{SIGNAL_CAPACITY, SIGNAL_MASK};
 use rand::RngCore;
 
@@ -81,4 +82,22 @@ impl Selector {
     //     self.bit_count += 1;
     //     self.bit_count
     // }
+
+    /// Reset statistics counters
+    pub fn reset_stats(&mut self) {
+        self.misses = 0;
+        self.contention = 0;
+    }
+
+    /// Get the miss rate (0.0 to 1.0)
+    pub fn miss_rate(&self) -> f64 {
+        let total = self.misses + self.contention + 1;
+        self.misses as f64 / total as f64
+    }
+
+    /// Get the contention rate (0.0 to 1.0)
+    pub fn contention_rate(&self) -> f64 {
+        let total = self.misses + self.contention + 1;
+        self.contention as f64 / total as f64
+    }
 }

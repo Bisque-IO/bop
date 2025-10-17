@@ -29,7 +29,11 @@ fn setup_mdbx_env() -> Result<(MdbxEnv, Dbi, tempfile::TempDir), Box<dyn Error>>
         MAP_SIZE / 4,
         4096,
     )?;
-    env.open(dir.path(), EnvFlags::SYNC_DURABLE, 0o600)?;
+    env.open(
+        dir.path(),
+        EnvFlags::SYNC_DURABLE | EnvFlags::WRITEMAP,
+        0o600,
+    )?;
     let txn = Txn::begin(&env, None, TxnFlags::READWRITE)?;
     let dbi = Dbi::open(&txn, Some("bench"), DbFlags::CREATE | DbFlags::INTEGERKEY)?;
     txn.commit()?;
@@ -282,17 +286,17 @@ fn report(producers: usize, total_ops: usize, elapsed: Duration) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    run_diatomic_waker(4, 10_000_000);
+    // run_diatomic_waker(4, 10_000_000);
 
     println!("mdbx sync durable benchmark (iterations={})", ITERATIONS);
     run_mdbx_insert(ITERATIONS, 1)?;
-    run_mdbx_insert(ITERATIONS, 100)?;
+    run_mdbx_insert(2, 10000)?;
     run_mdbx_update(ITERATIONS)?;
     run_mdbx_delete(ITERATIONS)?;
 
     println!("\nheed sync durable benchmark (iterations={})", ITERATIONS);
     run_heed_insert(ITERATIONS, 1)?;
-    run_heed_insert(ITERATIONS, 100)?;
+    run_heed_insert(2, 10000)?;
     run_heed_update(ITERATIONS)?;
     run_heed_delete(ITERATIONS)?;
 

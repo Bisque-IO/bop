@@ -113,7 +113,8 @@ use std::sync::Arc;
 
 use crossbeam_utils::CachePadded;
 
-use crate::{PopError, PushError, SignalGate};
+use crate::signal::SignalGate;
+use crate::{PopError, PushError};
 
 /// Cache-line aligned producer state (hot path for enqueue operations).
 ///

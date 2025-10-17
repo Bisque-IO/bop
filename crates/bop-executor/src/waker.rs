@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use crossbeam_utils::CachePadded;
+use crate::utils::CachePadded;
 
 use crate::bits::is_set;
 
@@ -136,6 +136,16 @@ pub struct SignalWaker {
     /// - Under-estimate: Permits accumulate, future wakeups succeed
     sleepers: CachePadded<AtomicUsize>,
 
+    /// **Active worker count**: Total number of FastTaskWorker threads currently running.
+    ///
+    /// Updated when workers start (register_worker) and stop (unregister_worker).
+    /// Workers periodically check this to reconfigure their signal partitions for
+    /// optimal load distribution with minimal contention.
+    ///
+    /// Uses `Relaxed` ordering since workers can tolerate slightly stale values
+    /// and will eventually reconfigure on the next periodic check.
+    worker_count: CachePadded<AtomicUsize>,
+
     /// Mutex for condvar (only used in blocking paths)
     m: Mutex<()>,
 
@@ -149,6 +159,7 @@ impl SignalWaker {
             summary: CachePadded::new(AtomicU64::new(0)),
             permits: CachePadded::new(AtomicU64::new(0)),
             sleepers: CachePadded::new(AtomicUsize::new(0)),
+            worker_count: CachePadded::new(AtomicUsize::new(0)),
             m: Mutex::new(()),
             cv: Condvar::new(),
         }
@@ -532,6 +543,118 @@ impl SignalWaker {
     #[inline]
     pub fn sleepers(&self) -> usize {
         self.sleepers.load(Ordering::Relaxed)
+    }
+
+    /// Increments the sleeper count, indicating a thread is about to park.
+    ///
+    /// Should be called BEFORE checking for work the final time, to prevent
+    /// lost wakeups. The calling thread must unregister via `unregister_sleeper()`
+    /// after waking up.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// waker.register_sleeper();
+    /// // Final check for work
+    /// if has_work() {
+    ///     waker.unregister_sleeper();
+    ///     return; // Found work, don't park
+    /// }
+    /// // Actually park...
+    /// waker.acquire();
+    /// waker.unregister_sleeper();
+    /// ```
+    #[inline]
+    pub fn register_sleeper(&self) {
+        self.sleepers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrements the sleeper count, indicating a thread has woken up.
+    ///
+    /// Should be called after waking up from `acquire()` or if aborting
+    /// a park attempt after `register_sleeper()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// waker.register_sleeper();
+    /// // ... park ...
+    /// waker.unregister_sleeper(); // Woke up
+    /// ```
+    #[inline]
+    pub fn unregister_sleeper(&self) {
+        self.sleepers.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // WORKER MANAGEMENT API
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// Registers a new worker thread and returns the new total worker count.
+    ///
+    /// Should be called when a FastTaskWorker thread starts. Workers use this
+    /// count to partition the signal space for optimal load distribution.
+    ///
+    /// # Returns
+    ///
+    /// The new total worker count after registration.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let waker = arena.waker();
+    /// let total_workers = unsafe { (*waker).register_worker() };
+    /// println!("Now have {} workers", total_workers);
+    /// ```
+    #[inline]
+    pub fn register_worker(&self) -> usize {
+        self.worker_count.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Unregisters a worker thread and returns the new total worker count.
+    ///
+    /// Should be called when a FastTaskWorker thread stops. This allows
+    /// remaining workers to reconfigure their partitions.
+    ///
+    /// # Returns
+    ///
+    /// The new total worker count after unregistration.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Worker stopping
+    /// let waker = arena.waker();
+    /// let remaining_workers = unsafe { (*waker).unregister_worker() };
+    /// println!("{} workers remaining", remaining_workers);
+    /// ```
+    #[inline]
+    pub fn unregister_worker(&self) -> usize {
+        self.worker_count
+            .fetch_sub(1, Ordering::Relaxed)
+            .saturating_sub(1)
+    }
+
+    /// Returns the current number of active worker threads.
+    ///
+    /// Workers periodically check this value to detect when the worker count
+    /// has changed and reconfigure their signal partitions accordingly.
+    ///
+    /// Uses Relaxed ordering since workers can tolerate slightly stale values
+    /// and will eventually see the update on their next check.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let waker = arena.waker();
+    /// let count = unsafe { (*waker).get_worker_count() };
+    /// if count != cached_count {
+    ///     // Reconfigure partition
+    /// }
+    /// ```
+    #[inline]
+    pub fn get_worker_count(&self) -> usize {
+        self.worker_count.load(Ordering::Relaxed)
     }
 }
 

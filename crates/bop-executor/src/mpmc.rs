@@ -2,11 +2,9 @@ use crate::bits::find_nearest;
 use crate::seg_spmc::SegSpmc;
 use crate::seg_spsc::SegSpsc;
 use crate::selector::Selector;
-use crate::signal::Signal;
-use crate::{PopError, PushError, SIGNAL_MASK};
-
-use crate::SignalGate;
+use crate::signal::{SIGNAL_MASK, Signal, SignalGate};
 use crate::waker::SignalWaker;
+use crate::{PopError, PushError};
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
 use std::ptr;
@@ -180,7 +178,7 @@ struct MpmcInner<T: Copy, const P: usize, const NUM_SEGS_P2: usize> {
     signals: Arc<[Signal; SIGNAL_WORDS]>,
 }
 
-/// Blocking MPmC Queue - Multi-Producer Single-Consumer with blocking operations
+/// Blocking MPMC Queue - Multi-Producer Single-Consumer with blocking operations
 ///
 /// # Type Parameters
 /// - `T`: The type of elements stored in the queue (must be Copy)
@@ -948,11 +946,11 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
     ) -> Option<(usize, &'a SegSpsc<T, P, NUM_SEGS_P2>)> {
         let random = selector.next() as usize;
         // Try selecting signal index from summary hint
-        let thread_id: u64 = std::thread::current().id().as_u64().into();
-        let mut signal_index = self.inner.waker.summary_select((thread_id as u64) & 63) as usize;
+        // let thread_id: u64 = std::thread::current().id().as_u64().into();
+        // let mut signal_index = self.inner.waker.summary_select((thread_id as u64) & 63) as usize;
         // let mut signal_index = self.inner.waker.summary_select((random as u64) & 63) as usize;
         // let mut signal_index = (thread_id as usize) & 3;
-        // let mut signal_index = 64;
+        let mut signal_index = 64;
         // let mut signal_index = 0;
 
         if signal_index >= 64 {

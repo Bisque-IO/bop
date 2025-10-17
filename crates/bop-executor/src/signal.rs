@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crossbeam_utils::CachePadded;
 
-use crate::SignalWaker;
+use crate::waker::SignalWaker;
 
 /// Number of bits per signal word (64-bit atomic).
 ///
@@ -513,9 +513,9 @@ pub const EXECUTING: u8 = 2;
 /// │     └────────finish()────────────┴───────────────────────────┘
 /// │                                  │                           │
 /// │                                  └──finish_and_schedule()────┘
-/// │                                              │
-/// │                                              ▼
-/// │                                         SCHEDULED (1)
+/// │                                              │               │
+/// │                                              ▼               │
+/// │                                         SCHEDULED (1)        │
 /// └──────────────────────────────────────────────────────────────┘
 /// ```
 ///

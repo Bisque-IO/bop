@@ -1,0 +1,74 @@
+[dependencies.crc32fast]
+default-features = false
+optional = true
+version = "1.2"
+
+[dependencies.fs2]
+optional = true
+version = "0.4"
+
+[dependencies.lazy_static]
+optional = true
+version = "1.4"
+
+[dependencies.log]
+version = "0.4"
+
+[dependencies.memmap]
+optional = true
+version = "0.7"
+
+[dependencies.parking_lot]
+version = "0.11"
+
+[dependencies.sanakirja-core]
+version = "1.4.1"
+
+[dependencies.serde]
+version = "1.0"
+
+[dependencies.thiserror]
+version = "1.0"
+[dev-dependencies.env_logger]
+version = "0.8"
+
+[dev-dependencies.libc]
+version = "0.2"
+
+[dev-dependencies.lmdb-rs]
+version = "0.7"
+
+[dev-dependencies.rand]
+features = ["small_rng"]
+version = "0.8"
+
+[dev-dependencies.sled]
+version = "0.34"
+
+[dev-dependencies.tempfile]
+version = "3.2"
+
+[dev-dependencies.uuid_]
+features = ["v4"]
+package = "uuid"
+version = "0.8"
+
+[features]
+crc32 = ["crc32fast", "lazy_static", "sanakirja-core/crc32"]
+default = ["mmap"]
+ed25519 = ["sanakirja-core/ed25519"]
+mmap = ["memmap", "fs2"]
+std = ["sanakirja-core/std"]
+uuid = ["sanakirja-core/uuid"]
+
+[package]
+authors = ["Pierre-Étienne Meunier"]
+description = "Copy-on-write datastructures, storable on disk (or elsewhere) with a stable format."
+documentation = "https://docs.rs/sanakirja"
+edition = "2018"
+include = ["Cargo.toml", "src/lib.rs", "src/debug.rs", "src/environment/mod.rs", "src/environment/global_header.rs", "src/environment/muttxn.rs", "src/tests.rs"]
+license = "MIT/Apache-2.0"
+name = "sanakirja"
+repository = "https://nest.pijul.com/pijul/sanakirja"
+resolver = "2"
+version = "1.4.1"

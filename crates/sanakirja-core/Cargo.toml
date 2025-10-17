@@ -1,0 +1,34 @@
+[dependencies.crc32fast]
+default-features = false
+optional = true
+version = "1.2"
+
+[dependencies.ed25519-zebra]
+optional = true
+version = "2.2"
+
+[dependencies.sha2]
+optional = true
+version = "0.10"
+
+[dependencies.uuid]
+optional = true
+version = "1.3.3"
+
+[features]
+crc32 = ["crc32fast"]
+ed25519 = ["ed25519-zebra", "ed25519-zebra/serde"]
+std = []
+typeids = ["sha2"]
+
+[package]
+authors = ["Pierre-Étienne Meunier", "Florent Becker"]
+description = "Copy-on-write datastructures, storable on disk (or elsewhere) with a stable format."
+documentation = "https://docs.rs/sanakirja"
+edition = "2018"
+include = ["Cargo.toml", "src/lib.rs", "src", "src/btree", "src/btree/page_cursor.rs", "src/btree/page_unsized", "src/btree/page_unsized/alloc.rs", "src/btree/page_unsized/rebalance.rs", "src/btree/page_unsized/header.rs", "src/btree/page_unsized/put.rs", "src/btree/page_unsized/cursor.rs", "src/btree/put.rs", "src/btree/page", "src/btree/page/alloc.rs", "src/btree/page/rebalance.rs", "src/btree/page/put.rs", "src/btree/del.rs", "src/btree/mod.rs", "src/btree/page_unsized.rs", "src/btree/cursor.rs", "src/btree/page.rs"]
+license = "MIT/Apache-2.0"
+name = "sanakirja-core"
+repository = "https://nest.pijul.com/pijul/sanakirja"
+resolver = "2"
+version = "1.4.1"
