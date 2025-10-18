@@ -586,7 +586,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
         ));
         Ok(Producer {
             _handle: Arc::clone(&self.inner),
-            producer: unsafe { producer as *mut SegSpmc<T, QUEUES_PER_PRODUCER, P, NUM_SEGS_P2> },
+            producer: producer as *mut SegSpmc<T, QUEUES_PER_PRODUCER, P, NUM_SEGS_P2>,
             producer_id,
         })
     }
@@ -855,9 +855,9 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
     }
 
     pub fn try_pop_n_with_selector(&self, selector: &mut Selector, batch: &mut [T]) -> usize {
-        let mut total_drained = 0;
+        let total_drained = 0;
         let max_count = batch.len();
-        let mut remaining = max_count;
+        // let mut remaining = max_count;
 
         // Try to drain from each producer queue using the selector for fairness
         // We'll cycle through producers until we've drained max_count items or all queues are empty
@@ -888,8 +888,8 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
                     // Drain from this producer's queue using consume_in_place
                     match queue.try_pop_n(batch) {
                         Ok(size) => {
-                            total_drained += size;
-                            remaining -= size;
+                            // total_drained += size;
+                            // remaining -= size;
                             queue.unmark_and_schedule();
                             return size;
                         }

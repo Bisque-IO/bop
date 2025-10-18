@@ -36,7 +36,7 @@ impl<T: Copy, const SHARDS: usize, const P: usize, const NUM_SEGS_P2: usize>
             })));
         }
         Self {
-            queues: unsafe { v.into_boxed_slice() },
+            queues: v.into_boxed_slice(),
             seed: UnsafeCell::new(rand::rng().next_u64()),
         }
     }
@@ -44,7 +44,7 @@ impl<T: Copy, const SHARDS: usize, const P: usize, const NUM_SEGS_P2: usize>
     pub fn with_queues(queues: Vec<*mut SegSpsc<T, P, NUM_SEGS_P2>>) -> Self {
         assert_eq!(queues.len(), SHARDS);
         Self {
-            queues: unsafe { queues.into_boxed_slice() },
+            queues: queues.into_boxed_slice(),
             seed: UnsafeCell::new(rand::rng().next_u64()),
         }
     }

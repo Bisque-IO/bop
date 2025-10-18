@@ -1,5 +1,7 @@
 use crate::bits;
 use crate::summary_tree::{SummaryInit, SummaryTree};
+use crate::timers::handle::TimerHandle;
+use crate::timers::service::TimerService;
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::future::{Future, IntoFuture};
@@ -230,6 +232,7 @@ unsafe impl Sync for TaskHandle {}
 #[repr(C)]
 pub struct TaskSlot {
     task_ptr: AtomicPtr<Task>,
+    active_task_ptr: AtomicPtr<Task>,
 }
 
 impl TaskSlot {
@@ -237,6 +240,7 @@ impl TaskSlot {
     pub fn new(task_ptr: *mut Task) -> Self {
         Self {
             task_ptr: AtomicPtr::new(task_ptr),
+            active_task_ptr: AtomicPtr::new(ptr::null_mut()),
         }
     }
 
@@ -253,6 +257,24 @@ impl TaskSlot {
     #[inline(always)]
     pub fn clear_task_ptr(&self) {
         self.task_ptr.store(ptr::null_mut(), Ordering::Release);
+        self.active_task_ptr
+            .store(ptr::null_mut(), Ordering::Release);
+    }
+
+    #[inline(always)]
+    pub fn set_active_task_ptr(&self, ptr: *mut Task) {
+        self.active_task_ptr.store(ptr, Ordering::Release);
+    }
+
+    #[inline(always)]
+    pub fn active_task_ptr(&self) -> *mut Task {
+        self.active_task_ptr.load(Ordering::Acquire)
+    }
+
+    #[inline(always)]
+    pub fn clear_active_task_ptr(&self) {
+        self.active_task_ptr
+            .store(ptr::null_mut(), Ordering::Release);
     }
 }
 
@@ -1320,6 +1342,32 @@ impl MmapExecutorArena {
             self.active_tree
                 .mark_signal_inactive(task.leaf_idx as usize, task.signal_idx as usize);
         }
+    }
+
+    pub fn schedule_task_timer(
+        &self,
+        task: TaskHandle,
+        timer: &TimerHandle,
+        service: &TimerService,
+        deadline_tick: u64,
+    ) -> u64 {
+        let _ = timer.cancel(service);
+        let task_ptr = task.as_ptr() as *mut ();
+        let previous = timer.inner().swap_payload(task_ptr, Ordering::AcqRel);
+        if let Some(prev) = MmapExecutorArena::task_handle_from_payload(previous) {
+            if prev.as_ptr() != task.as_ptr() {
+                self.activate_task(prev);
+            }
+        }
+        let stripe_hint = (task.leaf_idx() as u32).wrapping_add(1).max(1);
+        timer.inner().set_stripe_hint(stripe_hint);
+        timer.inner().set_home_worker(None);
+        service.schedule_handle(timer, deadline_tick)
+    }
+
+    #[inline(always)]
+    pub(crate) fn task_handle_from_payload(ptr: *mut ()) -> Option<TaskHandle> {
+        NonNull::new(ptr as *mut Task).map(TaskHandle::from_non_null)
     }
 
     pub fn reserve_worker(&self) -> Option<usize> {

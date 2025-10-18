@@ -23,9 +23,9 @@
 
 pub mod bits;
 pub mod deque;
-pub mod loom_exports;
+mod loom_exports;
 pub mod mpmc;
-pub mod mpsc;
+// pub mod mpsc;
 pub mod runtime;
 pub mod seg_spmc;
 pub mod seg_spsc;
@@ -34,6 +34,7 @@ pub mod signal;
 pub mod summary_tree;
 pub mod task;
 pub mod timer_wheel;
+pub mod timers;
 pub mod utils;
 pub mod waker;
 pub mod worker;

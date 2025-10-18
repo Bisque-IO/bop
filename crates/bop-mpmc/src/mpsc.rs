@@ -160,7 +160,7 @@ impl<T> MpscQueue<T> {
     ///
     /// This method may not be called concurrently from multiple threads.
     pub(super) unsafe fn pop(&self) -> Result<T, PopError> {
-        let dequeue_pos = self.dequeue_pos.with(|p| *p);
+        let dequeue_pos = self.dequeue_pos.with(|p| unsafe { *p });
         let slot = &self.buffer[dequeue_pos & self.right_mask];
         let stamp = slot.stamp.load(Ordering::Acquire);
 

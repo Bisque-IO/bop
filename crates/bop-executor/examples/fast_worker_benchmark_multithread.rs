@@ -71,7 +71,7 @@ fn worker_loop(
     }
 
     let core = core_affinity::get_core_ids().unwrap()[worker_idx];
-    // core_affinity::set_for_current(core);
+    core_affinity::set_for_current(core);
 
     setup_barrier.wait();
 

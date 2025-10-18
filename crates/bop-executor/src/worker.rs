@@ -1,9 +1,16 @@
 use crate::bits;
 use crate::deque::{StealStatus, Stealer, Worker as QueueWorker};
-use crate::task::{FutureHelpers, MmapExecutorArena, TaskHandle};
+use crate::task::{FutureHelpers, MmapExecutorArena, TaskHandle, TaskSlot};
+use crate::timers::context::GarbagePolicy;
+use crate::timers::{
+    MergeEntry, TimerEntry, TimerHandle, TimerService, TimerState, TimerWheelConfig,
+    TimerWheelContext, TimerWorkerHandle, TimerWorkerShared,
+};
+use std::cell::Cell;
 use std::hint::spin_loop;
-use std::sync::Arc;
+use std::ptr;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -14,6 +21,163 @@ const RND_ADDEND: u64 = 0xB;
 const RND_MASK: u64 = (1 << 48) - 1;
 const DEFAULT_WAKE_BURST: usize = 4;
 const FULL_SUMMARY_SCAN_CADENCE_MASK: u64 = 1023;
+const TIMER_BUCKET_BUDGET: usize = 32;
+const TIMER_STALE_ABS_THRESHOLD: usize = 8;
+const TIMER_STALE_RATIO_NUM: usize = 1;
+const TIMER_STALE_RATIO_DEN: usize = 1;
+
+thread_local! {
+    static WORKER_TIMERS: Cell<*const WorkerTimers> = Cell::new(ptr::null());
+}
+
+struct WorkerTimers {
+    arena: Arc<MmapExecutorArena>,
+    service: Arc<TimerService>,
+    handle: TimerWorkerHandle,
+    context: TimerWheelContext,
+    tick_duration_ns: u128,
+    bucket_budget: usize,
+    garbage_policy: GarbagePolicy,
+    current_task: Cell<*const crate::task::Task>,
+}
+
+unsafe impl Send for WorkerTimers {}
+
+impl WorkerTimers {
+    fn new(arena: Arc<MmapExecutorArena>, service: Arc<TimerService>) -> Self {
+        let shared = Arc::new(TimerWorkerShared::new());
+        let merge_inbox = Arc::new(Mutex::new(Vec::<MergeEntry>::new()));
+        let mut context = TimerWheelContext::new(
+            0,
+            Arc::clone(&shared),
+            Arc::clone(&merge_inbox),
+            TimerWheelConfig::default(),
+        );
+        let garbage = context.garbage_shared();
+        let handle =
+            service.register_worker(Arc::clone(&shared), Arc::clone(&merge_inbox), garbage);
+        context.set_worker_id(handle.id());
+
+        let tick_duration_ns = service.tick_duration().as_nanos().max(1);
+
+        Self {
+            arena,
+            service,
+            handle,
+            context,
+            tick_duration_ns,
+            bucket_budget: TIMER_BUCKET_BUDGET,
+            garbage_policy: GarbagePolicy::new(
+                TIMER_STALE_ABS_THRESHOLD,
+                TIMER_STALE_RATIO_NUM,
+                TIMER_STALE_RATIO_DEN,
+            ),
+            current_task: Cell::new(ptr::null()),
+        }
+    }
+
+    #[inline(always)]
+    fn duration_to_ticks(&self, duration: Duration) -> u64 {
+        if duration.is_zero() {
+            return 1;
+        }
+        let tick_ns = self.tick_duration_ns;
+        let nanos = duration.as_nanos();
+        let adjusted = nanos.saturating_add(tick_ns.saturating_sub(1));
+        let ticks = (adjusted / tick_ns).max(1);
+        ticks.min(u128::from(u64::MAX)) as u64
+    }
+
+    fn schedule(&self, task: TaskHandle, timer: &TimerHandle, duration: Duration) -> u64 {
+        let ticks = self.duration_to_ticks(duration);
+        let deadline_tick = self.context.now().wrapping_add(ticks);
+        self.context.set_needs_poll();
+        self.arena
+            .schedule_task_timer(task, timer, self.service.as_ref(), deadline_tick)
+    }
+
+    fn poll(&mut self) -> bool {
+        if !self.context.needs_poll() {
+            self.context.scrub_next_bucket(&self.garbage_policy);
+            return false;
+        }
+
+        self.context.absorb_merges();
+        let now = self.context.now();
+        let ready = self
+            .context
+            .poll_ready(now, self.bucket_budget, &self.garbage_policy);
+        let mut did_work = false;
+        for entry in ready {
+            let payload = entry.handle.swap_payload(ptr::null_mut(), Ordering::AcqRel);
+            if let Some(handle) = MmapExecutorArena::task_handle_from_payload(payload) {
+                self.arena.activate_task(handle);
+                did_work = true;
+            }
+            entry
+                .handle
+                .store_state(TimerState::Idle, Ordering::Release);
+        }
+        self.context.scrub_next_bucket(&self.garbage_policy);
+        did_work
+    }
+
+    #[inline(always)]
+    fn set_current_task(&self, task: *const crate::task::Task) {
+        self.current_task.set(task);
+    }
+
+    #[inline(always)]
+    fn clear_current_task(&self) {
+        self.current_task.set(ptr::null());
+    }
+
+    #[inline(always)]
+    fn current_task_ptr(&self) -> *const crate::task::Task {
+        self.current_task.get()
+    }
+
+    fn migrate_pending(&mut self) {
+        self.context.absorb_merges();
+        let entries = self.context.drain_all_entries();
+        if entries.is_empty() {
+            return;
+        }
+        for entry in entries {
+            let TimerEntry {
+                handle,
+                generation,
+                deadline_tick,
+                stripe_hint,
+            } = entry;
+            if handle.generation() != generation {
+                continue;
+            }
+            match handle.state(Ordering::Acquire) {
+                TimerState::Scheduled | TimerState::Migrating => {
+                    handle.set_home_worker(None);
+                    handle.store_state(TimerState::Migrating, Ordering::Release);
+                    self.service.enqueue_merge(MergeEntry::new(
+                        deadline_tick,
+                        generation,
+                        stripe_hint,
+                        handle,
+                    ));
+                }
+                TimerState::Cancelled | TimerState::Fired => {}
+                TimerState::Idle | TimerState::Firing => {
+                    handle.store_state(TimerState::Idle, Ordering::Release);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for WorkerTimers {
+    fn drop(&mut self) {
+        self.migrate_pending();
+    }
+}
 
 /// Comprehensive statistics for fast worker.
 #[derive(Debug, Default, Clone)]
@@ -110,11 +274,19 @@ pub struct Worker {
     wake_burst_limit: usize,
     wake_stats: WakeStats,
     stats: WorkerStats,
+    timers: Option<Box<WorkerTimers>>,
     pub seed: u64,
 }
 
 impl Worker {
     pub fn new(arena: Arc<MmapExecutorArena>) -> Self {
+        Self::new_with_timers(arena, None)
+    }
+
+    pub fn new_with_timers(
+        arena: Arc<MmapExecutorArena>,
+        timer_service: Option<Arc<TimerService>>,
+    ) -> Self {
         let slot = arena
             .reserve_worker()
             .expect("failed to reserve worker slot");
@@ -122,7 +294,9 @@ impl Worker {
         let worker_count = arena.active_tree().worker_count().max(1);
         let (partition_start, partition_end) =
             Self::compute_partition(slot, leaf_count, worker_count);
-        Self {
+        let timers =
+            timer_service.map(|service| Box::new(WorkerTimers::new(Arc::clone(&arena), service)));
+        let worker = Self {
             arena,
             worker_slot: slot,
             yield_queue: QueueWorker::new_lifo(),
@@ -133,8 +307,39 @@ impl Worker {
             wake_burst_limit: DEFAULT_WAKE_BURST,
             wake_stats: WakeStats::default(),
             stats: WorkerStats::default(),
+            timers,
             seed: rand::rng().next_u64(),
-        }
+        };
+        worker.register_timer_tls();
+        worker
+    }
+
+    fn register_timer_tls(&self) {
+        WORKER_TIMERS.with(|cell| {
+            let ptr = self
+                .timers
+                .as_deref()
+                .map(|timers| timers as *const WorkerTimers)
+                .unwrap_or(ptr::null());
+            cell.set(ptr);
+        });
+    }
+
+    fn clear_timer_tls(&self) {
+        WORKER_TIMERS.with(|cell| {
+            let current = cell.get();
+            if current.is_null() {
+                return;
+            }
+            if let Some(timers) = self.timers.as_deref() {
+                let ptr = timers as *const WorkerTimers;
+                if ptr == current {
+                    cell.set(ptr::null());
+                }
+            } else {
+                cell.set(ptr::null());
+            }
+        });
     }
 
     #[inline(always)]
@@ -222,6 +427,10 @@ impl Worker {
             } else if self.try_any_partition_linear(leaf_count) {
                 did_work = true;
             }
+        }
+
+        if self.poll_timers() {
+            did_work = true;
         }
 
         if !did_work {
@@ -606,8 +815,42 @@ impl Worker {
     }
 
     #[inline(always)]
+    fn poll_timers(&mut self) -> bool {
+        match self.timers.as_mut() {
+            Some(timers) => timers.poll(),
+            None => false,
+        }
+    }
+
+    #[inline(always)]
     fn poll_handle(&mut self, handle: TaskHandle) {
         let task = handle.task();
+        struct ActiveTaskGuard<'a> {
+            slot: Option<&'a TaskSlot>,
+        }
+        impl<'a> ActiveTaskGuard<'a> {
+            fn new(task: &'a crate::task::Task) -> Self {
+                let slot = task.slot().map(|slot| unsafe { slot.as_ref() });
+                if let Some(slot_ref) = slot {
+                    slot_ref.set_active_task_ptr(task as *const _ as *mut _);
+                }
+                if let Some(timers) = unsafe { WORKER_TIMERS.with(|cell| cell.get().as_ref()) } {
+                    timers.set_current_task(task as *const _);
+                }
+                Self { slot }
+            }
+        }
+        impl Drop for ActiveTaskGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(slot) = self.slot {
+                    slot.clear_active_task_ptr();
+                }
+                if let Some(timers) = unsafe { WORKER_TIMERS.with(|cell| cell.get().as_ref()) } {
+                    timers.clear_current_task();
+                }
+            }
+        }
+        let _active_guard = ActiveTaskGuard::new(task);
 
         self.stats.tasks_polled += 1;
 
@@ -653,6 +896,8 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
+        self.clear_timer_tls();
+        let _ = self.timers.take();
         loop {
             let (item, was_last) = self.yield_queue.pop_with_status();
             match item {
@@ -668,10 +913,28 @@ impl Drop for Worker {
     }
 }
 
+pub fn schedule_timer_for_current_task(
+    _cx: &Context<'_>,
+    timer: &TimerHandle,
+    duration: Duration,
+) -> Option<(u64, Arc<TimerService>)> {
+    let timers_ptr = WORKER_TIMERS.with(|cell| cell.get());
+    let timers = unsafe { timers_ptr.as_ref() }?;
+    let task_ptr = timers.current_task_ptr();
+    if task_ptr.is_null() {
+        return None;
+    }
+    let task = unsafe { &*task_ptr };
+    let handle = TaskHandle::from_task(task);
+    let generation = timers.schedule(handle, timer, duration);
+    Some((generation, timers.service.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::task::{ArenaConfig, ArenaOptions, FutureHelpers, Task};
+    use crate::timers::{TimerConfig, TimerService, sleep};
     use std::future::{Future, poll_fn};
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Barrier};
@@ -1281,5 +1544,74 @@ mod tests {
         assert_eq!(worker.partition_end, 4);
 
         arena.release_worker(slot);
+    }
+
+    #[test]
+    fn sleep_future_reschedules_task() {
+        let arena = build_arena(1, 64);
+        let service = TimerService::start(TimerConfig {
+            tick_duration: Duration::from_millis(1),
+        });
+        let mut worker = Worker::new_with_timers(Arc::clone(&arena), Some(Arc::clone(&service)));
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let handle = prepare_task(&arena, {
+            let counter = Arc::clone(&counter);
+            async move {
+                sleep(Duration::from_millis(10)).await;
+                counter.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+        });
+
+        let start = Instant::now();
+        while counter.load(AtomicOrdering::Relaxed) == 0 && start.elapsed() < Duration::from_secs(1)
+        {
+            worker.run_once();
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
+
+        arena.release_task(handle);
+        drop(worker);
+        service.shutdown();
+    }
+
+    #[test]
+    fn timers_migrate_when_worker_drops() {
+        let arena = build_arena(1, 64);
+        let service = TimerService::start(TimerConfig {
+            tick_duration: Duration::from_millis(1),
+        });
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        let handle = {
+            let mut worker_a =
+                Worker::new_with_timers(Arc::clone(&arena), Some(Arc::clone(&service)));
+            let handle = prepare_task(&arena, {
+                let counter = Arc::clone(&counter);
+                async move {
+                    sleep(Duration::from_millis(20)).await;
+                    counter.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+            });
+            // Poll once to schedule the timer before dropping the worker.
+            worker_a.run_once();
+            handle
+        };
+
+        let mut worker_b = Worker::new_with_timers(Arc::clone(&arena), Some(Arc::clone(&service)));
+        let start = Instant::now();
+        while counter.load(AtomicOrdering::Relaxed) == 0 && start.elapsed() < Duration::from_secs(2)
+        {
+            worker_b.run_once();
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
+
+        arena.release_task(handle);
+        drop(worker_b);
+        service.shutdown();
     }
 }

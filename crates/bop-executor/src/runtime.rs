@@ -1,6 +1,7 @@
 use crate::task::{
     ArenaConfig, ArenaOptions, ArenaStats, FutureHelpers, MmapExecutorArena, SpawnError, TaskHandle,
 };
+use crate::timers::{TimerConfig, TimerService};
 use crate::worker::{WaitStrategy, Worker};
 use std::future::{Future, IntoFuture};
 use std::io;
@@ -19,6 +20,7 @@ pub struct Runtime {
 struct RuntimeInner {
     arena: Arc<MmapExecutorArena>,
     shutdown: AtomicBool,
+    timer_service: Arc<TimerService>,
 }
 
 impl RuntimeInner {
@@ -73,6 +75,7 @@ impl RuntimeInner {
             return;
         }
         self.arena.close();
+        TimerService::shutdown(&self.timer_service);
     }
 }
 
@@ -84,16 +87,21 @@ impl Runtime {
         worker_count: usize,
     ) -> io::Result<Self> {
         let arena = Arc::new(MmapExecutorArena::with_config(config, options)?);
+        let timer_service = TimerService::start(TimerConfig::default());
         let inner = Arc::new(RuntimeInner {
             arena,
             shutdown: AtomicBool::new(false),
+            timer_service,
         });
 
         let mut workers = Vec::with_capacity(worker_count.max(1));
         for _ in 0..worker_count.max(1) {
             let inner_clone = Arc::clone(&inner);
             workers.push(thread::spawn(move || {
-                let mut worker = Worker::new(Arc::clone(&inner_clone.arena));
+                let mut worker = Worker::new_with_timers(
+                    Arc::clone(&inner_clone.arena),
+                    Some(Arc::clone(&inner_clone.timer_service)),
+                );
                 let wait = WaitStrategy::default();
                 while !inner_clone.shutdown.load(Ordering::Acquire) {
                     worker.poll_blocking(&wait);
