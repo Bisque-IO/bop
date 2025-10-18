@@ -1,11 +1,9 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bop_executor::task::{
-    ArenaConfig, ArenaOptions, FutureHelpers, MmapExecutorArena, TaskHandle,
-};
+use bop_executor::task::{ArenaConfig, ArenaOptions, FutureHelpers, MmapExecutorArena, TaskHandle};
 use bop_executor::worker::Worker;
 
 fn setup_arena(leaf_count: usize, tasks_per_leaf: usize) -> Arc<MmapExecutorArena> {
@@ -58,7 +56,8 @@ fn bench_task_schedule_finish(thread_count: usize, iterations: usize) -> Duratio
             scope.spawn(move || {
                 let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
                 let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
-                let signal = unsafe { &*arena.task_signal_ptr(handle.leaf_idx(), handle.signal_idx()) };
+                let signal =
+                    unsafe { &*arena.task_signal_ptr(handle.leaf_idx(), handle.signal_idx()) };
                 for _ in 0..iterations {
                     task.schedule();
                     let (remaining, acquired) = signal.try_acquire(handle.bit_idx());
@@ -111,7 +110,7 @@ fn main() {
     let iterations = std::env::var("BENCH_ITERS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(10_000);
+        .unwrap_or(1000_000);
 
     println!("Task schedule/begin/finish benchmark (iterations={iterations})");
     for &threads in &[1, 2, 4, 8] {

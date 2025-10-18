@@ -222,10 +222,6 @@ impl Worker {
             } else if self.try_any_partition_linear(leaf_count) {
                 did_work = true;
             }
-
-            // if self.poll_yield_steal(1) > 0 {
-            //     did_work = true;
-            // }
         }
 
         if !did_work {
@@ -233,9 +229,9 @@ impl Worker {
                 did_work = true;
             }
 
-            // if self.poll_yield_steal(1) > 0 {
-            //     did_work = true;
-            // }
+            if self.poll_yield_steal(1) > 0 {
+                did_work = true;
+            }
         }
 
         did_work
@@ -590,7 +586,9 @@ impl Worker {
             self.maybe_release_for_backlog(leaf_idx, signal_idx, remaining_mask);
 
             self.stats.signal_polls += 1;
-            return Some(TaskHandle::new(leaf_idx, signal_idx, bit_idx));
+            let slot_idx = signal_idx * 64 + bit_idx as usize;
+            let task = unsafe { self.arena.task(leaf_idx, slot_idx) };
+            return Some(TaskHandle::from_task(task));
         }
 
         self.stats.empty_scans += 1;
@@ -609,14 +607,14 @@ impl Worker {
 
     #[inline(always)]
     fn poll_handle(&mut self, handle: TaskHandle) {
-        let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
-        let task = unsafe { self.arena.task(handle.leaf_idx(), slot_idx) };
+        let task = handle.task();
 
         self.stats.tasks_polled += 1;
 
         if !task.is_yielded() {
             task.begin();
         } else {
+            task.record_yield();
             task.clear_yielded();
         }
 
@@ -634,6 +632,7 @@ impl Worker {
             }
             Some(Poll::Pending) => {
                 if task.is_yielded() {
+                    task.record_yield();
                     self.stats.yielded_count += 1;
                     // Yielded Tasks stay in EXECUTING state with yielded set to true
                     // without resetting the signal. All attempts to set the signal
@@ -705,9 +704,8 @@ mod tests {
         assert_eq!(stats.steal_attempts, 0);
     }
 
-    fn task_by_handle<'a>(arena: &'a Arc<MmapExecutorArena>, handle: &TaskHandle) -> &'a Task {
-        let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
-        unsafe { arena.task(handle.leaf_idx(), slot_idx) }
+    fn task_by_handle(handle: &TaskHandle) -> &Task {
+        handle.task()
     }
 
     fn prepare_task<F>(arena: &Arc<MmapExecutorArena>, future: F) -> TaskHandle
@@ -718,14 +716,14 @@ mod tests {
         let global = handle.global_id(arena.tasks_per_leaf());
         arena.init_task(global);
         let future_ptr = FutureHelpers::box_future(future);
-        let task = task_by_handle(arena, &handle);
+        let task = task_by_handle(&handle);
         task.attach_future(future_ptr).unwrap();
         arena.activate_task(handle);
         handle
     }
 
-    fn drop_future(arena: &Arc<MmapExecutorArena>, handle: &TaskHandle) {
-        let task = task_by_handle(arena, handle);
+    fn drop_future(handle: &TaskHandle) {
+        let task = task_by_handle(handle);
         if let Some(ptr) = task.take_future() {
             unsafe { FutureHelpers::drop_boxed(ptr) };
         }
@@ -830,7 +828,7 @@ mod tests {
         assert_eq!(stats.signal_polls, 3);
         assert!(stats.empty_scans >= 1);
 
-        drop_future(&arena, &pending_handle);
+        drop_future(&pending_handle);
         arena.release_task(ready_handle);
         arena.release_task(pending_handle);
         arena.release_task(yield_handle);
@@ -872,7 +870,7 @@ mod tests {
         barrier.wait();
         thread::sleep(Duration::from_millis(20));
 
-        let activation_handle = TaskHandle::new(leaf, signal, bit);
+        let activation_handle = TaskHandle::from_task(task);
         arena.activate_task(activation_handle);
 
         let (slot, elapsed) = worker_thread.join().expect("worker thread panicked");
@@ -1033,8 +1031,9 @@ mod tests {
         );
 
         for (leaf, signal, bit) in handles_meta {
-            let handle = TaskHandle::new(leaf, signal, bit);
-            arena.release_task(handle);
+            let slot_idx = signal * 64 + bit as usize;
+            let task = unsafe { arena.task(leaf, slot_idx) };
+            arena.release_task(TaskHandle::from_task(task));
         }
     }
 
@@ -1070,7 +1069,9 @@ mod tests {
         arena.release_worker(new_slot);
 
         let (leaf, signal, bit) = handle_bits;
-        arena.release_task(TaskHandle::new(leaf, signal, bit));
+        let slot_idx = signal * 64 + bit as usize;
+        let task = unsafe { arena.task(leaf, slot_idx) };
+        arena.release_task(TaskHandle::from_task(task));
     }
 
     #[test]
@@ -1130,7 +1131,9 @@ mod tests {
         assert_eq!(stats.steal_successes, 1);
         assert_eq!(stats.yield_queue_polls, 1);
 
-        arena.release_task(TaskHandle::new(leaf, signal, bit));
+        let slot_idx = signal * 64 + bit as usize;
+        let task = unsafe { arena.task(leaf, slot_idx) };
+        arena.release_task(TaskHandle::from_task(task));
     }
 
     #[test]
@@ -1186,7 +1189,9 @@ mod tests {
             "yield bit should be cleared after draining queue"
         );
 
-        arena.release_task(TaskHandle::new(leaf, signal, bit));
+        let slot_idx = signal * 64 + bit as usize;
+        let task = unsafe { arena.task(leaf, slot_idx) };
+        arena.release_task(TaskHandle::from_task(task));
     }
 
     #[test]
@@ -1214,6 +1219,7 @@ mod tests {
 
         worker.partition_start = 0;
         worker.partition_end = 0;
+        worker.seed = 0;
 
         let handle = prepare_task(&arena, async {});
         assert!(worker.try_any_partition_random(arena.leaf_count()));

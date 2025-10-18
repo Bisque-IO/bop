@@ -1,4 +1,4 @@
-use std::alloc::{alloc_zeroed, handle_alloc_error, Layout};
+use std::alloc::{Layout, alloc_zeroed, handle_alloc_error};
 use std::boxed::Box;
 use std::cell::{Cell, UnsafeCell};
 use std::cmp;
@@ -6,8 +6,8 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::mem::{self, MaybeUninit};
 use std::ptr;
-use std::sync::atomic::{self, AtomicIsize, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{self, AtomicIsize, AtomicPtr, AtomicUsize, Ordering};
 
 use crate::utils::CachePadded;
 use crossbeam_epoch::{self as epoch, Atomic, Owned};
@@ -2255,10 +2255,6 @@ impl<T> FromIterator<Steal<T>> for Steal<T> {
             }
         }
 
-        if retry {
-            Steal::Retry
-        } else {
-            Steal::Empty
-        }
+        if retry { Steal::Retry } else { Steal::Empty }
     }
 }

@@ -70,6 +70,9 @@ fn worker_loop(
         *slot = Some(my_stealer);
     }
 
+    let core = core_affinity::get_core_ids().unwrap()[worker_idx];
+    // core_affinity::set_for_current(core);
+
     setup_barrier.wait();
 
     let mut peer_stealers = Vec::with_capacity(num_workers.saturating_sub(1));
