@@ -79,3 +79,44 @@ impl Drop for Sleep {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::timers::service::{TimerConfig, TimerService};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn sleep_reset_clears_internal_state() {
+        let mut sleep = Sleep::new(Duration::from_millis(5));
+        sleep.generation = Some(42);
+        sleep.completed = true;
+        sleep.service = Some(TimerService::start(TimerConfig::default()));
+
+        sleep.reset(Duration::from_millis(2));
+
+        assert!(sleep.generation.is_none());
+        assert!(!sleep.completed);
+        assert!(sleep.service.is_none());
+        assert_eq!(sleep.duration, Duration::from_millis(2));
+    }
+
+    #[test]
+    fn dropping_sleep_cancels_pending_timer() {
+        let service = TimerService::start(TimerConfig::default());
+        {
+            let mut sleep = Sleep::new(Duration::from_millis(10));
+            sleep.generation = Some(1);
+            sleep.service = Some(Arc::clone(&service));
+            sleep
+                .timer
+                .inner()
+                .store_state(TimerState::Scheduled, Ordering::Release);
+            sleep.timer.inner().set_home_worker(Some(0));
+            sleep.timer.inner().set_stripe_hint(1);
+        }
+        assert!(service.cancellation_count() >= 1);
+        service.shutdown();
+    }
+}

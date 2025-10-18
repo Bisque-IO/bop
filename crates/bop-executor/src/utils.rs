@@ -4,6 +4,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use std::boxed::Box;
 use std::vec::Vec;
 
+use std::{
+    future::{Future, IntoFuture},
+    sync::Arc,
+    task::{Context, Poll, Wake, Waker},
+    thread,
+};
+
 /// Pads and aligns a value to the length of a cache line.
 ///
 /// In concurrent programming, sometimes it is desirable to make sure commonly accessed pieces of
@@ -286,6 +293,81 @@ impl Default for StripedAtomicU64 {
     }
 }
 
+thread_local! {
+    // A local reusable signal for each thread.
+    static LOCAL_THREAD_SIGNAL: Arc<Signal> = Arc::new(Signal {
+        owning_thread: thread::current(),
+    });
+}
+
+// #[cfg(feature = "macro")]
+// pub use bop_executor_macro::{main, test};
+
+/// An extension trait that allows blocking on a future in suffix position.
+pub trait FutureExt: Future {
+    /// Block the thread until the future is ready.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pollster::FutureExt as _;
+    ///
+    /// let my_fut = async {};
+    ///
+    /// let result = my_fut.block_on();
+    /// ```
+    fn block_on(self) -> Self::Output
+    where
+        Self: Sized,
+    {
+        block_on(self)
+    }
+}
+
+impl<F: Future> FutureExt for F {}
+
+struct Signal {
+    /// The thread that owns the signal.
+    owning_thread: thread::Thread,
+}
+
+impl Wake for Signal {
+    fn wake(self: Arc<Self>) {
+        self.owning_thread.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.owning_thread.unpark();
+    }
+}
+
+/// Block the thread until the future is ready.
+///
+/// # Example
+///
+/// ```
+/// let my_fut = async {};
+/// let result = pollster::block_on(my_fut);
+/// ```
+pub fn block_on<F: IntoFuture>(fut: F) -> F::Output {
+    let mut fut = core::pin::pin!(fut.into_future());
+
+    // A signal used to wake up the thread for polling as the future moves to completion.
+    LOCAL_THREAD_SIGNAL.with(|signal| {
+        // Create a waker and a context to be passed to the future.
+        let waker = Waker::from(Arc::clone(signal));
+        let mut context = Context::from_waker(&waker);
+
+        // Poll the future to completion.
+        loop {
+            match fut.as_mut().poll(&mut context) {
+                Poll::Pending => thread::park(),
+                Poll::Ready(item) => break item,
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::StripedAtomicU64;
@@ -316,5 +398,28 @@ mod tests {
         counter.fetch_add_index(idx, 10, Ordering::AcqRel);
         counter.fetch_sub_index(idx, 4, Ordering::AcqRel);
         assert_eq!(counter.get(idx, Ordering::Acquire), 6);
+    }
+
+    #[test]
+    fn striped_atomic_u64_saturating_sub_does_not_underflow() {
+        let counter = StripedAtomicU64::new(2);
+        let idx = counter.stripe_for(1);
+        counter.fetch_add_index(idx, 2, Ordering::Relaxed);
+        let previous = counter.saturating_sub_index(idx, 10, Ordering::AcqRel);
+        assert_eq!(previous, 2);
+        assert_eq!(counter.get(idx, Ordering::Acquire), 0);
+        let zero_prev = counter.saturating_sub_index(idx, 1, Ordering::AcqRel);
+        assert_eq!(zero_prev, 0);
+    }
+
+    #[test]
+    fn stripe_for_covers_all_indices() {
+        let counter = StripedAtomicU64::new(8);
+        let mut seen = [false; 8];
+        for hint in 0..64 {
+            let idx = counter.stripe_for(hint);
+            seen[idx] = true;
+        }
+        assert!(seen.iter().all(|present| *present));
     }
 }

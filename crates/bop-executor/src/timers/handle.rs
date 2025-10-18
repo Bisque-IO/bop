@@ -247,6 +247,7 @@ mod tests {
     use super::{TimerHandle, TimerInner, TimerState};
     use crate::timers::context::{TimerWheelConfig, TimerWheelContext, TimerWorkerShared};
     use crate::timers::service::{TimerConfig, TimerService};
+    use std::ptr;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
@@ -316,6 +317,62 @@ mod tests {
         unsafe {
             drop(Box::from_raw(payload as *mut u32));
         }
+        service.shutdown();
+    }
+
+    #[test]
+    fn timer_handle_cancel_is_idempotent() {
+        let service = TimerService::start(TimerConfig::default());
+        let handle = TimerHandle::new();
+
+        assert!(handle.cancel(&service));
+        let after_first = service.cancellation_count();
+        assert_eq!(handle.state(), TimerState::Cancelled);
+
+        assert!(!handle.cancel(&service));
+        assert_eq!(service.cancellation_count(), after_first);
+        assert_eq!(handle.state(), TimerState::Cancelled);
+
+        service.shutdown();
+    }
+
+    #[test]
+    fn timer_handle_swap_payload_roundtrip() {
+        let handle = TimerHandle::new();
+        let first = Box::into_raw(Box::new(7u32)) as *mut ();
+        let second = Box::into_raw(Box::new(11u32)) as *mut ();
+
+        let prev = handle.inner().swap_payload(first, Ordering::AcqRel);
+        assert!(prev.is_null());
+
+        let prev = handle.inner().swap_payload(second, Ordering::AcqRel);
+        assert_eq!(prev, first);
+
+        let cleared = handle
+            .inner()
+            .swap_payload(ptr::null_mut(), Ordering::AcqRel);
+        assert_eq!(cleared, second);
+        assert!(handle.inner().payload().is_null());
+
+        unsafe {
+            drop(Box::from_raw(first as *mut u32));
+            drop(Box::from_raw(second as *mut u32));
+        }
+    }
+
+    #[test]
+    fn timer_handle_cancel_from_migrating_state() {
+        let service = TimerService::start(TimerConfig::default());
+        let handle = TimerHandle::new();
+        handle
+            .inner()
+            .store_state(TimerState::Migrating, Ordering::Release);
+        handle.inner().set_home_worker(Some(0));
+        handle.inner().set_stripe_hint(2);
+
+        assert!(handle.cancel(&service));
+        assert_eq!(handle.state(), TimerState::Cancelled);
+
         service.shutdown();
     }
 }

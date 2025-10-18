@@ -3,7 +3,7 @@ use crate::seg_spmc::SegSpmc;
 use crate::seg_spsc::SegSpsc;
 use crate::selector::Selector;
 use crate::signal::{SIGNAL_MASK, Signal, SignalGate};
-use crate::waker::SignalWaker;
+use crate::signal_waker::SignalWaker;
 use crate::{PopError, PushError};
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;

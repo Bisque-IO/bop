@@ -934,10 +934,13 @@ pub fn schedule_timer_for_current_task(
 mod tests {
     use super::*;
     use crate::task::{ArenaConfig, ArenaOptions, FutureHelpers, Task};
-    use crate::timers::{TimerConfig, TimerService, sleep};
+    use crate::timers::{TimerConfig, TimerHandle, TimerService, TimerState, sleep};
     use std::future::{Future, poll_fn};
+    use std::pin::Pin;
+    use std::ptr;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     use std::thread;
     use std::thread::yield_now;
     use std::time::{Duration, Instant};
@@ -990,6 +993,146 @@ mod tests {
         if let Some(ptr) = task.take_future() {
             unsafe { FutureHelpers::drop_boxed(ptr) };
         }
+    }
+
+    fn noop_waker() -> Waker {
+        unsafe { Waker::from_raw(noop_raw_waker()) }
+    }
+
+    fn noop_raw_waker() -> RawWaker {
+        unsafe fn clone(_: *const ()) -> RawWaker {
+            noop_raw_waker()
+        }
+        unsafe fn wake(_: *const ()) {}
+        unsafe fn wake_by_ref(_: *const ()) {}
+        unsafe fn drop(_: *const ()) {}
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+        RawWaker::new(ptr::null(), &VTABLE)
+    }
+
+    struct ImmediateTimer {
+        timer: TimerHandle,
+        scheduled: bool,
+        done: bool,
+        service: Option<Arc<TimerService>>,
+        completion: Arc<AtomicUsize>,
+    }
+
+    impl ImmediateTimer {
+        fn new(completion: Arc<AtomicUsize>) -> Self {
+            Self {
+                timer: TimerHandle::new(),
+                scheduled: false,
+                done: false,
+                service: None,
+                completion,
+            }
+        }
+    }
+
+    impl Future for ImmediateTimer {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.as_mut().get_mut();
+            if this.done {
+                return Poll::Ready(());
+            }
+            if !this.scheduled {
+                if let Some((_generation, service)) =
+                    schedule_timer_for_current_task(cx, &this.timer, Duration::from_millis(0))
+                {
+                    this.service = Some(service);
+                    this.scheduled = true;
+                } else {
+                    panic!("ImmediateTimer must be polled inside a worker with timers");
+                }
+                return Poll::Pending;
+            }
+            if matches!(this.timer.state(), TimerState::Idle) {
+                this.done = true;
+                this.service = None;
+                this.completion.fetch_add(1, AtomicOrdering::Relaxed);
+                return Poll::Ready(());
+            }
+            Poll::Pending
+        }
+    }
+
+    struct ReschedulingTimer {
+        timer: TimerHandle,
+        phase: u8,
+        service: Option<Arc<TimerService>>,
+        completion: Arc<AtomicUsize>,
+        generations: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl ReschedulingTimer {
+        fn new(completion: Arc<AtomicUsize>, generations: Arc<Mutex<Vec<u64>>>) -> Self {
+            Self {
+                timer: TimerHandle::new(),
+                phase: 0,
+                service: None,
+                completion,
+                generations,
+            }
+        }
+    }
+
+    impl Future for ReschedulingTimer {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.as_mut().get_mut();
+            match this.phase {
+                0 => {
+                    if let Some((generation, service)) =
+                        schedule_timer_for_current_task(cx, &this.timer, Duration::from_millis(3))
+                    {
+                        this.generations.lock().unwrap().push(generation);
+                        this.service = Some(service);
+                        this.phase = 1;
+                        Poll::Pending
+                    } else {
+                        panic!("ReschedulingTimer must run inside a worker with timers");
+                    }
+                }
+                1 => {
+                    if !matches!(this.timer.state(), TimerState::Idle) {
+                        return Poll::Pending;
+                    }
+                    if let Some((generation, service)) =
+                        schedule_timer_for_current_task(cx, &this.timer, Duration::from_millis(6))
+                    {
+                        this.generations.lock().unwrap().push(generation);
+                        this.service = Some(service);
+                        this.phase = 2;
+                    } else {
+                        panic!("ReschedulingTimer second schedule must succeed");
+                    }
+                    Poll::Pending
+                }
+                2 => {
+                    if matches!(this.timer.state(), TimerState::Idle) {
+                        this.phase = 3;
+                        this.service = None;
+                        this.completion.fetch_add(1, AtomicOrdering::Relaxed);
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                }
+                _ => Poll::Ready(()),
+            }
+        }
+    }
+
+    #[test]
+    fn schedule_timer_for_current_task_outside_worker_returns_none() {
+        let timer = TimerHandle::new();
+        let waker = noop_waker();
+        let cx = Context::from_waker(&waker);
+        assert!(schedule_timer_for_current_task(&cx, &timer, Duration::from_millis(1)).is_none());
     }
 
     #[test]
@@ -1547,6 +1690,70 @@ mod tests {
     }
 
     #[test]
+    fn worker_timer_zero_duration_fires_immediately() {
+        let arena = build_arena(2, 32);
+        let service = TimerService::start(TimerConfig::default());
+        let mut worker = Worker::new_with_timers(Arc::clone(&arena), Some(Arc::clone(&service)));
+
+        let completion = Arc::new(AtomicUsize::new(0));
+        let task_count = 6;
+        let mut tasks = Vec::with_capacity(task_count);
+
+        for _ in 0..task_count {
+            let future = ImmediateTimer::new(Arc::clone(&completion));
+            tasks.push(prepare_task(&arena, future));
+        }
+
+        let start = Instant::now();
+        while completion.load(AtomicOrdering::Relaxed) < task_count {
+            worker.run_once();
+            if start.elapsed() > Duration::from_secs(1) {
+                panic!("zero-duration timers did not fire");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        for task in tasks {
+            arena.release_task(task);
+        }
+        drop(worker);
+        service.shutdown();
+    }
+
+    #[test]
+    fn worker_timer_reschedules_on_completion() {
+        let arena = build_arena(1, 32);
+        let service = TimerService::start(TimerConfig::default());
+        let mut worker = Worker::new_with_timers(Arc::clone(&arena), Some(Arc::clone(&service)));
+
+        let completion = Arc::new(AtomicUsize::new(0));
+        let generations = Arc::new(Mutex::new(Vec::new()));
+        let handle = prepare_task(
+            &arena,
+            ReschedulingTimer::new(Arc::clone(&completion), Arc::clone(&generations)),
+        );
+
+        let start = Instant::now();
+        while completion.load(AtomicOrdering::Relaxed) == 0 {
+            worker.run_once();
+            if start.elapsed() > Duration::from_secs(2) {
+                panic!("rescheduled timer did not complete");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        {
+            let gens = generations.lock().unwrap();
+            assert_eq!(gens.len(), 2);
+            assert!(gens[1] > gens[0]);
+        }
+
+        arena.release_task(handle);
+        drop(worker);
+        service.shutdown();
+    }
+
+    #[test]
     fn sleep_future_reschedules_task() {
         let arena = build_arena(1, 64);
         let service = TimerService::start(TimerConfig {
@@ -1584,29 +1791,35 @@ mod tests {
             tick_duration: Duration::from_millis(1),
         });
         let counter = Arc::new(AtomicUsize::new(0));
+        let mut worker_a = Worker::new_with_timers(Arc::clone(&arena), Some(Arc::clone(&service)));
+        let handle = prepare_task(&arena, {
+            let counter = Arc::clone(&counter);
+            async move {
+                sleep(Duration::from_millis(20)).await;
+                counter.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+        });
 
-        let handle = {
-            let mut worker_a =
-                Worker::new_with_timers(Arc::clone(&arena), Some(Arc::clone(&service)));
-            let handle = prepare_task(&arena, {
-                let counter = Arc::clone(&counter);
-                async move {
-                    sleep(Duration::from_millis(20)).await;
-                    counter.fetch_add(1, AtomicOrdering::Relaxed);
-                }
-            });
-            // Poll once to schedule the timer before dropping the worker.
+        // Ensure the timer is scheduled before dropping the worker.
+        for _ in 0..10 {
             worker_a.run_once();
-            handle
-        };
+            if counter.load(AtomicOrdering::Relaxed) > 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        drop(worker_a);
 
         let mut worker_b = Worker::new_with_timers(Arc::clone(&arena), Some(Arc::clone(&service)));
+        let strategy = WaitStrategy::non_blocking();
         let start = Instant::now();
-        while counter.load(AtomicOrdering::Relaxed) == 0 && start.elapsed() < Duration::from_secs(2)
+        while counter.load(AtomicOrdering::Relaxed) == 0 && start.elapsed() < Duration::from_secs(3)
         {
             worker_b.run_once();
+            worker_b.poll_blocking(&strategy);
             thread::sleep(Duration::from_millis(2));
         }
+        worker_b.run_until_idle();
 
         assert_eq!(counter.load(AtomicOrdering::Relaxed), 1);
 

@@ -19,7 +19,7 @@ use std::{
 
 use crossbeam_deque::{Stealer, Worker};
 
-use crate::{seg_spmc::SegSpmc, seg_spsc::SegSpsc, waker::SignalWaker};
+use crate::{seg_spmc::SegSpmc, seg_spsc::SegSpsc, signal_waker::SignalWaker};
 
 pub struct TimerWheel<T> {
     /// Represents a deadline slot not set in the wheel

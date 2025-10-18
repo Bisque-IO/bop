@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crossbeam_utils::CachePadded;
 
-use crate::waker::SignalWaker;
+use crate::signal_waker::SignalWaker;
 
 /// Number of bits per signal word (64-bit atomic).
 ///

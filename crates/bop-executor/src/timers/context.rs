@@ -645,6 +645,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
+    use std::time::Instant;
 
     #[test]
     fn timer_wheel_context_schedules_poll_and_merges() {
@@ -688,6 +689,159 @@ mod tests {
         assert_eq!(merge_handle.state(Ordering::Acquire), TimerState::Fired);
     }
 
+    #[test]
+    fn poll_ready_respects_bucket_budget() {
+        let shared = Arc::new(TimerWorkerShared::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = TimerWheelContext::new(
+            0,
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            TimerWheelConfig::new(8, 4),
+        );
+        let policy = GarbagePolicy::new(1, 1, 1);
+
+        let first = TimerHandle::new();
+        let second = TimerHandle::new();
+
+        ctx.schedule_handle(first.inner(), 5);
+        ctx.schedule_handle(second.inner(), 6);
+        ctx.wheel_mut().advance_to(5);
+        shared.update_now(6);
+
+        let ready_first = ctx.poll_ready(6, 1, &policy);
+        assert_eq!(ready_first.len(), 1);
+        assert!(Arc::ptr_eq(&ready_first[0].handle, first.inner()));
+
+        let ready_second = ctx.poll_ready(6, 1, &policy);
+        assert_eq!(ready_second.len(), 1);
+        assert!(Arc::ptr_eq(&ready_second[0].handle, second.inner()));
+    }
+
+    #[test]
+    fn stale_generation_retire_garbage_and_skip_entry() {
+        let service = TimerService::start(TimerConfig::default());
+        let shared = Arc::new(TimerWorkerShared::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = TimerWheelContext::new(
+            0,
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            TimerWheelConfig::new(16, 4),
+        );
+        let garbage = ctx.garbage_shared();
+        let _token = service.register_worker(
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            Arc::clone(&garbage),
+        );
+        let policy = GarbagePolicy::new(1, 1, 1);
+
+        let handle = TimerHandle::new();
+        let deadline = 4u64;
+        let generation = ctx.schedule_handle(handle.inner(), deadline);
+        assert_eq!(handle.generation(), generation);
+
+        ctx.garbage()
+            .fetch_add_hint(handle.inner().stripe_hint() as usize, 1, Ordering::Relaxed);
+        handle.inner().bump_generation();
+
+        ctx.wheel_mut().advance_to(deadline);
+        shared.update_now(deadline);
+        let ready = ctx.poll_ready(deadline, 8, &policy);
+        assert!(ready.is_empty());
+        assert_eq!(ctx.garbage().total(), 0);
+
+        service.shutdown();
+    }
+
+    #[test]
+    fn scrub_cursor_wraps_after_full_cycle() {
+        let shared = Arc::new(TimerWorkerShared::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = TimerWheelContext::new(
+            0,
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            TimerWheelConfig::new(4, 4),
+        );
+        let policy = GarbagePolicy::new(1, 1, 1);
+
+        assert_eq!(ctx.scrub_cursor(), 0);
+        ctx.scrub_next_bucket(&policy);
+        assert_eq!(ctx.scrub_cursor(), 1);
+
+        while ctx.scrub_cursor() != 3 {
+            ctx.advance_scrub_cursor();
+        }
+        ctx.scrub_next_bucket(&policy);
+        assert_eq!(ctx.scrub_cursor(), 0);
+    }
+
+    #[test]
+    fn dropping_handle_before_poll_keeps_entry_alive() {
+        let service = TimerService::start(TimerConfig::default());
+        let shared = Arc::new(TimerWorkerShared::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = TimerWheelContext::new(
+            0,
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            TimerWheelConfig::new(32, 4),
+        );
+        let garbage = ctx.garbage_shared();
+        let _token = service.register_worker(
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            Arc::clone(&garbage),
+        );
+        let policy = GarbagePolicy::new(1, 1, 1);
+
+        let handle = TimerHandle::new();
+        let inner = Arc::clone(handle.inner());
+        ctx.schedule_handle(handle.inner(), 9);
+        assert!(Arc::strong_count(&inner) >= 2);
+        drop(handle);
+
+        ctx.wheel_mut().advance_to(9);
+        shared.update_now(9);
+        let ready = ctx.poll_ready(9, 16, &policy);
+        assert_eq!(ready.len(), 1);
+        assert!(Arc::ptr_eq(&ready[0].handle, &inner));
+
+        service.shutdown();
+    }
+
+    #[test]
+    fn tick_skew_does_not_skip_due_entries() {
+        let service = TimerService::start(TimerConfig::default());
+        let shared = Arc::new(TimerWorkerShared::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = TimerWheelContext::new(
+            0,
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            TimerWheelConfig::new(32, 4),
+        );
+        let garbage = ctx.garbage_shared();
+        let _token = service.register_worker(
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            Arc::clone(&garbage),
+        );
+        let policy = GarbagePolicy::new(1, 1, 1);
+
+        let handle = TimerHandle::new();
+        ctx.schedule_handle(handle.inner(), 12);
+        ctx.wheel_mut().advance_to(12);
+
+        shared.update_now(120);
+        let ready = ctx.poll_ready(120, 64, &policy);
+        assert_eq!(ready.len(), 1);
+        assert!(Arc::ptr_eq(&ready[0].handle, handle.inner()));
+
+        service.shutdown();
+    }
     #[test]
     fn local_timer_wheel_masks_indices() {
         let mut wheel = LocalTimerWheel::new(8);
@@ -861,6 +1015,150 @@ mod tests {
         assert_eq!(ready.len(), 1);
         assert!(Arc::ptr_eq(&ready[0].handle, handle.inner()));
         assert_eq!(handle.state(), TimerState::Fired);
+
+        service.shutdown();
+    }
+
+    #[test]
+    fn absorb_merges_skips_entries_with_stale_generation() {
+        let service = TimerService::start(TimerConfig::default());
+        let shared = Arc::new(TimerWorkerShared::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = TimerWheelContext::new(
+            0,
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            TimerWheelConfig::new(16, 4),
+        );
+        let garbage = ctx.garbage_shared();
+        let token = service.register_worker(
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            Arc::clone(&garbage),
+        );
+        ctx.set_worker_id(token.id());
+
+        let handle = TimerHandle::new();
+        handle
+            .inner()
+            .store_state(TimerState::Migrating, Ordering::Release);
+        let stale_generation = handle.inner().bump_generation();
+        let deadline = 24u64;
+
+        inbox.lock().unwrap().push(MergeEntry::new(
+            deadline,
+            stale_generation,
+            0,
+            Arc::clone(handle.inner()),
+        ));
+
+        handle.inner().bump_generation();
+        ctx.absorb_merges();
+        let bucket_idx = (deadline as usize) & (ctx.wheel().ticks_per_wheel() - 1);
+        assert_eq!(ctx.wheel().bucket(bucket_idx).entries().len(), 0);
+
+        service.shutdown();
+    }
+
+    #[test]
+    fn scrub_policy_obeys_ratio_before_compacting() {
+        let service = TimerService::start(TimerConfig::default());
+        let shared = Arc::new(TimerWorkerShared::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let mut ctx = TimerWheelContext::new(
+            0,
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            TimerWheelConfig::new(32, 8),
+        );
+        let garbage = ctx.garbage_shared();
+        let token = service.register_worker(
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            Arc::clone(&garbage),
+        );
+        ctx.set_worker_id(token.id());
+
+        let policy = GarbagePolicy::new(8, 3, 2);
+        let future_tick = 48u64;
+        let handle_live = TimerHandle::new();
+        let handle_cancelled = TimerHandle::new();
+
+        ctx.schedule_handle(handle_live.inner(), future_tick);
+        ctx.schedule_handle(handle_cancelled.inner(), future_tick);
+
+        assert!(handle_cancelled.cancel(&service));
+        let bucket_idx = (future_tick as usize) & (ctx.wheel().ticks_per_wheel() - 1);
+        assert!(ctx.garbage().total() >= 1);
+
+        while ctx.scrub_cursor() != bucket_idx {
+            ctx.advance_scrub_cursor();
+        }
+        ctx.scrub_next_bucket(&policy);
+
+        let entries = ctx.wheel().bucket(bucket_idx).entries().len();
+        assert_eq!(entries, 1);
+        assert_eq!(ctx.garbage().total(), 0);
+
+        service.shutdown();
+    }
+
+    #[test]
+    fn multi_worker_merge_burst_distributes_evenly() {
+        let service = TimerService::start(TimerConfig::default());
+        let mut workers = Vec::new();
+        let policy = GarbagePolicy::new(1, 1, 1);
+
+        for id in 0..3 {
+            let shared = Arc::new(TimerWorkerShared::new());
+            let inbox = Arc::new(Mutex::new(Vec::new()));
+            let mut ctx = TimerWheelContext::new(
+                id,
+                Arc::clone(&shared),
+                Arc::clone(&inbox),
+                TimerWheelConfig::new(64, 8),
+            );
+            let garbage = ctx.garbage_shared();
+            let token = service.register_worker(
+                Arc::clone(&shared),
+                Arc::clone(&inbox),
+                Arc::clone(&garbage),
+            );
+            ctx.set_worker_id(token.id());
+            workers.push((ctx, shared, inbox, token));
+        }
+
+        let handles: Vec<_> = (0..45).map(|_| TimerHandle::new()).collect();
+        for (idx, handle) in handles.iter().enumerate() {
+            let deadline = 10 + (idx as u64 % 6);
+            service.schedule_handle(handle, deadline);
+        }
+
+        let start = Instant::now();
+        loop {
+            let total_inbox: usize = workers
+                .iter()
+                .map(|(_, _, inbox, _)| inbox.lock().unwrap().len())
+                .sum();
+            if total_inbox >= handles.len() {
+                break;
+            }
+            if start.elapsed() > Duration::from_millis(500) {
+                panic!("merge entries did not arrive in time");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let mut fired = 0usize;
+        for (ctx, shared, inbox, _token) in &mut workers {
+            assert!(!inbox.lock().unwrap().is_empty());
+            ctx.absorb_merges();
+            shared.update_now(10_000);
+            let ready = ctx.poll_ready(10_000, 256, &policy);
+            fired += ready.len();
+        }
+
+        assert_eq!(fired, handles.len());
 
         service.shutdown();
     }

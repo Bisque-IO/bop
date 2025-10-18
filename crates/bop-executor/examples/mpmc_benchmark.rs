@@ -642,7 +642,7 @@ fn main() {
     // bulk_drain_multi_mpmc_blocking_benchmark::<8, 12>(8, 10_000_000, 5, 4096);
     // bulk_drain_multi_moody_blocking_benchmark::<8, 10>(8, 10_000_000, 5, 4096);
 
-    bulk_drain_multi_mpmc_blocking_benchmark::<10, 10>(32, 10_000_000, 1, 4096);
+    bulk_drain_multi_mpmc_blocking_benchmark::<7, 7>(32, 10_000_000, 1, 4096);
     bulk_drain_multi_moody_blocking_benchmark::<8, 10>(32, 10_000_000, 1, 4096);
     // bulk_drain_multi_moody_blocking_benchmark::<8, 12>(1, 10_000_000, 1, 1024);
     // bulk_drain_multi_mpmc_blocking_benchmark::<8, 12>(1, 10_000_000, 1, 1024);

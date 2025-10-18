@@ -294,9 +294,10 @@ mod tests {
     use crate::timers::context::{MergeEntry, TimerWheelConfig};
     use crate::timers::handle::TimerInner;
     use crate::utils::StripedAtomicU64;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn timer_service_updates_workers() {
@@ -323,6 +324,182 @@ mod tests {
 
         shared.take_needs_poll();
         inbox.lock().unwrap().clear();
+        service.shutdown();
+    }
+
+    #[test]
+    fn merge_queue_drains_round_robin() {
+        let service = TimerService::start(TimerConfig {
+            tick_duration: Duration::from_millis(1),
+        });
+
+        let shared_a = Arc::new(TimerWorkerShared::new());
+        let inbox_a = Arc::new(Mutex::new(Vec::new()));
+        let garbage_a = Arc::new(StripedAtomicU64::new(
+            TimerWheelConfig::DEFAULT_GARBAGE_STRIPES,
+        ));
+        let _token_a = service.register_worker(
+            Arc::clone(&shared_a),
+            Arc::clone(&inbox_a),
+            Arc::clone(&garbage_a),
+        );
+
+        let shared_b = Arc::new(TimerWorkerShared::new());
+        let inbox_b = Arc::new(Mutex::new(Vec::new()));
+        let garbage_b = Arc::new(StripedAtomicU64::new(
+            TimerWheelConfig::DEFAULT_GARBAGE_STRIPES,
+        ));
+        let _token_b = service.register_worker(
+            Arc::clone(&shared_b),
+            Arc::clone(&inbox_b),
+            Arc::clone(&garbage_b),
+        );
+
+        for tick in 1..=6 {
+            service.enqueue_merge(MergeEntry::new(tick, tick, 0, Arc::new(TimerInner::new())));
+        }
+
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(2));
+            let a = inbox_a.lock().unwrap().len();
+            let b = inbox_b.lock().unwrap().len();
+            if a + b == 6 {
+                assert!((a as isize - b as isize).abs() <= 1);
+                break;
+            }
+        }
+
+        service.shutdown();
+    }
+
+    #[test]
+    fn notify_cancelled_updates_worker_state() {
+        let service = TimerService::start(TimerConfig::default());
+        let shared = Arc::new(TimerWorkerShared::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let garbage = Arc::new(StripedAtomicU64::new(
+            TimerWheelConfig::DEFAULT_GARBAGE_STRIPES,
+        ));
+        let handle = service.register_worker(
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            Arc::clone(&garbage),
+        );
+
+        service.notify_cancelled(3, Some(handle.id() as u32), true);
+
+        assert!(shared.needs_poll());
+        assert_eq!(garbage.total(), 1);
+        assert!(service.cancellation_count() >= 1);
+
+        shared.take_needs_poll();
+        garbage.clear(Ordering::AcqRel);
+        service.shutdown();
+    }
+
+    #[test]
+    fn notify_cancelled_without_entry_marks_all_workers() {
+        let service = TimerService::start(TimerConfig::default());
+        let shared_a = Arc::new(TimerWorkerShared::new());
+        let inbox_a = Arc::new(Mutex::new(Vec::new()));
+        let garbage = Arc::new(StripedAtomicU64::new(
+            TimerWheelConfig::DEFAULT_GARBAGE_STRIPES,
+        ));
+        let _token_a = service.register_worker(
+            Arc::clone(&shared_a),
+            Arc::clone(&inbox_a),
+            Arc::clone(&garbage),
+        );
+
+        let shared_b = Arc::new(TimerWorkerShared::new());
+        let inbox_b = Arc::new(Mutex::new(Vec::new()));
+        let _token_b = service.register_worker(
+            Arc::clone(&shared_b),
+            Arc::clone(&inbox_b),
+            Arc::clone(&garbage),
+        );
+
+        service.notify_cancelled(0, None, false);
+
+        assert!(shared_a.needs_poll());
+        assert!(shared_b.needs_poll());
+        assert_eq!(garbage.total(), 0);
+
+        service.shutdown();
+    }
+
+    #[test]
+    fn enqueue_merge_before_worker_registration_delays_delivery() {
+        let service = TimerService::start(TimerConfig {
+            tick_duration: Duration::from_millis(1),
+        });
+        let handle = Arc::new(TimerInner::new());
+        handle.store_state(TimerState::Migrating, Ordering::Release);
+        let generation = handle.bump_generation();
+        service.enqueue_merge(MergeEntry::new(4, generation, 0, Arc::clone(&handle)));
+
+        thread::sleep(Duration::from_millis(20));
+
+        let shared = Arc::new(TimerWorkerShared::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let garbage = Arc::new(StripedAtomicU64::new(
+            TimerWheelConfig::DEFAULT_GARBAGE_STRIPES,
+        ));
+        let _token = service.register_worker(
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            Arc::clone(&garbage),
+        );
+
+        let start = Instant::now();
+        loop {
+            if inbox.lock().unwrap().len() == 1 {
+                assert!(shared.needs_poll());
+                break;
+            }
+            if start.elapsed() > Duration::from_millis(200) {
+                panic!("merge entry was not delivered after worker registration");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        service.shutdown();
+    }
+
+    #[test]
+    fn shutdown_is_idempotent() {
+        let service = TimerService::start(TimerConfig::default());
+        service.shutdown();
+        service.shutdown();
+    }
+
+    #[test]
+    fn schedule_handle_bumps_generation_and_enqueues_merge() {
+        let service = TimerService::start(TimerConfig::default());
+        let shared = Arc::new(TimerWorkerShared::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let garbage = Arc::new(StripedAtomicU64::new(
+            TimerWheelConfig::DEFAULT_GARBAGE_STRIPES,
+        ));
+        let _token = service.register_worker(
+            Arc::clone(&shared),
+            Arc::clone(&inbox),
+            Arc::clone(&garbage),
+        );
+
+        let handle = TimerHandle::new();
+        let generation = service.schedule_handle(&handle, 5);
+        assert_eq!(handle.generation(), generation);
+        assert_eq!(handle.state(), TimerState::Migrating);
+
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(2));
+            if !inbox.lock().unwrap().is_empty() {
+                break;
+            }
+        }
+        assert!(!inbox.lock().unwrap().is_empty());
+
         service.shutdown();
     }
 }

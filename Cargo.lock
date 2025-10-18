@@ -481,13 +481,17 @@ dependencies = [
  "crossbeam-queue",
  "crossbeam-utils",
  "dashmap",
+ "futures-executor",
  "futures-lite",
  "generator 0.8.7",
  "hashbrown 0.16.0",
  "libc",
+ "loom 0.7.2",
  "num_cpus",
  "parking_lot 0.12.4",
+ "pin-project-lite",
  "rand 0.9.2",
+ "tokio",
  "winapi",
 ]
 
