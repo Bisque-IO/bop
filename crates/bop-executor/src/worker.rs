@@ -938,7 +938,7 @@ mod tests {
     use std::future::{Future, poll_fn};
     use std::pin::Pin;
     use std::ptr;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Barrier, Mutex};
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     use std::thread;
@@ -1123,6 +1123,61 @@ mod tests {
                     }
                 }
                 _ => Poll::Ready(()),
+            }
+        }
+    }
+
+    struct MigratingTimer {
+        timer: Arc<TimerHandle>,
+        deadline: Duration,
+        scheduled: Arc<AtomicBool>,
+        fired: Arc<AtomicBool>,
+        completion: Arc<AtomicUsize>,
+        service: Option<Arc<TimerService>>,
+    }
+
+    impl MigratingTimer {
+        fn new(
+            timer: Arc<TimerHandle>,
+            deadline: Duration,
+            scheduled: Arc<AtomicBool>,
+            fired: Arc<AtomicBool>,
+            completion: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                timer,
+                deadline,
+                scheduled,
+                fired,
+                completion,
+                service: None,
+            }
+        }
+    }
+
+    impl Future for MigratingTimer {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if !self.scheduled.load(AtomicOrdering::Relaxed) {
+                if let Some((_generation, service)) =
+                    schedule_timer_for_current_task(cx, &self.timer, self.deadline)
+                {
+                    self.service = Some(service);
+                    self.scheduled.store(true, AtomicOrdering::Relaxed);
+                }
+                return Poll::Pending;
+            }
+
+            match self.timer.state() {
+                TimerState::Idle => {
+                    self.fired.store(true, AtomicOrdering::Relaxed);
+                    self.completion.fetch_add(1, AtomicOrdering::Relaxed);
+                    self.service = None;
+                    Poll::Ready(())
+                }
+                TimerState::Cancelled => Poll::Ready(()),
+                _ => Poll::Pending,
             }
         }
     }

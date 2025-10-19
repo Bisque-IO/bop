@@ -1,0 +1,85 @@
+*** Begin Patch
+*** Update File: crates/bop-executor/src/seg_spsc_dynamic.rs
+@@
+-pub struct SegSpscDyn<T> {
+-    inner: Arc<SegSpscDynInner<T>>,
+-}
+-
+-impl<T> SegSpscDyn<T> {
+-    /// Create a new queue.
+-    ///
+-    /// * `segment_bits` determines the segment size `1 << segment_bits`.
+-    /// * `num_segs_bits` determines the number of segments `1 << num_segs_bits`.
+-    ///
+-    /// Both values must be chosen such that the final capacity
+-    /// `(1 << segment_bits) * (1 << num_segs_bits)` is at most `usize::MAX`
+-    /// and is a power of two.
+-    pub fn new(
+-        segment_bits: usize,
+-        num_segs_bits: usize,
+-    ) -> (SegSpscDynProducer<T>, SegSpscDynConsumer<T>) {
+-        let inner = Arc::new(SegSpscDynInner::new(segment_bits, num_segs_bits));
+-        (
+-            SegSpscDynProducer {
+-                inner: Arc::clone(&inner),
+-            },
+-            SegSpscDynConsumer { inner },
+-        )
+-    }
+-}
++pub struct SegSpscDyn<T> {
++    inner: Arc<SegSpscDynInner<T>>,
++}
++
++impl<T> SegSpscDyn<T> {
++    /// Create a new queue.
++    ///
++    /// * `segment_bits` determines the segment size `1 << segment_bits`.
++    /// * `num_segs_bits` determines the number of segments `1 << num_segs_bits`.
++    ///
++    /// Both values must be chosen such that the final capacity
++    /// `(1 << segment_bits) * (1 << num_segs_bits)` is at most `usize::MAX`
++    /// and is a power of two.
++    pub fn new(segment_bits: usize, num_segs_bits: usize) -> Self {
++        Self {
++            inner: Arc::new(SegSpscDynInner::new(segment_bits, num_segs_bits)),
++        }
++    }
++
++    #[inline]
++    pub fn capacity(&self) -> usize {
++        self.inner.capacity()
++    }
++
++    #[inline]
++    pub fn seg_size(&self) -> usize {
++        self.inner.seg_size()
++    }
++
++    #[inline]
++    pub fn num_segments(&self) -> usize {
++        self.inner.num_segs()
++    }
++
++    pub fn split(&self) -> (SegSpscDynProducer<T>, SegSpscDynConsumer<T>) {
++        (
++            SegSpscDynProducer {
++                inner: Arc::clone(&self.inner),
++            },
++            SegSpscDynConsumer {
++                inner: Arc::clone(&self.inner),
++            },
++        )
++    }
++
++    pub fn into_split(self) -> (SegSpscDynProducer<T>, SegSpscDynConsumer<T>) {
++        let inner = self.inner;
++        (
++            SegSpscDynProducer {
++                inner: Arc::clone(&inner),
++            },
++            SegSpscDynConsumer { inner },
++        )
++    }
++}
+*** End Patch

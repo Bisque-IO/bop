@@ -9,7 +9,6 @@
 //! 3. Mixed scheduling + cross-thread cancel
 
 use std::{
-    cell::RefCell,
     sync::{
         Arc, Barrier,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -498,7 +497,7 @@ fn main() {
     let config = BenchmarkConfig::default();
 
     // Run all benchmarks
-    benchmark_pure_scheduling(config.clone());
+    // benchmark_pure_scheduling(config.clone());
     benchmark_cross_thread_cancel(config.clone());
     benchmark_schedule_and_poll(config.clone());
     benchmark_scalability();

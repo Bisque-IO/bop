@@ -53,7 +53,9 @@
 //! // Poll timers (FAST: no synchronization)
 //! fn poll_timers(now_ns: u64) -> Vec<(u64, u64, Waker)> {
 //!     MY_WHEEL.with(|wheel| {
-//!         wheel.borrow_mut().poll(now_ns, 100, 100)
+//!         let mut buffer = Vec::new();
+//!         wheel.borrow_mut().poll(now_ns, 100, 100, &mut buffer);
+//!         buffer
 //!     })
 //! }
 //! ```
@@ -249,7 +251,8 @@ impl<T: Copy> ThreadLocalWheel<T> {
     ///
     /// # Returns
     ///
-    /// Vector of `(timer_id, deadline, data)` tuples for expired timers.
+    /// Writes expired `(timer_id, deadline, data)` tuples into `output` and
+    /// returns the number of entries produced.
     ///
     /// # Performance
     ///
@@ -259,12 +262,13 @@ impl<T: Copy> ThreadLocalWheel<T> {
         now_ns: u64,
         expiry_limit: usize,
         cancel_limit: usize,
-    ) -> Vec<(u64, u64, T)> {
+        output: &mut Vec<(u64, u64, T)>,
+    ) -> usize {
         // First, process any pending cancel requests
         self.process_cancel_requests(cancel_limit);
 
         // Then poll the wheel
-        unsafe { &mut *self.wheel.get() }.poll(now_ns, expiry_limit)
+        unsafe { &mut *self.wheel.get() }.poll(now_ns, expiry_limit, output)
     }
 
     /// Get the current time in nanoseconds (relative to start_time).
@@ -428,10 +432,11 @@ mod tests {
 
         // Poll multiple times to advance through ticks
         let mut expired = Vec::new();
+        let mut batch = Vec::new();
         for tick in 0..10 {
             let now_ns = tick * 1024 + 1024;
-            let batch = wheel.poll(now_ns, 10, 10);
-            expired.extend(batch);
+            wheel.poll(now_ns, 10, 10, &mut batch);
+            expired.extend(batch.drain(..));
             if !expired.is_empty() {
                 break;
             }
@@ -456,10 +461,11 @@ mod tests {
 
         // Poll - should find nothing
         let mut expired = Vec::new();
+        let mut batch = Vec::new();
         for tick in 0..15 {
             let now_ns = tick * 1024 + 1024;
-            let batch = wheel.poll(now_ns, 10, 10);
-            expired.extend(batch);
+            wheel.poll(now_ns, 10, 10, &mut batch);
+            expired.extend(batch.drain(..));
         }
 
         assert_eq!(expired.len(), 0);
@@ -525,9 +531,11 @@ mod tests {
                 // Poll to collect expired timers
                 thread::sleep(Duration::from_millis(5));
                 let mut all_expired = Vec::new();
+                let mut batch = Vec::new();
                 for tick in 0..15 {
                     let now_ns = tick * 1024 + 1024;
-                    all_expired.extend(wheel.poll(now_ns, 50, 50));
+                    wheel.poll(now_ns, 50, 50, &mut batch);
+                    all_expired.extend(batch.drain(..));
                 }
 
                 all_expired.len()

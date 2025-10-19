@@ -1,0 +1,237 @@
+use bop_executor::runtime::Runtime;
+use bop_executor::task::{ArenaConfig, ArenaOptions};
+use bop_executor::timers::{TimerHandle, TimerState, sleep};
+use bop_executor::worker::schedule_timer_for_current_task;
+use futures_lite::future::{block_on, poll_fn};
+use num_cpus;
+use std::env;
+use std::error::Error;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
+use std::time::{Duration, Instant};
+
+/// Configuration for the runtime benchmark.
+#[derive(Debug)]
+struct BenchOptions {
+    workers: usize,
+    leaf_count: usize,
+    tasks_per_leaf: usize,
+    futures: usize,
+    iterations: usize,
+    base_delay_micros: u64,
+}
+
+impl BenchOptions {
+    fn from_args() -> Self {
+        let mut opts = Self {
+            workers: num_cpus::get().max(1),
+            leaf_count: 4,
+            tasks_per_leaf: 256,
+            futures: 1024,
+            iterations: 8,
+            base_delay_micros: 50,
+        };
+
+        for arg in env::args().skip(1) {
+            let Some((flag, value)) = arg.split_once('=') else {
+                continue;
+            };
+            match flag {
+                "--workers" => {
+                    opts.workers = value
+                        .parse()
+                        .ok()
+                        .filter(|v| *v > 0)
+                        .unwrap_or(opts.workers);
+                }
+                "--leafs" | "--leaves" => {
+                    opts.leaf_count = value
+                        .parse()
+                        .ok()
+                        .filter(|v| *v > 0)
+                        .unwrap_or(opts.leaf_count);
+                }
+                "--tasks-per-leaf" => {
+                    opts.tasks_per_leaf = value
+                        .parse()
+                        .ok()
+                        .filter(|v| *v > 0)
+                        .unwrap_or(opts.tasks_per_leaf);
+                }
+                "--futures" => {
+                    opts.futures = value
+                        .parse()
+                        .ok()
+                        .filter(|v| *v > 0)
+                        .unwrap_or(opts.futures);
+                }
+                "--iterations" => {
+                    opts.iterations = value
+                        .parse()
+                        .ok()
+                        .filter(|v| *v > 0)
+                        .unwrap_or(opts.iterations);
+                }
+                "--base-delay-us" => {
+                    opts.base_delay_micros = value
+                        .parse()
+                        .ok()
+                        .filter(|v| *v > 0)
+                        .unwrap_or(opts.base_delay_micros);
+                }
+                _ => {}
+            }
+        }
+
+        opts
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let opts = BenchOptions::from_args();
+    let worker_capacity = opts.leaf_count.max(1);
+    let worker_count = opts.workers.min(worker_capacity);
+    println!(
+        "runtime multithread benchmark: requested_workers={} actual_workers={} futures={} iterations={} leafs={} tasks_per_leaf={}",
+        opts.workers,
+        worker_count,
+        opts.futures,
+        opts.iterations,
+        opts.leaf_count,
+        opts.tasks_per_leaf
+    );
+
+    let arena_config = ArenaConfig::new(opts.leaf_count, opts.tasks_per_leaf)?;
+    let runtime = Runtime::new(arena_config, ArenaOptions::default(), worker_count)?;
+    let operations = Arc::new(AtomicUsize::new(0));
+
+    let start = Instant::now();
+    let mut handles = Vec::with_capacity(opts.futures);
+    handles.push(
+        runtime
+            .spawn(async move {
+                for _ in 0..100 {
+                    sleep::sleep(Duration::from_millis(500)).await;
+                    println!("{}", Instant::now().elapsed().as_millis());
+                }
+            })
+            .expect("spawn task into runtime"),
+    );
+    for idx in 0..opts.futures {
+        let ops_counter = Arc::clone(&operations);
+        let iterations = opts.iterations;
+        let base_delay = opts.base_delay_micros;
+        handles.push(
+            runtime
+                .spawn(async move {
+                    let ops = match idx % 3 {
+                        0 => timer_sleep_job(iterations, base_delay).await,
+                        1 => timer_reschedule_job(iterations, base_delay).await,
+                        _ => timer_cancel_job(iterations, base_delay).await,
+                    };
+                    ops_counter.fetch_add(ops, Ordering::Relaxed);
+                })
+                .expect("spawn task into runtime"),
+        );
+    }
+
+    for handle in handles {
+        block_on(handle);
+    }
+    let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64().max(f64::EPSILON);
+    let timer_ops = operations.load(Ordering::Relaxed);
+    let tasks_per_sec = opts.futures as f64 / elapsed_secs;
+    let ops_per_sec = timer_ops as f64 / elapsed_secs;
+
+    println!(
+        "completed {} futures in {:?} ({:.2} futures/sec, ~{:.2} timer ops/sec, total timer ops={})",
+        opts.futures, elapsed, tasks_per_sec, ops_per_sec, timer_ops
+    );
+    println!(
+        "active tasks after benchmark: {}",
+        runtime.stats().active_tasks
+    );
+
+    drop(runtime);
+    Ok(())
+}
+
+async fn timer_sleep_job(iterations: usize, base_delay_micros: u64) -> usize {
+    for round in 0..iterations {
+        let delay = base_delay_micros * (1 + (round % 5) as u64);
+        sleep::sleep(Duration::from_micros(delay)).await;
+    }
+    iterations
+}
+
+async fn timer_reschedule_job(iterations: usize, base_delay_micros: u64) -> usize {
+    for round in 0..iterations {
+        let first = base_delay_micros * (1 + (round % 3) as u64);
+        let second = base_delay_micros * (2 + (round % 4) as u64);
+        reschedule_twice(Duration::from_micros(first), Duration::from_micros(second)).await;
+    }
+    iterations * 2
+}
+
+async fn timer_cancel_job(iterations: usize, base_delay_micros: u64) -> usize {
+    for round in 0..iterations {
+        let delay = base_delay_micros * (1 + (round % 7) as u64);
+        schedule_and_cancel(Duration::from_micros(delay)).await;
+    }
+    iterations
+}
+
+async fn reschedule_twice(first: Duration, second: Duration) {
+    let timer = TimerHandle::new();
+    let mut stage = 0_u8;
+    poll_fn(|cx| match stage {
+        0 => {
+            if schedule_timer_for_current_task(cx, &timer, first).is_some() {
+                stage = 1;
+            }
+            Poll::Pending
+        }
+        1 => {
+            if timer.state() == TimerState::Idle {
+                if schedule_timer_for_current_task(cx, &timer, second).is_some() {
+                    stage = 2;
+                }
+            }
+            Poll::Pending
+        }
+        2 => {
+            if timer.state() == TimerState::Idle {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+        _ => Poll::Ready(()),
+    })
+    .await;
+}
+
+async fn schedule_and_cancel(delay: Duration) {
+    let timer = TimerHandle::new();
+    let mut service = None;
+    let mut cancelled = false;
+    poll_fn(|cx| {
+        if service.is_none() {
+            if let Some((_generation, svc)) = schedule_timer_for_current_task(cx, &timer, delay) {
+                service = Some(svc);
+            }
+            return Poll::Pending;
+        }
+        if !cancelled {
+            if let Some(ref svc) = service {
+                let _ = timer.cancel(svc.as_ref());
+            }
+            cancelled = true;
+            return Poll::Ready(());
+        }
+        Poll::Ready(())
+    })
+    .await;
+}
