@@ -1,8 +1,8 @@
 use crate::task::{
     ArenaConfig, ArenaOptions, ArenaStats, FutureHelpers, MmapExecutorArena, SpawnError, TaskHandle,
 };
-use crate::timers::{TimerConfig, TimerService};
 use crate::worker::{WaitStrategy, Worker};
+use crate::worker_service::{WorkerService, WorkerServiceConfig};
 use std::future::{Future, IntoFuture};
 use std::io;
 use std::pin::Pin;
@@ -19,8 +19,8 @@ pub struct Runtime {
 
 struct RuntimeInner {
     arena: Arc<MmapExecutorArena>,
-    shutdown: AtomicBool,
-    timer_service: Arc<TimerService>,
+    shutdown: Arc<AtomicBool>,
+    service: Arc<WorkerService>,
 }
 
 impl RuntimeInner {
@@ -75,39 +75,36 @@ impl RuntimeInner {
             return;
         }
         self.arena.close();
-        TimerService::shutdown(&self.timer_service);
+        self.service.shutdown();
     }
 }
 
 impl Runtime {
-    /// Creates a new runtime with the provided configuration and number of worker threads.
     pub fn new(
         config: ArenaConfig,
         options: ArenaOptions,
         worker_count: usize,
     ) -> io::Result<Self> {
         let arena = Arc::new(MmapExecutorArena::with_config(config, options)?);
-        let timer_service = TimerService::start(TimerConfig::default());
+        let service = WorkerService::start(WorkerServiceConfig::default());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
         let inner = Arc::new(RuntimeInner {
-            arena,
-            shutdown: AtomicBool::new(false),
-            timer_service,
+            arena: Arc::clone(&arena),
+            shutdown: Arc::clone(&shutdown),
+            service: Arc::clone(&service),
         });
 
-        let mut workers = Vec::with_capacity(worker_count.max(1));
-        for _ in 0..worker_count.max(1) {
-            let inner_clone = Arc::clone(&inner);
-            workers.push(thread::spawn(move || {
-                let mut worker = Worker::new_with_timers(
-                    Arc::clone(&inner_clone.arena),
-                    Some(Arc::clone(&inner_clone.timer_service)),
-                );
-                let wait = WaitStrategy::default();
-                while !inner_clone.shutdown.load(Ordering::Acquire) {
-                    worker.poll_blocking(&wait);
-                }
-                worker.run_until_idle();
-            }));
+        let worker_threads = worker_count.max(1);
+        let mut workers = Vec::with_capacity(worker_threads);
+        for _ in 0..worker_threads {
+            let mut worker = Worker::with_shutdown(
+                Arc::clone(&inner.arena),
+                Some(Arc::clone(&service)),
+                Arc::clone(&shutdown),
+            );
+            let handle = thread::spawn(move || worker.run());
+            workers.push(handle);
         }
 
         Ok(Self { inner, workers })

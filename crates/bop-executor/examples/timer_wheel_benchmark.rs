@@ -9,7 +9,7 @@
 #![allow(unused_imports)]
 #![feature(thread_id_value)]
 
-use bop_executor::timer_wheel::{SpscTimerWheel, TimerWheel};
+use bop_executor::timer_wheel::TimerWheel;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::{Arc, Mutex};
@@ -228,11 +228,12 @@ fn benchmark_poll(num_timers: usize, tick_res: Duration, ticks: usize) {
     let bench_start = Instant::now();
     let mut total_expired = 0;
     let max_time_ns = (num_timers as u64 * tick_res.as_nanos() as u64) / 10;
+    let mut expired_buf: Vec<(u64, u64, u32)> = Vec::new();
 
     for now_ns in (0..=max_time_ns).step_by(tick_res.as_nanos() as usize) {
         wheel.advance_to(now_ns);
-        let expired = wheel.poll(now_ns, 1000);
-        total_expired += expired.len();
+        let expired = wheel.poll(now_ns, 1000, &mut expired_buf);
+        total_expired += expired;
     }
 
     let elapsed = bench_start.elapsed();
@@ -273,6 +274,7 @@ fn benchmark_mixed_workload(num_ops: usize, tick_res: Duration, ticks: usize) {
     let mut polls = 0;
     let mut expirations = 0;
     let mut ops_since_poll = 0;
+    let mut expired_buf: Vec<(u64, u64, u32)> = Vec::new();
     let ops_per_tick = (num_ops as f64 / 1000.0).ceil() as usize; // Poll ~1000 times total
 
     let tick_res_ns = tick_res.as_nanos() as u64;
@@ -313,8 +315,8 @@ fn benchmark_mixed_workload(num_ops: usize, tick_res: Duration, ticks: usize) {
             ops_since_poll = 0;
             current_time_ns += tick_res_ns;
             wheel.advance_to(current_time_ns);
-            let expired = wheel.poll(current_time_ns, usize::MAX);
-            expirations += expired.len();
+            let expired = wheel.poll(current_time_ns, usize::MAX, &mut expired_buf);
+            expirations += expired;
             polls += 1;
         }
     }
@@ -365,11 +367,12 @@ fn benchmark_vs_binary_heap(num_timers: usize) {
 
     let wheel_poll_start = Instant::now();
     let mut total = 0;
+    let mut expired_buf: Vec<(u64, u64, u32)> = Vec::new();
     // Poll at tick resolution intervals
     let max_deadline_ns = 1024 * 1048576;
     for now_ns in (0..=max_deadline_ns).step_by(1048576) {
         wheel.advance_to(now_ns);
-        total += wheel.poll(now_ns, usize::MAX).len();
+        total += wheel.poll(now_ns, usize::MAX, &mut expired_buf);
     }
     let wheel_poll_time = wheel_poll_start.elapsed();
 
@@ -501,10 +504,11 @@ fn benchmark_different_configurations() {
         let poll_start = Instant::now();
         let max_time_ns = ticks as u64 * tick_res.as_nanos() as u64;
         let mut total = 0;
+        let mut expired_buf: Vec<(u64, u64, u32)> = Vec::new();
 
         for now_ns in (0..=max_time_ns).step_by(tick_res.as_nanos() as usize) {
             wheel.advance_to(now_ns);
-            total += wheel.poll(now_ns, 1000).len();
+            total += wheel.poll(now_ns, 1000, &mut expired_buf);
         }
 
         let poll_time = poll_start.elapsed();
@@ -669,11 +673,12 @@ fn benchmark_sharded_multithreaded(
             let wheel = wheels[tid as usize % num_shards].clone();
             let mut local_wheel = wheel.lock().unwrap();
             let mut total_expired = 0;
+            let mut expired_buf: Vec<(u64, u64, u32)> = Vec::new();
 
             for now_ns in (0..=max_time_ns).step_by(tick_res_ns as usize) {
                 local_wheel.advance_to(now_ns);
-                let expired = local_wheel.poll(now_ns, usize::MAX);
-                total_expired += expired.len();
+                let expired = local_wheel.poll(now_ns, usize::MAX, &mut expired_buf);
+                total_expired += expired;
             }
 
             total_expired
@@ -723,6 +728,7 @@ fn benchmark_sharded_multithreaded(
             let mut current_time_ns = 0u64;
             let mut ops_since_poll = 0;
             let ops_per_tick = (ops_per_thread as f64 / 100.0).ceil() as usize;
+            let mut expired_buf: Vec<(u64, u64, u32)> = Vec::new();
 
             let tid: u64 = std::thread::current().id().as_u64().into();
             let wheel = wheels[tid as usize % num_shards].clone();
@@ -764,8 +770,8 @@ fn benchmark_sharded_multithreaded(
                     ops_since_poll = 0;
                     current_time_ns += tick_res_ns;
                     local_wheel.advance_to(current_time_ns);
-                    let expired = local_wheel.poll(current_time_ns, usize::MAX);
-                    expirations += expired.len();
+                    let expired = local_wheel.poll(current_time_ns, usize::MAX, &mut expired_buf);
+                    expirations += expired;
                     polls += 1;
                 }
             }
@@ -919,50 +925,6 @@ fn benchmark_sharded_vs_single(num_threads: usize, timers_per_thread: usize) {
                         let mut local_wheel = wheel.lock().unwrap();
                         local_wheel.cancel_timer(timer_id);
                     }
-                }
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        let sharded_time = sharded_start.elapsed();
-        println!("    Schedule time: {:?}", sharded_time);
-        println!(
-            "    Throughput: {:.2}M timers/sec",
-            total_timers as f64 / sharded_time.as_secs_f64() / 1_000_000.0
-        );
-    }
-
-    {
-        // Sharded multi-threaded
-        println!("\n  Sharded multi-threaded SpscTimerWheel:");
-        let wheels: Vec<Arc<SpscTimerWheel<u32>>> = (0..num_threads)
-            .map(|_| {
-                Arc::new(SpscTimerWheel::with_allocation(
-                    start_time,
-                    tick_res,
-                    ticks,
-                    initial_allocation / num_threads,
-                ))
-            })
-            .collect();
-
-        let shards = num_threads * 16;
-        let sharded_start = Instant::now();
-        let mut handles = vec![];
-
-        for thread_id in 0..num_threads {
-            let wheel = wheels[thread_id].clone();
-            let handle = thread::spawn(move || {
-                let mut local_wheel = wheel;
-                for i in 0..timers_per_thread {
-                    let tick = (i * ticks / timers_per_thread) as u64;
-                    let deadline_ns = (tick + 1) * tick_res_ns;
-                    let timer_id = local_wheel.schedule_timer(deadline_ns, i as u32).unwrap();
-                    local_wheel.cancel_timer(timer_id);
                 }
             });
             handles.push(handle);

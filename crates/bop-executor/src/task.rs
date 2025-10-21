@@ -1,7 +1,6 @@
 use crate::bits;
 use crate::summary_tree::{SummaryInit, SummaryTree};
-use crate::timers::handle::TimerHandle;
-use crate::timers::service::TimerService;
+use crate::timer::TimerHandle;
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::future::{Future, IntoFuture};
@@ -1344,25 +1343,18 @@ impl MmapExecutorArena {
         }
     }
 
+    #[allow(dead_code)]
     pub fn schedule_task_timer(
         &self,
         task: TaskHandle,
         timer: &TimerHandle,
-        service: &TimerService,
-        deadline_tick: u64,
-    ) -> u64 {
-        let _ = timer.cancel(service);
+        worker_id: u32,
+        deadline_ns: u64,
+    ) {
         let task_ptr = task.as_ptr() as *mut ();
-        let previous = timer.inner().swap_payload(task_ptr, Ordering::AcqRel);
-        if let Some(prev) = MmapExecutorArena::task_handle_from_payload(previous) {
-            if prev.as_ptr() != task.as_ptr() {
-                self.activate_task(prev);
-            }
-        }
-        let stripe_hint = (task.leaf_idx() as u32).wrapping_add(1).max(1);
-        timer.inner().set_stripe_hint(stripe_hint);
-        timer.inner().set_home_worker(None);
-        service.schedule_handle(timer, deadline_tick)
+        timer
+            .inner()
+            .prepare_schedule(worker_id, task_ptr, deadline_ns, None);
     }
 
     #[inline(always)]
@@ -1905,7 +1897,7 @@ mod tests {
             .expect("spawn task");
 
         {
-            let mut worker = Worker::new(arena.clone());
+            let mut worker = Worker::new(arena.clone(), None);
             worker.run_until_idle();
         }
 
@@ -1922,7 +1914,7 @@ mod tests {
         assert_eq!(err, SpawnError::NoCapacity);
 
         {
-            let mut worker = Worker::new(arena.clone());
+            let mut worker = Worker::new(arena.clone(), None);
             worker.run_until_idle();
         }
 

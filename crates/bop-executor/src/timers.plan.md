@@ -1,61 +1,38 @@
-## Timer Integration Implementation Plan
+# Timer Safety & Scheduling Refinement Plan
 
-> High-level steps to implement the timer design described in `timers.md`. Tasks are grouped logically; each group can be tackled incrementally.
+## Goals
+- Preserve the zero-allocation timer fast path while eliminating the possibility of dangling task pointers.
+- Let workers optimistically poll timer-driven tasks inline when safe, falling back to the existing scheduler otherwise.
+- Keep timer/future APIs ergonomic (e.g. `TimerDelay`) without reintroducing `Arc<TimerInner>`.
 
-### 1. Core Infrastructure
-- [x] Introduce a `StripedAtomicU64` helper (cache-line aligned stripes, Power-of-two configurable).
-- [x] Define shared timer handle structure (`Arc<TimerInner>` with state enum, generation `AtomicU64`, and optional payload pointer).
-- [x] Add per-worker timer context (thread-local wheel pointer, `timer_now` atomic ref, `needs_poll` flag).
+## Core Design Tweaks
+1. **Timer identity only**
+   - Store `TaskSlot*` + `task_id` inside `TimerHandle`.
+   - `prepare_schedule` records `task_slot`, `task_id`, target worker, and deadline.
+   - Wheel entries never dereference user memory; they validate the slot + id before acting.
 
-### 2. Dedicated Timer Thread
-- [x] Create timer-thread service responsible for:
-  - [x] Sleeping until next tick, updating each worker's `timer_now`.
-  - [x] Draining a global `MergeQueue` (initially `Mutex<Vec<_>>`, future: lock-free).
-  - [x] Nudging workers that have ready buckets (e.g., by CAS-ing `needs_poll` or enqueuing a lightweight waker).
-- [x] Determine tick resolution configuration (hard-coded constant to start; later: config/auto-tuning).
+2. **Worker-side validation**
+   - On expiry, worker loads the slot pointer.
+   - If the slot is empty or the `task_id` mismatches, drop the entry (task finished or slot reused).
+   - Otherwise proceed with wake/poll logic.
 
-### 3. Worker Integration
-- [x] Attach a `TimerWheelContext` to `Worker` (wheel structure, striped counters, `VecDeque` buckets).
-- [x] Implement scheduling:
-  - Increment generation, set state `Scheduled`.
-  - Push entry into local wheel bucket.
-  - Mark `needs_poll`.
-- [x] Implement polling path:
-  - Check `timer_now` vs. wheel tick.
-  - Drain due bucket, compare generation/state, fire or drop.
-  - Update per-bucket stale counters & decrement stripes.
-- [x] Add background scrub pass (bounded budget per loop).
+3. **Optimistic inline polling**
+   - Attempt CAS from `TASK_IDLE → TASK_EXECUTING`.
+     - Success: poll the task immediately; skip signal bookkeeping.
+   - Else if state is `TASK_SCHEDULED`, run the normal `signal::acquire` path.
+   - Any other state → fall back to scheduling (let the regular worker loop handle it).
 
-### 4. Cancellation & Reschedule
-- [x] Expose cancel API: generation bump + state update + stripe increment.
-- [x] Ensure rescheduling via `MmapExecutorArena::spawn` (or higher-level API) uses new timer handle semantics.
-- [x] Maintain stats / counters (optional at first; at least track cancellations).
+4. **TimerDelay helper**
+   - Provide a zero-allocation future that borrows the `TimerHandle` and just awaits the validated wakeup.
+   - Ensures application code doesn’t accidentally drop the timer without cancelling.
 
-### 5. Shutdown & Merge Queue
-- [x] During `Worker::drop`, move outstanding buckets into `MergeQueue`.
-- [x] Timer thread reassigns entries to active workers (simple strategy: round-robin or worker with least pending).
-- [x] When reinserted, generation/state check ensures stale entries get dropped immediately.
+## Safety Guarantees
+- Task identity check prevents use-after-free even if a timer fires after the task completed.
+- No raw payload pointer leaves the future; only slot/id + timestamps move around.
+- Optimization respects existing scheduler invariants: we only bypass the signal path when the CAS proves exclusive ownership.
 
-### 6. Garbage Management
-- [x] Integrate `StripedAtomicU64` updates in cancel/reschedule paths.
-- [x] Implement lazy compaction on due buckets when stale ratio exceeds threshold.
-- [x] Implement round-robin background scrub (e.g., process 1 bucket per poll loop).
-- [x] Tune thresholds (e.g., stale > live or stale > configurable constant).
-
-### 7. Testing & Instrumentation
-- [x] Unit tests for timer handle lifecycle (schedule -> cancel -> reschedule).
-- [x] Tests for wheel migration (simulate worker drop, ensure timers fire).
-- [x] Tests for garbage counters (ensure they drop after compaction).
-- [ ] Integrate logging/metrics hooks (optional, but helpful for tuning).
-
-### 8. Documentation & Follow-ups
-- [ ] Update `timers.md` if implementation details diverge.
-- [ ] Document configuration knobs (tick resolution, scrub thresholds).
-- [ ] Track unresolved follow-ups (dynamic resolution, load balancing strategy).
-
-Execution can proceed in phases:
-1. Skeleton infrastructure (Sections 1–3) to get timers running locally.
-2. Cancellation + garbage tracking (Sections 4 & 6).
-3. Worker shutdown + migration (Section 5).
-4. Tests, instrumentation, refinements (Section 7 onwards).
-
+## Follow-up Tasks
+- Implement `TimerHandle` identity storage + helper methods.
+- Update worker timer polling to use the new validation and CAS flow.
+- Replace existing pointer-based scheduling in tests/examples with the `TimerDelay` pattern.
+- Audit task teardown to ensure handles cancel/clear on drop (still useful as a secondary guard).

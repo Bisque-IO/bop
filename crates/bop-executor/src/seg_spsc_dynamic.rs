@@ -345,11 +345,11 @@ impl ConsumerState {
 /// - [`SegSpscConsumer`]: The consumer half
 /// - [`SegSpsc`]: The underlying shared queue structure
 /// - [`PushError`]: Error types for push operations
-pub struct SegSpscProducer<T: Copy> {
+pub struct SegSpscProducer<T> {
     queue: Arc<SegSpsc<T>>,
 }
 
-impl<T: Copy> SegSpscProducer<T> {
+impl<T> SegSpscProducer<T> {
     /// Returns the number of items currently in the queue.
     ///
     /// This is calculated as `head - tail`, where both positions are monotonically
@@ -687,7 +687,7 @@ impl<T: Copy> SegSpscProducer<T> {
     }
 }
 
-impl<T: Copy> Drop for SegSpscProducer<T> {
+impl<T> Drop for SegSpscProducer<T> {
     fn drop(&mut self) {
         unsafe {
             self.queue.close();
@@ -817,11 +817,11 @@ impl<T: Copy> Drop for SegSpscProducer<T> {
 /// - [`SegSpscProducer`]: The producer half
 /// - [`SegSpsc`]: The underlying shared queue structure
 /// - [`PopError`]: Error types for pop operations
-pub struct SegSpscConsumer<T: Copy> {
+pub struct SegSpscConsumer<T> {
     queue: Arc<SegSpsc<T>>,
 }
 
-impl<T: Copy> SegSpscConsumer<T> {
+impl<T> SegSpscConsumer<T> {
     /// Returns the number of items currently in the queue.
     ///
     /// This is calculated as `head - tail`, where both positions are monotonically
@@ -1456,7 +1456,7 @@ impl<T: Copy> SegSpscConsumer<T> {
 /// }
 /// // Now sees PopError::Closed
 /// ```
-pub struct SegSpsc<T: Copy> {
+pub struct SegSpsc<T> {
     /// **Segment directory**: Fixed array of `AtomicPtr<MaybeUninit<T>>` slots.
     ///
     /// Each slot either:
@@ -1488,7 +1488,7 @@ pub struct SegSpsc<T: Copy> {
     _t: PhantomData<T>,
 }
 
-impl<T: Copy> SegSpsc<T> {
+impl<T> SegSpsc<T> {
     // /// Items per segment (2^P)
     // pub const SEG_SIZE: usize = 1usize << P;
 
@@ -3182,7 +3182,7 @@ impl<T: Copy> SegSpsc<T> {
     }
 }
 
-impl<T: Copy> Drop for SegSpsc<T> {
+impl<T> Drop for SegSpsc<T> {
     fn drop(&mut self) {
         let seg_size = self.seg_size;
         for slot in self.segs.iter() {

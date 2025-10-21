@@ -3,6 +3,9 @@ name = "bop-executor"
 edition = "2024"
 version.workspace = true
 
+[features]
+timers-introspection = []
+
 [dependencies]
 bop-mpmc = { workspace = true }
 congee = "0.4.1"
@@ -31,7 +34,16 @@ winapi = { version = "0.3", features = ["memoryapi", "winnt", "sysinfoapi"] }
 futures-executor = "0.3"
 loom = "0.7"
 tokio = { version = "1.0", features = ["full"] }
+criterion = "0.5"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(diatomic_waker_loom)', 'cfg(multishot_loom)', 'cfg(async_event_loom)'] }
 # unexpected_cfgs = { level = "warn", check-cfg = ['cfg(diatomic_waker_loom)'] }
+
+[[example]]
+name = "timers_gc_benchmark"
+required-features = ["timers-introspection"]
+
+[[bench]]
+name = "mpsc_local_sender"
+harness = false
