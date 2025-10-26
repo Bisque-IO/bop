@@ -29,10 +29,12 @@ pub mod mpmc;
 pub mod mpsc;
 pub mod seg_spmc;
 pub mod seg_spsc;
+pub mod seg_spsc_dynamic;
 pub mod selector;
 pub mod signal;
 pub mod spsc;
 pub mod timer_wheel;
+pub mod utils;
 pub mod waker;
 
 pub use mpmc::*;

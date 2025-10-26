@@ -1,5 +1,12 @@
+use crate::task::TaskSlot;
+use crate::worker::{
+    cancel_timer_for_current_task, current_worker_now_ns, schedule_timer_for_current_task,
+};
+use std::cell::Cell;
+use std::future::Future;
+use std::pin::Pin;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 #[repr(u8)]
@@ -10,143 +17,165 @@ pub enum TimerState {
     Cancelled = 2,
 }
 
-impl TimerState {
+#[derive(Clone, Copy, Debug)]
+pub struct TimerHandle {
+    task_slot: NonNull<TaskSlot>,
+    task_id: u64,
+    worker_id: u32,
+    timer_id: u64,
+}
+
+impl TimerHandle {
     #[inline(always)]
-    fn from_u8(value: u8) -> Self {
-        match value {
-            0 => TimerState::Idle,
-            1 => TimerState::Scheduled,
-            2 => TimerState::Cancelled,
-            _ => TimerState::Idle,
+    pub(crate) fn new(
+        task_slot: NonNull<TaskSlot>,
+        task_id: u64,
+        worker_id: u32,
+        timer_id: u64,
+    ) -> Self {
+        Self {
+            task_slot,
+            task_id,
+            worker_id,
+            timer_id,
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn task_slot(&self) -> NonNull<TaskSlot> {
+        self.task_slot
+    }
+
+    #[inline(always)]
+    pub(crate) fn task_id(&self) -> u64 {
+        self.task_id
+    }
+
+    #[inline(always)]
+    pub(crate) fn worker_id(&self) -> u32 {
+        self.worker_id
+    }
+
+    #[inline(always)]
+    pub(crate) fn timer_id(&self) -> u64 {
+        self.timer_id
     }
 }
 
-/// Allocation-free timer that can be embedded directly inside a task or future.
+unsafe impl Send for TimerHandle {}
+unsafe impl Sync for TimerHandle {}
+
 #[derive(Debug)]
 pub struct Timer {
-    state: AtomicU8,
-    worker_id: AtomicU32,
-    deadline_ns: AtomicU64,
-    interval_ns: AtomicU64,
-    task_ptr: AtomicPtr<()>,
+    state: Cell<TimerState>,
+    deadline_ns: Cell<u64>,
+    task_slot: Cell<*mut TaskSlot>,
+    task_id: Cell<u64>,
+    worker_id: Cell<u32>,
+    timer_id: Cell<u64>,
 }
 
 impl Timer {
     pub const fn new() -> Self {
         Self {
-            state: AtomicU8::new(TimerState::Idle as u8),
-            worker_id: AtomicU32::new(u32::MAX),
-            deadline_ns: AtomicU64::new(0),
-            interval_ns: AtomicU64::new(0),
-            task_ptr: AtomicPtr::new(ptr::null_mut()),
+            state: Cell::new(TimerState::Idle),
+            deadline_ns: Cell::new(0),
+            task_slot: Cell::new(ptr::null_mut()),
+            task_id: Cell::new(0),
+            worker_id: Cell::new(u32::MAX),
+            timer_id: Cell::new(0),
         }
     }
 
     #[inline(always)]
-    pub fn state(&self) -> TimerState {
-        TimerState::from_u8(self.state.load(Ordering::Acquire))
+    pub fn delay(&self, duration: Duration) -> TimerDelay<'_> {
+        TimerDelay::new(self, duration)
     }
 
     #[inline(always)]
-    pub fn worker_id(&self) -> Option<u32> {
-        match self.worker_id.load(Ordering::Acquire) {
+    pub fn state(&self) -> TimerState {
+        self.state.get()
+    }
+
+    #[inline(always)]
+    pub fn deadline_ns(&self) -> u64 {
+        self.deadline_ns.get()
+    }
+
+    #[inline(always)]
+    pub fn is_scheduled(&self) -> bool {
+        self.state.get() == TimerState::Scheduled
+    }
+
+    #[inline(always)]
+    pub fn cancel(&self) -> bool {
+        cancel_timer_for_current_task(self)
+    }
+
+    #[inline(always)]
+    pub(crate) fn prepare(
+        &self,
+        task_slot: NonNull<TaskSlot>,
+        task_id: u64,
+        worker_id: u32,
+    ) -> TimerHandle {
+        self.task_slot.set(task_slot.as_ptr());
+        self.task_id.set(task_id);
+        self.worker_id.set(worker_id);
+        self.timer_id.set(0);
+        self.deadline_ns.set(0);
+        self.state.set(TimerState::Idle);
+
+        TimerHandle::new(task_slot, task_id, worker_id, 0)
+    }
+
+    #[inline(always)]
+    pub(crate) fn commit_schedule(&self, timer_id: u64, deadline_ns: u64) {
+        self.timer_id.set(timer_id);
+        self.deadline_ns.set(deadline_ns);
+        self.state.set(TimerState::Scheduled);
+    }
+
+    #[inline(always)]
+    pub(crate) fn mark_cancelled(&self, timer_id: u64) -> bool {
+        if self.timer_id.get() != timer_id {
+            return false;
+        }
+        self.state.set(TimerState::Cancelled);
+        self.clear_identity();
+        true
+    }
+
+    #[inline(always)]
+    pub(crate) fn reset(&self) {
+        self.state.set(TimerState::Idle);
+        self.clear_identity();
+    }
+
+    #[inline(always)]
+    pub(crate) fn worker_id(&self) -> Option<u32> {
+        match self.worker_id.get() {
             id if id == u32::MAX => None,
             id => Some(id),
         }
     }
 
     #[inline(always)]
-    pub fn deadline_ns(&self) -> u64 {
-        self.deadline_ns.load(Ordering::Acquire)
+    pub(crate) fn timer_id(&self) -> u64 {
+        self.timer_id.get()
     }
 
     #[inline(always)]
-    pub fn interval_ns(&self) -> u64 {
-        self.interval_ns.load(Ordering::Acquire)
-    }
-
-    /// Sets a repeating interval in nanoseconds (0 => one-shot).
-    #[inline(always)]
-    pub fn set_interval(&self, interval: Duration) {
-        let nanos = interval.as_nanos().min(u128::from(u64::MAX)) as u64;
-        self.interval_ns.store(nanos, Ordering::Release);
-    }
-
-    /// Clears any previously configured interval.
-    #[inline(always)]
-    pub fn clear_interval(&self) {
-        self.interval_ns.store(0, Ordering::Release);
-    }
-
-    /// Prepares the timer for scheduling on the specified worker.
-    pub fn prepare_schedule(
-        &self,
-        worker_id: u32,
-        task_ptr: *mut (),
-        deadline_ns: u64,
-        interval_override: Option<u64>,
-    ) {
-        if let Some(interval) = interval_override {
-            self.interval_ns.store(interval, Ordering::Release);
-        }
-
-        self.worker_id.store(worker_id, Ordering::Release);
-        self.deadline_ns.store(deadline_ns, Ordering::Release);
-        self.task_ptr.store(task_ptr, Ordering::Release);
-        self.state
-            .store(TimerState::Scheduled as u8, Ordering::Release);
-    }
-
-    /// Attempts to cancel a scheduled timer.
-    pub fn cancel(&self) -> bool {
-        loop {
-            let current = TimerState::from_u8(self.state.load(Ordering::Acquire));
-            match current {
-                TimerState::Scheduled => {
-                    if self
-                        .state
-                        .compare_exchange(
-                            TimerState::Scheduled as u8,
-                            TimerState::Cancelled as u8,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        self.worker_id.store(u32::MAX, Ordering::Release);
-                        self.task_ptr.store(ptr::null_mut(), Ordering::Release);
-                        return true;
-                    }
-                }
-                TimerState::Cancelled | TimerState::Idle => return false,
-            }
-        }
-    }
-
-    /// Takes ownership of the scheduled task pointer if the deadline matches the expectation.
-    pub fn take_scheduled_task(&self, expected_deadline_ns: u64) -> Option<*mut ()> {
-        if self.deadline_ns.load(Ordering::Acquire) != expected_deadline_ns {
-            return None;
-        }
-
-        if self
-            .state
-            .compare_exchange(
-                TimerState::Scheduled as u8,
-                TimerState::Idle as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return None;
-        }
-
-        let ptr = self.task_ptr.swap(ptr::null_mut(), Ordering::AcqRel);
-        if ptr.is_null() { None } else { Some(ptr) }
+    fn clear_identity(&self) {
+        self.deadline_ns.set(0);
+        self.timer_id.set(0);
+        self.worker_id.set(u32::MAX);
+        self.task_slot.set(ptr::null_mut());
     }
 }
+
+unsafe impl Send for Timer {}
+unsafe impl Sync for Timer {}
 
 impl Default for Timer {
     fn default() -> Self {
@@ -154,45 +183,62 @@ impl Default for Timer {
     }
 }
 
-/// Thin wrapper that embeds a timer directly inside user futures.
-#[derive(Debug, Default)]
-pub struct TimerHandle {
-    inner: Timer,
+pub struct TimerDelay<'a> {
+    timer: &'a Timer,
+    delay: Duration,
+    scheduled: bool,
 }
 
-impl TimerHandle {
-    pub const fn new() -> Self {
+impl<'a> TimerDelay<'a> {
+    #[inline(always)]
+    pub fn new(timer: &'a Timer, delay: Duration) -> Self {
         Self {
-            inner: Timer::new(),
+            timer,
+            delay,
+            scheduled: false,
         }
     }
+}
 
-    #[inline(always)]
-    pub fn inner(&self) -> &Timer {
-        &self.inner
+impl<'a> Future for TimerDelay<'a> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if !self.scheduled {
+            if schedule_timer_for_current_task(cx, self.timer, self.delay).is_some() {
+                self.scheduled = true;
+            }
+            return Poll::Pending;
+        }
+
+        match self.timer.state() {
+            TimerState::Idle | TimerState::Cancelled => {
+                self.scheduled = false;
+                Poll::Ready(())
+            }
+            TimerState::Scheduled => {
+                let deadline = self.timer.deadline_ns();
+                if deadline == 0 {
+                    return Poll::Pending;
+                }
+
+                if let Some(now_ns) = current_worker_now_ns() {
+                    if now_ns >= deadline {
+                        self.timer.reset();
+                        self.scheduled = false;
+                        return Poll::Ready(());
+                    }
+                }
+                Poll::Pending
+            }
+        }
     }
+}
 
-    #[inline(always)]
-    pub fn as_ptr(&self) -> NonNull<Timer> {
-        // SAFETY: `inner` lives for the duration of `self`, never null.
-        unsafe { NonNull::new_unchecked(&self.inner as *const Timer as *mut Timer) }
-    }
-
-    #[inline(always)]
-    pub fn state(&self) -> TimerState {
-        self.inner.state()
-    }
-
-    #[inline(always)]
-    pub fn cancel(&self) -> bool {
-        self.inner.cancel()
-    }
-
-    #[inline(always)]
-    pub fn configure_interval(&self, interval: Option<Duration>) {
-        match interval {
-            Some(duration) if duration.as_nanos() > 0 => self.inner.set_interval(duration),
-            _ => self.inner.clear_interval(),
+impl<'a> Drop for TimerDelay<'a> {
+    fn drop(&mut self) {
+        if self.scheduled {
+            let _ = self.timer.cancel();
         }
     }
 }

@@ -1,6 +1,6 @@
 use crate::CachePadded;
 use crate::bits::find_nearest;
-use crate::seg_spsc::SegSpsc;
+use crate::seg_spsc_dynamic::SegSpsc;
 use crate::selector::Selector;
 use crate::signal::{SIGNAL_MASK, Signal, SignalGate};
 use crate::signal_waker::SignalWaker;
@@ -15,54 +15,25 @@ use std::thread;
 use rand::RngCore;
 
 /// Create a new blocking MPSC queue
-pub fn new<T, const P: usize, const NUM_SEGS_P2: usize>() -> Receiver<T, P, NUM_SEGS_P2> {
+pub fn new<T>(seg_shift: usize, num_segs_shift: usize) -> (Sender<T>, Receiver<T>) {
     let waker = Arc::new(SignalWaker::new());
     // Create sparse array of AtomicPtr, all initialized to null
-    let mut queues = Vec::with_capacity(MAX_QUEUES);
-    for _ in 0..MAX_QUEUES {
-        queues.push(AtomicPtr::new(core::ptr::null_mut()));
-    }
+    let queues: [AtomicPtr<SegSpsc<T>>; MAX_QUEUES] =
+        std::array::from_fn(|_| AtomicPtr::new(ptr::null_mut()));
 
     let signals: Arc<[Signal; SIGNAL_WORDS]> =
         Arc::new(std::array::from_fn(|i| Signal::with_index(i as u64)));
 
     let inner = Arc::new(Inner {
-        queues: queues.into_boxed_slice(),
+        queues,
         queue_count: CachePadded::new(AtomicUsize::new(0)),
         producer_count: CachePadded::new(AtomicUsize::new(0)),
         max_producer_id: AtomicUsize::new(0),
         closed: CachePadded::new(AtomicBool::new(false)),
         waker: waker,
         signals,
-    });
-
-    Receiver {
-        inner,
-        misses: 0,
-        seed: rand::rng().next_u64(),
-    }
-}
-
-pub fn new_with_sender<T, const P: usize, const NUM_SEGS_P2: usize>()
--> (Sender<T, P, NUM_SEGS_P2>, Receiver<T, P, NUM_SEGS_P2>) {
-    let waker = Arc::new(SignalWaker::new());
-    // Create sparse array of AtomicPtr, all initialized to null
-    let mut queues = Vec::with_capacity(MAX_QUEUES);
-    for _ in 0..MAX_QUEUES {
-        queues.push(AtomicPtr::new(core::ptr::null_mut()));
-    }
-
-    let signals: Arc<[Signal; SIGNAL_WORDS]> =
-        Arc::new(std::array::from_fn(|i| Signal::with_index(i as u64)));
-
-    let inner = Arc::new(Inner {
-        queues: queues.into_boxed_slice(),
-        queue_count: CachePadded::new(AtomicUsize::new(0)),
-        producer_count: CachePadded::new(AtomicUsize::new(0)),
-        max_producer_id: AtomicUsize::new(0),
-        closed: CachePadded::new(AtomicBool::new(false)),
-        waker: waker,
-        signals,
+        seg_shift,
+        num_segs_shift,
     });
 
     (
@@ -96,10 +67,10 @@ const SIGNAL_WORDS: usize = (MAX_QUEUES + 63) / 64;
 type CloseFn = Box<dyn FnOnce()>;
 
 /// The shared state of the blocking MPSC queue
-struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
+struct Inner<T> {
     /// Sparse array of producer queues - always MAX_PRODUCERS size
     /// Each slot is an AtomicPtr for thread-safe registration and access
-    queues: Box<[AtomicPtr<SegSpsc<T, P, NUM_SEGS_P2>>]>,
+    queues: [AtomicPtr<SegSpsc<T>>; MAX_QUEUES],
     queue_count: CachePadded<AtomicUsize>,
     /// Number of registered producers
     producer_count: CachePadded<AtomicUsize>,
@@ -109,9 +80,12 @@ struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
     waker: Arc<SignalWaker>,
     /// Signal bitset - one bit per producer indicating which queues has data
     signals: Arc<[Signal; SIGNAL_WORDS]>,
+
+    seg_shift: usize,
+    num_segs_shift: usize,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
+impl<T> Inner<T> {
     /// Check if the queue is closed
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
@@ -120,10 +94,6 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
     /// Get the number of registered producers
     pub fn producer_count(&self) -> usize {
         self.producer_count.load(Ordering::Relaxed)
-    }
-
-    pub fn create_sender(self: &Arc<Self>) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
-        self.create_sender_with_config(0)
     }
 
     /// Create a new producer handle that bypasses all thread-local caching
@@ -156,10 +126,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
     /// producer.push(42).unwrap();
     /// producer.push_bulk(&[1, 2, 3]).unwrap();
     /// ```ignore
-    pub fn create_sender_with_config(
-        self: &Arc<Self>,
-        max_pooled_segments: usize,
-    ) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
+    pub fn create_sender(self: &Arc<Self>) -> Result<Sender<T>, PushError<()>> {
         if self.is_closed() {
             return Err(PushError::Closed(()));
         }
@@ -179,7 +146,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
         }
 
         let mut assigned_id = None;
-        let mut queue_arc: Option<Arc<SegSpsc<T, P, NUM_SEGS_P2>>> = None;
+        let mut queue_arc: Option<Arc<SegSpsc<T>>> = None;
 
         for signal_index in 0..(MAX_QUEUES / 64) {
             for bit_index in 0..64 {
@@ -192,17 +159,18 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
                 }
 
                 let arc = Arc::new(unsafe {
-                    SegSpsc::<T, P, NUM_SEGS_P2>::new_unsafe_with_gate_and_config(
+                    SegSpsc::<T>::new_unsafe_with_gate(
+                        self.seg_shift,
+                        self.num_segs_shift,
                         SignalGate::new(
                             bit_index as u64,
                             self.signals[signal_index].clone(),
                             Arc::clone(&self.waker),
                         ),
-                        max_pooled_segments,
                     )
                 });
 
-                let raw = Arc::into_raw(Arc::clone(&arc)) as *mut SegSpsc<T, P, NUM_SEGS_P2>;
+                let raw = Arc::into_raw(Arc::clone(&arc)) as *mut SegSpsc<T>;
                 match self.queues[queue_index].compare_exchange(
                     ptr::null_mut(),
                     raw,
@@ -323,13 +291,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
 /// let value = mpsc.pop_blocking().unwrap();
 /// assert_eq!(value, 42);
 /// ```ignore
-pub struct Sender<T, const P: usize, const NUM_SEGS_P2: usize> {
-    inner: Arc<Inner<T, P, NUM_SEGS_P2>>,
-    queue: Arc<SegSpsc<T, P, NUM_SEGS_P2>>,
+pub struct Sender<T> {
+    inner: Arc<Inner<T>>,
+    queue: Arc<SegSpsc<T>>,
     producer_id: usize,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
+impl<T> Sender<T> {
     /// Check if the queue is closed
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Acquire)
@@ -375,23 +343,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
         if self.is_closed() {
             return Err(PushError::Closed(()));
         }
-        self.queue.try_push_n(values)
-    }
-
-    /// Push a value onto the queue
-    ///
-    /// This will use the thread-local SPSC queue for this producer.
-    /// If successful, notifies any waiting consumer.
-    pub unsafe fn unsafe_try_push(&self, value: T) -> Result<(), PushError<T>> {
-        self.queue.try_push(value)
-    }
-
-    /// Push multiple values in bulk
-    pub unsafe fn unsafe_try_push_n(&self, values: &[T]) -> Result<usize, PushError<()>> {
-        if self.is_closed() {
-            return Err(PushError::Closed(()));
-        }
-        self.queue.try_push_n(values)
+        self.try_push_n(values)
     }
 
     /// Close the queue
@@ -405,13 +357,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for Sender<T, P, NUM_SEGS_P2> {
+impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.inner.create_sender().expect("too many senders")
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS_P2> {
+impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         unsafe {
             self.queue.close();
@@ -419,13 +371,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS
     }
 }
 
-pub struct Receiver<T, const P: usize, const NUM_SEGS_P2: usize> {
-    inner: Arc<Inner<T, P, NUM_SEGS_P2>>,
+pub struct Receiver<T> {
+    inner: Arc<Inner<T>>,
     misses: u64,
     seed: u64,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
+impl<T> Receiver<T> {
     pub fn next(&mut self) -> u64 {
         let old_seed = self.seed;
         let next_seed = (old_seed
@@ -454,47 +406,6 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
     /// Get the number of registered producers
     pub fn producer_count(&self) -> usize {
         self.inner.producer_count.load(Ordering::Relaxed)
-    }
-
-    pub fn create_sender(&self) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
-        self.create_sender_with_config(0)
-    }
-
-    /// Create a new producer handle that bypasses all thread-local caching
-    ///
-    /// This creates a direct, high-performance handle to a specific producer queue.
-    /// The handle provides push-only access without any thread-local overhead, making
-    /// it ideal for scenarios where you need maximum performance and want to maintain
-    /// explicit control over producer instances.
-    ///
-    /// Unlike `get_producer_queue()`, this method:
-    /// - Does not register with thread-local storage
-    /// - Does not use caching mechanisms
-    /// - Provides a standalone handle that can be stored and reused
-    /// - Offers maximum push performance
-    ///
-    /// # Returns
-    ///
-    /// Returns a `ProducerHandle` that can be used to push values, or `PushError::Closed`
-    /// if the MPSC queue is closed.
-    ///
-    /// # Example
-    ///
-    /// ```ignoreignore
-    /// let mpsc = MpscBlocking::<i32, 64>::new();
-    ///
-    /// // Create a direct producer handle
-    /// let producer = mpsc.create_producer_handle().unwrap();
-    ///
-    /// // Use the handle for high-performance pushes
-    /// producer.push(42).unwrap();
-    /// producer.push_bulk(&[1, 2, 3]).unwrap();
-    /// ```ignore
-    pub fn create_sender_with_config(
-        &self,
-        max_pooled_segments: usize,
-    ) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
-        self.inner.create_sender_with_config(max_pooled_segments)
     }
 
     /// Pop a value from the queue (non-blocking) using supplied Selector
@@ -694,7 +605,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
         total_drained
     }
 
-    fn acquire<'a>(&mut self) -> Option<(usize, &'a SegSpsc<T, P, NUM_SEGS_P2>)> {
+    fn acquire<'a>(&mut self) -> Option<(usize, &'a SegSpsc<T>)> {
         let random = self.next() as usize;
         // Try selecting signal index from summary hint
         // let thread_id: u64 = std::thread::current().id().as_u64().into();
@@ -765,23 +676,20 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Receiver<T, P, NUM_SEGS_P2> {
+impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.inner.close();
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Inner<T, P, NUM_SEGS_P2> {
+impl<T> Drop for Inner<T> {
     fn drop(&mut self) {
         self.close();
     }
 }
 
-unsafe impl<T: Send, const P: usize, const NUM_SEGS_P2: usize> Send for Sender<T, P, NUM_SEGS_P2> {}
-unsafe impl<T: Send, const P: usize, const NUM_SEGS_P2: usize> Send
-    for Receiver<T, P, NUM_SEGS_P2>
-{
-}
+unsafe impl<T: Send> Send for Sender<T> {}
+unsafe impl<T: Send> Send for Receiver<T> {}
 
 #[cfg(test)]
 mod tests {
@@ -790,7 +698,7 @@ mod tests {
 
     #[test]
     fn try_pop_drains_and_reports_closed() {
-        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        let (mut tx, mut rx) = new::<u64>(6, 8);
 
         tx.try_push(42).unwrap();
         assert_eq!(rx.try_pop().unwrap(), 42);
@@ -802,7 +710,7 @@ mod tests {
 
     #[test]
     fn dropping_local_sender_clears_producer_slot() {
-        let (tx, rx) = new_with_sender::<u64, 6, 8>();
+        let (tx, rx) = new::<u64>(6, 8);
         assert_eq!(tx.producer_count(), 1);
 
         drop(tx);

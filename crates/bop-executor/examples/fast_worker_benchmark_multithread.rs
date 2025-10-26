@@ -1,238 +1,107 @@
-//! Multi-threaded benchmark for the standard Worker/Task executor.
+//! Multi-threaded benchmark for the Worker/Task executor built on the new runtime.
 //!
-//! Creates a configurable number of tasks that cooperatively yield a set
-//! number of times. Multiple workers run in parallel until every task
-//! completes. Throughput and per-worker statistics are printed for each run.
+//! Spawns a configurable number of cooperative tasks that repeatedly yield.
+//! The runtime executes them on a configurable worker pool and we report simple
+//! throughput statistics for each configuration.
 
-use std::future::Future;
-use std::sync::{Arc, Barrier, Mutex};
-use std::task::{Context, Poll};
-use std::thread;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use bop_executor::deque::Stealer;
-use bop_executor::task::{ArenaConfig, ArenaOptions, FutureHelpers, MmapExecutorArena, TaskHandle};
-use bop_executor::worker::{Worker, WorkerStats};
+use bop_executor::runtime::Runtime;
+use bop_executor::task::{ArenaConfig, ArenaOptions};
+use futures_lite::future::{block_on, yield_now};
 
 const DEFAULT_LEAVES: usize = 16;
 const DEFAULT_TASKS_PER_LEAF: usize = 2048;
 
 #[derive(Debug)]
-struct YieldNTimes {
-    remaining: usize,
-}
-
-impl Future for YieldNTimes {
-    type Output = ();
-
-    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.remaining > 0 {
-            self.remaining -= 1;
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        } else {
-            Poll::Ready(())
-        }
-    }
-}
-
-fn setup_arena(leaf_count: usize, tasks_per_leaf: usize) -> Arc<MmapExecutorArena> {
-    let config = ArenaConfig::new(leaf_count, tasks_per_leaf).expect("invalid arena config");
-    Arc::new(
-        MmapExecutorArena::with_config(config, ArenaOptions::default())
-            .expect("failed to create arena"),
-    )
-}
-
-fn task_from_handle<'a>(
-    arena: &'a Arc<MmapExecutorArena>,
-    handle: &TaskHandle,
-) -> &'a bop_executor::task::Task {
-    let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
-    unsafe { arena.task(handle.leaf_idx(), slot_idx) }
-}
-
-fn worker_loop(
-    arena: Arc<MmapExecutorArena>,
-    worker_idx: usize,
-    num_workers: usize,
-    task_count: usize,
-    yields_per_task: usize,
-    stealer_slots: Arc<Vec<Mutex<Option<Stealer<TaskHandle>>>>>,
-    setup_barrier: Arc<Barrier>,
-) -> (WorkerStats, Vec<TaskHandle>) {
-    let mut worker = Worker::new(Arc::clone(&arena));
-    let my_stealer = worker.yield_stealer();
-    {
-        let mut slot = stealer_slots[worker_idx]
-            .lock()
-            .expect("stealer slot poisoned");
-        *slot = Some(my_stealer);
-    }
-
-    let core = core_affinity::get_core_ids().unwrap()[worker_idx];
-    core_affinity::set_for_current(core);
-
-    setup_barrier.wait();
-
-    let mut peer_stealers = Vec::with_capacity(num_workers.saturating_sub(1));
-    for idx in 0..num_workers {
-        if idx == worker_idx {
-            continue;
-        }
-        let guard = stealer_slots[idx].lock().expect("stealer slot poisoned");
-        if let Some(ref stealer) = *guard {
-            peer_stealers.push(stealer.clone());
-        }
-    }
-    worker.set_yield_stealers(peer_stealers);
-
-    setup_barrier.wait();
-
-    let leaf_count = arena.leaf_count();
-    let mut leaf = worker_idx % leaf_count;
-    let mut handles = Vec::with_capacity(task_count);
-    for _ in 0..task_count {
-        let handle = loop {
-            if let Some(handle) = arena.reserve_task_in_leaf(leaf) {
-                break handle;
-            }
-            leaf = (leaf + 1) % leaf_count;
-        };
-
-        let global = handle.global_id(arena.tasks_per_leaf());
-        arena.init_task(global);
-        let task = task_from_handle(&arena, &handle);
-        let future_ptr = FutureHelpers::box_future(YieldNTimes {
-            remaining: yields_per_task,
-        });
-        task.attach_future(future_ptr).expect("attach future");
-        arena.activate_task(handle);
-
-        handles.push(handle);
-        leaf = (leaf + num_workers) % leaf_count;
-    }
-
-    setup_barrier.wait();
-
-    worker.run_until_idle();
-
-    setup_barrier.wait();
-
-    (worker.stats().clone(), handles)
-}
-
-fn run_workers(
-    arena: Arc<MmapExecutorArena>,
+struct BenchmarkConfig {
+    worker_count: usize,
     total_tasks: usize,
     yields_per_task: usize,
-    num_workers: usize,
-) -> Vec<WorkerStats> {
-    let mut stats = Vec::with_capacity(num_workers);
-    let mut all_handles: Vec<Vec<TaskHandle>> = Vec::with_capacity(num_workers);
-    let stealer_slots = Arc::new(
-        (0..num_workers)
-            .map(|_| Mutex::new(None))
-            .collect::<Vec<Mutex<Option<Stealer<TaskHandle>>>>>(),
-    );
-    let setup_barrier = Arc::new(Barrier::new(num_workers));
-    thread::scope(|scope| {
-        let mut joins = Vec::with_capacity(num_workers);
-        let base = total_tasks / num_workers;
-        let remainder = total_tasks % num_workers;
-        for idx in 0..num_workers {
-            let arena = Arc::clone(&arena);
-            let mut count = base;
-            if idx < remainder {
-                count += 1;
-            }
-            let stealer_slots = Arc::clone(&stealer_slots);
-            let setup_barrier = Arc::clone(&setup_barrier);
-            joins.push(scope.spawn(move || {
-                worker_loop(
-                    arena,
-                    idx,
-                    num_workers,
-                    count,
-                    yields_per_task,
-                    stealer_slots,
-                    setup_barrier,
-                )
-            }));
-        }
-        for handle in joins {
-            let (worker_stats, handles) = handle.join().expect("worker thread panicked");
-            stats.push(worker_stats);
-            all_handles.push(handles);
-        }
-    });
-
-    for handle_set in all_handles {
-        for handle in handle_set {
-            arena.release_task(handle);
-        }
-    }
-
-    stats
 }
 
-fn summarize(stats: &[WorkerStats], duration: Duration) {
-    let total_polls: u64 = stats.iter().map(|s| s.tasks_polled).sum();
-    let throughput = total_polls as f64 / duration.as_secs_f64();
-    println!(
-        "    Total polls: {:>12} | Throughput: {:>12.0} polls/sec",
-        total_polls, throughput
-    );
-    for (idx, stat) in stats.iter().enumerate() {
-        println!(
-            "      worker {:>2}: polls {:>8} completed {:>8} yield {:>6}",
-            idx, stat.tasks_polled, stat.completed_count, stat.yielded_count
-        );
+const BENCHMARKS: &[BenchmarkConfig] = &[
+    BenchmarkConfig {
+        worker_count: 1,
+        total_tasks: 128,
+        yields_per_task: 100_000, // 12.8M yields total
+    },
+    BenchmarkConfig {
+        worker_count: 2,
+        total_tasks: 256,
+        yields_per_task: 100_000, // 25.6M yields total
+    },
+    BenchmarkConfig {
+        worker_count: 4,
+        total_tasks: 512,
+        yields_per_task: 100_000, // 51.2M yields total
+    },
+    BenchmarkConfig {
+        worker_count: 8,
+        total_tasks: 1024,
+        yields_per_task: 100_000, // 102.4M yields total
+    },
+];
+
+async fn yield_n_times(mut remaining: usize) {
+    while remaining > 0 {
+        yield_now().await;
+        remaining -= 1;
     }
 }
 
-fn run_benchmark(
-    leaf_count: usize,
-    tasks_per_leaf: usize,
-    num_workers: usize,
-    total_tasks: usize,
-    yields_per_task: usize,
-) {
+fn run_benchmark(config: &BenchmarkConfig) {
     println!(
         "> workers={} tasks={} yields/task={}",
-        num_workers, total_tasks, yields_per_task
+        config.worker_count, config.total_tasks, config.yields_per_task
     );
-    let arena = setup_arena(leaf_count, tasks_per_leaf);
+
+    let arena_config =
+        ArenaConfig::new(DEFAULT_LEAVES, DEFAULT_TASKS_PER_LEAF).expect("arena config");
+    let runtime =
+        Runtime::new(arena_config, ArenaOptions::default(), config.worker_count).expect("runtime");
+    let completion_counter = Arc::new(AtomicUsize::new(0));
 
     let start = Instant::now();
-    let stats = run_workers(
-        Arc::clone(&arena),
-        total_tasks,
-        yields_per_task,
-        num_workers,
-    );
-    let elapsed = start.elapsed();
+    let mut handles = Vec::with_capacity(config.total_tasks);
+    for _ in 0..config.total_tasks {
+        let counter = Arc::clone(&completion_counter);
+        let yields = config.yields_per_task;
+        let task = async move {
+            yield_n_times(yields).await;
+            counter.fetch_add(1, Ordering::Relaxed);
+        };
+        handles.push(runtime.spawn(task).expect("spawn task for benchmark"));
+    }
 
-    summarize(&stats, elapsed);
+    for (idx, handle) in handles.into_iter().enumerate() {
+        block_on(handle);
+        if (idx + 1) % 10 == 0 || idx + 1 == config.total_tasks {
+            println!("    joined {}/{} tasks", idx + 1, config.total_tasks);
+        }
+    }
+
+    let elapsed = start.elapsed();
+    summarize(config, elapsed, completion_counter.load(Ordering::Relaxed));
+    drop(runtime);
     println!();
 }
 
-fn main() {
+fn summarize(config: &BenchmarkConfig, duration: Duration, completed: usize) {
+    let throughput = completed as f64 / duration.as_secs_f64().max(f64::EPSILON);
     println!(
-        "Worker/Task multithread benchmark
-"
+        "    Completed {:>6} tasks in {:?} (~{:.2} tasks/sec)",
+        completed, duration, throughput
     );
+    let theoretical_ops = (completed as u64).saturating_mul(config.yields_per_task as u64);
+    println!("    Approximate yield operations: {}", theoretical_ops);
+}
 
-    let leaf_count = DEFAULT_LEAVES;
-    let tasks_per_leaf = DEFAULT_TASKS_PER_LEAF;
-    let configs = [
-        (1, 64, 10_000),
-        (2, 1024, 50_000),
-        (4, 1024, 50_000),
-        (8, 1024, 50_000),
-    ];
-
-    for (workers, tasks, yields) in configs {
-        run_benchmark(leaf_count, tasks_per_leaf, workers, tasks, yields);
+fn main() {
+    println!("Worker executor benchmark (multi-threaded).");
+    for config in BENCHMARKS {
+        run_benchmark(config);
     }
 }

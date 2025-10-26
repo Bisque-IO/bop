@@ -1,6 +1,7 @@
 use crate::bits;
 use crate::summary_tree::{SummaryInit, SummaryTree};
 use crate::timer::TimerHandle;
+use crate::worker::Worker;
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::future::{Future, IntoFuture};
@@ -338,9 +339,9 @@ impl ArenaLayout {
     }
 }
 
-pub struct FutureHelpers;
+pub struct FutureAllocator;
 
-impl FutureHelpers {
+impl FutureAllocator {
     pub fn box_future<F>(future: F) -> *mut ()
     where
         F: Future<Output = ()> + Send + 'static,
@@ -395,7 +396,7 @@ pub struct Task {
     signal_bit: u32,
     signal_ptr: *const TaskSignal,
     slot_ptr: AtomicPtr<TaskSlot>,
-    arena_ptr: AtomicPtr<MmapExecutorArena>,
+    arena_ptr: AtomicPtr<ExecutorArena>,
     state: AtomicU8,
     yielded: AtomicBool,
     cpu_time_enabled: AtomicBool,
@@ -456,9 +457,9 @@ impl Task {
         }
     }
 
-    unsafe fn bind_arena(&self, arena: *const MmapExecutorArena) {
+    unsafe fn bind_arena(&self, arena: *const ExecutorArena) {
         self.arena_ptr
-            .store(arena as *mut MmapExecutorArena, Ordering::Release);
+            .store(arena as *mut ExecutorArena, Ordering::Release);
     }
 
     pub fn global_id(&self) -> u64 {
@@ -572,8 +573,8 @@ impl Task {
 
         if scheduled_nor_executing {
             let signal = unsafe { &*self.signal_ptr };
-            let (was_empty, was_set) = signal.set(self.signal_bit);
-            if was_empty && was_set {
+            let (_was_empty, was_set) = signal.set(self.signal_bit);
+            if was_set {
                 let arena_ptr = self.arena_ptr.load(Ordering::Acquire);
                 if !arena_ptr.is_null() {
                     unsafe {
@@ -584,6 +585,19 @@ impl Task {
                 }
             }
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn try_begin_inline(&self) -> Result<(), u8> {
+        self.state
+            .compare_exchange(
+                TASK_IDLE,
+                TASK_EXECUTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|current| current)
     }
 
     /// Marks the queue as EXECUTING (SCHEDULED -> EXECUTING transition).
@@ -680,8 +694,8 @@ impl Task {
         let after_flags = self.state.fetch_sub(TASK_EXECUTING, Ordering::AcqRel);
         if after_flags & TASK_SCHEDULED != TASK_IDLE {
             let signal = unsafe { &*self.signal_ptr };
-            let (was_empty, was_set) = signal.set(self.signal_bit);
-            if was_empty && was_set {
+            let (_was_empty, was_set) = signal.set(self.signal_bit);
+            if was_set {
                 let arena_ptr = self.arena_ptr.load(Ordering::Relaxed);
                 if !arena_ptr.is_null() {
                     unsafe {
@@ -847,11 +861,11 @@ impl Task {
         self.record_poll();
         if self.cpu_time_enabled.load(Ordering::Relaxed) {
             let start = Instant::now();
-            let result = unsafe { FutureHelpers::poll_boxed(ptr, cx) };
+            let result = unsafe { FutureAllocator::poll_boxed(ptr, cx) };
             self.record_cpu_time(start.elapsed());
             result
         } else {
-            unsafe { FutureHelpers::poll_boxed(ptr, cx) }
+            unsafe { FutureAllocator::poll_boxed(ptr, cx) }
         }
     }
 
@@ -911,7 +925,7 @@ impl Task {
     }
 }
 
-pub struct MmapExecutorArena {
+pub struct ExecutorArena {
     memory: NonNull<u8>,
     size: usize,
     config: ArenaConfig,
@@ -944,10 +958,10 @@ impl fmt::Display for SpawnError {
 
 impl std::error::Error for SpawnError {}
 
-unsafe impl Send for MmapExecutorArena {}
-unsafe impl Sync for MmapExecutorArena {}
+unsafe impl Send for ExecutorArena {}
+unsafe impl Sync for ExecutorArena {}
 
-impl MmapExecutorArena {
+impl ExecutorArena {
     pub fn with_config(config: ArenaConfig, options: ArenaOptions) -> io::Result<Self> {
         let layout = ArenaLayout::new(&config);
         let memory_ptr = Self::allocate_memory(layout.total_size, &options)?;
@@ -979,7 +993,7 @@ impl MmapExecutorArena {
 
         let active_tree = unsafe { SummaryTree::new(init) };
 
-        let arena = MmapExecutorArena {
+        let arena = ExecutorArena {
             memory,
             size: layout.total_size,
             config,
@@ -1047,10 +1061,10 @@ impl MmapExecutorArena {
 
         let task = handle.task();
         let future = future.into_future();
-        let future_ptr = FutureHelpers::box_future(future);
+        let future_ptr = FutureAllocator::box_future(future);
 
         if task.attach_future(future_ptr).is_err() {
-            unsafe { FutureHelpers::drop_boxed(future_ptr) };
+            unsafe { FutureAllocator::drop_boxed(future_ptr) };
             self.release_task(handle);
             return Err(SpawnError::AttachFailed);
         }
@@ -1351,10 +1365,8 @@ impl MmapExecutorArena {
         worker_id: u32,
         deadline_ns: u64,
     ) {
-        let task_ptr = task.as_ptr() as *mut ();
-        timer
-            .inner()
-            .prepare_schedule(worker_id, task_ptr, deadline_ns, None);
+        let _ = (task, timer, worker_id, deadline_ns);
+        // Timer scheduling through TaskHandle is not supported under the identity-only timer model.
     }
 
     #[inline(always)]
@@ -1418,7 +1430,7 @@ impl MmapExecutorArena {
     }
 }
 
-impl Drop for MmapExecutorArena {
+impl Drop for ExecutorArena {
     fn drop(&mut self) {
         unsafe {
             #[cfg(unix)]
@@ -1464,9 +1476,9 @@ mod tests {
         unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) }
     }
 
-    fn setup_arena(leaf_count: usize, tasks_per_leaf: usize) -> Arc<MmapExecutorArena> {
+    fn setup_arena(leaf_count: usize, tasks_per_leaf: usize) -> Arc<ExecutorArena> {
         let config = ArenaConfig::new(leaf_count, tasks_per_leaf).unwrap();
-        Arc::new(MmapExecutorArena::with_config(config, ArenaOptions::default()).unwrap())
+        Arc::new(ExecutorArena::with_config(config, ArenaOptions::default()).unwrap())
     }
 
     #[test]
@@ -1651,7 +1663,7 @@ mod tests {
     #[test]
     fn future_helpers_drop_boxed_accepts_null() {
         unsafe {
-            FutureHelpers::drop_boxed(ptr::null_mut());
+            FutureAllocator::drop_boxed(ptr::null_mut());
         }
     }
 
@@ -1659,7 +1671,7 @@ mod tests {
     fn future_helpers_poll_boxed_accepts_null() {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        assert!(unsafe { FutureHelpers::poll_boxed(ptr::null_mut(), &mut cx) }.is_none());
+        assert!(unsafe { FutureAllocator::poll_boxed(ptr::null_mut(), &mut cx) }.is_none());
     }
 
     #[test]
@@ -1720,7 +1732,7 @@ mod tests {
             task.bind_arena(Arc::as_ptr(&arena));
             assert_eq!(
                 task.arena_ptr.load(Ordering::Relaxed),
-                Arc::as_ptr(&arena) as *mut MmapExecutorArena
+                Arc::as_ptr(&arena) as *mut ExecutorArena
             );
             ptr::drop_in_place(storage.as_mut_ptr());
             ptr::drop_in_place(slot_storage.as_mut_ptr());
@@ -1854,15 +1866,15 @@ mod tests {
         let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
         let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
 
-        let first_ptr = FutureHelpers::box_future(async {});
+        let first_ptr = FutureAllocator::box_future(async {});
         task.attach_future(first_ptr).unwrap();
-        let second_ptr = FutureHelpers::box_future(async {});
+        let second_ptr = FutureAllocator::box_future(async {});
         let existing = task.attach_future(second_ptr).unwrap_err();
         assert_eq!(existing, first_ptr);
-        unsafe { FutureHelpers::drop_boxed(second_ptr) };
+        unsafe { FutureAllocator::drop_boxed(second_ptr) };
 
         let ptr = task.take_future().unwrap();
-        unsafe { FutureHelpers::drop_boxed(ptr) };
+        unsafe { FutureAllocator::drop_boxed(ptr) };
         arena.release_task(handle);
     }
 
@@ -1875,12 +1887,12 @@ mod tests {
         let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
         let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
 
-        let future_ptr = FutureHelpers::box_future(async {});
+        let future_ptr = FutureAllocator::box_future(async {});
         task.attach_future(future_ptr).unwrap();
         let returned = task.take_future().unwrap();
         assert_eq!(returned, future_ptr);
         assert!(task.take_future().is_none());
-        unsafe { FutureHelpers::drop_boxed(returned) };
+        unsafe { FutureAllocator::drop_boxed(returned) };
         arena.release_task(handle);
     }
 
@@ -1897,7 +1909,7 @@ mod tests {
             .expect("spawn task");
 
         {
-            let mut worker = Worker::new(arena.clone(), None);
+            let mut worker = Worker::<10, 6>::new(arena.clone(), None);
             worker.run_until_idle();
         }
 
@@ -1914,7 +1926,7 @@ mod tests {
         assert_eq!(err, SpawnError::NoCapacity);
 
         {
-            let mut worker = Worker::new(arena.clone(), None);
+            let mut worker = Worker::<10, 6>::new(arena.clone(), None);
             worker.run_until_idle();
         }
 

@@ -15,6 +15,7 @@ crossbeam = { workspace = true }
 crossbeam-deque = "0.8"
 crossbeam-queue = "0.3"
 crossbeam-utils = "0.8"
+crossfire = "2.1.6"
 dashmap = "6.1"
 futures-core = "0.3"
 futures-lite = "2.6"

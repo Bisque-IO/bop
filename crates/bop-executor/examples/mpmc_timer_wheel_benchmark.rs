@@ -354,6 +354,7 @@ fn benchmark_schedule_and_poll(config: BenchmarkConfig) {
             let mut local_polls = 0u64;
             let mut local_expired = 0u64;
             let mut current_tick = 0u64;
+            let mut expired_batch = Vec::with_capacity(128);
 
             while running.load(Ordering::Relaxed) {
                 // Schedule some timers
@@ -368,8 +369,8 @@ fn benchmark_schedule_and_poll(config: BenchmarkConfig) {
                 // Poll to collect expired timers
                 for _ in 0..10 {
                     let now_ns = current_tick * cfg.tick_resolution_ns + cfg.tick_resolution_ns;
-                    let expired = wheel.poll(now_ns, 100, 100);
-                    local_expired += expired.len() as u64;
+                    let expired = wheel.poll(now_ns, 100, 100, &mut expired_batch);
+                    local_expired += expired as u64;
                     local_polls += 1;
                     current_tick += 1;
                 }

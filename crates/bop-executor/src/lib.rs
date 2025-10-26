@@ -28,7 +28,9 @@ mod loom_exports;
 pub mod mpmc;
 pub mod mpmc_timer_wheel;
 pub mod mpsc;
+pub mod mpsc_dynamic;
 pub mod multishot;
+pub mod parking;
 pub mod runtime;
 pub mod seg_spmc;
 pub mod seg_spsc;
@@ -43,8 +45,6 @@ pub mod timer_wheel;
 pub mod utils;
 pub mod waker;
 pub mod worker;
-pub mod worker_message;
-pub mod worker_service;
 
 pub use summary_tree::*;
 pub use utils::*;

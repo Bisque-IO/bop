@@ -38,7 +38,7 @@ struct Slot<T> {
 ///   which makes it in particular possible to support queues with a capacity of
 ///   1 without special-casing.
 ///
-pub(super) struct MpscQueue<T> {
+pub struct MpscQueue<T> {
     /// Buffer position of the slot to which the next value will be written.
     ///
     /// The position stores the buffer index in the least significant bits and a
@@ -159,7 +159,7 @@ impl<T> MpscQueue<T> {
     /// # Safety
     ///
     /// This method may not be called concurrently from multiple threads.
-    pub(super) unsafe fn pop(&self) -> Result<T, PopError> {
+    pub unsafe fn pop(&self) -> Result<T, PopError> {
         let dequeue_pos = self.dequeue_pos.with(|p| unsafe { *p });
         let slot = &self.buffer[dequeue_pos & self.right_mask];
         let stamp = slot.stamp.load(Ordering::Acquire);

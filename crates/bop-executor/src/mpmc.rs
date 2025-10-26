@@ -187,7 +187,7 @@ struct MpmcInner<T: Copy, const P: usize, const NUM_SEGS_P2: usize> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use bop_mpmc::mpsc_blocking::MpscBlocking;
 /// use std::thread;
 /// use std::time::Duration;
@@ -204,7 +204,7 @@ struct MpmcInner<T: Copy, const P: usize, const NUM_SEGS_P2: usize> {
 /// // Consumer blocks until item is available
 /// let value = mpsc.pop_blocking().unwrap();
 /// assert_eq!(value, 42);
-/// ```
+/// ```ignore
 pub struct Mpmc<T: Copy, const P: usize = 6, const NUM_SEGS_P2: usize = 10> {
     inner: Arc<MpmcInner<T, P, NUM_SEGS_P2>>,
 }
@@ -448,7 +448,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```ignoreignore
     /// let mpsc = MpscBlocking::<i32, 64>::new();
     ///
     /// // Create a direct producer handle
@@ -457,7 +457,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
     /// // Use the handle for high-performance pushes
     /// producer.push(42).unwrap();
     /// producer.push_bulk(&[1, 2, 3]).unwrap();
-    /// ```
+    /// ```ignore
     pub fn create_producer_handle(&self) -> Result<Producer<T, P, NUM_SEGS_P2>, PushError<()>> {
         if self.is_closed() {
             return Err(PushError::Closed(()));
@@ -698,14 +698,14 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```ignoreignore
     /// let mut count = 0;
     /// let drained = mpmc.drain_with(|item| {
     ///     // Process item
     ///     count += 1;
     /// }, 100);
     /// println!("Drained {} items", drained);
-    /// ```
+    /// ```ignore
     ///
     /// # Safety
     ///

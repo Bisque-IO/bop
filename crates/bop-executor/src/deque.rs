@@ -202,12 +202,12 @@ pub struct Worker<T> {
 
     /// The flavor of the queue.
     flavor: Flavor,
-
-    /// Indicates that the worker cannot be shared among threads.
-    _marker: PhantomData<*mut ()>, // !Send + !Sync
+    // Indicates that the worker cannot be shared among threads.
+    // _marker: PhantomData<*mut ()>, // !Send + !Sync
 }
 
 unsafe impl<T: Send> Send for Worker<T> {}
+unsafe impl<T: Send> Sync for Worker<T> {}
 
 impl<T> Worker<T> {
     /// Creates a FIFO worker queue.
@@ -234,7 +234,7 @@ impl<T> Worker<T> {
             inner,
             buffer: Cell::new(buffer),
             flavor: Flavor::Fifo,
-            _marker: PhantomData,
+            // _marker: PhantomData,
         }
     }
 
@@ -262,7 +262,7 @@ impl<T> Worker<T> {
             inner,
             buffer: Cell::new(buffer),
             flavor: Flavor::Lifo,
-            _marker: PhantomData,
+            // _marker: PhantomData,
         }
     }
 

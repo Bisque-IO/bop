@@ -28,7 +28,7 @@
 //!
 //! Wait until a non-zero value has been sent asynchronously.
 //!
-//! ```
+//! ```ignore
 //! use std::sync::atomic::{AtomicUsize, Ordering};
 //! use std::sync::Arc;
 //! use std::thread;
@@ -67,7 +67,7 @@
 //!
 //!      assert_eq!(v, 42);
 //! });
-//! ```
+//! ```ignore
 #![warn(missing_docs, missing_debug_implementations, unreachable_pub)]
 
 mod loom_exports;

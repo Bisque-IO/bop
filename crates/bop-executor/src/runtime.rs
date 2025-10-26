@@ -1,5 +1,5 @@
 use crate::task::{
-    ArenaConfig, ArenaOptions, ArenaStats, FutureHelpers, MmapExecutorArena, SpawnError, TaskHandle,
+    ArenaConfig, ArenaOptions, ArenaStats, ExecutorArena, FutureAllocator, SpawnError, TaskHandle,
 };
 use crate::worker::{WaitStrategy, Worker};
 use crate::worker_service::{WorkerService, WorkerServiceConfig};
@@ -12,18 +12,18 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 
 /// Cooperative executor runtime backed by `MmapExecutorArena` and worker threads.
-pub struct Runtime {
-    inner: Arc<RuntimeInner>,
+pub struct Runtime<const P: usize = 10, const NUM_SEGS_P2: usize = 6> {
+    inner: Arc<RuntimeInner<P, NUM_SEGS_P2>>,
     workers: Vec<thread::JoinHandle<()>>,
 }
 
-struct RuntimeInner {
-    arena: Arc<MmapExecutorArena>,
+struct RuntimeInner<const P: usize, const NUM_SEGS_P2: usize> {
+    arena: Arc<ExecutorArena>,
     shutdown: Arc<AtomicBool>,
-    service: Arc<WorkerService>,
+    service: Arc<WorkerService<P, NUM_SEGS_P2>>,
 }
 
-impl RuntimeInner {
+impl<const P: usize, const NUM_SEGS_P2: usize> RuntimeInner<P, NUM_SEGS_P2> {
     fn spawn<F, T>(&self, future: F) -> Result<JoinHandle<T>, SpawnError>
     where
         F: IntoFuture<Output = T> + Send + 'static,
@@ -59,9 +59,9 @@ impl RuntimeInner {
             arena_for_future.release_task(release_handle_for_future);
         };
 
-        let future_ptr = FutureHelpers::box_future(join_future);
+        let future_ptr = FutureAllocator::box_future(join_future);
         if task.attach_future(future_ptr).is_err() {
-            unsafe { FutureHelpers::drop_boxed(future_ptr) };
+            unsafe { FutureAllocator::drop_boxed(future_ptr) };
             self.arena.release_task(release_handle);
             return Err(SpawnError::AttachFailed);
         }
@@ -79,17 +79,17 @@ impl RuntimeInner {
     }
 }
 
-impl Runtime {
+impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
     pub fn new(
         config: ArenaConfig,
         options: ArenaOptions,
         worker_count: usize,
     ) -> io::Result<Self> {
-        let arena = Arc::new(MmapExecutorArena::with_config(config, options)?);
-        let service = WorkerService::start(WorkerServiceConfig::default());
+        let arena = Arc::new(ExecutorArena::with_config(config, options)?);
+        let service = WorkerService::<P, NUM_SEGS_P2>::start(WorkerServiceConfig::default());
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let inner = Arc::new(RuntimeInner {
+        let inner = Arc::new(RuntimeInner::<P, NUM_SEGS_P2> {
             arena: Arc::clone(&arena),
             shutdown: Arc::clone(&shutdown),
             service: Arc::clone(&service),
@@ -126,7 +126,7 @@ impl Runtime {
     }
 }
 
-impl Drop for Runtime {
+impl<const P: usize, const NUM_SEGS_P2: usize> Drop for Runtime<P, NUM_SEGS_P2> {
     fn drop(&mut self) {
         self.inner.shutdown();
 
@@ -251,8 +251,9 @@ mod tests {
 
     #[test]
     fn runtime_spawn_completes() {
-        let runtime = Runtime::new(ArenaConfig::new(1, 8).unwrap(), ArenaOptions::default(), 1)
-            .expect("runtime");
+        let runtime =
+            Runtime::<10, 6>::new(ArenaConfig::new(1, 8).unwrap(), ArenaOptions::default(), 1)
+                .expect("runtime");
         let counter = Arc::new(AtomicUsize::new(0));
         let cloned = counter.clone();
 
@@ -268,8 +269,9 @@ mod tests {
 
     #[test]
     fn join_handle_reports_completion() {
-        let runtime = Runtime::new(ArenaConfig::new(1, 4).unwrap(), ArenaOptions::default(), 1)
-            .expect("runtime");
+        let runtime =
+            Runtime::<10, 6>::new(ArenaConfig::new(1, 4).unwrap(), ArenaOptions::default(), 1)
+                .expect("runtime");
         let join = runtime.spawn(async {}).expect("spawn");
         assert!(!join.is_finished());
         block_on(join);

@@ -1,8 +1,8 @@
 use bop_executor::runtime::Runtime;
 use bop_executor::task::{ArenaConfig, ArenaOptions};
-use bop_executor::timers::{TimerHandle, TimerState, sleep};
-use bop_executor::worker::schedule_timer_for_current_task;
+use bop_executor::timer::Timer;
 use futures_lite::future::{block_on, poll_fn};
+use futures_lite::pin;
 use num_cpus;
 use std::env;
 use std::error::Error;
@@ -111,8 +111,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     handles.push(
         runtime
             .spawn(async move {
+                let timer = Timer::new();
                 for _ in 0..100 {
-                    sleep::sleep(Duration::from_millis(500)).await;
+                    timer.delay(Duration::from_millis(500)).await;
                     println!("{}", Instant::now().elapsed().as_millis());
                 }
             })
@@ -159,79 +160,39 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn timer_sleep_job(iterations: usize, base_delay_micros: u64) -> usize {
+    let timer = Timer::new();
     for round in 0..iterations {
         let delay = base_delay_micros * (1 + (round % 5) as u64);
-        sleep::sleep(Duration::from_micros(delay)).await;
+        timer.delay(Duration::from_micros(delay)).await;
     }
     iterations
 }
 
 async fn timer_reschedule_job(iterations: usize, base_delay_micros: u64) -> usize {
+    let timer = Timer::new();
     for round in 0..iterations {
         let first = base_delay_micros * (1 + (round % 3) as u64);
         let second = base_delay_micros * (2 + (round % 4) as u64);
-        reschedule_twice(Duration::from_micros(first), Duration::from_micros(second)).await;
+        timer.delay(Duration::from_micros(first)).await;
+        timer.delay(Duration::from_micros(second)).await;
     }
     iterations * 2
 }
 
 async fn timer_cancel_job(iterations: usize, base_delay_micros: u64) -> usize {
+    let timer = Timer::new();
     for round in 0..iterations {
         let delay = base_delay_micros * (1 + (round % 7) as u64);
-        schedule_and_cancel(Duration::from_micros(delay)).await;
+        let delay_future = timer.delay(Duration::from_micros(delay));
+        pin!(delay_future);
+        poll_fn(|cx| match delay_future.as_mut().poll(cx) {
+            Poll::Pending => {
+                timer.cancel();
+                Poll::Ready(())
+            }
+            Poll::Ready(()) => Poll::Ready(()),
+        })
+        .await;
     }
     iterations
-}
-
-async fn reschedule_twice(first: Duration, second: Duration) {
-    let timer = TimerHandle::new();
-    let mut stage = 0_u8;
-    poll_fn(|cx| match stage {
-        0 => {
-            if schedule_timer_for_current_task(cx, &timer, first).is_some() {
-                stage = 1;
-            }
-            Poll::Pending
-        }
-        1 => {
-            if timer.state() == TimerState::Idle {
-                if schedule_timer_for_current_task(cx, &timer, second).is_some() {
-                    stage = 2;
-                }
-            }
-            Poll::Pending
-        }
-        2 => {
-            if timer.state() == TimerState::Idle {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        }
-        _ => Poll::Ready(()),
-    })
-    .await;
-}
-
-async fn schedule_and_cancel(delay: Duration) {
-    let timer = TimerHandle::new();
-    let mut service = None;
-    let mut cancelled = false;
-    poll_fn(|cx| {
-        if service.is_none() {
-            if let Some((_generation, svc)) = schedule_timer_for_current_task(cx, &timer, delay) {
-                service = Some(svc);
-            }
-            return Poll::Pending;
-        }
-        if !cancelled {
-            if let Some(ref svc) = service {
-                let _ = timer.cancel(svc.as_ref());
-            }
-            cancelled = true;
-            return Poll::Ready(());
-        }
-        Poll::Ready(())
-    })
-    .await;
 }

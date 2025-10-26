@@ -23,7 +23,8 @@ use std::{
 ///
 /// Cache lines are assumed to be N bytes long, depending on the architecture:
 ///
-/// * On x86-64, aarch64, and powerpc64, N = 128.
+/// * On x86-64, N = 64.
+/// * On aarch64, and powerpc64, N = 128.
 /// * On arm, mips, mips64, sparc, and hexagon, N = 32.
 /// * On m68k, N = 16.
 /// * On s390x, N = 256.

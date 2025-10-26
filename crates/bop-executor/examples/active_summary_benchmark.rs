@@ -1,4 +1,4 @@
-use bop_executor::task::{ArenaConfig, ArenaOptions, MmapExecutorArena};
+use bop_executor::task::{ArenaConfig, ArenaOptions, ExecutorArena};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -31,7 +31,7 @@ fn run_scenario(s: &Scenario) {
         .with_max_workers(s.leaf_count);
 
     let arena = Arc::new(
-        MmapExecutorArena::with_config(config, ArenaOptions::default())
+        ExecutorArena::with_config(config, ArenaOptions::default())
             .expect("failed to create arena"),
     );
 
@@ -85,13 +85,13 @@ fn run_scenario(s: &Scenario) {
     );
 }
 
-fn reserve_release(arena: &MmapExecutorArena) {
+fn reserve_release(arena: &ExecutorArena) {
     if let Some(handle) = arena.reserve_task() {
         arena.release_task(handle);
     }
 }
 
-fn activate_deactivate(arena: &MmapExecutorArena) {
+fn activate_deactivate(arena: &ExecutorArena) {
     if let Some(handle) = arena.reserve_task() {
         arena.activate_task(handle);
         arena.deactivate_task(handle);
@@ -99,7 +99,7 @@ fn activate_deactivate(arena: &MmapExecutorArena) {
     }
 }
 
-fn yield_flip(arena: &MmapExecutorArena, worker_slot: usize) {
+fn yield_flip(arena: &ExecutorArena, worker_slot: usize) {
     arena.mark_yield_active(worker_slot % arena.active_tree().active_leaves());
     arena.mark_yield_inactive(worker_slot % arena.active_tree().active_leaves());
 }

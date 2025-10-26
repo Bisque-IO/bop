@@ -61,9 +61,11 @@
       "Bash(if [ -d \"crates/bop-executor/examples\" ])",
       "Bash(then echo \"exists\")",
       "Bash(else mkdir -p crates/bop-executor/examples)",
-      "Bash(fi)"
+      "Bash(fi)",
+      "Bash(powershell:*)"
     ],
     "deny": [],
     "ask": []
-  }
+  },
+  "outputStyle": "default"
 }

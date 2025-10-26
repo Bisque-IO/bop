@@ -1,47 +1,13 @@
-use bop_executor::task::{ArenaConfig, ArenaOptions, FutureHelpers, MmapExecutorArena, TaskHandle};
-use bop_executor::timer::{TimerHandle, TimerState};
-use bop_executor::worker::{Worker, schedule_timer_for_current_task};
+use bop_executor::task::{
+    ArenaConfig, ArenaOptions, FutureAllocator, MmapExecutorArena, TaskHandle,
+};
+use bop_executor::timer::Timer;
+use bop_executor::worker::Worker;
 use bop_executor::worker_service::{WorkerService, WorkerServiceConfig};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
-
-struct BenchmarkFuture {
-    timer: Arc<TimerHandle>,
-    fired: Arc<AtomicUsize>,
-    completed: Arc<AtomicUsize>,
-    stop: Arc<AtomicBool>,
-    scheduled: bool,
-    interval: Duration,
-}
-
-impl Future for BenchmarkFuture {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
-        if self.stop.load(Ordering::Acquire) {
-            self.timer.cancel();
-            self.completed.fetch_add(1, Ordering::Relaxed);
-            return std::task::Poll::Ready(());
-        }
-
-        if !self.scheduled {
-            schedule_timer_for_current_task(cx, &self.timer, self.interval);
-            self.scheduled = true;
-            return std::task::Poll::Pending;
-        }
-
-        if self.timer.state() == TimerState::Idle {
-            self.fired.fetch_add(1, Ordering::Relaxed);
-            schedule_timer_for_current_task(cx, &self.timer, self.interval);
-        }
-
-        std::task::Poll::Pending
-    }
-}
 
 fn release_tasks(arena: &Arc<MmapExecutorArena>, tasks: Vec<TaskHandle>) {
     for handle in tasks {
@@ -82,19 +48,22 @@ fn main() {
         let global = handle.global_id(arena.tasks_per_leaf());
         arena.init_task(global);
 
-        let timer = Arc::new(TimerHandle::new());
         let fired = Arc::clone(&fired_total);
         let completed = Arc::clone(&completed_total);
         let stop = Arc::clone(&stop_flag);
         let interval = Duration::from_millis(2);
 
-        let future_ptr = FutureHelpers::box_future(BenchmarkFuture {
-            timer,
-            fired,
-            completed,
-            stop,
-            scheduled: false,
-            interval,
+        let future_ptr = FutureAllocator::box_future(async move {
+            let timer = Timer::new();
+            loop {
+                if stop.load(Ordering::Acquire) {
+                    timer.cancel();
+                    completed.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                timer.delay(interval).await;
+                fired.fetch_add(1, Ordering::Relaxed);
+            }
         });
 
         let task = handle.task();
