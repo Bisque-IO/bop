@@ -14,7 +14,7 @@ async fn tick_printer(ticks: usize, interval: Duration) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let runtime = Runtime::new(ArenaConfig::new(2, 16)?, ArenaOptions::default(), 1)?;
+    let runtime: Runtime<10, 6> = Runtime::new(ArenaConfig::new(2, 16)?, ArenaOptions::default(), 1)?;
 
     let tick_future = tick_printer(5, Duration::from_millis(500));
     let handle = runtime.spawn(tick_future)?;

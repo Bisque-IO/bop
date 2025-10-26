@@ -1,8 +1,7 @@
 use crate::task::{
     ArenaConfig, ArenaOptions, ArenaStats, ExecutorArena, FutureAllocator, SpawnError, TaskHandle,
 };
-use crate::worker::{WaitStrategy, Worker};
-use crate::worker_service::{WorkerService, WorkerServiceConfig};
+use crate::worker::{WaitStrategy, Worker, WorkerService, WorkerServiceConfig};
 use std::future::{Future, IntoFuture};
 use std::io;
 use std::pin::Pin;
@@ -86,7 +85,16 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
         worker_count: usize,
     ) -> io::Result<Self> {
         let arena = Arc::new(ExecutorArena::with_config(config, options)?);
-        let service = WorkerService::<P, NUM_SEGS_P2>::start(WorkerServiceConfig::default());
+
+        // Create config with desired worker count as min_workers
+        // This ensures workers start immediately on WorkerService::start()
+        let worker_config = WorkerServiceConfig {
+            min_workers: worker_count,
+            max_workers: worker_count.max(num_cpus::get()),
+            ..WorkerServiceConfig::default()
+        };
+
+        let service = WorkerService::<P, NUM_SEGS_P2>::start(Arc::clone(&arena), worker_config);
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let inner = Arc::new(RuntimeInner::<P, NUM_SEGS_P2> {
@@ -95,17 +103,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
             service: Arc::clone(&service),
         });
 
-        let worker_threads = worker_count.max(1);
-        let mut workers = Vec::with_capacity(worker_threads);
-        for _ in 0..worker_threads {
-            let mut worker = Worker::with_shutdown(
-                Arc::clone(&inner.arena),
-                Some(Arc::clone(&service)),
-                Arc::clone(&shutdown),
-            );
-            let handle = thread::spawn(move || worker.run());
-            workers.push(handle);
-        }
+        let workers = Vec::new();
 
         Ok(Self { inner, workers })
     }

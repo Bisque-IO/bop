@@ -40,9 +40,8 @@ fn run_scenario(s: &Scenario) {
         for worker_id in 0..s.threads {
             let arena = Arc::clone(&arena);
             scope.spawn(move || {
-                let worker_slot = arena
-                    .reserve_worker()
-                    .unwrap_or_else(|| panic!("worker {} failed to reserve slot", worker_id));
+                // TODO: Worker reservation removed - this benchmark needs updating
+                let worker_slot = worker_id;
 
                 for iter in 0..s.ops_per_thread {
                     match s.pattern {
@@ -60,8 +59,6 @@ fn run_scenario(s: &Scenario) {
                         }
                     }
                 }
-
-                arena.release_worker(worker_slot);
             });
         }
     });
@@ -100,8 +97,8 @@ fn activate_deactivate(arena: &ExecutorArena) {
 }
 
 fn yield_flip(arena: &ExecutorArena, worker_slot: usize) {
-    arena.mark_yield_active(worker_slot % arena.active_tree().active_leaves());
-    arena.mark_yield_inactive(worker_slot % arena.active_tree().active_leaves());
+    // TODO: This benchmark needs update - yield bits moved to WorkerService
+    let _ = (arena, worker_slot);
 }
 
 fn main() {

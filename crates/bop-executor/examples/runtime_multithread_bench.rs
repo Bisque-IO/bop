@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let arena_config = ArenaConfig::new(opts.leaf_count, opts.tasks_per_leaf)?;
-    let runtime = Runtime::new(arena_config, ArenaOptions::default(), worker_count)?;
+    let runtime: Runtime<10, 6> = Runtime::new(arena_config, ArenaOptions::default(), worker_count)?;
     let operations = Arc::new(AtomicUsize::new(0));
 
     let start = Instant::now();

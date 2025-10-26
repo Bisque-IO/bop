@@ -51,7 +51,7 @@ fn benchmark_schedule(num_timers: usize, tick_res: Duration, ticks: usize) {
     );
 
     let mut wheel =
-        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation);
+        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation, 0);
 
     let bench_start = Instant::now();
 
@@ -93,7 +93,7 @@ fn benchmark_cancel(num_timers: usize, tick_res: Duration, ticks: usize) {
     println!("  Pre-allocating: {} slots per tick", initial_allocation);
 
     let mut wheel =
-        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation);
+        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation, 0);
     let mut timer_ids = Vec::with_capacity(num_timers);
 
     // Schedule all timers with collisions allowed
@@ -146,7 +146,7 @@ fn benchmark_cancel_random(num_timers: usize, tick_res: Duration, ticks: usize) 
     println!("  Pre-allocating: {} slots per tick", initial_allocation);
 
     let mut wheel =
-        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation);
+        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation, 0);
     let mut timer_ids = Vec::with_capacity(num_timers);
 
     // Schedule all timers with collisions allowed
@@ -210,7 +210,7 @@ fn benchmark_poll(num_timers: usize, tick_res: Duration, ticks: usize) {
     println!("  Pre-allocating: {} slots per tick", initial_allocation);
 
     let mut wheel =
-        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation);
+        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation, 0);
 
     // Schedule timers uniformly across the wheel with collisions allowed
     let tick_res_ns = tick_res.as_nanos() as u64;
@@ -263,7 +263,7 @@ fn benchmark_mixed_workload(num_ops: usize, tick_res: Duration, ticks: usize) {
     println!("  Pre-allocating: {} slots per tick", initial_allocation);
 
     let mut wheel =
-        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation);
+        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation, 0);
     let mut timer_ids = Vec::new();
     let mut current_time_ns = 0u64;
 
@@ -354,6 +354,7 @@ fn benchmark_vs_binary_heap(num_timers: usize) {
         Duration::from_nanos(1048576),
         1024,
         initial_allocation,
+        0,
     );
 
     let wheel_start = Instant::now();
@@ -439,7 +440,7 @@ fn benchmark_capacity_growth() {
 
     let start_time = Instant::now();
     let tick_res = Duration::from_nanos(1048576); // ~1ms, power of 2
-    let mut wheel = TimerWheel::<u32>::new(start_time, tick_res, 256);
+    let mut wheel = TimerWheel::<u32>::new(start_time, tick_res, 256, 0);
 
     println!("  Initial allocation per tick: 16");
 
@@ -486,7 +487,7 @@ fn benchmark_different_configurations() {
         let initial_allocation: usize = avg_timers_per_tick.next_power_of_two();
 
         let mut wheel =
-            TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation);
+            TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation, 0);
 
         let bench_start = Instant::now();
 
@@ -556,12 +557,13 @@ fn benchmark_sharded_multithreaded(
     // Create sharded wheels (one per thread)
     let wheels: Arc<Vec<Arc<Mutex<TimerWheel<u32>>>>> = Arc::new(
         (0..num_shards)
-            .map(|_| {
+            .map(|shard_id| {
                 Arc::new(Mutex::new(TimerWheel::with_allocation(
                     start_time,
                     tick_res,
                     ticks,
                     initial_allocation,
+                    shard_id as u32,
                 )))
             })
             .collect(),
@@ -702,12 +704,13 @@ fn benchmark_sharded_multithreaded(
     // Reset wheels
     let wheels: Arc<Vec<Arc<Mutex<TimerWheel<u32>>>>> = Arc::new(
         (0..num_shards)
-            .map(|_| {
+            .map(|shard_id| {
                 Arc::new(Mutex::new(TimerWheel::with_allocation(
                     start_time,
                     tick_res,
                     ticks,
                     initial_allocation,
+                    shard_id as u32,
                 )))
             })
             .collect(),
@@ -831,7 +834,7 @@ fn benchmark_sharded_vs_single(num_threads: usize, timers_per_thread: usize) {
     let initial_allocation = avg_timers_per_tick.next_power_of_two();
 
     let mut wheel =
-        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation);
+        TimerWheel::<u32>::with_allocation(start_time, tick_res, ticks, initial_allocation, 0);
 
     let single_start = Instant::now();
     let tick_res_ns = tick_res.as_nanos() as u64;
@@ -852,12 +855,13 @@ fn benchmark_sharded_vs_single(num_threads: usize, timers_per_thread: usize) {
 
     {
         let mut wheels: Vec<TimerWheel<u32>> = (0..num_threads)
-            .map(|_| {
+            .map(|thread_id| {
                 TimerWheel::with_allocation(
                     start_time,
                     tick_res,
                     ticks,
                     initial_allocation / num_threads,
+                    thread_id as u32,
                 )
             })
             .collect();
@@ -897,12 +901,13 @@ fn benchmark_sharded_vs_single(num_threads: usize, timers_per_thread: usize) {
         // Sharded multi-threaded
         println!("\n  Sharded multi-threaded Mutex<TimerWheel>:");
         let wheels: Vec<Arc<Mutex<TimerWheel<u32>>>> = (0..num_threads)
-            .map(|_| {
+            .map(|thread_id| {
                 Arc::new(Mutex::new(TimerWheel::with_allocation(
                     start_time,
                     tick_res,
                     ticks,
                     initial_allocation / num_threads,
+                    thread_id as u32,
                 )))
             })
             .collect();

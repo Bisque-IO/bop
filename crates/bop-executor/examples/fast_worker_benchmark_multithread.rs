@@ -12,7 +12,7 @@ use bop_executor::runtime::Runtime;
 use bop_executor::task::{ArenaConfig, ArenaOptions};
 use futures_lite::future::{block_on, yield_now};
 
-const DEFAULT_LEAVES: usize = 16;
+const DEFAULT_LEAVES: usize = 64;
 const DEFAULT_TASKS_PER_LEAF: usize = 2048;
 
 #[derive(Debug)]
@@ -23,25 +23,25 @@ struct BenchmarkConfig {
 }
 
 const BENCHMARKS: &[BenchmarkConfig] = &[
-    BenchmarkConfig {
-        worker_count: 1,
-        total_tasks: 128,
-        yields_per_task: 100_000, // 12.8M yields total
-    },
-    BenchmarkConfig {
-        worker_count: 2,
-        total_tasks: 256,
-        yields_per_task: 100_000, // 25.6M yields total
-    },
-    BenchmarkConfig {
-        worker_count: 4,
-        total_tasks: 512,
-        yields_per_task: 100_000, // 51.2M yields total
-    },
+    // BenchmarkConfig {
+    //     worker_count: 1,
+    //     total_tasks: 128,
+    //     yields_per_task: 100_000, // 12.8M yields total
+    // },
+    // BenchmarkConfig {
+    //     worker_count: 2,
+    //     total_tasks: 256,
+    //     yields_per_task: 100_000, // 25.6M yields total
+    // },
+    // BenchmarkConfig {
+    //     worker_count: 4,
+    //     total_tasks: 512,
+    //     yields_per_task: 100_000, // 51.2M yields total
+    // },
     BenchmarkConfig {
         worker_count: 8,
         total_tasks: 1024,
-        yields_per_task: 100_000, // 102.4M yields total
+        yields_per_task: 100_000, // 51.2M yields total
     },
 ];
 
@@ -60,7 +60,7 @@ fn run_benchmark(config: &BenchmarkConfig) {
 
     let arena_config =
         ArenaConfig::new(DEFAULT_LEAVES, DEFAULT_TASKS_PER_LEAF).expect("arena config");
-    let runtime =
+    let runtime: Runtime<10, 6> =
         Runtime::new(arena_config, ArenaOptions::default(), config.worker_count).expect("runtime");
     let completion_counter = Arc::new(AtomicUsize::new(0));
 
@@ -78,9 +78,9 @@ fn run_benchmark(config: &BenchmarkConfig) {
 
     for (idx, handle) in handles.into_iter().enumerate() {
         block_on(handle);
-        if (idx + 1) % 10 == 0 || idx + 1 == config.total_tasks {
-            println!("    joined {}/{} tasks", idx + 1, config.total_tasks);
-        }
+        // if (idx + 1) % 10 == 0 || idx + 1 == config.total_tasks {
+        //     println!("    joined {}/{} tasks", idx + 1, config.total_tasks);
+        // }
     }
 
     let elapsed = start.elapsed();
@@ -90,13 +90,21 @@ fn run_benchmark(config: &BenchmarkConfig) {
 }
 
 fn summarize(config: &BenchmarkConfig, duration: Duration, completed: usize) {
-    let throughput = completed as f64 / duration.as_secs_f64().max(f64::EPSILON);
+    let duration_secs = duration.as_secs_f64().max(f64::EPSILON);
+    let task_throughput = completed as f64 / duration_secs;
+
+    let total_yields = (completed as u64).saturating_mul(config.yields_per_task as u64);
+    let yield_throughput = total_yields as f64 / duration_secs;
+
     println!(
         "    Completed {:>6} tasks in {:?} (~{:.2} tasks/sec)",
-        completed, duration, throughput
+        completed, duration, task_throughput
     );
-    let theoretical_ops = (completed as u64).saturating_mul(config.yields_per_task as u64);
-    println!("    Approximate yield operations: {}", theoretical_ops);
+    println!(
+        "    Total yields: {} ({:.2}M yields/sec)",
+        total_yields,
+        yield_throughput / 1_000_000.0
+    );
 }
 
 fn main() {

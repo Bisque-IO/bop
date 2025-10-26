@@ -529,24 +529,24 @@ async fn main() {
     println!("{}", "=".repeat(100));
     println!("\nSingle task with many yields (baseline overhead):");
 
-    let duration = benchmark_single_task_yield(100_000).await;
-    print_yield_results("Single task", 100_000, duration);
+    // let duration = benchmark_single_task_yield(100_000).await;
+    // print_yield_results("Single task", 100_000, duration);
 
-    let duration = benchmark_single_task_yield(1_000_000).await;
-    print_yield_results("Single task", 1_000_000, duration);
+    // let duration = benchmark_single_task_yield(1_000_000).await;
+    // print_yield_results("Single task", 1_000_000, duration);
 
-    println!("\nMultiple tasks, few yields (work stealing focus):");
+    // println!("\nMultiple tasks, few yields (work stealing focus):");
 
-    let duration = benchmark_cooperative_yield(1_000, 10).await;
-    print_yield_results("1K tasks × 10 yields", 10_000, duration);
+    // let duration = benchmark_cooperative_yield(1_000, 10).await;
+    // print_yield_results("1K tasks × 10 yields", 10_000, duration);
 
-    let duration = benchmark_cooperative_yield(10_000, 10).await;
-    print_yield_results("10K tasks × 10 yields", 100_000, duration);
+    // let duration = benchmark_cooperative_yield(10_000, 10).await;
+    // print_yield_results("10K tasks × 10 yields", 100_000, duration);
 
-    println!("\nMultiple tasks, many yields (maximal work stealing):");
+    // println!("\nMultiple tasks, many yields (maximal work stealing):");
 
-    let duration = benchmark_cooperative_yield(100, 1_000).await;
-    print_yield_results("100 tasks × 1K yields", 100_000, duration);
+    // let duration = benchmark_cooperative_yield(100, 1_000).await;
+    // print_yield_results("100 tasks × 1K yields", 100_000, duration);
 
     let duration = benchmark_cooperative_yield(1_000, 1_000).await;
     print_yield_results("1K tasks × 1K yields", 1_000_000, duration);

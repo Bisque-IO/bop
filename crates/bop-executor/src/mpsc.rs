@@ -16,7 +16,31 @@ use rand::RngCore;
 
 /// Create a new blocking MPSC queue
 pub fn new<T, const P: usize, const NUM_SEGS_P2: usize>() -> Receiver<T, P, NUM_SEGS_P2> {
-    let waker = Arc::new(SignalWaker::new());
+    new_with_waker(Arc::new(SignalWaker::new()))
+}
+
+/// Create a new blocking MPSC queue with a custom SignalWaker
+///
+/// This allows integration with external notification systems. The waker's
+/// callback will be invoked when work becomes available in the queue.
+///
+/// # Arguments
+///
+/// * `waker` - Custom SignalWaker (typically with a callback to update worker status)
+///
+/// # Example
+///
+/// ```ignore
+/// let worker_status = Arc::new(AtomicU64::new(0));
+/// let status_clone = Arc::clone(&worker_status);
+/// let waker = Arc::new(SignalWaker::new_with_callback(Some(Box::new(move || {
+///     status_clone.fetch_or(WORKER_BIT_QUEUE, Ordering::Release);
+/// }))));
+/// let receiver = mpsc::new_with_waker(waker);
+/// ```
+pub fn new_with_waker<T, const P: usize, const NUM_SEGS_P2: usize>(
+    waker: Arc<SignalWaker>
+) -> Receiver<T, P, NUM_SEGS_P2> {
     // Create sparse array of AtomicPtr, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
     for _ in 0..MAX_QUEUES {
@@ -32,7 +56,7 @@ pub fn new<T, const P: usize, const NUM_SEGS_P2: usize>() -> Receiver<T, P, NUM_
         producer_count: CachePadded::new(AtomicUsize::new(0)),
         max_producer_id: AtomicUsize::new(0),
         closed: CachePadded::new(AtomicBool::new(false)),
-        waker: waker,
+        waker,
         signals,
     });
 

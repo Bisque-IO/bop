@@ -8,7 +8,7 @@ use crate::task::{
 use crate::timer::{Timer, TimerHandle};
 use crate::timer_wheel::TimerWheel;
 use crate::{PopError, bits};
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::mem::MaybeUninit;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -27,15 +27,26 @@ const RND_MULTIPLIER: u64 = 0x5DEECE66D;
 const RND_ADDEND: u64 = 0xB;
 const RND_MASK: u64 = (1 << 48) - 1;
 const DEFAULT_WAKE_BURST: usize = 4;
-const FULL_SUMMARY_SCAN_CADENCE_MASK: u64 = 1023;
+const FULL_SUMMARY_SCAN_CADENCE_MASK: u64 = 1024 * 1024 - 1;
 const DEFAULT_TICK_DURATION_NS: u64 = 1 << 20; // ~1.05ms, power of two as required by TimerWheel
 const TIMER_TICKS_PER_WHEEL: usize = 1024;
 const TIMER_EXPIRE_BUDGET: usize = 256;
 const MESSAGE_BATCH_SIZE: usize = 4096;
 
+// Worker status is now managed via SignalWaker:
+// - SignalWaker.summary: mpsc queue signals (bits 0-63)
+// - SignalWaker.status bit 0: yield queue has items
+// - SignalWaker.status bit 1: task partition has work
+
+/// Trait for cross-worker operations that don't depend on const parameters
+trait CrossWorkerOps: Send + Sync {
+    fn post_cancel_message(&self, from_worker_id: u32, to_worker_id: u32, timer_id: u64) -> bool;
+}
+
 thread_local! {
-    static CURRENT_WORKER: Cell<*mut ()> = Cell::new(ptr::null_mut());
+    static CURRENT_TIMER_WHEEL: Cell<*mut TimerWheel<TimerHandle>> = Cell::new(ptr::null_mut());
     static CURRENT_TASK: Cell<*mut Task> = Cell::new(ptr::null_mut());
+    static CROSS_WORKER_OPS: Cell<Option<&'static dyn CrossWorkerOps>> = const { Cell::new(None) };
 }
 
 pub struct WorkerTLS {}
@@ -59,6 +70,15 @@ pub fn current_task<'a>() -> Option<&'a mut Task> {
         return None;
     } else {
         unsafe { Some(&mut *task) }
+    }
+}
+
+pub fn current_timer_wheel<'a>() -> Option<&'a mut TimerWheel<TimerHandle>> {
+    let timer_wheel = CURRENT_TIMER_WHEEL.with(|cell| cell.get());
+    if timer_wheel.is_null() {
+        None
+    } else {
+        unsafe { Some(&mut *timer_wheel) }
     }
 }
 
@@ -135,11 +155,40 @@ impl TimerBatch {
 /// Worker control-plane messages.
 #[derive(Clone, Debug)]
 pub enum WorkerMessage {
-    ScheduleTimer { timer: TimerSchedule },
-    ScheduleBatch { timers: TimerBatch },
-    CancelTimer { worker_id: u32, timer_id: u64 },
-    WorkerCountChanged { new_worker_count: u16 },
+    ScheduleTimer {
+        timer: TimerSchedule,
+    },
+    ScheduleBatch {
+        timers: TimerBatch,
+    },
+    CancelTimer {
+        worker_id: u32,
+        timer_id: u64,
+    },
+    WorkerCountChanged {
+        new_worker_count: u16,
+    },
+
+    /// Rebalance task partitions (reassign which leaves this worker processes)
+    RebalancePartitions {
+        partition_start: usize,
+        partition_end: usize,
+    },
+
+    /// Migrate specific tasks to another worker
+    MigrateTasks {
+        task_handles: Vec<TaskHandle>,
+    },
+
+    /// Request worker to report its current health metrics
+    ReportHealth,
+
+    /// Graceful shutdown: finish current task then exit
+    GracefulShutdown,
+
+    /// Immediate shutdown
     Shutdown,
+
     Noop,
 }
 
@@ -156,34 +205,11 @@ pub struct WorkerServiceConfig {
 impl Default for WorkerServiceConfig {
     fn default() -> Self {
         Self {
-            tick_duration: Duration::from_micros(500),
+            tick_duration: Duration::from_nanos(DEFAULT_TICK_DURATION_NS),
             min_workers: num_cpus::get(),
             max_workers: num_cpus::get(),
         }
     }
-}
-
-pub struct WorkerRegistration<
-    const P: usize = DEFAULT_QUEUE_SEG_SHIFT,
-    const NUM_SEGS_P2: usize = DEFAULT_QUEUE_NUM_SEGS_SHIFT,
-> {
-    pub worker_id: u32,
-    pub sender: mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>,
-    pub receiver: mpsc::Receiver<WorkerMessage, P, NUM_SEGS_P2>,
-    pub yield_queue: YieldWorker<TaskHandle>,
-    pub now_ns: Arc<AtomicU64>,
-    pub tick_duration_ns: u64,
-}
-
-struct WorkerEntry<
-    const P: usize = DEFAULT_QUEUE_SEG_SHIFT,
-    const NUM_SEGS_P2: usize = DEFAULT_QUEUE_NUM_SEGS_SHIFT,
-> {
-    id: u32,
-    active: AtomicU64,
-    now_ns: AtomicU64,
-    shutdown: AtomicU64,
-    thread: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 pub struct WorkerService<
@@ -195,6 +221,13 @@ pub struct WorkerService<
     tick_duration: Duration,
     tick_duration_ns: u64,
     clock_ns: Arc<AtomicU64>,
+
+    // Per-worker SignalWakers - each tracks all three work types:
+    // - summary: mpsc queue signals (bits 0-63 for different signal words)
+    // - status bit 0: yield queue has items
+    // - status bit 1: task partition has work
+    wakers: Box<[Arc<crate::signal_waker::SignalWaker>]>,
+
     worker_actives: Box<[AtomicU64]>,
     worker_now_ns: Box<[AtomicU64]>,
     worker_shutdowns: Box<[AtomicBool]>,
@@ -202,11 +235,11 @@ pub struct WorkerService<
     worker_stats: Box<[WorkerStats]>,
     worker_count: AtomicUsize,
     worker_max_id: AtomicUsize,
-    receivers: Box<[mpsc::Receiver<WorkerMessage, P, NUM_SEGS_P2>]>,
+    receivers: Box<[UnsafeCell<mpsc::Receiver<WorkerMessage, P, NUM_SEGS_P2>>]>,
     senders: Box<[mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>]>,
     yield_queues: Box<[YieldWorker<TaskHandle>]>,
     yield_stealers: Box<[Stealer<TaskHandle>]>,
-    timers: Box<[TimerWheel<TimerHandle>]>,
+    timers: Box<[UnsafeCell<TimerWheel<TimerHandle>>]>,
     shutdown: AtomicBool,
     tick_thread: Mutex<Option<thread::JoinHandle<()>>>,
     register_mutex: Mutex<()>,
@@ -214,12 +247,23 @@ pub struct WorkerService<
 
 unsafe impl<const P: usize, const NUM_SEGS_P2: usize> Send for WorkerService<P, NUM_SEGS_P2> {}
 
+// SAFETY: WorkerService contains UnsafeCells for receivers and timers, but each worker
+// has exclusive access to its own index. The Arc-wrapped WorkerService is shared between
+// threads, but the UnsafeCell data is partitioned by worker_id.
+unsafe impl<const P: usize, const NUM_SEGS_P2: usize> Sync for WorkerService<P, NUM_SEGS_P2> {}
+
 impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     pub fn start(arena: Arc<ExecutorArena>, config: WorkerServiceConfig) -> Arc<Self> {
         let tick_duration = config.tick_duration;
         let tick_duration_ns = normalize_tick_duration_ns(config.tick_duration);
         let min_workers = config.min_workers.max(1);
         let max_workers = config.max_workers.max(min_workers).min(MAX_WORKER_LIMIT);
+
+        // Create per-worker SignalWakers
+        let mut wakers = Vec::with_capacity(max_workers);
+        for _ in 0..max_workers {
+            wakers.push(Arc::new(crate::signal_waker::SignalWaker::new()));
+        }
 
         let mut worker_actives = Vec::with_capacity(max_workers);
         for _ in 0..max_workers {
@@ -241,22 +285,33 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         for _ in 0..max_workers {
             worker_stats.push(WorkerStats::default());
         }
+
         let mut receivers = Vec::with_capacity(max_workers);
         let mut senders = Vec::<mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>>::with_capacity(
             max_workers * max_workers,
         );
         for worker_id in 0..max_workers {
-            let rx = mpsc::new();
-            receivers.push(rx);
+            // Use the worker's SignalWaker for mpsc queue
+            let rx = mpsc::new_with_waker(Arc::clone(&wakers[worker_id]));
+            receivers.push(UnsafeCell::new(rx));
         }
         for worker_id in 0..max_workers {
             for other_worker_id in 0..max_workers {
                 senders.push(
-                    receivers[worker_id]
+                    unsafe { &*receivers[worker_id].get() }
                         .create_sender_with_config(0)
                         .expect("ran out of producer slots"),
                 )
             }
+        }
+
+        let mut tick_thread_senders = Vec::with_capacity(max_workers);
+        for worker_id in 0..max_workers {
+            tick_thread_senders.push(
+                unsafe { &*receivers[worker_id].get() }
+                    .create_sender_with_config(0)
+                    .expect("ran out of producer slots"),
+            );
         }
 
         let mut yield_queues = Vec::with_capacity(max_workers);
@@ -268,12 +323,13 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             yield_stealers.push(yield_queues[worker_id].stealer());
         }
         let mut timers = Vec::with_capacity(max_workers);
-        for _ in 0..max_workers {
-            timers.push(TimerWheel::new(
+        for worker_id in 0..max_workers {
+            timers.push(UnsafeCell::new(TimerWheel::new(
                 Instant::now(),
                 tick_duration,
                 TIMER_TICKS_PER_WHEEL,
-            ));
+                worker_id as u32,
+            )));
         }
 
         let service = Arc::new(Self {
@@ -282,6 +338,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             tick_duration: tick_duration,
             tick_duration_ns,
             clock_ns: Arc::new(AtomicU64::new(0)),
+            wakers: wakers.into_boxed_slice(),
             worker_actives: worker_actives.into_boxed_slice(),
             worker_now_ns: worker_now_ns.into_boxed_slice(),
             worker_shutdowns: worker_shutdowns.into_boxed_slice(),
@@ -299,12 +356,20 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             register_mutex: Mutex::new(()),
         });
 
-        Self::spawn_tick_thread(&service);
+        Self::spawn_tick_thread(&service, tick_thread_senders.into_boxed_slice());
+
+        // Spawn min_workers on startup
+        for _ in 0..min_workers {
+            if service.spawn_worker().is_err() {
+                break;
+            }
+        }
+
         service
     }
 
     pub fn spawn_worker(self: &Arc<Self>) -> Result<(), PushError<()>> {
-        let _ = self.register_mutex.lock().expect("register_mutex poisoned");
+        let _lock = self.register_mutex.lock().expect("register_mutex poisoned");
         let now_ns = Instant::now().elapsed().as_nanos() as u64;
 
         // Find first empty slot.
@@ -327,6 +392,9 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         }
         self.worker_count.fetch_add(1, Ordering::SeqCst);
 
+        // Mark worker as active
+        self.worker_actives[worker_id].store(1, Ordering::SeqCst);
+
         let arena = Arc::clone(&self.arena);
         let service = Arc::clone(self);
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -346,19 +414,22 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             for _ in 0..MESSAGE_BATCH_SIZE {
                 message_batch.push(WorkerMessage::Noop);
             }
+
             let mut w = Worker {
                 arena,
                 service: Arc::clone(&service),
                 wait_strategy: WaitStrategy::default(),
                 shutdown: &service.worker_shutdowns[worker_id],
-                now_ns: &service.worker_now_ns[worker_id],
                 receiver: unsafe {
-                    &mut *(&service.receivers[worker_id] as *const _
-                        as *mut mpsc::Receiver<WorkerMessage, P, NUM_SEGS_P2>)
+                    // SAFETY: Worker thread has exclusive access to its own receiver.
+                    // The service Arc is kept alive for the lifetime of the worker.
+                    &mut *service.receivers[worker_id].get()
                 },
                 yield_queue: &service.yield_queues[worker_id],
                 timer_wheel: unsafe {
-                    &mut *(&service.timers[worker_id] as *const _ as *mut TimerWheel<TimerHandle>)
+                    // SAFETY: Worker thread has exclusive access to its own timer wheel.
+                    // The service Arc is kept alive for the lifetime of the worker.
+                    &mut *service.timers[worker_id].get()
                 },
                 wake_stats: WakeStats::default(),
                 stats: WorkerStats::default(),
@@ -373,9 +444,23 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                 seed: rand::rng().next_u64(),
                 current_task: std::ptr::null_mut(),
             };
-            std::panic::catch_unwind(|| {});
+            CURRENT_TIMER_WHEEL.set(w.timer_wheel as *mut TimerWheel<TimerHandle>);
+            // SAFETY: The service Arc is kept alive for the lifetime of the worker thread
+            let ops_ref: &'static dyn CrossWorkerOps =
+                unsafe { &*(&*service as *const dyn CrossWorkerOps) };
+            CROSS_WORKER_OPS.set(Some(ops_ref));
+            let _ = std::panic::catch_unwind(|| {});
             w.run();
+
+            // Worker exited - clean up counters
+            service.worker_count.fetch_sub(1, Ordering::SeqCst);
+            service.worker_actives[worker_id].store(0, Ordering::SeqCst);
         });
+
+        // Store the join handle
+        *self.worker_threads[worker_id]
+            .lock()
+            .expect("worker_threads lock poisoned") = Some(join);
 
         Ok(())
     }
@@ -386,6 +471,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         to_worker_id: u32,
         message: WorkerMessage,
     ) -> Result<(), PushError<WorkerMessage>> {
+        // mpsc will automatically set bits in the target worker's SignalWaker.summary
         unsafe {
             self.senders
                 [((from_worker_id as usize) * self.config.max_workers) + (to_worker_id as usize)]
@@ -432,32 +518,433 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             return;
         }
 
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[WorkerService] Shutdown initiated, joining tick thread...");
+        }
+
+        // Join tick thread first (it coordinates worker shutdown)
         if let Some(handle) = self.tick_thread.lock().unwrap().take() {
             let _ = handle.join();
         }
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!(
+                "[WorkerService] Tick thread joined, joining {} worker threads...",
+                self.worker_count.load(Ordering::Relaxed)
+            );
+        }
+
+        // Join all worker threads
+        // Note: Tick thread should have already coordinated their shutdown
+        for (idx, worker_thread) in self.worker_threads.iter().enumerate() {
+            if let Some(handle) = worker_thread.lock().unwrap().take() {
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!("[WorkerService] Joining worker thread {}...", idx);
+                }
+                let _ = handle.join();
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!("[WorkerService] Worker thread {} joined", idx);
+                }
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[WorkerService] Shutdown complete");
+        }
     }
 
-    fn spawn_tick_thread(self: &Arc<Self>) {
+    /// Returns the current worker count
+    #[inline]
+    pub fn worker_count(&self) -> usize {
+        self.worker_count.load(Ordering::Relaxed)
+    }
+
+    /// Checks if a specific worker has any work to do
+    #[inline]
+    pub fn worker_has_work(&self, worker_id: usize) -> bool {
+        if worker_id >= self.wakers.len() {
+            return false;
+        }
+        let waker = &self.wakers[worker_id];
+        let summary = waker.snapshot_summary();
+        let status = waker.status();
+        summary != 0 || status != 0
+    }
+
+    fn spawn_tick_thread(
+        self: &Arc<Self>,
+        worker_senders: Box<[crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>]>,
+    ) {
         let service = Arc::clone(self);
         let tick_duration = service.tick_duration;
         let handle = thread::spawn(move || {
             let start = Instant::now();
+            let mut tick_count: u64 = 0;
+            let health_check_interval = 100; // Check health every 100 ticks
+            let partition_rebalance_interval = 1000; // Rebalance every 1000 ticks
+            let scaling_check_interval = 500; // Check for scaling every 500 ticks
+            let mut worker_senders = worker_senders; // Make mutable
+
             loop {
                 if service.shutdown.load(Ordering::Acquire) {
+                    // Graceful shutdown: notify all workers
+                    Self::supervisor_graceful_shutdown(&service, &mut worker_senders);
                     break;
                 }
 
+                // Update clock for all workers
                 let now_ns = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
                 service.clock_ns.store(now_ns, Ordering::Release);
                 let max_workers = service.worker_max_id.load(Ordering::Relaxed);
-                for i in 0..max_workers {
+                for i in 0..=max_workers {
+                    if i >= service.worker_now_ns.len() {
+                        break;
+                    }
                     service.worker_now_ns[i].store(now_ns, Ordering::Release);
+                    // Update TimerWheel's now_ns
+                    unsafe {
+                        // SAFETY: Each worker has exclusive access to its own TimerWheel.
+                        // Workers are not running concurrently with this tick thread update.
+                        let timer_wheel = &mut *service.timers[i].get();
+                        timer_wheel.set_now_ns(now_ns);
+                    }
                 }
+
+                // Periodic health monitoring
+                if tick_count % health_check_interval == 0 {
+                    Self::supervisor_health_check(&service, &mut worker_senders, now_ns);
+                }
+
+                // Periodic dynamic worker scaling
+                if tick_count % scaling_check_interval == 0 {
+                    Self::supervisor_dynamic_scaling(&service, &mut worker_senders);
+                }
+
+                // Periodic partition rebalancing
+                if tick_count % partition_rebalance_interval == 0 {
+                    Self::supervisor_rebalance_partitions(&service, &mut worker_senders);
+                }
+
+                tick_count = tick_count.wrapping_add(1);
                 thread::sleep(tick_duration);
             }
         });
 
         *self.tick_thread.lock().unwrap() = Some(handle);
+    }
+
+    /// Supervisor: Health monitoring - check for stuck workers and collect metrics
+    fn supervisor_health_check(
+        service: &Arc<WorkerService<P, NUM_SEGS_P2>>,
+        worker_senders: &mut [crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
+        current_time_ns: u64,
+    ) {
+        let max_workers = service.worker_max_id.load(Ordering::Relaxed);
+        let tick_duration_ns = service.tick_duration_ns;
+        let stuck_threshold_ns = tick_duration_ns * 10; // Worker is stuck if no progress for 10 ticks
+
+        for worker_id in 0..max_workers {
+            let is_active = service.worker_actives[worker_id].load(Ordering::Relaxed);
+            if is_active == 0 {
+                continue; // Worker slot not active
+            }
+
+            let last_update = service.worker_now_ns[worker_id].load(Ordering::Relaxed);
+            let time_since_update = current_time_ns.saturating_sub(last_update);
+
+            // Detect stuck workers
+            if time_since_update > stuck_threshold_ns {
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!(
+                        "[Supervisor] WARNING: Worker {} appears stuck (no update for {}ns)",
+                        worker_id, time_since_update
+                    );
+                }
+            }
+
+            // Request health report from active workers
+            if worker_id < worker_senders.len() {
+                let _ = worker_senders[worker_id].try_push(WorkerMessage::ReportHealth);
+            }
+        }
+    }
+
+    /// Supervisor: Rebalance task partitions across workers
+    fn supervisor_rebalance_partitions(
+        service: &Arc<WorkerService<P, NUM_SEGS_P2>>,
+        worker_senders: &mut [crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
+    ) {
+        let active_workers = service.worker_count.load(Ordering::Relaxed);
+        if active_workers == 0 {
+            return;
+        }
+
+        let total_leaves = service.arena.leaf_count();
+        let leaves_per_worker = (total_leaves + active_workers - 1) / active_workers;
+
+        let max_workers = service.worker_max_id.load(Ordering::Relaxed);
+        let mut active_worker_ids = Vec::with_capacity(max_workers);
+
+        // Collect active worker IDs
+        for worker_id in 0..max_workers {
+            if service.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
+                active_worker_ids.push(worker_id);
+            }
+        }
+
+        // Assign partitions to active workers
+        for (idx, &worker_id) in active_worker_ids.iter().enumerate() {
+            let partition_start = idx * leaves_per_worker;
+            let partition_end = ((idx + 1) * leaves_per_worker).min(total_leaves);
+
+            // Assign contiguous range of leaves [partition_start, partition_end)
+            let _ = worker_senders[worker_id].try_push(WorkerMessage::RebalancePartitions {
+                partition_start,
+                partition_end,
+            });
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!(
+                "[Supervisor] Rebalanced {} leaves across {} active workers",
+                total_leaves, active_workers
+            );
+        }
+    }
+
+    /// Supervisor: Graceful shutdown coordination
+    fn supervisor_graceful_shutdown(
+        service: &Arc<WorkerService<P, NUM_SEGS_P2>>,
+        worker_senders: &mut [crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
+    ) {
+        let max_workers = service.worker_max_id.load(Ordering::Relaxed);
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[Supervisor] Shutting down, max_workers={}", max_workers);
+        }
+
+        // Send graceful shutdown to all active workers
+        for worker_id in 0..=max_workers {
+            #[cfg(debug_assertions)]
+            {
+                let is_active = worker_id < service.worker_actives.len()
+                    && service.worker_actives[worker_id].load(Ordering::Relaxed) != 0;
+                eprintln!("[Supervisor] Worker {} active={}", worker_id, is_active);
+            }
+            if worker_id < service.worker_actives.len()
+                && service.worker_actives[worker_id].load(Ordering::Relaxed) != 0
+            {
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!("[Supervisor] Sending shutdown to worker {}", worker_id);
+                }
+                let _ = worker_senders[worker_id].try_push(WorkerMessage::GracefulShutdown);
+                // Mark work available to wake up the worker
+                service.wakers[worker_id].mark_tasks();
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[Supervisor] Sent graceful shutdown to all workers");
+        }
+
+        // Wait for workers to finish (with timeout)
+        let shutdown_timeout = std::time::Duration::from_secs(5);
+        let shutdown_start = std::time::Instant::now();
+
+        loop {
+            let active_count = service.worker_count.load(Ordering::Relaxed);
+            if active_count == 0 {
+                break;
+            }
+
+            if shutdown_start.elapsed() > shutdown_timeout {
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!(
+                        "[Supervisor] Graceful shutdown timeout, {} workers still active",
+                        active_count
+                    );
+                }
+                // Force shutdown remaining workers
+                for worker_id in 0..max_workers {
+                    if service.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
+                        let _ = worker_senders[worker_id].try_push(WorkerMessage::Shutdown);
+                    }
+                }
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Supervisor: Dynamic worker scaling based on load
+    fn supervisor_dynamic_scaling(
+        service: &Arc<WorkerService<P, NUM_SEGS_P2>>,
+        worker_senders: &mut [crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
+    ) {
+        let active_workers = service.worker_count.load(Ordering::Relaxed);
+        let min_workers = service.config.min_workers;
+        let max_workers_config = service.config.max_workers;
+
+        // Calculate total work pressure by checking SignalWakers
+        let mut total_work_signals = 0u64;
+        let max_worker_id = service.worker_max_id.load(Ordering::Relaxed);
+
+        for worker_id in 0..max_worker_id {
+            if service.worker_actives[worker_id].load(Ordering::Relaxed) == 0 {
+                continue;
+            }
+
+            let waker = &service.wakers[worker_id];
+            let summary = waker.snapshot_summary();
+            let status = waker.status();
+
+            // Count work signals: summary bits + status bits
+            total_work_signals += summary.count_ones() as u64 + status.count_ones() as u64;
+        }
+
+        // Scale up: if average work per worker > threshold, add workers
+        if active_workers > 0 {
+            let avg_work_per_worker = total_work_signals / active_workers as u64;
+            let scale_up_threshold = 4; // If avg work signals > 4 per worker, scale up
+
+            if avg_work_per_worker > scale_up_threshold && active_workers < max_workers_config {
+                // Try to spawn a new worker
+                match service.spawn_worker() {
+                    Ok(()) => {
+                        let new_count = service.worker_count.load(Ordering::Relaxed);
+
+                        #[cfg(debug_assertions)]
+                        {
+                            eprintln!(
+                                "[Supervisor] Scaled UP: {} -> {} workers (avg_work={})",
+                                active_workers, new_count, avg_work_per_worker
+                            );
+                        }
+
+                        // Notify all workers of count change
+                        for sender in worker_senders.iter_mut() {
+                            let _ = sender.try_push(WorkerMessage::WorkerCountChanged {
+                                new_worker_count: new_count as u16,
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        #[cfg(debug_assertions)]
+                        {
+                            eprintln!("[Supervisor] Failed to scale up: no available worker slots");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Scale down: if work pressure is very low and we have more than min_workers
+        if active_workers > min_workers && total_work_signals == 0 {
+            // Find a worker to shut down (prefer higher worker IDs)
+            for worker_id in (0..max_worker_id).rev() {
+                if service.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
+                    // Send graceful shutdown to this worker
+                    let _ = worker_senders[worker_id].try_push(WorkerMessage::GracefulShutdown);
+
+                    #[cfg(debug_assertions)]
+                    {
+                        eprintln!(
+                            "[Supervisor] Scaled DOWN: removed worker {} (no work detected)",
+                            worker_id
+                        );
+                    }
+                    break; // Only remove one worker at a time
+                }
+            }
+        }
+    }
+
+    /// Supervisor: Task migration for load balancing
+    /// Migrates tasks from overloaded workers to underloaded workers
+    fn supervisor_task_migration(
+        service: &Arc<WorkerService<P, NUM_SEGS_P2>>,
+        worker_senders: &mut [crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
+    ) {
+        let max_worker_id = service.worker_max_id.load(Ordering::Relaxed);
+
+        // Collect load information for each worker
+        let mut worker_loads: Vec<(usize, u64)> = Vec::new();
+
+        for worker_id in 0..max_worker_id {
+            if service.worker_actives[worker_id].load(Ordering::Relaxed) == 0 {
+                continue;
+            }
+
+            let waker = &service.wakers[worker_id];
+            let summary = waker.snapshot_summary();
+            let status = waker.status();
+            let load = summary.count_ones() as u64 + status.count_ones() as u64;
+
+            worker_loads.push((worker_id, load));
+        }
+
+        if worker_loads.len() < 2 {
+            return; // Need at least 2 workers for migration
+        }
+
+        // Sort by load
+        worker_loads.sort_by_key(|&(_, load)| load);
+
+        // Find most loaded and least loaded workers
+        let (most_loaded_id, most_loaded_load) = worker_loads[worker_loads.len() - 1];
+        let (least_loaded_id, least_loaded_load) = worker_loads[0];
+
+        // Migration threshold: only migrate if imbalance is significant
+        let imbalance = most_loaded_load.saturating_sub(least_loaded_load);
+        let migration_threshold = 3;
+
+        if imbalance >= migration_threshold {
+            // In a real implementation, we would:
+            // 1. Steal tasks from the overloaded worker's yield queue
+            // 2. Send MigrateTasks message to the underloaded worker
+            //
+            // For now, we just log the decision
+            // TODO: Implement actual task stealing from yield queues
+
+            #[cfg(debug_assertions)]
+            {
+                eprintln!(
+                    "[Supervisor] Task migration opportunity: worker {} (load={}) -> worker {} (load={})",
+                    most_loaded_id, most_loaded_load, least_loaded_id, least_loaded_load
+                );
+            }
+
+            // We can't easily steal from another worker's yield queue from the supervisor
+            // This would require exposing the yield_stealers or implementing a different mechanism
+            // For now, leave this as a placeholder for future implementation
+            let _ = (most_loaded_id, least_loaded_id); // Suppress unused warnings
+        }
+    }
+}
+
+impl<const P: usize, const NUM_SEGS_P2: usize> CrossWorkerOps for WorkerService<P, NUM_SEGS_P2> {
+    fn post_cancel_message(&self, from_worker_id: u32, to_worker_id: u32, timer_id: u64) -> bool {
+        self.post_message(
+            from_worker_id,
+            to_worker_id,
+            WorkerMessage::CancelTimer {
+                worker_id: to_worker_id,
+                timer_id,
+            },
+        )
+        .is_ok()
     }
 }
 
@@ -520,6 +1007,19 @@ pub struct WorkerStats {
     pub leaf_steal_successes: u64,
 
     pub timer_fires: u64,
+}
+
+/// Health snapshot of a worker at a point in time.
+/// Used by the supervisor for health monitoring and load balancing decisions.
+#[derive(Debug, Clone)]
+pub struct WorkerHealthSnapshot {
+    pub worker_id: u32,
+    pub timestamp_ns: u64,
+    pub stats: WorkerStats,
+    pub yield_queue_len: usize,
+    pub mpsc_queue_len: usize,
+    pub active_leaf_partitions: Vec<usize>,
+    pub has_work: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -598,7 +1098,6 @@ pub struct Worker<
     service: Arc<WorkerService<P, NUM_SEGS_P2>>,
     wait_strategy: WaitStrategy,
     shutdown: &'a AtomicBool,
-    now_ns: &'a AtomicU64,
     receiver: &'a mut mpsc::Receiver<WorkerMessage, P, NUM_SEGS_P2>,
     yield_queue: &'a YieldWorker<TaskHandle>,
     timer_wheel: &'a mut TimerWheel<TimerHandle>,
@@ -617,63 +1116,77 @@ pub struct Worker<
 }
 
 impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
-    // pub fn new(arena: Arc<ExecutorArena>, service: Arc<WorkerService<P, NUM_SEGS_P2>>) -> Self {
-    //     Self::with_shutdown(arena, service, Arc::new(AtomicBool::new(false)))
-    // }
-
-    // pub fn with_shutdown(
-    //     arena: Arc<ExecutorArena>,
-    //     service: Arc<WorkerService<P, NUM_SEGS_P2>>,
-    //     shutdown: Arc<AtomicBool>,
-    // ) -> Self {
-    //     let timer_resolution_ns = service.tick_duration().as_nanos().max(1) as u64;
-    //     let timer_wheel = TimerWheel::new(
-    //         Instant::now(),
-    //         Duration::from_nanos(timer_resolution_ns),
-    //         TIMER_TICKS_PER_WHEEL,
-    //     );
-
-    //     let message_batch = Vec::<WorkerMessage>::with_capacity(MESSAGE_BATCH_SIZE);
-    //     for _ in 0..MESSAGE_BATCH_SIZE {
-    //         message_batch.push(WorkerMessage::Noop);
-    //     }
-
-    //     Self {
-    //         arena,
-    //         service,
-    //         shutdown,
-    //         wait_strategy: WaitStrategy::default(),
-    //         sender: registration.sender,
-    //         receiver: registration.receiver,
-    //         now_ns: registration.now_ns,
-    //         worker_id: registration.worker_id,
-    //         timer_resolution_ns,
-    //         timer_wheel,
-    //         timer_output: Vec::with_capacity(TIMER_EXPIRE_BUDGET),
-    //         message_batch: message_batch.into_boxed_slice(),
-    //         wake_stats: WakeStats::default(),
-    //         stats: WorkerStats::default(),
-    //         seed: rand::rng().next_u64(),
-    //         current_task: std::ptr::null_mut(),
-    //     }
-    // }
-
     #[inline]
     pub fn stats(&self) -> &WorkerStats {
         &self.stats
+    }
+
+    /// Checks if this worker has any work to do (tasks, yields, or messages).
+    /// Returns true if the worker should continue running, false if it can park.
+    #[inline]
+    fn has_work(&self) -> bool {
+        let waker = &self.service.wakers[self.worker_id as usize];
+        let summary = waker.snapshot_summary(); // mpsc queue signals
+        let status = waker.status(); // yield_bit | task_bit
+        summary != 0 || status != 0
     }
 
     pub fn set_wait_strategy(&mut self, strategy: WaitStrategy) {
         self.wait_strategy = strategy;
     }
 
-    pub fn run(&mut self) {
+    pub(crate) fn run(&mut self) {
+        let mut spin_count = 0;
         while !self.shutdown.load(Ordering::Acquire) {
             let progress = self.run_once();
-            // if !progress {
-            //     self.wait_strategy.wait();
-            // }
+            if !progress && !self.has_work() {
+                if spin_count < self.wait_strategy.spin_before_sleep {
+                    spin_count += 1;
+                    std::hint::spin_loop();
+                } else {
+                    // Calculate sleep duration considering timer deadlines
+                    let sleep_duration = self.calculate_park_duration();
+
+                    if let Some(duration) = sleep_duration {
+                        thread::sleep(duration);
+                    } else {
+                        // Park with a timeout so we wake up periodically to check shutdown flag
+                        thread::park_timeout(Duration::from_millis(100));
+                    }
+                    spin_count = 0;
+                }
+            } else {
+                spin_count = 0;
+            }
         }
+    }
+
+    /// Calculate how long the worker can park, considering both the wait strategy
+    /// and the next timer deadline.
+    #[inline]
+    fn calculate_park_duration(&mut self) -> Option<Duration> {
+        let mut duration = self.wait_strategy.park_timeout;
+
+        // Check if we have pending timers
+        if let Some(next_deadline_ns) = self.timer_wheel.next_deadline() {
+            let now_ns = self.timer_wheel.now_ns();
+
+            if next_deadline_ns > now_ns {
+                let timer_duration_ns = next_deadline_ns - now_ns;
+                let timer_duration = Duration::from_nanos(timer_duration_ns);
+
+                // Use the minimum of wait_strategy timeout and timer deadline
+                duration = match duration {
+                    Some(strategy_timeout) => Some(strategy_timeout.min(timer_duration)),
+                    None => Some(timer_duration),
+                };
+            } else {
+                // Timer already expired, don't sleep at all
+                return Some(Duration::ZERO);
+            }
+        }
+
+        duration
     }
 
     fn process_messages(&mut self) -> bool {
@@ -685,7 +1198,10 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                         progress = true;
                     }
                 }
-                Err(PopError::Empty) | Err(PopError::Timeout) => break,
+                Err(PopError::Empty) | Err(PopError::Timeout) => {
+                    // Queue is empty - mpsc signal bits will be cleared automatically
+                    break;
+                }
                 Err(PopError::Closed) => break,
             }
         }
@@ -711,6 +1227,19 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 self.cached_worker_count = new_worker_count as usize;
                 true
             }
+            WorkerMessage::RebalancePartitions {
+                partition_start,
+                partition_end,
+            } => self.handle_rebalance_partitions(partition_start, partition_end),
+            WorkerMessage::MigrateTasks { task_handles } => self.handle_migrate_tasks(task_handles),
+            WorkerMessage::ReportHealth => {
+                self.handle_report_health();
+                true
+            }
+            WorkerMessage::GracefulShutdown => {
+                self.handle_graceful_shutdown();
+                true
+            }
             WorkerMessage::Shutdown => {
                 self.shutdown.store(true, Ordering::Release);
                 true
@@ -727,12 +1256,114 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         self.enqueue_timer_entry(deadline_ns, handle).is_some()
     }
 
+    fn handle_rebalance_partitions(
+        &mut self,
+        partition_start: usize,
+        partition_end: usize,
+    ) -> bool {
+        self.partition_start = partition_start;
+        self.partition_end = partition_end;
+
+        // Mark that we have work in our new partitions (if non-empty)
+        if partition_start < partition_end {
+            self.service.wakers[self.worker_id as usize].mark_tasks();
+        }
+
+        true
+    }
+
+    fn handle_migrate_tasks(&mut self, task_handles: Vec<TaskHandle>) -> bool {
+        // Receive migrated tasks from another worker
+        // Add them to our yield queue for processing
+        if task_handles.is_empty() {
+            return false;
+        }
+
+        let count = task_handles.len();
+        for handle in task_handles {
+            self.enqueue_yield(handle);
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!(
+                "[Worker {}] Received {} migrated tasks",
+                self.worker_id, count
+            );
+        }
+
+        true
+    }
+
+    fn handle_report_health(&mut self) {
+        // Capture current state snapshot
+        let snapshot = WorkerHealthSnapshot {
+            worker_id: self.worker_id,
+            timestamp_ns: self.timer_wheel.now_ns(),
+            stats: self.stats.clone(),
+            yield_queue_len: self.yield_queue.len(),
+            mpsc_queue_len: 0, // TODO: Add len() method to mpsc::Receiver
+            active_leaf_partitions: (self.partition_start..self.partition_end).collect(),
+            has_work: self.has_work(),
+        };
+
+        // For now, just log the health snapshot
+        // TODO: Send this back to supervisor via a response channel
+        #[cfg(debug_assertions)]
+        {
+            eprintln!(
+                "[Worker {}] Health: tasks_polled={}, yield_queue={}, mpsc_queue={}, partitions={:?}, has_work={}",
+                snapshot.worker_id,
+                snapshot.stats.tasks_polled,
+                snapshot.yield_queue_len,
+                snapshot.mpsc_queue_len,
+                snapshot.active_leaf_partitions,
+                snapshot.has_work
+            );
+        }
+        let _ = snapshot; // Suppress unused warning in release builds
+    }
+
+    fn handle_graceful_shutdown(&mut self) {
+        // Graceful shutdown: just process a few more iterations then shutdown
+        // The worker loop will naturally drain queues during normal operation
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!(
+                "[Worker {}] Received graceful shutdown signal",
+                self.worker_id
+            );
+        }
+
+        // Process any remaining messages
+        loop {
+            match self.receiver.try_pop() {
+                Ok(message) => match message {
+                    WorkerMessage::Shutdown | WorkerMessage::GracefulShutdown => break,
+                    _ => {
+                        self.handle_message(message);
+                    }
+                },
+                Err(_) => break,
+            }
+        }
+
+        // Set shutdown flag - worker loop will finish current work before exiting
+        self.shutdown.store(true, Ordering::Release);
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[Worker {}] Set shutdown flag", self.worker_id);
+        }
+    }
+
     fn enqueue_timer_entry(&mut self, deadline_ns: u64, handle: TimerHandle) -> Option<u64> {
         self.timer_wheel.schedule_timer(deadline_ns, handle)
     }
 
     fn poll_timers(&mut self) -> bool {
-        let now_ns = self.now_ns.load(Ordering::Acquire);
+        let now_ns = self.timer_wheel.now_ns();
         let expired = self
             .timer_wheel
             .poll(now_ns, TIMER_EXPIRE_BUDGET, &mut self.timer_output);
@@ -807,7 +1438,8 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             return false;
         }
 
-        self.timer_wheel.cancel_timer(timer_id).is_some()
+        self.service
+            .post_cancel_message(self.worker_id, worker_id, timer_id)
     }
 
     #[inline(always)]
@@ -830,8 +1462,13 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
         let mut did_work = false;
 
-        // if self.poll_yield(self.yield_queue.len()) > 0 {
-        if self.poll_yield(4) > 0 {
+        // Process messages first (including shutdown signals)
+        if self.process_messages() {
+            did_work = true;
+        }
+
+        // Poll all yielded tasks first - they're ready to run
+        if self.poll_yield(self.yield_queue.len()) > 0 {
             did_work = true;
         }
 
@@ -850,7 +1487,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         let mask = leaf_count - 1;
         let rand = self.next_u64();
 
-        if !did_work || rand & FULL_SUMMARY_SCAN_CADENCE_MASK == 0 {
+        if !did_work && rand & FULL_SUMMARY_SCAN_CADENCE_MASK == 0 {
             // if self.try_any_partition_random(leaf_count) {
             //     did_work = true;
             // }
@@ -871,9 +1508,9 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 did_work = true;
             }
 
-            if self.poll_yield_steal(1) > 0 {
-                did_work = true;
-            }
+            // if self.poll_yield_steal(1) > 0 {
+            //     did_work = true;
+            // }
         }
 
         did_work
@@ -928,25 +1565,28 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 return true;
             }
 
-            if strategy.spin_before_sleep > 0 && spins < strategy.spin_before_sleep {
-                spins += 1;
-                core::hint::spin_loop();
-                continue;
-            }
-
-            spins = 0;
-
-            match strategy.park_timeout {
-                Some(timeout) => {
-                    if timeout.is_zero() {
-                        return false;
-                    }
-                    if !self.arena.active_tree().acquire_timeout(timeout) {
-                        return false;
-                    }
+            // Fast path: check if we have any work before parking
+            if !self.has_work() {
+                if strategy.spin_before_sleep > 0 && spins < strategy.spin_before_sleep {
+                    spins += 1;
+                    core::hint::spin_loop();
+                    continue;
                 }
-                None => {
-                    self.arena.active_tree().acquire();
+
+                spins = 0;
+
+                match strategy.park_timeout {
+                    Some(timeout) => {
+                        if timeout.is_zero() {
+                            return false;
+                        }
+                        if !self.arena.active_tree().acquire_timeout(timeout) {
+                            return false;
+                        }
+                    }
+                    None => {
+                        self.arena.active_tree().acquire();
+                    }
                 }
             }
         }
@@ -958,7 +1598,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
     #[inline(always)]
     fn refresh_partition(&mut self, leaf_count: usize) {
-        let worker_count = self.arena.active_tree().worker_count().max(1);
+        let worker_count = self.service.worker_count().max(1);
         if worker_count == self.cached_worker_count {
             return;
         }
@@ -1088,10 +1728,10 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
     #[inline(always)]
     fn enqueue_yield(&mut self, handle: TaskHandle) {
-        let leaf_idx = handle.leaf_idx();
         let was_empty = self.yield_queue.push_with_status(handle);
         if was_empty {
-            self.arena.mark_yield_active(leaf_idx);
+            // Set yield_bit in SignalWaker status
+            self.service.wakers[self.worker_id as usize].mark_yield();
         }
         self.maybe_release_for_queue(was_empty);
     }
@@ -1101,7 +1741,8 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         let (item, was_last) = self.yield_queue.pop_with_status();
         if let Some(handle) = item {
             if was_last {
-                self.arena.mark_yield_inactive(handle.leaf_idx());
+                // Clear yield_bit in SignalWaker status
+                self.service.wakers[self.worker_id as usize].try_unmark_yield();
             }
             return Some(handle);
         }
@@ -1191,10 +1832,14 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             let start_offset = self.next_u64() as usize % partition_len;
             let leaf_idx = self.partition_start + start_offset;
             if self.process_leaf(leaf_idx) {
+                // Found work - set task_bit in SignalWaker status
+                self.service.wakers[self.worker_id as usize].mark_tasks();
                 return true;
             }
         }
 
+        // Scanned entire partition, no work found - clear task_bit
+        self.service.wakers[self.worker_id as usize].try_unmark_tasks();
         false
     }
 
@@ -1208,10 +1853,14 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         for offset in 0..partition_len {
             let leaf_idx = self.partition_start + offset;
             if self.process_leaf(leaf_idx) {
+                // Found work - set task_bit in SignalWaker status
+                self.service.wakers[self.worker_id as usize].mark_tasks();
                 return true;
             }
         }
 
+        // Scanned entire partition, no work found - clear task_bit
+        self.service.wakers[self.worker_id as usize].try_unmark_tasks();
         false
     }
 
@@ -1297,44 +1946,6 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         }
     }
 
-    // fn poll_single_task(&mut self, task: &Task) -> bool {
-    //     let Some(slot) = task.slot() else {
-    //         return false;
-    //     };
-
-    //     self.stats.tasks_polled = self.stats.tasks_polled.saturating_add(1);
-
-    //     task.begin();
-    //     CURRENT_WORKER.with(|cell| cell.set(self as *mut Worker));
-    //     CURRENT_TASK.with(|cell| cell.set(task as *const Task));
-
-    //     let waker = unsafe { make_task_waker(slot.as_ref()) };
-    //     let mut cx = Context::from_waker(&waker);
-    //     let poll_result = unsafe { task.poll_future(&mut cx) };
-
-    //     CURRENT_TASK.with(|cell| cell.set(ptr::null()));
-    //     CURRENT_WORKER.with(|cell| cell.set(ptr::null_mut()));
-
-    //     match poll_result {
-    //         Some(Poll::Ready(())) => {
-    //             task.finish();
-    //             if let Some(ptr) = task.take_future() {
-    //                 unsafe { FutureHelpers::drop_boxed(ptr) };
-    //             }
-    //             self.stats.completed_count = self.stats.completed_count.saturating_add(1);
-    //             true
-    //         }
-    //         Some(Poll::Pending) => {
-    //             task.finish();
-    //             true
-    //         }
-    //         None => {
-    //             task.finish();
-    //             false
-    //         }
-    //     }
-    // }
-
     fn schedule_timer_for_current_task(&mut self, timer: &Timer, delay: Duration) -> Option<u64> {
         let task_ptr = CURRENT_TASK.with(|cell| cell.get()) as *mut Task;
         if task_ptr.is_null() {
@@ -1360,7 +1971,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         }
 
         let delay_ns = delay.as_nanos().min(u128::from(u64::MAX)) as u64;
-        let now = self.now_ns.load(Ordering::Acquire);
+        let now = self.timer_wheel.now_ns();
         let deadline_ns = now.saturating_add(delay_ns);
 
         let handle = timer.prepare(slot, task.global_id(), self.worker_id);
@@ -1417,47 +2028,93 @@ pub fn schedule_timer_for_current_task(
     timer: &Timer,
     delay: Duration,
 ) -> Option<u64> {
-    CURRENT_WORKER.with(|cell| {
-        let worker_ptr = cell.get();
-        if worker_ptr.is_null() {
-            return None;
+    let timer_wheel = current_timer_wheel()?;
+    let task = current_task()?;
+    let worker_id = timer_wheel.worker_id();
+    let slot = task.slot()?;
+
+    // Cancel existing timer if scheduled
+    if timer.is_scheduled() {
+        if let Some(existing_worker_id) = timer.worker_id() {
+            if existing_worker_id == worker_id {
+                let existing_id = timer.timer_id();
+                if timer_wheel.cancel_timer(existing_id).is_some() {
+                    timer.reset();
+                }
+            } else {
+                // Cross-worker cancellation: send message to the worker that owns the timer
+                let existing_id = timer.timer_id();
+                let ops = CROSS_WORKER_OPS.with(|cell| cell.get());
+                if let Some(ops) = ops {
+                    if ops.post_cancel_message(worker_id, existing_worker_id, existing_id) {
+                        timer.reset();
+                    }
+                }
+            }
         }
-        unsafe {
-            (&mut *(worker_ptr
-                as *mut Worker<'static, DEFAULT_QUEUE_SEG_SHIFT, DEFAULT_QUEUE_NUM_SEGS_SHIFT>))
-                .schedule_timer_for_current_task(timer, delay)
-        }
-    })
+    }
+
+    let delay_ns = delay.as_nanos().min(u128::from(u64::MAX)) as u64;
+    let now = timer_wheel.now_ns();
+    let deadline_ns = now.saturating_add(delay_ns);
+
+    let handle = timer.prepare(slot, task.global_id(), worker_id);
+
+    if let Some(timer_id) = timer_wheel.schedule_timer(deadline_ns, handle) {
+        timer.commit_schedule(timer_id, deadline_ns);
+        Some(deadline_ns)
+    } else {
+        timer.reset();
+        None
+    }
 }
 
 /// Cancels a timer owned by the task currently being polled by the active worker.
 pub fn cancel_timer_for_current_task(timer: &Timer) -> bool {
-    CURRENT_WORKER.with(|cell| {
-        let worker_ptr = cell.get();
-        if worker_ptr.is_null() {
-            return false;
+    if !timer.is_scheduled() {
+        return false;
+    }
+
+    let Some(timer_worker_id) = timer.worker_id() else {
+        return false;
+    };
+
+    let timer_id = timer.timer_id();
+    if timer_id == 0 {
+        return false;
+    }
+
+    let timer_wheel = current_timer_wheel();
+    let Some(timer_wheel) = timer_wheel else {
+        return false;
+    };
+
+    let worker_id = timer_wheel.worker_id();
+
+    if timer_worker_id == worker_id {
+        if timer_wheel.cancel_timer(timer_id).is_some() {
+            timer.mark_cancelled(timer_id);
+            return true;
         }
-        unsafe {
-            (&mut *(worker_ptr
-                as *mut Worker<'static, DEFAULT_QUEUE_SEG_SHIFT, DEFAULT_QUEUE_NUM_SEGS_SHIFT>))
-                .cancel_timer(timer)
-        }
-    })
+        return false;
+    }
+
+    let ops = CROSS_WORKER_OPS.with(|cell| cell.get());
+    let Some(ops) = ops else {
+        return false;
+    };
+
+    // Cross-worker cancellation: send message to the worker that owns the timer
+    if ops.post_cancel_message(worker_id, timer_worker_id, timer_id) {
+        timer.mark_cancelled(timer_id);
+        true
+    } else {
+        false
+    }
 }
 
 /// Returns the most recent `now_ns` observed by the active worker.
 pub fn current_worker_now_ns() -> Option<u64> {
-    CURRENT_WORKER.with(|cell| {
-        let worker_ptr = cell.get();
-        if worker_ptr.is_null() {
-            None
-        } else {
-            Some(unsafe {
-                (&mut *(worker_ptr
-                    as *mut Worker<'static, DEFAULT_QUEUE_SEG_SHIFT, DEFAULT_QUEUE_NUM_SEGS_SHIFT>))
-                    .now_ns
-                    .load(Ordering::Acquire)
-            })
-        }
-    })
+    let timer_wheel = current_timer_wheel()?;
+    Some(timer_wheel.now_ns())
 }

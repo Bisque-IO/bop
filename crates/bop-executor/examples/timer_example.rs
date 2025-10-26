@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let iterations = 16;
 
     let arena_config = ArenaConfig::new(4, 256)?;
-    let runtime = Runtime::new(arena_config, ArenaOptions::default(), workers.min(4))?;
+    let runtime: Runtime<10, 6> = Runtime::new(arena_config, ArenaOptions::default(), workers.min(4))?;
     let operations = Arc::new(AtomicUsize::new(0));
 
     let start = Instant::now();

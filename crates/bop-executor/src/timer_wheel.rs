@@ -37,6 +37,17 @@ pub struct TimerWheel<T> {
     /// Number of active timers
     timer_count: u64,
 
+    /// Cached next deadline for efficient querying
+    /// Set to null_deadline when no timers scheduled or cache is invalid
+    cached_next_deadline: u64,
+
+    /// Current time in nanoseconds (updated during poll and by supervisor thread)
+    /// Atomic because supervisor thread writes while worker thread reads
+    now_ns: AtomicU64,
+
+    /// Worker ID that owns this timer wheel
+    worker_id: u32,
+
     /// Number of ticks/spokes per wheel (must be power of 2)
     ticks_per_wheel: usize,
 
@@ -74,12 +85,19 @@ impl<T> TimerWheel<T> {
     /// * `start_time` - Starting instant for the wheel
     /// * `tick_resolution` - Duration of each tick (must be power of 2 nanoseconds)
     /// * `ticks_per_wheel` - Number of spokes in the wheel (must be power of 2)
-    pub fn new(start_time: Instant, tick_resolution: Duration, ticks_per_wheel: usize) -> Self {
+    /// * `worker_id` - Worker ID that owns this timer wheel
+    pub fn new(
+        start_time: Instant,
+        tick_resolution: Duration,
+        ticks_per_wheel: usize,
+        worker_id: u32,
+    ) -> Self {
         Self::with_allocation(
             start_time,
             tick_resolution,
             ticks_per_wheel,
             Self::INITIAL_TICK_ALLOCATION,
+            worker_id,
         )
     }
 
@@ -89,6 +107,7 @@ impl<T> TimerWheel<T> {
         tick_resolution: Duration,
         ticks_per_wheel: usize,
         initial_tick_allocation: usize,
+        worker_id: u32,
     ) -> Self {
         assert!(
             ticks_per_wheel.is_power_of_two(),
@@ -126,6 +145,9 @@ impl<T> TimerWheel<T> {
             start_time_ns,
             current_tick: 0,
             timer_count: 0,
+            cached_next_deadline: Self::NULL_DEADLINE,
+            now_ns: AtomicU64::new(0),
+            worker_id,
             ticks_per_wheel,
             tick_mask,
             resolution_bits_to_shift,
@@ -154,6 +176,10 @@ impl<T> TimerWheel<T> {
         if hint < self.tick_allocation && self.wheel[hint_index].is_none() {
             self.wheel[hint_index] = Some((deadline_ns, data));
             self.timer_count += 1;
+            // Update cached deadline if this is earlier
+            if deadline_ns < self.cached_next_deadline {
+                self.cached_next_deadline = deadline_ns;
+            }
             // Update hint to next slot
             self.next_free_hint[spoke_index] = hint + 1;
             return Some(Self::timer_id_for_slot(spoke_index, hint));
@@ -167,6 +193,10 @@ impl<T> TimerWheel<T> {
             if self.wheel[index].is_none() {
                 self.wheel[index] = Some((deadline_ns, data));
                 self.timer_count += 1;
+                // Update cached deadline if this is earlier
+                if deadline_ns < self.cached_next_deadline {
+                    self.cached_next_deadline = deadline_ns;
+                }
                 // Update hint past this slot
                 self.next_free_hint[spoke_index] = (slot_idx + 1) % self.tick_allocation;
                 return Some(Self::timer_id_for_slot(spoke_index, slot_idx));
@@ -174,7 +204,12 @@ impl<T> TimerWheel<T> {
         }
 
         // Need to increase capacity
-        self.increase_capacity(deadline_ns, spoke_index, data)
+        let result = self.increase_capacity(deadline_ns, spoke_index, data);
+        // Update cached deadline if successful and this is earlier
+        if result.is_some() && deadline_ns < self.cached_next_deadline {
+            self.cached_next_deadline = deadline_ns;
+        }
+        result
     }
 
     /// Cancel a previously scheduled timer
@@ -185,8 +220,14 @@ impl<T> TimerWheel<T> {
         let wheel_index = (spoke_index << self.allocation_bits_to_shift) + tick_index;
 
         if spoke_index < self.ticks_per_wheel && tick_index < self.tick_allocation {
-            if let Some((_, data)) = self.wheel[wheel_index].take() {
+            if let Some((deadline_ns, data)) = self.wheel[wheel_index].take() {
                 self.timer_count -= 1;
+
+                // If we canceled the cached next deadline, we need to recompute
+                if deadline_ns == self.cached_next_deadline {
+                    self.recompute_cached_deadline();
+                }
+
                 return Some(data);
             }
         }
@@ -203,6 +244,9 @@ impl<T> TimerWheel<T> {
         expiry_limit: usize,
         output: &mut Vec<(u64, u64, T)>,
     ) -> usize {
+        // Update current time
+        self.now_ns.store(now_ns, Ordering::Release);
+
         output.clear();
 
         if self.timer_count == 0 {
@@ -229,6 +273,11 @@ impl<T> TimerWheel<T> {
 
                     let timer_id = Self::timer_id_for_slot(spoke_index, self.poll_index);
                     output.push((timer_id, deadline, data));
+
+                    // If we polled the cached next deadline, mark cache as needing update
+                    if deadline == self.cached_next_deadline {
+                        self.cached_next_deadline = self.null_deadline;
+                    }
                 }
             }
 
@@ -265,12 +314,77 @@ impl<T> TimerWheel<T> {
         self.timer_count
     }
 
+    /// Returns the deadline of the next timer to expire, or None if no timers are scheduled.
+    ///
+    /// Uses a cached value that is maintained during schedule/cancel/poll operations.
+    /// The cache is lazily recomputed only when necessary (after canceling/polling the
+    /// earliest timer).
+    ///
+    /// # Performance
+    ///
+    /// O(1) in the common case (cache hit).
+    /// O(n) when cache needs recomputation (after canceling/polling the earliest timer).
+    #[inline]
+    pub fn next_deadline(&mut self) -> Option<u64> {
+        if self.timer_count == 0 {
+            return None;
+        }
+
+        // Lazy recomputation if cache is invalid
+        if self.cached_next_deadline == self.null_deadline {
+            self.recompute_cached_deadline();
+        }
+
+        if self.cached_next_deadline == self.null_deadline {
+            None
+        } else {
+            Some(self.cached_next_deadline)
+        }
+    }
+
+    /// Get the current time in nanoseconds
+    /// This is updated each time poll() is called
+    /// Uses Relaxed ordering since exact synchronization with updates is not required
+    #[inline]
+    pub fn now_ns(&self) -> u64 {
+        self.now_ns.load(Ordering::Relaxed)
+    }
+
+    /// Update the current time in nanoseconds
+    /// Typically updated via poll(), but can be set manually by supervisor thread
+    /// Uses Release ordering so timer scheduling sees up-to-date time
+    #[inline]
+    pub fn set_now_ns(&mut self, now_ns: u64) {
+        self.now_ns.store(now_ns, Ordering::Release);
+    }
+
+    /// Get the worker ID that owns this timer wheel
+    #[inline]
+    pub fn worker_id(&self) -> u32 {
+        self.worker_id
+    }
+
+    /// Recompute the cached next deadline by scanning all slots.
+    /// Called when the cache is invalidated (after cancel/poll of earliest timer).
+    fn recompute_cached_deadline(&mut self) {
+        let mut earliest = self.null_deadline;
+        for slot in &self.wheel {
+            if let Some((deadline_ns, _)) = slot {
+                if *deadline_ns < earliest {
+                    earliest = *deadline_ns;
+                }
+            }
+        }
+        self.cached_next_deadline = earliest;
+    }
+
     /// Clear all timers
     pub fn clear(&mut self) {
         for slot in &mut self.wheel {
             *slot = None;
         }
         self.timer_count = 0;
+        self.cached_next_deadline = self.null_deadline;
     }
 
     fn increase_capacity(&mut self, deadline_ns: u64, spoke_index: usize, data: T) -> Option<u64> {
@@ -334,7 +448,7 @@ mod tests {
     #[test]
     fn test_basic_scheduling() {
         let start = Instant::now();
-        let mut wheel = TimerWheel::<u32>::new(start, Duration::from_nanos(1024 * 1024), 256);
+        let mut wheel = TimerWheel::<u32>::new(start, Duration::from_nanos(1024 * 1024), 256, 0);
 
         let timer_id = wheel.schedule_timer(100, 42).unwrap();
         assert_eq!(wheel.timer_count(), 1);
@@ -347,7 +461,7 @@ mod tests {
     #[test]
     fn test_expiry() {
         let start = Instant::now();
-        let mut wheel = TimerWheel::<&str>::new(start, Duration::from_nanos(1024 * 1024), 256);
+        let mut wheel = TimerWheel::<&str>::new(start, Duration::from_nanos(1024 * 1024), 256, 0);
 
         wheel.schedule_timer(5, "task1").unwrap();
         wheel.schedule_timer(15, "task2").unwrap();

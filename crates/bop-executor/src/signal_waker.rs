@@ -113,6 +113,8 @@ pub struct SignalWaker {
     /// - Consumer: Reads via `snapshot_summary()`, clears via `try_unmark_if_empty()`
     summary: CachePadded<AtomicU64>,
 
+    status: CachePadded<AtomicU64>,
+
     /// **Counting semaphore**: Number of threads that should be awake (available permits).
     ///
     /// Incremented by producers when queues become active (0→1 transitions).
@@ -157,6 +159,7 @@ impl SignalWaker {
     pub fn new() -> Self {
         Self {
             summary: CachePadded::new(AtomicU64::new(0)),
+            status: CachePadded::new(AtomicU64::new(0)),
             permits: CachePadded::new(AtomicU64::new(0)),
             sleepers: CachePadded::new(AtomicUsize::new(0)),
             worker_count: CachePadded::new(AtomicUsize::new(0)),
@@ -168,6 +171,54 @@ impl SignalWaker {
     // ────────────────────────────────────────────────────────────────────────────
     // PRODUCER-SIDE API
     // ────────────────────────────────────────────────────────────────────────────
+
+    #[inline]
+    pub fn status(&self) -> u64 {
+        self.status.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn status_bits(&self) -> (bool, bool) {
+        let status = self.status.load(Ordering::Relaxed);
+        // (yield, tasks)
+        (status & (1u64 << 0) != 0, status & (1u64 << 1) != 0)
+    }
+
+    #[inline]
+    pub fn mark_yield(&self) {
+        if is_set(&self.status, 0) {
+            return;
+        }
+        let prev = self.status.fetch_or(1u64 << 0, Ordering::Relaxed);
+        if prev & (1u64 << 0) == 0 {
+            self.release(1);
+        }
+    }
+
+    #[inline]
+    pub fn try_unmark_yield(&self) {
+        if is_set(&self.status, 0) {
+            self.summary.fetch_and(!(1u64 << 0), Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn mark_tasks(&self) {
+        if is_set(&self.status, 1) {
+            return;
+        }
+        let prev = self.status.fetch_or(1u64 << 1, Ordering::Relaxed);
+        if prev & (1u64 << 1) == 0 {
+            self.release(1);
+        }
+    }
+
+    #[inline]
+    pub fn try_unmark_tasks(&self) {
+        if is_set(&self.status, 1) {
+            self.summary.fetch_and(!(1u64 << 1), Ordering::Relaxed);
+        }
+    }
 
     /// Marks a signal word at `index` (0..63) as active in the summary.
     ///
@@ -245,6 +296,47 @@ impl SignalWaker {
         }
     }
 
+    /// Clears the summary bit for `bit_index` if the corresponding signal word is empty.
+    ///
+    /// This is **lazy cleanup** - consumers call this after draining a word to prevent
+    /// false positives in future `snapshot_summary()` calls. However, it's safe to skip
+    /// this; the system remains correct with stale summary bits.
+    ///
+    /// # Arguments
+    ///
+    /// * `bit_index` - Word index (0..63) to potentially clear
+    /// * `signal` - The actual signal word to check for emptiness
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // After draining all queues in word 3
+    /// waker.try_unmark_if_empty(3, &signal_word_3);
+    /// ```
+    #[inline]
+    pub fn try_unmark_if_empty(&self, bit_index: u64, signal: &AtomicU64) {
+        if signal.load(Ordering::Relaxed) == 0 {
+            self.summary
+                .fetch_and(!(1u64 << bit_index), Ordering::Relaxed);
+        }
+    }
+
+    /// Unconditionally clears the summary bit for `bit_index`.
+    ///
+    /// Faster than `try_unmark_if_empty()` when the caller already knows
+    /// the word is empty (avoids checking the signal word).
+    ///
+    /// # Arguments
+    ///
+    /// * `bit_index` - Word index (0..63) to clear
+    #[inline]
+    pub fn try_unmark(&self, bit_index: u64) {
+        if is_set(&self.summary, bit_index) {
+            self.summary
+                .fetch_and(!(1u64 << bit_index), Ordering::Relaxed);
+        }
+    }
+
     // ────────────────────────────────────────────────────────────────────────────
     // CONSUMER-SIDE API
     // ────────────────────────────────────────────────────────────────────────────
@@ -304,47 +396,6 @@ impl SignalWaker {
     #[inline]
     pub fn summary_select(&self, nearest_to_index: u64) -> u64 {
         crate::bits::find_nearest(self.summary.load(Ordering::Relaxed), nearest_to_index)
-    }
-
-    /// Clears the summary bit for `bit_index` if the corresponding signal word is empty.
-    ///
-    /// This is **lazy cleanup** - consumers call this after draining a word to prevent
-    /// false positives in future `snapshot_summary()` calls. However, it's safe to skip
-    /// this; the system remains correct with stale summary bits.
-    ///
-    /// # Arguments
-    ///
-    /// * `bit_index` - Word index (0..63) to potentially clear
-    /// * `signal` - The actual signal word to check for emptiness
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // After draining all queues in word 3
-    /// waker.try_unmark_if_empty(3, &signal_word_3);
-    /// ```
-    #[inline]
-    pub fn try_unmark_if_empty(&self, bit_index: u64, signal: &AtomicU64) {
-        if signal.load(Ordering::Relaxed) == 0 {
-            self.summary
-                .fetch_and(!(1u64 << bit_index), Ordering::Relaxed);
-        }
-    }
-
-    /// Unconditionally clears the summary bit for `bit_index`.
-    ///
-    /// Faster than `try_unmark_if_empty()` when the caller already knows
-    /// the word is empty (avoids checking the signal word).
-    ///
-    /// # Arguments
-    ///
-    /// * `bit_index` - Word index (0..63) to clear
-    #[inline]
-    pub fn try_unmark(&self, bit_index: u64) {
-        if is_set(&self.summary, bit_index) {
-            self.summary
-                .fetch_and(!(1u64 << bit_index), Ordering::Relaxed);
-        }
     }
 
     // ────────────────────────────────────────────────────────────────────────────
