@@ -143,7 +143,6 @@ impl<T: Copy> ThreadLocalWheel<T> {
         Self {
             thread_id,
             wheel: UnsafeCell::new(TimerWheel::new(
-                start_time,
                 tick_resolution,
                 ticks_per_wheel,
                 thread_id as u32,

@@ -328,12 +328,7 @@ impl TimerWheelShared {
         let start_time = Instant::now();
         Arc::new(Self {
             // 1ms tick resolution, 512 ticks = 512ms wheel coverage
-            wheel: Mutex::new(TimerWheel::new(
-                start_time,
-                Duration::from_millis(1),
-                512,
-                0,
-            )),
+            wheel: Mutex::new(TimerWheel::new(Duration::from_millis(1), 512, 0)),
             shutdown: AtomicBool::new(false),
             start_time,
         })

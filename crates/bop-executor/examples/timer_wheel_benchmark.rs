@@ -559,7 +559,6 @@ fn benchmark_sharded_multithreaded(
         (0..num_shards)
             .map(|shard_id| {
                 Arc::new(Mutex::new(TimerWheel::with_allocation(
-                    start_time,
                     tick_res,
                     ticks,
                     initial_allocation,
@@ -706,7 +705,6 @@ fn benchmark_sharded_multithreaded(
         (0..num_shards)
             .map(|shard_id| {
                 Arc::new(Mutex::new(TimerWheel::with_allocation(
-                    start_time,
                     tick_res,
                     ticks,
                     initial_allocation,
@@ -857,7 +855,6 @@ fn benchmark_sharded_vs_single(num_threads: usize, timers_per_thread: usize) {
         let mut wheels: Vec<TimerWheel<u32>> = (0..num_threads)
             .map(|thread_id| {
                 TimerWheel::with_allocation(
-                    start_time,
                     tick_res,
                     ticks,
                     initial_allocation / num_threads,
@@ -903,7 +900,6 @@ fn benchmark_sharded_vs_single(num_threads: usize, timers_per_thread: usize) {
         let wheels: Vec<Arc<Mutex<TimerWheel<u32>>>> = (0..num_threads)
             .map(|thread_id| {
                 Arc::new(Mutex::new(TimerWheel::with_allocation(
-                    start_time,
                     tick_res,
                     ticks,
                     initial_allocation / num_threads,

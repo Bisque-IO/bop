@@ -30,7 +30,7 @@ const DEFAULT_WAKE_BURST: usize = 4;
 const FULL_SUMMARY_SCAN_CADENCE_MASK: u64 = 1024 * 1024 - 1;
 const DEFAULT_TICK_DURATION_NS: u64 = 1 << 20; // ~1.05ms, power of two as required by TimerWheel
 const TIMER_TICKS_PER_WHEEL: usize = 1024;
-const TIMER_EXPIRE_BUDGET: usize = 256;
+const TIMER_EXPIRE_BUDGET: usize = 4096;
 const MESSAGE_BATCH_SIZE: usize = 4096;
 
 // Worker status is now managed via SignalWaker:
@@ -325,7 +325,6 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         let mut timers = Vec::with_capacity(max_workers);
         for worker_id in 0..max_workers {
             timers.push(UnsafeCell::new(TimerWheel::new(
-                Instant::now(),
                 tick_duration,
                 TIMER_TICKS_PER_WHEEL,
                 worker_id as u32,
@@ -1085,7 +1084,7 @@ impl WaitStrategy {
 
 impl Default for WaitStrategy {
     fn default() -> Self {
-        Self::new(64, Some(Duration::from_millis(1)))
+        Self::new(0, Some(Duration::from_millis(100)))
     }
 }
 
@@ -1137,21 +1136,33 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
     pub(crate) fn run(&mut self) {
         let mut spin_count = 0;
-        while !self.shutdown.load(Ordering::Acquire) {
+        while !self.shutdown.load(Ordering::Relaxed) {
             let progress = self.run_once();
-            if !progress && !self.has_work() {
+            if !progress {
                 if spin_count < self.wait_strategy.spin_before_sleep {
                     spin_count += 1;
                     std::hint::spin_loop();
                 } else {
                     // Calculate sleep duration considering timer deadlines
                     let sleep_duration = self.calculate_park_duration();
+                    println!(
+                        "number_of_timers: {} park duration: {}",
+                        self.timer_wheel.timer_count(),
+                        sleep_duration
+                            .unwrap_or(Duration::from_millis(0))
+                            .as_nanos()
+                    );
 
                     if let Some(duration) = sleep_duration {
-                        thread::sleep(duration);
+                        // if duration.as_nanos() == 0 {
+                        //     thread::park_timeout(Duration::from_millis(250));
+                        // } else {
+                        // }
+                        thread::park_timeout(duration);
+                        // thread::sleep(duration);
                     } else {
                         // Park with a timeout so we wake up periodically to check shutdown flag
-                        thread::park_timeout(Duration::from_millis(100));
+                        thread::park_timeout(Duration::from_millis(250));
                     }
                     spin_count = 0;
                 }
@@ -1402,6 +1413,11 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             return false;
         }
 
+        // if task.try_begin_inline().is_ok() {
+        //     // self.poll_task(TaskHandle::from_task(task), task);
+        //     task.schedule();
+        // } else {
+        // }
         task.schedule();
         self.stats.timer_fires = self.stats.timer_fires.saturating_add(1);
         true
@@ -1462,6 +1478,10 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
         let mut did_work = false;
 
+        if self.poll_timers() {
+            did_work = true;
+        }
+
         // Process messages first (including shutdown signals)
         if self.process_messages() {
             did_work = true;
@@ -1499,9 +1519,9 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             }
         }
 
-        if self.poll_timers() {
-            did_work = true;
-        }
+        // if self.poll_timers() {
+        //     did_work = true;
+        // }
 
         if !did_work {
             if self.poll_yield(self.yield_queue.len() as usize) > 0 {
@@ -1913,6 +1933,10 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             task.clear_yielded();
         }
 
+        self.poll_task(handle, task);
+    }
+
+    fn poll_task(&mut self, handle: TaskHandle, task: &Task) {
         let waker = unsafe { task.waker_yield() };
         let mut cx = Context::from_waker(&waker);
         let poll_result = unsafe { task.poll_future(&mut cx) };

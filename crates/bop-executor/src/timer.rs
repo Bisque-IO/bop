@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,6 +186,7 @@ impl Default for Timer {
 pub struct TimerDelay<'a> {
     timer: &'a Timer,
     delay: Duration,
+    deadline: Instant,
     scheduled: bool,
 }
 
@@ -195,6 +196,7 @@ impl<'a> TimerDelay<'a> {
         Self {
             timer,
             delay,
+            deadline: Instant::now().checked_add(delay).unwrap(),
             scheduled: false,
         }
     }
@@ -211,27 +213,38 @@ impl<'a> Future for TimerDelay<'a> {
             return Poll::Pending;
         }
 
-        match self.timer.state() {
-            TimerState::Idle | TimerState::Cancelled => {
-                self.scheduled = false;
-                Poll::Ready(())
-            }
-            TimerState::Scheduled => {
-                let deadline = self.timer.deadline_ns();
-                if deadline == 0 {
-                    return Poll::Pending;
-                }
-
-                if let Some(now_ns) = current_worker_now_ns() {
-                    if now_ns >= deadline {
-                        self.timer.reset();
-                        self.scheduled = false;
-                        return Poll::Ready(());
-                    }
-                }
-                Poll::Pending
-            }
+        if Instant::now() >= self.deadline {
+            return Poll::Ready(());
         }
+
+        Poll::Pending
+
+        // match self.timer.state() {
+        //     TimerState::Idle | TimerState::Cancelled => {
+        //         println!("TimerDelay::Idle | Cancelled");
+        //         self.scheduled = false;
+        //         Poll::Ready(())
+        //     }
+        //     TimerState::Scheduled => {
+        //         let deadline = self.timer.deadline_ns();
+        //         if deadline == 0 {
+        //             println!("TimerDelay deadline = 0");
+        //             return Poll::Pending;
+        //         }
+
+        //         if let Some(now_ns) = current_worker_now_ns() {
+        //             println!("TimerDelay now_ns = {}", now_ns);
+        //             if now_ns >= deadline {
+        //                 self.timer.reset();
+        //                 self.scheduled = false;
+        //                 println!("TimerDelay now_ns >= deadline!");
+        //                 return Poll::Ready(());
+        //             }
+        //         }
+        //         println!("TimerDelay Pending");
+        //         Poll::Pending
+        //     }
+        // }
     }
 }
 

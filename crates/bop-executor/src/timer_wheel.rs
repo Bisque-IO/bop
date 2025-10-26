@@ -82,18 +82,15 @@ impl<T> TimerWheel<T> {
     /// Create new timer wheel
     ///
     /// # Arguments
-    /// * `start_time` - Starting instant for the wheel
     /// * `tick_resolution` - Duration of each tick (must be power of 2 nanoseconds)
     /// * `ticks_per_wheel` - Number of spokes in the wheel (must be power of 2)
     /// * `worker_id` - Worker ID that owns this timer wheel
-    pub fn new(
-        start_time: Instant,
-        tick_resolution: Duration,
-        ticks_per_wheel: usize,
-        worker_id: u32,
-    ) -> Self {
+    ///
+    /// # Timer Deadlines
+    /// All timer deadlines are specified as nanoseconds elapsed since wheel creation.
+    /// This allows the wheel to track time independently without needing an external clock source.
+    pub fn new(tick_resolution: Duration, ticks_per_wheel: usize, worker_id: u32) -> Self {
         Self::with_allocation(
-            start_time,
             tick_resolution,
             ticks_per_wheel,
             Self::INITIAL_TICK_ALLOCATION,
@@ -102,8 +99,13 @@ impl<T> TimerWheel<T> {
     }
 
     /// Create timer wheel with custom initial allocation per tick
+    ///
+    /// # Arguments
+    /// * `tick_resolution` - Duration of each tick (must be power of 2 nanoseconds)
+    /// * `ticks_per_wheel` - Number of spokes in the wheel (must be power of 2)
+    /// * `initial_tick_allocation` - Initial number of timer slots per spoke (must be power of 2)
+    /// * `worker_id` - Worker ID that owns this timer wheel
     pub fn with_allocation(
-        start_time: Instant,
         tick_resolution: Duration,
         ticks_per_wheel: usize,
         initial_tick_allocation: usize,
@@ -161,10 +163,14 @@ impl<T> TimerWheel<T> {
 
     /// Schedule a timer for an absolute deadline
     /// Returns timer_id for future cancellation, or None if failed
+    ///
+    /// Timers with deadlines in the past will be placed in their natural spoke
+    /// and will fire on the next poll() call.
     pub fn schedule_timer(&mut self, deadline_ns: u64, data: T) -> Option<u64> {
-        let deadline_tick = ((deadline_ns.saturating_sub(self.start_time_ns))
-            >> self.resolution_bits_to_shift)
-            .max(self.current_tick);
+        let deadline_tick =
+            (deadline_ns.saturating_sub(self.start_time_ns)) >> self.resolution_bits_to_shift;
+        // Don't use .max(current_tick) - let the hash table work naturally
+        // Expired timers go in their correct spoke and will be found when poll() scans
         let spoke_index = (deadline_tick & self.tick_mask as u64) as usize;
         let tick_start_index = spoke_index << self.allocation_bits_to_shift;
 
@@ -250,48 +256,51 @@ impl<T> TimerWheel<T> {
         output.clear();
 
         if self.timer_count == 0 {
-            if now_ns >= self.current_tick_time_ns() {
-                self.current_tick += 1;
-                self.poll_index = 0;
-            }
+            self.advance_to(now_ns);
             return 0;
         }
 
-        let spoke_index = (self.current_tick & self.tick_mask as u64) as usize;
+        // Don't skip ticks - scan each spoke that needs to be checked
+        let target_tick =
+            (now_ns.saturating_sub(self.start_time_ns)) >> self.resolution_bits_to_shift;
 
-        for _ in 0..self.tick_allocation {
-            if output.len() >= expiry_limit {
-                break;
-            }
+        // Continue scanning until we reach the target tick or hit expiry limit
+        while self.current_tick <= target_tick
+            && output.len() < expiry_limit
+            && self.timer_count > 0
+        {
+            let spoke_index = (self.current_tick & self.tick_mask as u64) as usize;
 
-            let wheel_index = (spoke_index << self.allocation_bits_to_shift) + self.poll_index;
+            // Scan all slots in this spoke starting from poll_index
+            while self.poll_index < self.tick_allocation {
+                if output.len() >= expiry_limit {
+                    // Hit expiry limit - return without advancing tick
+                    // Next poll() will continue from current position
+                    return output.len();
+                }
 
-            if let Some((deadline, data)) = &self.wheel[wheel_index] {
-                if now_ns >= *deadline {
-                    let (deadline, data) = self.wheel[wheel_index].take().unwrap();
-                    self.timer_count -= 1;
+                let wheel_index = (spoke_index << self.allocation_bits_to_shift) + self.poll_index;
 
-                    let timer_id = Self::timer_id_for_slot(spoke_index, self.poll_index);
-                    output.push((timer_id, deadline, data));
+                if let Some((deadline, data)) = &self.wheel[wheel_index] {
+                    if now_ns >= *deadline {
+                        let (deadline, data) = self.wheel[wheel_index].take().unwrap();
+                        self.timer_count -= 1;
 
-                    // If we polled the cached next deadline, mark cache as needing update
-                    if deadline == self.cached_next_deadline {
-                        self.cached_next_deadline = self.null_deadline;
+                        let timer_id = Self::timer_id_for_slot(spoke_index, self.poll_index);
+                        output.push((timer_id, deadline, data));
+
+                        // If we polled the cached next deadline, mark cache as needing update
+                        if deadline == self.cached_next_deadline {
+                            self.cached_next_deadline = self.null_deadline;
+                        }
                     }
                 }
+
+                self.poll_index += 1;
             }
 
-            self.poll_index = if self.poll_index + 1 >= self.tick_allocation {
-                0
-            } else {
-                self.poll_index + 1
-            };
-        }
-
-        if output.len() < expiry_limit && now_ns >= self.current_tick_time_ns() {
+            // Finished scanning this spoke, move to next tick
             self.current_tick += 1;
-            self.poll_index = 0;
-        } else if self.poll_index >= self.tick_allocation {
             self.poll_index = 0;
         }
 
@@ -367,14 +376,35 @@ impl<T> TimerWheel<T> {
     /// Recompute the cached next deadline by scanning all slots.
     /// Called when the cache is invalidated (after cancel/poll of earliest timer).
     fn recompute_cached_deadline(&mut self) {
+        if self.timer_count == 0 {
+            self.cached_next_deadline = self.null_deadline;
+            return;
+        }
+
         let mut earliest = self.null_deadline;
-        for slot in &self.wheel {
-            if let Some((deadline_ns, _)) = slot {
-                if *deadline_ns < earliest {
-                    earliest = *deadline_ns;
+        let spoke_index = (self.current_tick & self.tick_mask as u64) as usize;
+
+        // Start from current position and scan the entire wheel
+        // This matches the poll order: current spoke from poll_index onwards,
+        // then remaining spokes, wrapping around
+        for spoke_offset in 0..self.ticks_per_wheel {
+            let spoke = (spoke_index + spoke_offset) % self.ticks_per_wheel;
+            let start_slot = if spoke == spoke_index {
+                self.poll_index
+            } else {
+                0
+            };
+
+            for slot_idx in start_slot..self.tick_allocation {
+                let wheel_index = (spoke << self.allocation_bits_to_shift) + slot_idx;
+                if let Some((deadline_ns, _)) = &self.wheel[wheel_index] {
+                    if *deadline_ns < earliest {
+                        earliest = *deadline_ns;
+                    }
                 }
             }
         }
+
         self.cached_next_deadline = earliest;
     }
 
@@ -416,9 +446,16 @@ impl<T> TimerWheel<T> {
         let timer_id = Self::timer_id_for_slot(spoke_index, self.tick_allocation);
         self.timer_count += 1;
 
+        let old_allocation = self.tick_allocation;
         self.tick_allocation = new_tick_allocation;
         self.allocation_bits_to_shift = new_allocation_bits;
         self.wheel = new_wheel;
+
+        // Reset all free hints to point to the start of newly allocated region
+        // This ensures O(1) performance for subsequent schedules
+        for hint in &mut self.next_free_hint {
+            *hint = old_allocation;
+        }
 
         Some(timer_id)
     }
