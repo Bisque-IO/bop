@@ -1420,11 +1420,6 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             return false;
         }
 
-        // if task.try_begin_inline().is_ok() {
-        //     // self.poll_task(TaskHandle::from_task(task), task);
-        //     task.schedule();
-        // } else {
-        // }
         task.schedule();
         self.stats.timer_fires = self.stats.timer_fires.saturating_add(1);
         true

@@ -213,8 +213,15 @@ impl<'a> Future for TimerDelay<'a> {
             return Poll::Pending;
         }
 
-        if Instant::now() >= self.deadline {
-            return Poll::Ready(());
+        // Check timer deadline using the worker's time source (same as timer wheel)
+        // rather than Instant::now() which may use a different clock on some platforms
+        let deadline = self.timer.deadline_ns();
+        if let Some(now_ns) = current_worker_now_ns() {
+            if now_ns >= deadline {
+                self.timer.reset();
+                self.scheduled = false;
+                return Poll::Ready(());
+            }
         }
 
         Poll::Pending

@@ -231,6 +231,10 @@ pub struct TimerWheel<T> {
 
     /// L0 coverage in nanoseconds (precalculated)
     l0_coverage_ns: u64,
+
+    /// Last L1 tick that was fully cascaded (to avoid re-cascading)
+    /// Uses Option to handle the case where no ticks have been cascaded yet
+    last_cascaded_l1_tick: Option<u64>,
 }
 
 impl<T> TimerWheel<T> {
@@ -278,6 +282,7 @@ impl<T> TimerWheel<T> {
             now_ns: AtomicU64::new(0),
             worker_id,
             l0_coverage_ns,
+            last_cascaded_l1_tick: None,
         }
     }
 
@@ -332,10 +337,18 @@ impl<T> TimerWheel<T> {
         let l1_target_tick =
             (now_ns.saturating_sub(self.start_time_ns)) >> self.l1.resolution_bits_to_shift;
 
-        // Cascade all L1 ticks up to and including the target tick
-        // This moves timers to L0 for precise deadline checking
-        while self.l1.current_tick <= l1_target_tick && self.l1.timer_count > 0 {
-            let spoke_index = (self.l1.current_tick & self.l1.tick_mask as u64) as usize;
+        // If no L1 timers, nothing to cascade
+        if self.l1.timer_count == 0 {
+            // Still update last_cascaded to avoid re-scanning empty ticks
+            self.last_cascaded_l1_tick = Some(l1_target_tick);
+            return;
+        }
+
+        // Cascade ALL L1 ticks from 0 to target_tick
+        // We can't skip ticks based on last_cascaded because new timers can be
+        // scheduled into already-cascaded ticks at any time
+        for current_tick in 0..=l1_target_tick {
+            let spoke_index = (current_tick & self.l1.tick_mask as u64) as usize;
             let tick_start = spoke_index << self.l1.allocation_bits_to_shift;
 
             // Collect all timers from this L1 spoke
@@ -353,17 +366,19 @@ impl<T> TimerWheel<T> {
 
             // Reset L1 spoke hint
             self.l1.next_free_hint[spoke_index] = 0;
-            self.l1.current_tick += 1;
         }
 
-        // Keep current_tick synchronized with target_tick after cascading
-        // This prevents current_tick from drifting ahead and getting stuck
-        // when we repeatedly cascade the same tick (as time advances within that tick)
-        self.l1.current_tick = l1_target_tick;
+        // Update last cascaded tick
+        self.last_cascaded_l1_tick = Some(l1_target_tick);
 
-        // Invalidate L1 cache after cascading
+        // Invalidate both L0 and L1 caches after cascading
+        // L0 cache must be invalidated because cascaded timers may have deadlines
+        // in past ticks (already processed), and recompute needs to scan all ticks to find them
         if self.l1.cached_next_deadline != SingleWheel::<T>::NULL_DEADLINE {
             self.l1.cached_next_deadline = SingleWheel::<T>::NULL_DEADLINE;
+        }
+        if self.l0.cached_next_deadline != SingleWheel::<T>::NULL_DEADLINE {
+            self.l0.cached_next_deadline = SingleWheel::<T>::NULL_DEADLINE;
         }
     }
 
@@ -373,34 +388,39 @@ impl<T> TimerWheel<T> {
         expiry_limit: usize,
         output: &mut Vec<(u64, u64, T)>,
     ) -> usize {
-        if self.l0.timer_count == 0 {
-            self.advance_to(now_ns);
-            return 0;
-        }
-
         let target_tick =
             (now_ns.saturating_sub(self.start_time_ns)) >> self.l0.resolution_bits_to_shift;
 
-        while self.l0.current_tick <= target_tick
-            && output.len() < expiry_limit
-            && self.l0.timer_count > 0
-        {
-            let spoke_index = (self.l0.current_tick & self.l0.tick_mask as u64) as usize;
+        // If no timers, just return without advancing current_tick
+        // current_tick will naturally catch up when timers are added via cascade
+        if self.l0.timer_count == 0 {
+            return 0;
+        }
 
-            while self.l0.poll_index < self.l0.tick_allocation {
+        // CRITICAL: After cascading, timers may exist in ticks BEFORE current_tick
+        // (if current_tick advanced while L0 was empty). We must scan ALL expired timers
+        // in the entire wheel, not just from current_tick forward.
+        // Use deadline-based expiry check, not tick-based.
+
+        // Scan all ticks that could contain expired timers
+        for spoke in 0..self.l0.ticks_per_wheel {
+            if output.len() >= expiry_limit {
+                break;
+            }
+
+            for slot_idx in 0..self.l0.tick_allocation {
                 if output.len() >= expiry_limit {
-                    return output.len();
+                    break;
                 }
 
-                let wheel_index =
-                    (spoke_index << self.l0.allocation_bits_to_shift) + self.l0.poll_index;
+                let wheel_index = (spoke << self.l0.allocation_bits_to_shift) + slot_idx;
 
                 if let Some((deadline, _)) = &self.l0.wheel[wheel_index] {
                     if now_ns >= *deadline {
                         let (deadline, data) = self.l0.wheel[wheel_index].take().unwrap();
                         self.l0.timer_count -= 1;
 
-                        let timer_id = Self::encode_timer_id(0, spoke_index, self.l0.poll_index);
+                        let timer_id = Self::encode_timer_id(0, spoke, slot_idx);
                         output.push((timer_id, deadline, data));
 
                         if deadline == self.l0.cached_next_deadline {
@@ -408,13 +428,12 @@ impl<T> TimerWheel<T> {
                         }
                     }
                 }
-
-                self.l0.poll_index += 1;
             }
-
-            self.l0.current_tick += 1;
-            self.l0.poll_index = 0;
         }
+
+        // Advance current_tick to target_tick since we've processed all expired timers
+        self.l0.current_tick = target_tick;
+        self.l0.poll_index = 0;
 
         output.len()
     }
@@ -480,17 +499,11 @@ impl<T> TimerWheel<T> {
         }
 
         let mut earliest = SingleWheel::<T>::NULL_DEADLINE;
-        let spoke_index = (self.l0.current_tick & self.l0.tick_mask as u64) as usize;
 
-        for spoke_offset in 0..self.l0.ticks_per_wheel {
-            let spoke = (spoke_index + spoke_offset) % self.l0.ticks_per_wheel;
-            let start_slot = if spoke == spoke_index {
-                self.l0.poll_index
-            } else {
-                0
-            };
-
-            for slot_idx in start_slot..self.l0.tick_allocation {
+        // CRITICAL: Must scan ENTIRE wheel since poll_l0 does full-wheel scans
+        // and doesn't maintain current_tick/poll_index in a meaningful way
+        for spoke in 0..self.l0.ticks_per_wheel {
+            for slot_idx in 0..self.l0.tick_allocation {
                 let wheel_index = (spoke << self.l0.allocation_bits_to_shift) + slot_idx;
                 if let Some((deadline_ns, _)) = &self.l0.wheel[wheel_index] {
                     if *deadline_ns < earliest {
