@@ -29,7 +29,7 @@ const RND_MASK: u64 = (1 << 48) - 1;
 const DEFAULT_WAKE_BURST: usize = 4;
 const FULL_SUMMARY_SCAN_CADENCE_MASK: u64 = 1024 * 1024 - 1;
 const DEFAULT_TICK_DURATION_NS: u64 = 1 << 20; // ~1.05ms, power of two as required by TimerWheel
-const TIMER_TICKS_PER_WHEEL: usize = 1024;
+const TIMER_TICKS_PER_WHEEL: usize = 1024 * 1;
 const TIMER_EXPIRE_BUDGET: usize = 4096;
 const MESSAGE_BATCH_SIZE: usize = 4096;
 
@@ -1181,6 +1181,13 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         // Check if we have pending timers
         if let Some(next_deadline_ns) = self.timer_wheel.next_deadline() {
             let now_ns = self.timer_wheel.now_ns();
+
+            println!(
+                "next_deadline: {} now_ns: {} diff: {}",
+                next_deadline_ns,
+                now_ns,
+                next_deadline_ns.saturating_sub(now_ns)
+            );
 
             if next_deadline_ns > now_ns {
                 let timer_duration_ns = next_deadline_ns - now_ns;

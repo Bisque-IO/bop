@@ -1,5 +1,5 @@
-#![feature(portable_simd)]
-#![feature(thread_id_value)]
+// #![feature(portable_simd)]
+// #![feature(thread_id_value)]
 #![allow(dead_code)]
 #![allow(unused_variables)]
 #![allow(unused_imports)]
@@ -26,7 +26,6 @@ pub mod deque;
 pub mod event;
 mod loom_exports;
 pub mod mpmc;
-pub mod mpmc_timer_wheel;
 pub mod mpsc;
 pub mod mpsc_dynamic;
 pub mod multishot;
