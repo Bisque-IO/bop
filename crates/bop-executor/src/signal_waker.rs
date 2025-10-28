@@ -148,6 +148,20 @@ pub struct SignalWaker {
     /// and will eventually reconfigure on the next periodic check.
     worker_count: CachePadded<AtomicUsize>,
 
+    /// **Partition summary**: Bitmap tracking which leafs in this worker's SummaryTree partition
+    /// have active tasks (up to 64 leafs per partition).
+    ///
+    /// Bit `i` corresponds to leaf `partition_start + i` in the global SummaryTree.
+    /// This allows each worker to maintain a cache-local view of its assigned partition,
+    /// enabling O(1) work checking without scanning the full tree.
+    ///
+    /// Updated via `sync_partition_summary()` before parking. Uses `Relaxed` ordering
+    /// since it's a hint (false positives are safe, workers verify actual task availability).
+    ///
+    /// When partition_summary transitions 0→non-zero, status bit 1 (STATUS_TASKS_AVAILABLE)
+    /// is set and a permit is added to wake the worker.
+    partition_summary: CachePadded<AtomicU64>,
+
     /// Mutex for condvar (only used in blocking paths)
     m: Mutex<()>,
 
@@ -163,6 +177,7 @@ impl SignalWaker {
             permits: CachePadded::new(AtomicU64::new(0)),
             sleepers: CachePadded::new(AtomicUsize::new(0)),
             worker_count: CachePadded::new(AtomicUsize::new(0)),
+            partition_summary: CachePadded::new(AtomicU64::new(0)),
             m: Mutex::new(()),
             cv: Condvar::new(),
         }
@@ -706,6 +721,197 @@ impl SignalWaker {
     #[inline]
     pub fn get_worker_count(&self) -> usize {
         self.worker_count.load(Ordering::Relaxed)
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // PARTITION SUMMARY MANAGEMENT
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// Synchronize partition summary from SummaryTree leaf range.
+    ///
+    /// Samples the worker's assigned partition of the SummaryTree and updates
+    /// the local `partition_summary` bitmap. When the partition transitions from
+    /// empty to non-empty, sets status bit 1 (STATUS_TASKS_AVAILABLE) and adds
+    /// a permit to wake the worker.
+    ///
+    /// This should be called before parking to ensure the worker doesn't sleep
+    /// when tasks are available in its partition.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_start` - First leaf index in this worker's partition
+    /// * `partition_end` - One past the last leaf index (exclusive)
+    /// * `leaf_words` - Slice of AtomicU64 leaf words from SummaryTree
+    ///
+    /// # Returns
+    ///
+    /// `true` if the partition currently has work, `false` otherwise
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if partition is larger than 64 leafs
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Before parking, sync partition status
+    /// let waker = &service.wakers[worker_id];
+    /// let has_work = waker.sync_partition_summary(
+    ///     self.partition_start,
+    ///     self.partition_end,
+    ///     &self.arena.active_tree().leaf_words,
+    /// );
+    /// ```
+    pub fn sync_partition_summary(
+        &self,
+        partition_start: usize,
+        partition_end: usize,
+        leaf_words: &[AtomicU64],
+    ) -> bool {
+        debug_assert!(
+            partition_end - partition_start <= 64,
+            "partition size {} exceeds 64-bit bitmap capacity",
+            partition_end - partition_start
+        );
+
+        let mut new_summary = 0u64;
+
+        // Sample leaf words in our partition
+        for leaf_idx in partition_start..partition_end {
+            if let Some(leaf_word) = leaf_words.get(leaf_idx) {
+                let leaf_value = leaf_word.load(Ordering::Relaxed);
+                if leaf_value != 0 {
+                    let bit_idx = leaf_idx - partition_start;
+                    new_summary |= 1u64 << bit_idx;
+                }
+            }
+        }
+
+        // Update partition summary
+        let old_summary = self.partition_summary.swap(new_summary, Ordering::Relaxed);
+
+        // Update status bit 1 based on summary
+        let had_work = old_summary != 0;
+        let has_work = new_summary != 0;
+
+        if has_work && !had_work {
+            // 0→1 transition: mark tasks available
+            self.mark_tasks();
+        } else if !has_work && had_work {
+            // 1→0 transition: try unmark
+            self.try_unmark_tasks();
+        }
+
+        has_work
+    }
+
+    /// Get current partition summary bitmap.
+    ///
+    /// Returns a bitmap where bit `i` indicates whether leaf `partition_start + i`
+    /// has active tasks. This is a snapshot and may become stale immediately.
+    ///
+    /// Uses `Relaxed` ordering since this is a hint for optimization purposes.
+    ///
+    /// # Returns
+    ///
+    /// Bitmap of active leafs in this worker's partition
+    #[inline]
+    pub fn partition_summary(&self) -> u64 {
+        self.partition_summary.load(Ordering::Relaxed)
+    }
+
+    /// Check if a specific leaf in the partition has work.
+    ///
+    /// # Arguments
+    ///
+    /// * `local_leaf_idx` - Leaf index relative to partition start (0-63)
+    ///
+    /// # Returns
+    ///
+    /// `true` if the leaf appears to have work based on the cached summary
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Check if first leaf in partition has work
+    /// if waker.partition_leaf_has_work(0) {
+    ///     // Try to acquire from that leaf
+    /// }
+    /// ```
+    #[inline]
+    pub fn partition_leaf_has_work(&self, local_leaf_idx: usize) -> bool {
+        debug_assert!(
+            local_leaf_idx < 64,
+            "local_leaf_idx {} out of range",
+            local_leaf_idx
+        );
+        let summary = self.partition_summary.load(Ordering::Relaxed);
+        summary & (1u64 << local_leaf_idx) != 0
+    }
+
+    /// Directly update partition summary for a specific leaf.
+    ///
+    /// This is called when a task is scheduled into a leaf to immediately update
+    /// the partition owner's summary without waiting for the next sync.
+    ///
+    /// # Arguments
+    ///
+    /// * `local_leaf_idx` - Leaf index relative to partition start (0-63)
+    ///
+    /// # Returns
+    ///
+    /// `true` if this was the first active leaf (partition was empty before)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // When scheduling a task, immediately update owner's partition summary
+    /// let owner_waker = &service.wakers[owner_id];
+    /// if owner_waker.mark_partition_leaf_active(local_leaf_idx) {
+    ///     // This was the first task - worker will be woken by mark_tasks()
+    /// }
+    /// ```
+    pub fn mark_partition_leaf_active(&self, local_leaf_idx: usize) -> bool {
+        debug_assert!(
+            local_leaf_idx < 64,
+            "local_leaf_idx {} out of range",
+            local_leaf_idx
+        );
+
+        let mask = 1u64 << local_leaf_idx;
+        let old_summary = self.partition_summary.fetch_or(mask, Ordering::Relaxed);
+
+        // If partition was empty, mark tasks available
+        if old_summary == 0 {
+            self.mark_tasks();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear partition summary for a specific leaf.
+    ///
+    /// Called when a leaf becomes empty. If this was the last active leaf,
+    /// attempts to clear the tasks status bit.
+    ///
+    /// # Arguments
+    ///
+    /// * `local_leaf_idx` - Leaf index relative to partition start (0-63)
+    pub fn clear_partition_leaf(&self, local_leaf_idx: usize) {
+        debug_assert!(
+            local_leaf_idx < 64,
+            "local_leaf_idx {} out of range",
+            local_leaf_idx
+        );
+
+        let mask = !(1u64 << local_leaf_idx);
+        let new_summary = self.partition_summary.fetch_and(mask, Ordering::Relaxed) & mask;
+
+        // If partition is now empty, try to unmark tasks
+        if new_summary == 0 {
+            self.try_unmark_tasks();
+        }
     }
 }
 

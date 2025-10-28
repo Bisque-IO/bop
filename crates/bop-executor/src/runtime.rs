@@ -17,7 +17,6 @@ pub struct Runtime<const P: usize = 10, const NUM_SEGS_P2: usize = 6> {
 }
 
 struct RuntimeInner<const P: usize, const NUM_SEGS_P2: usize> {
-    arena: Arc<ExecutorArena>,
     shutdown: Arc<AtomicBool>,
     service: Arc<WorkerService<P, NUM_SEGS_P2>>,
 }
@@ -29,39 +28,41 @@ impl<const P: usize, const NUM_SEGS_P2: usize> RuntimeInner<P, NUM_SEGS_P2> {
         F::IntoFuture: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        if self.shutdown.load(Ordering::Acquire) || self.arena.is_closed() {
+        let arena = self.service.arena();
+
+        if self.shutdown.load(Ordering::Acquire) || arena.is_closed() {
             return Err(SpawnError::Closed);
         }
 
-        let Some(handle) = self.arena.reserve_task() else {
-            return Err(if self.arena.is_closed() {
+        let Some(handle) = self.service.reserve_task() else {
+            return Err(if arena.is_closed() {
                 SpawnError::Closed
             } else {
                 SpawnError::NoCapacity
             });
         };
 
-        let global_id = handle.global_id(self.arena.tasks_per_leaf());
-        self.arena.init_task(global_id);
+        let global_id = handle.global_id(arena.tasks_per_leaf());
+        arena.init_task(global_id, self.service.summary_tree() as *const _);
 
         let task = handle.task();
         let release_handle = TaskHandle::from_non_null(handle.as_non_null());
-        let arena = Arc::clone(&self.arena);
+        let service = Arc::clone(&self.service);
         let shared = Arc::new(JoinShared::new());
         let shared_for_future = Arc::clone(&shared);
         let release_handle_for_future = release_handle;
-        let arena_for_future = Arc::clone(&self.arena);
+        let service_for_future = Arc::clone(&self.service);
 
         let join_future = async move {
             let result = future.into_future().await;
             shared_for_future.complete(result);
-            arena_for_future.release_task(release_handle_for_future);
+            service_for_future.release_task(release_handle_for_future);
         };
 
         let future_ptr = FutureAllocator::box_future(join_future);
         if task.attach_future(future_ptr).is_err() {
             unsafe { FutureAllocator::drop_boxed(future_ptr) };
-            self.arena.release_task(release_handle);
+            self.service.release_task(release_handle);
             return Err(SpawnError::AttachFailed);
         }
 
@@ -73,7 +74,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> RuntimeInner<P, NUM_SEGS_P2> {
         if self.shutdown.swap(true, Ordering::Release) {
             return;
         }
-        self.arena.close();
+        self.service.arena().close();
         self.service.shutdown();
     }
 }
@@ -84,7 +85,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
         options: ArenaOptions,
         worker_count: usize,
     ) -> io::Result<Self> {
-        let arena = Arc::new(ExecutorArena::with_config(config, options)?);
+        let arena = ExecutorArena::with_config(config, options)?;
 
         // Create config with desired worker count as min_workers
         // This ensures workers start immediately on WorkerService::start()
@@ -94,11 +95,10 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
             ..WorkerServiceConfig::default()
         };
 
-        let service = WorkerService::<P, NUM_SEGS_P2>::start(Arc::clone(&arena), worker_config);
+        let service = WorkerService::<P, NUM_SEGS_P2>::start(arena, worker_config);
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let inner = Arc::new(RuntimeInner::<P, NUM_SEGS_P2> {
-            arena: Arc::clone(&arena),
             shutdown: Arc::clone(&shutdown),
             service: Arc::clone(&service),
         });
@@ -120,7 +120,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
 
     /// Returns current arena statistics.
     pub fn stats(&self) -> ArenaStats {
-        self.inner.arena.stats()
+        self.inner.service.arena().stats()
     }
 }
 

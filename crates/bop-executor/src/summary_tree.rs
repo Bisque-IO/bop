@@ -4,15 +4,16 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-/// Two-level (root → leaf) summary tree for task work-stealing.
+/// Single-level summary tree for task work-stealing.
 ///
 /// This tree tracks ONLY task signals - no yield or worker state.
-/// Each leaf represents a set of task signal words, and the root provides
-/// a summary bitmap of which leaves have active tasks.
+/// Each leaf represents a set of task signal words.
+///
+/// The SummaryTree coordinates with SignalWakers to notify partition owners
+/// when their assigned leafs become active/inactive.
 pub struct SummaryTree {
     // Owned heap allocations
-    root_words: Box<[AtomicU64]>,
-    pub(crate) leaf_words: Box<[AtomicU64]>,  // Pub for ExecutorArena access
+    pub(crate) leaf_words: Box<[AtomicU64]>, // Pub for Worker access
     task_reservations: Box<[AtomicU64]>,
 
     // Configuration
@@ -29,6 +30,12 @@ pub struct SummaryTree {
     sleepers: CachePadded<AtomicUsize>,
     lock: Mutex<()>,
     cv: Condvar,
+
+    // Partition owner notification
+    // Raw pointer to WorkerService.wakers array (lifetime guaranteed by WorkerService ownership)
+    wakers: *const std::sync::Arc<crate::signal_waker::SignalWaker>,
+    wakers_len: usize,
+    worker_count: CachePadded<AtomicUsize>,
 }
 
 unsafe impl Send for SummaryTree {}
@@ -40,18 +47,22 @@ impl SummaryTree {
     /// # Arguments
     /// * `leaf_count` - Number of leaf nodes (typically matches worker partition count)
     /// * `signals_per_leaf` - Number of task signal words per leaf (typically tasks_per_leaf / 64)
-    pub fn new(leaf_count: usize, signals_per_leaf: usize) -> Self {
+    /// * `wakers` - Slice of SignalWakers for partition owner notification
+    ///
+    /// # Safety
+    /// The wakers slice must remain valid for the lifetime of this SummaryTree.
+    /// This is guaranteed when SummaryTree is owned by WorkerService which also owns the wakers.
+    pub fn new(
+        leaf_count: usize,
+        signals_per_leaf: usize,
+        wakers: &[std::sync::Arc<crate::signal_waker::SignalWaker>],
+    ) -> Self {
         assert!(leaf_count > 0, "leaf_count must be > 0");
         assert!(signals_per_leaf > 0, "signals_per_leaf must be > 0");
         assert!(signals_per_leaf <= 64, "signals_per_leaf must be <= 64");
+        assert!(!wakers.is_empty(), "wakers must not be empty");
 
-        let root_count = ((leaf_count + 63) / 64).max(1);
         let task_word_count = leaf_count * signals_per_leaf;
-
-        let root_words = (0..root_count)
-            .map(|_| AtomicU64::new(0))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
 
         let leaf_words = (0..leaf_count)
             .map(|_| AtomicU64::new(0))
@@ -75,7 +86,6 @@ impl SummaryTree {
             .into_boxed_slice();
 
         Self {
-            root_words,
             leaf_words,
             task_reservations,
             leaf_count,
@@ -87,12 +97,23 @@ impl SummaryTree {
             sleepers: CachePadded::new(AtomicUsize::new(0)),
             lock: Mutex::new(()),
             cv: Condvar::new(),
+            wakers: wakers.as_ptr(),
+            wakers_len: wakers.len(),
+            worker_count: CachePadded::new(AtomicUsize::new(0)),
         }
     }
 
-    #[inline(always)]
-    fn root_word(&self, idx: usize) -> &AtomicU64 {
-        &self.root_words[idx]
+    /// Update the worker count for partition ownership calculations.
+    /// Should be called when workers are registered/unregistered.
+    #[inline]
+    pub fn set_worker_count(&self, count: usize) {
+        self.worker_count.store(count, Ordering::Relaxed);
+    }
+
+    /// Get the current worker count.
+    #[inline]
+    pub fn get_worker_count(&self) -> usize {
+        self.worker_count.load(Ordering::Relaxed)
     }
 
     #[inline(always)]
@@ -106,24 +127,48 @@ impl SummaryTree {
         &self.task_reservations[index]
     }
 
+    /// Notify the partition owner's SignalWaker that a leaf in their partition became active.
     #[inline(always)]
-    fn activate_root(&self, leaf_idx: usize) {
-        let word_idx = leaf_idx / 64;
-        let bit = leaf_idx % 64;
-        let mask = 1u64 << bit;
-        let root = self.root_word(word_idx);
-        let prev = root.fetch_or(mask, Ordering::AcqRel);
-        if prev & mask == 0 {
-            self.release(1);
+    fn notify_partition_owner_active(&self, leaf_idx: usize) {
+        let worker_count = self.worker_count.load(Ordering::Relaxed);
+        if worker_count == 0 {
+            return;
+        }
+
+        let owner_id = self.compute_partition_owner(leaf_idx, worker_count);
+        if owner_id < self.wakers_len {
+            // SAFETY: wakers pointer is valid for the lifetime of SummaryTree
+            // because WorkerService owns both
+            let waker = unsafe { &*self.wakers.add(owner_id) };
+
+            // Compute local leaf index within owner's partition
+            if let Some(local_idx) = self.global_to_local_leaf_idx(leaf_idx, owner_id, worker_count)
+            {
+                waker.mark_partition_leaf_active(local_idx);
+            }
         }
     }
 
+    /// Notify the partition owner's SignalWaker that a leaf in their partition became inactive.
     #[inline(always)]
-    fn deactivate_root(&self, leaf_idx: usize) {
-        let word_idx = leaf_idx / 64;
-        let bit = leaf_idx % 64;
-        let mask = !(1u64 << bit);
-        self.root_word(word_idx).fetch_and(mask, Ordering::AcqRel);
+    fn notify_partition_owner_inactive(&self, leaf_idx: usize) {
+        let worker_count = self.worker_count.load(Ordering::Relaxed);
+        if worker_count == 0 {
+            return;
+        }
+
+        let owner_id = self.compute_partition_owner(leaf_idx, worker_count);
+        if owner_id < self.wakers_len {
+            // SAFETY: wakers pointer is valid for the lifetime of SummaryTree
+            // because WorkerService owns both
+            let waker = unsafe { &*self.wakers.add(owner_id) };
+
+            // Compute local leaf index within owner's partition
+            if let Some(local_idx) = self.global_to_local_leaf_idx(leaf_idx, owner_id, worker_count)
+            {
+                waker.clear_partition_leaf(local_idx);
+            }
+        }
     }
 
     #[inline(always)]
@@ -133,13 +178,16 @@ impl SummaryTree {
         }
         let leaf = self.leaf_word(leaf_idx);
         let prev = leaf.fetch_or(mask, Ordering::AcqRel);
-        // Activate root if this leaf was previously empty
-        if prev & self.leaf_summary_mask == 0 {
-            self.activate_root(leaf_idx);
-            true
-        } else {
-            false
+
+        let was_empty = prev & self.leaf_summary_mask == 0;
+        let any_new_bits = (prev & mask) != mask;
+
+        // Notify partition owner if any new signal bits were set
+        if any_new_bits {
+            self.notify_partition_owner_active(leaf_idx);
         }
+
+        was_empty
     }
 
     #[inline(always)]
@@ -152,9 +200,9 @@ impl SummaryTree {
         if prev & mask == 0 {
             return false;
         }
-        // Deactivate root if this leaf is now empty
+        // Notify partition owner if this leaf is now empty
         if (prev & !mask) & self.leaf_summary_mask == 0 {
-            self.deactivate_root(leaf_idx);
+            self.notify_partition_owner_inactive(leaf_idx);
             true
         } else {
             false
@@ -249,28 +297,9 @@ impl SummaryTree {
         }
     }
 
-    #[inline(always)]
-    pub fn snapshot_summary_word(&self, idx: usize) -> u64 {
-        if idx >= self.root_words.len() {
-            return 0;
-        }
-        self.root_word(idx).load(Ordering::Relaxed)
-    }
-
-    #[inline(always)]
-    pub fn snapshot_summary(&self) -> u64 {
-        self.snapshot_summary_word(0)
-    }
-
-    #[inline(always)]
-    pub fn summary_select(&self, nearest_to_index: u64) -> u64 {
-        bits::find_nearest(self.snapshot_summary(), nearest_to_index)
-    }
-
-    #[inline(always)]
-    pub fn summary(&self) -> u64 {
-        self.snapshot_summary()
-    }
+    // NOTE: snapshot_summary_word, snapshot_summary, summary_select, and summary removed
+    // because root_words was removed. Root-level summary is no longer needed
+    // with partition-based notification. Workers scan their local partitions directly.
 
     #[inline]
     pub fn try_acquire(&self) -> bool {
@@ -349,6 +378,126 @@ impl SummaryTree {
     pub fn signals_per_leaf(&self) -> usize {
         self.signals_per_leaf
     }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // PARTITION MANAGEMENT HELPERS
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// Compute which worker owns a given leaf based on partition assignments.
+    ///
+    /// This is the inverse of `Worker::compute_partition()`. Given a leaf index,
+    /// it determines which worker is responsible for processing tasks in that leaf.
+    ///
+    /// # Arguments
+    ///
+    /// * `leaf_idx` - The global leaf index (0..leaf_count)
+    /// * `worker_count` - Total number of active workers
+    ///
+    /// # Returns
+    ///
+    /// Worker ID (0..worker_count) that owns this leaf
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let owner_id = summary_tree.compute_partition_owner(leaf_idx, worker_count);
+    /// let owner_waker = &service.wakers[owner_id];
+    /// owner_waker.mark_partition_leaf_active(local_idx);
+    /// ```
+    pub fn compute_partition_owner(&self, leaf_idx: usize, worker_count: usize) -> usize {
+        if worker_count == 0 {
+            return 0;
+        }
+
+        let base = self.leaf_count / worker_count;
+        let extra = self.leaf_count % worker_count;
+
+        // First 'extra' workers get (base + 1) leafs each
+        let boundary = extra * (base + 1);
+
+        if leaf_idx < boundary {
+            leaf_idx / (base + 1)
+        } else {
+            extra + (leaf_idx - boundary) / base
+        }
+    }
+
+    /// Compute the partition start index for a given worker.
+    ///
+    /// # Arguments
+    ///
+    /// * `worker_id` - Worker ID (0..worker_count)
+    /// * `worker_count` - Total number of active workers
+    ///
+    /// # Returns
+    ///
+    /// First leaf index in this worker's partition
+    pub fn partition_start_for_worker(&self, worker_id: usize, worker_count: usize) -> usize {
+        if worker_count == 0 {
+            return 0;
+        }
+
+        let base = self.leaf_count / worker_count;
+        let extra = self.leaf_count % worker_count;
+
+        if worker_id < extra {
+            worker_id * (base + 1)
+        } else {
+            extra * (base + 1) + (worker_id - extra) * base
+        }
+    }
+
+    /// Compute the partition end index for a given worker.
+    ///
+    /// # Arguments
+    ///
+    /// * `worker_id` - Worker ID (0..worker_count)
+    /// * `worker_count` - Total number of active workers
+    ///
+    /// # Returns
+    ///
+    /// One past the last leaf index in this worker's partition (exclusive)
+    pub fn partition_end_for_worker(&self, worker_id: usize, worker_count: usize) -> usize {
+        if worker_count == 0 {
+            return 0;
+        }
+
+        let start = self.partition_start_for_worker(worker_id, worker_count);
+        let base = self.leaf_count / worker_count;
+        let extra = self.leaf_count % worker_count;
+
+        let len = if worker_id < extra { base + 1 } else { base };
+
+        (start + len).min(self.leaf_count)
+    }
+
+    /// Convert a global leaf index to a local index within a worker's partition.
+    ///
+    /// # Arguments
+    ///
+    /// * `leaf_idx` - Global leaf index
+    /// * `worker_id` - Worker ID
+    /// * `worker_count` - Total number of workers
+    ///
+    /// # Returns
+    ///
+    /// Local leaf index (0..partition_size) for use with SignalWaker partition bitmap,
+    /// or None if the leaf is not in this worker's partition
+    pub fn global_to_local_leaf_idx(
+        &self,
+        leaf_idx: usize,
+        worker_id: usize,
+        worker_count: usize,
+    ) -> Option<usize> {
+        let partition_start = self.partition_start_for_worker(worker_id, worker_count);
+        let partition_end = self.partition_end_for_worker(worker_id, worker_count);
+
+        if leaf_idx >= partition_start && leaf_idx < partition_end {
+            Some(leaf_idx - partition_start)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -361,7 +510,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn setup_tree(leaf_count: usize, signals_per_leaf: usize) -> SummaryTree {
-        SummaryTree::new(leaf_count, signals_per_leaf)
+        // Create dummy wakers for testing
+        let wakers: Vec<Arc<crate::signal_waker::SignalWaker>> = (0..4)
+            .map(|_| Arc::new(crate::signal_waker::SignalWaker::new()))
+            .collect();
+        SummaryTree::new(leaf_count, signals_per_leaf, &wakers)
     }
 
     #[test]
@@ -369,12 +522,12 @@ mod tests {
         let tree = setup_tree(4, 4);
         assert!(tree.mark_signal_active(1, 1));
         assert_eq!(tree.leaf_words[1].load(Ordering::Relaxed), 1u64 << 1);
-        assert_ne!(tree.root_words[0].load(Ordering::Relaxed) & (1u64 << 1), 0);
+        // assert_ne!(tree.root_words[0].load(Ordering::Relaxed) & (1u64 << 1), 0); // root_words removed
 
         assert!(!tree.mark_signal_active(1, 1));
         assert!(tree.mark_signal_inactive(1, 1));
         assert_eq!(tree.leaf_words[1].load(Ordering::Relaxed), 0);
-        assert_eq!(tree.root_words[0].load(Ordering::Relaxed) & (1u64 << 1), 0);
+        // assert_eq!(tree.root_words[0].load(Ordering::Relaxed) & (1u64 << 1), 0); // root_words removed
     }
 
     #[test]
@@ -384,7 +537,7 @@ mod tests {
         let signal = AtomicU64::new(0);
         tree.mark_signal_inactive_if_empty(0, 1, &signal);
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 0);
-        assert_eq!(tree.root_words[0].load(Ordering::Relaxed), 0);
+        // assert_eq!(tree.root_words[0].load(Ordering::Relaxed), 0); // root_words removed
     }
 
     #[test]
@@ -518,14 +671,16 @@ mod tests {
         let handle = tree.reserve_task().expect("task handle");
         assert_eq!(handle.1, 0); // signal idx
 
-        let reservation = tree.task_reservations
+        let reservation = tree
+            .task_reservations
             .get(handle.0 * 1 + handle.1)
             .unwrap()
             .load(Ordering::Relaxed);
         assert_ne!(reservation, 0);
 
         tree.release_task_in_leaf(handle.0, handle.1, handle.2);
-        let reservation = tree.task_reservations
+        let reservation = tree
+            .task_reservations
             .get(handle.0 * 1 + handle.1)
             .unwrap()
             .load(Ordering::Relaxed);
