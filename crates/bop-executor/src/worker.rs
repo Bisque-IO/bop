@@ -3,7 +3,8 @@ use crate::mpsc;
 use crate::mpsc::Receiver;
 use crate::signal_waker::SignalWaker;
 use crate::task::{
-    ExecutorArena, FutureAllocator, TASK_EXECUTING, TASK_SCHEDULED, Task, TaskHandle, TaskSlot,
+    FutureAllocator, TASK_EXECUTING, TASK_IDLE, TASK_SCHEDULED, TASK_SCHEDULED_AND_EXECUTING, Task,
+    TaskArena, TaskHandle, TaskSlot,
 };
 use crate::timer::{Timer, TimerHandle};
 use crate::timer_wheel::TimerWheel;
@@ -30,7 +31,7 @@ const RND_MULTIPLIER: u64 = 0x5DEECE66D;
 const RND_ADDEND: u64 = 0xB;
 const RND_MASK: u64 = (1 << 48) - 1;
 const DEFAULT_WAKE_BURST: usize = 4;
-const FULL_SUMMARY_SCAN_CADENCE_MASK: u64 = 1024 * 1024 - 1;
+const FULL_SUMMARY_SCAN_CADENCE_MASK: u64 = 1024 * 8;
 const DEFAULT_TICK_DURATION_NS: u64 = 1 << 20; // ~1.05ms, power of two as required by TimerWheel
 const TIMER_TICKS_PER_WHEEL: usize = 1024 * 1;
 const TIMER_EXPIRE_BUDGET: usize = 4096;
@@ -220,7 +221,7 @@ pub struct WorkerService<
     const NUM_SEGS_P2: usize = DEFAULT_QUEUE_NUM_SEGS_SHIFT,
 > {
     // Core ownership - WorkerService owns the arena and coordinates work via SummaryTree
-    arena: ExecutorArena,
+    arena: TaskArena,
     summary_tree: SummaryTree,
 
     config: WorkerServiceConfig,
@@ -250,6 +251,8 @@ pub struct WorkerService<
     tick_thread: Mutex<Option<thread::JoinHandle<()>>>,
     tick_stats: TickStats,
     register_mutex: Mutex<()>,
+    // Flag to request immediate partition rebalancing on next tick (when workers spawn/exit)
+    rebalance_requested: AtomicBool,
 }
 
 unsafe impl<const P: usize, const NUM_SEGS_P2: usize> Send for WorkerService<P, NUM_SEGS_P2> {}
@@ -260,7 +263,7 @@ unsafe impl<const P: usize, const NUM_SEGS_P2: usize> Send for WorkerService<P, 
 unsafe impl<const P: usize, const NUM_SEGS_P2: usize> Sync for WorkerService<P, NUM_SEGS_P2> {}
 
 impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
-    pub fn start(arena: ExecutorArena, config: WorkerServiceConfig) -> Arc<Self> {
+    pub fn start(arena: TaskArena, config: WorkerServiceConfig) -> Arc<Self> {
         let tick_duration = config.tick_duration;
         let tick_duration_ns = normalize_tick_duration_ns(config.tick_duration);
         let min_workers = config.min_workers.max(1);
@@ -273,11 +276,15 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         }
         let wakers = wakers.into_boxed_slice();
 
-        // Create SummaryTree with reference to wakers for partition owner notifications
+        // Create worker_count early so we can pass it to SummaryTree (single source of truth)
+        let worker_count = AtomicUsize::new(0);
+
+        // Create SummaryTree with reference to wakers and worker_count
         let summary_tree = crate::summary_tree::SummaryTree::new(
             arena.config().leaf_count,
             arena.layout().signals_per_leaf,
             &wakers,
+            &worker_count,
         );
 
         let mut worker_actives = Vec::with_capacity(max_workers);
@@ -359,7 +366,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             worker_shutdowns: worker_shutdowns.into_boxed_slice(),
             worker_threads: worker_threads.into_boxed_slice(),
             worker_stats: worker_stats.into_boxed_slice(),
-            worker_count: AtomicUsize::new(0),
+            worker_count, // Use the worker_count we created earlier and passed to SummaryTree
             worker_max_id: AtomicUsize::new(0),
             receivers: receivers.into_boxed_slice(),
             senders: senders.into_boxed_slice(),
@@ -370,13 +377,14 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             tick_thread: Mutex::new(None),
             tick_stats: TickStats::default(),
             register_mutex: Mutex::new(()),
+            rebalance_requested: AtomicBool::new(false),
         });
 
         // Spawn min_workers on startup with pre-set count to avoid rebalancing
         // Each worker recalculates partitions when worker_count changes, so we
         // pre-set it to the final value before spawning any workers
         service.worker_count.store(min_workers, Ordering::SeqCst);
-        service.summary_tree.set_worker_count(min_workers);
+        // SummaryTree now references worker_count directly - no need to set it separately
 
         let mut spawned = 0;
         for _ in 0..min_workers {
@@ -389,7 +397,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         // Adjust worker_count if we failed to spawn all min_workers
         if spawned < min_workers {
             service.worker_count.store(spawned, Ordering::SeqCst);
-            service.summary_tree.set_worker_count(spawned);
+            // SummaryTree now references worker_count directly - no need to set it separately
         }
 
         Self::spawn_tick_thread(&service, tick_thread_senders.into_boxed_slice());
@@ -399,7 +407,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
     /// Get a reference to the ExecutorArena owned by this service.
     #[inline]
-    pub fn arena(&self) -> &ExecutorArena {
+    pub fn arena(&self) -> &TaskArena {
         &self.arena
     }
 
@@ -420,7 +428,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             Some(handle) => handle,
             None => {
                 self.summary_tree
-                    .release_task_in_leaf(leaf_idx, signal_idx, bit);
+                    .release_task_in_leaf(leaf_idx, signal_idx, bit as usize);
                 return None;
             }
         };
@@ -435,7 +443,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         self.summary_tree.release_task_in_leaf(
             task.leaf_idx() as usize,
             task.signal_idx() as usize,
-            task.signal_bit(),
+            task.signal_bit() as usize,
         );
         self.arena.decrement_total_tasks();
     }
@@ -469,8 +477,10 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         }
 
         if increment_count {
-            let new_count = self.worker_count.fetch_add(1, Ordering::SeqCst) + 1;
-            self.summary_tree.set_worker_count(new_count);
+            self.worker_count.fetch_add(1, Ordering::SeqCst);
+            // SummaryTree now references worker_count directly - no need to set it separately
+            // Request immediate partition rebalancing on next tick
+            self.rebalance_requested.store(true, Ordering::Release);
         }
 
         // Mark worker as active
@@ -533,9 +543,11 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             w.run();
 
             // Worker exited - clean up counters
-            let new_count = service.worker_count.fetch_sub(1, Ordering::SeqCst) - 1;
-            service.summary_tree.set_worker_count(new_count);
+            service.worker_count.fetch_sub(1, Ordering::SeqCst);
+            // SummaryTree now references worker_count directly - no need to set it separately
             service.worker_actives[worker_id].store(0, Ordering::SeqCst);
+            // Request immediate partition rebalancing on next tick
+            service.rebalance_requested.store(true, Ordering::Release);
         });
 
         // Store the join handle
@@ -710,6 +722,11 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                     }
                 }
 
+                // Immediate rebalancing if requested (worker spawned/exited)
+                if service.rebalance_requested.swap(false, Ordering::AcqRel) {
+                    Self::supervisor_rebalance_partitions(&service, &mut worker_senders);
+                }
+
                 // Periodic health monitoring
                 if tick_count % health_check_interval == 0 {
                     Self::supervisor_health_check(&service, &mut worker_senders, now_ns);
@@ -720,7 +737,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                     Self::supervisor_dynamic_scaling(&service, &mut worker_senders);
                 }
 
-                // Periodic partition rebalancing
+                // Periodic partition rebalancing (backup in case flag mechanism fails)
                 if tick_count % partition_rebalance_interval == 0 {
                     Self::supervisor_rebalance_partitions(&service, &mut worker_senders);
                 }
@@ -1385,16 +1402,16 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         //     did_work = true;
         // }
 
-        let mask = self.partition_len - 1;
         let rand = self.next_u64();
 
         if !did_work && rand & FULL_SUMMARY_SCAN_CADENCE_MASK == 0 {
             let leaf_count = self.service.arena().leaf_count();
-            if self.try_any_partition_random() {
-                did_work = true;
-            } else if self.try_any_partition_linear(leaf_count) {
+            if self.try_any_partition_random(leaf_count) {
                 did_work = true;
             }
+            // else if self.try_any_partition_linear(leaf_count) {
+            // did_work = true;
+            // }
         }
 
         if !did_work {
@@ -1410,6 +1427,59 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         did_work
     }
 
+    #[inline(always)]
+    pub fn run_once_exhaustive(&mut self) -> bool {
+        let mut did_work = false;
+
+        if self.poll_timers() {
+            did_work = true;
+        }
+
+        // Process messages first (including shutdown signals)
+        if self.process_messages() {
+            did_work = true;
+        }
+
+        // Poll all yielded tasks first - they're ready to run
+        let yielded = self.poll_yield(self.yield_queue.len());
+        if yielded > 0 {
+            did_work = true;
+        }
+
+        // Partition assignment is handled by WorkerService via RebalancePartitions message
+        if self.try_partition_random() {
+            did_work = true;
+        }
+
+        if self.try_partition_random() {
+            did_work = true;
+        } else if self.try_partition_linear() {
+            did_work = true;
+        }
+
+        let rand = self.next_u64();
+
+        if !did_work {
+            let leaf_count = self.service.arena().leaf_count();
+            if self.try_any_partition_random(leaf_count) {
+                did_work = true;
+            } else if self.try_any_partition_linear(leaf_count) {
+                did_work = true;
+            }
+        }
+
+        if !did_work {
+            if self.poll_yield(self.yield_queue.len() as usize) > 0 {
+                did_work = true;
+            }
+            if self.poll_yield_steal(1) > 0 {
+                did_work = true;
+            }
+        }
+
+        did_work
+    }
+
     #[inline]
     fn run_last_before_park(&mut self) -> bool {
         false
@@ -1417,41 +1487,52 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
     pub(crate) fn run(&mut self) {
         let mut spin_count = 0;
+        let waker_id = self.worker_id as usize;
+
         while !self.shutdown.load(Ordering::Relaxed) {
-            let progress = self.run_once();
+            let mut progress = self.run_once();
+
             if !progress {
-                if spin_count < self.wait_strategy.spin_before_sleep {
-                    spin_count += 1;
-                    std::hint::spin_loop();
-                } else {
-                    // Calculate park duration considering timer deadlines
-                    let park_duration = self.calculate_park_duration();
+                spin_count += 1;
 
-                    // Sync partition summary from SummaryTree before parking
-                    let waker_id = self.worker_id as usize;
-                    self.service.wakers[waker_id].sync_partition_summary(
-                        self.partition_start,
-                        self.partition_end,
-                        &self.service.summary_tree().leaf_words,
-                    );
+                if spin_count >= self.wait_strategy.spin_before_sleep {
+                    core::hint::spin_loop();
+                    progress = self.run_once_exhaustive();
 
-                    // Park on SignalWaker with timer-aware timeout
-                    match park_duration {
-                        Some(duration) if duration.is_zero() => {
-                            // Timer ready - don't park, continue immediately
-                        }
-                        Some(duration) => {
-                            // Park with timeout for timer deadline
-                            self.service.wakers[waker_id].acquire_timeout(duration);
-                        }
-                        None => {
-                            // No timer deadline - park with periodic wakeup for shutdown check
-                            self.service.wakers[waker_id]
-                                .acquire_timeout(Duration::from_millis(250));
-                        }
+                    if progress {
+                        spin_count = 0;
+                        continue;
                     }
-                    spin_count = 0;
+                } else if spin_count < self.wait_strategy.spin_before_sleep {
+                    core::hint::spin_loop();
+                    continue;
                 }
+
+                // Calculate park duration considering timer deadlines
+                let park_duration = self.calculate_park_duration();
+
+                // Sync partition summary from SummaryTree before parking
+                self.service.wakers[waker_id].sync_partition_summary(
+                    self.partition_start,
+                    self.partition_end,
+                    &self.service.summary_tree().leaf_words,
+                );
+
+                // Park on SignalWaker with timer-aware timeout
+                match park_duration {
+                    Some(duration) if duration.is_zero() => {
+                        // Timer ready - don't park, continue immediately
+                    }
+                    Some(duration) => {
+                        // Park with timeout for timer deadline
+                        self.service.wakers[waker_id].acquire_timeout(duration);
+                    }
+                    None => {
+                        // No timer deadline - park with periodic wakeup for shutdown check
+                        self.service.wakers[waker_id].acquire_timeout(Duration::from_millis(250));
+                    }
+                }
+                spin_count = 0;
             } else {
                 spin_count = 0;
             }
@@ -1566,10 +1647,14 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         self.partition_end = partition_end;
         self.partition_len = partition_end.saturating_sub(partition_start);
 
-        // Mark that we have work in our new partitions (if non-empty)
-        if partition_start < partition_end {
-            self.service.wakers[self.worker_id as usize].mark_tasks();
-        }
+        // Sync partition summary to reflect new partition boundaries.
+        // This will also update the tasks-available bit based on actual partition state.
+        let waker_id = self.worker_id as usize;
+        self.service.wakers[waker_id].sync_partition_summary(
+            partition_start,
+            partition_end,
+            &self.service.summary_tree().leaf_words,
+        );
 
         true
     }
@@ -1705,6 +1790,29 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         }
 
         task.schedule();
+        // let state = task.state().load(Ordering::Acquire);
+        //
+        // if state == TASK_IDLE {
+        //     if task
+        //         .state()
+        //         .compare_exchange(
+        //             TASK_IDLE,
+        //             TASK_EXECUTING,
+        //             Ordering::AcqRel,
+        //             Ordering::Acquire,
+        //         )
+        //         .is_ok()
+        //     {
+        //         task.schedule();
+        //         // self.poll_task(TaskHandle::from_task(task), task);
+        //     } else {
+        //         task.schedule();
+        //     }
+        // } else if state == TASK_EXECUTING && !task.is_yielded() {
+        //     task.schedule();
+        // } else {
+        //     task.schedule();
+        // }
         self.stats.timer_fires = self.stats.timer_fires.saturating_add(1);
         true
     }
@@ -1846,10 +1954,6 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         }
     }
 
-    pub fn run_blocking(&mut self, strategy: &WaitStrategy) {
-        while self.poll_blocking(strategy) {}
-    }
-
     #[inline(always)]
     fn try_acquire_task(&mut self, leaf_idx: usize) -> Option<TaskHandle> {
         let signals_per_leaf = self.service.arena().signals_per_leaf();
@@ -1863,14 +1967,14 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             (1u64 << signals_per_leaf) - 1
         };
 
-        self.stats.leaf_summary_checks += 1;
+        self.stats.leaf_summary_checks = self.stats.leaf_summary_checks.saturating_add(1);
         let mut available =
             self.service.summary_tree().leaf_words[leaf_idx].load(Ordering::Acquire) & mask;
         if available == 0 {
-            self.stats.empty_scans += 1;
+            self.stats.empty_scans = self.stats.empty_scans.saturating_add(1);
             return None;
         }
-        self.stats.leaf_summary_hits += 1;
+        self.stats.leaf_summary_hits = self.stats.leaf_summary_hits.saturating_add(1);
 
         let signals = self.service.arena().active_signals(leaf_idx);
         let mut attempts = signals_per_leaf;
@@ -1881,15 +1985,16 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             let (signal_idx, signal) = loop {
                 let candidate = bits::find_nearest(available, start as u64);
                 if candidate >= 64 {
-                    self.stats.leaf_summary_checks += 1;
+                    self.stats.leaf_summary_checks =
+                        self.stats.leaf_summary_checks.saturating_add(1);
                     available = self.service.summary_tree().leaf_words[leaf_idx]
                         .load(Ordering::Acquire)
                         & mask;
                     if available == 0 {
-                        self.stats.empty_scans += 1;
+                        self.stats.empty_scans = self.stats.empty_scans.saturating_add(1);
                         return None;
                     }
-                    self.stats.leaf_summary_hits += 1;
+                    self.stats.leaf_summary_hits = self.stats.leaf_summary_hits.saturating_add(1);
                     continue;
                 }
                 let bit_index = candidate as usize;
@@ -1910,7 +2015,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             let bit_seed = (self.next_u64() & 63) as u64;
             let bit_candidate = bits::find_nearest(bits, bit_seed);
             let bit_idx = if bit_candidate < 64 {
-                bit_candidate as u32
+                bit_candidate as u64
             } else {
                 available &= !(1u64 << signal_idx);
                 attempts -= 1;
@@ -1919,7 +2024,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
             let (remaining, acquired) = signal.try_acquire(bit_idx);
             if !acquired {
-                self.stats.cas_failures += 1;
+                self.stats.cas_failures = self.stats.cas_failures.saturating_add(1);
                 available &= !(1u64 << signal_idx);
                 attempts -= 1;
                 continue;
@@ -1932,13 +2037,13 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                     .mark_signal_inactive(leaf_idx, signal_idx);
             }
 
-            self.stats.signal_polls += 1;
+            self.stats.signal_polls = self.stats.signal_polls.saturating_add(1);
             let slot_idx = signal_idx * 64 + bit_idx as usize;
             let task = unsafe { self.service.arena().task(leaf_idx, slot_idx) };
             return Some(TaskHandle::from_task(task));
         }
 
-        self.stats.empty_scans += 1;
+        self.stats.empty_scans = self.stats.empty_scans.saturating_add(1);
         None
     }
 
@@ -1992,11 +2097,22 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     fn try_partition_random(&mut self) -> bool {
         let partition_len = self.partition_len;
 
-        for _ in 0..partition_len {
-            let start_offset = self.next_u64() as usize % partition_len;
-            let leaf_idx = self.partition_start + start_offset;
-            if self.process_leaf(leaf_idx) {
-                return true;
+        if partition_len.is_power_of_two() {
+            let mask = partition_len - 1;
+            for _ in 0..partition_len {
+                let start_offset = self.next_u64() as usize & mask;
+                let leaf_idx = self.partition_start + start_offset;
+                if self.process_leaf(leaf_idx) {
+                    return true;
+                }
+            }
+        } else {
+            for _ in 0..partition_len {
+                let start_offset = self.next_u64() as usize % partition_len;
+                let leaf_idx = self.partition_start + start_offset;
+                if self.process_leaf(leaf_idx) {
+                    return true;
+                }
             }
         }
 
@@ -2019,12 +2135,10 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     }
 
     #[inline(always)]
-    fn try_any_partition_random(&mut self) -> bool {
-        let partition_start = self.partition_start;
-        let partition_len = self.partition_len;
-        if partition_len.is_power_of_two() {
-            let leaf_mask = partition_len - 1;
-            for _ in 0..partition_len {
+    fn try_any_partition_random(&mut self, leaf_count: usize) -> bool {
+        if leaf_count.is_power_of_two() {
+            let leaf_mask = leaf_count - 1;
+            for _ in 0..leaf_count {
                 let leaf_idx = self.next_u64() as usize & leaf_mask;
                 self.stats.leaf_steal_attempts += 1;
                 if self.process_leaf(leaf_idx) {
@@ -2033,8 +2147,8 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 }
             }
         } else {
-            for _ in 0..partition_len {
-                let leaf_idx = self.next_u64() as usize % partition_len;
+            for _ in 0..leaf_count {
+                let leaf_idx = self.next_u64() as usize % leaf_count;
                 self.stats.leaf_steal_attempts += 1;
                 if self.process_leaf(leaf_idx) {
                     self.stats.leaf_steal_successes += 1;

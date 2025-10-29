@@ -28,14 +28,15 @@ pub type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 pub const TASK_IDLE: u8 = 0;
 pub const TASK_SCHEDULED: u8 = 1;
 pub const TASK_EXECUTING: u8 = 2;
+pub const TASK_SCHEDULED_AND_EXECUTING: u8 = 3;
 
 #[derive(Clone, Copy, Debug)]
-pub struct ArenaOptions {
+pub struct TaskArenaOptions {
     pub use_huge_pages: bool,
     pub preinitialize_tasks: bool,
 }
 
-impl Default for ArenaOptions {
+impl Default for TaskArenaOptions {
     fn default() -> Self {
         Self {
             use_huge_pages: false,
@@ -44,7 +45,7 @@ impl Default for ArenaOptions {
     }
 }
 
-impl ArenaOptions {
+impl TaskArenaOptions {
     pub fn with_preinitialized_tasks(mut self, enabled: bool) -> Self {
         self.preinitialize_tasks = enabled;
         self
@@ -52,13 +53,13 @@ impl ArenaOptions {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ArenaConfig {
+pub struct TaskArenaConfig {
     pub leaf_count: usize,
     pub tasks_per_leaf: usize,
     pub max_workers: usize,
 }
 
-impl ArenaConfig {
+impl TaskArenaConfig {
     pub fn new(leaf_count: usize, tasks_per_leaf: usize) -> io::Result<Self> {
         let leaf_count = if !leaf_count.is_power_of_two() {
             leaf_count.next_power_of_two()
@@ -108,13 +109,13 @@ impl TaskSignal {
     }
 
     #[inline(always)]
-    pub fn is_set(&self, bit_index: u32) -> bool {
+    pub fn is_set(&self, bit_index: u64) -> bool {
         let mask = 1u64 << bit_index;
         (self.value.load(Ordering::Relaxed) & mask) != 0
     }
 
     #[inline(always)]
-    pub fn set(&self, bit_index: u32) -> (bool, bool) {
+    pub fn set(&self, bit_index: u64) -> (bool, bool) {
         let mask = 1u64 << bit_index;
         let prev = self.value.fetch_or(mask, Ordering::AcqRel);
         // was empty; was_set
@@ -122,7 +123,7 @@ impl TaskSignal {
     }
 
     #[inline]
-    pub fn clear(&self, bit_index: u32) -> (u64, bool) {
+    pub fn clear(&self, bit_index: u64) -> (u64, bool) {
         let mask = 1u64 << bit_index;
         let previous = self.value.fetch_and(!mask, Ordering::AcqRel);
         let remaining = previous & !mask;
@@ -130,7 +131,7 @@ impl TaskSignal {
     }
 
     #[inline]
-    pub fn try_acquire(&self, bit_index: u32) -> (u64, bool) {
+    pub fn try_acquire(&self, bit_index: u64) -> (u64, bool) {
         if !self.is_set(bit_index) {
             return (0, false);
         }
@@ -141,7 +142,7 @@ impl TaskSignal {
     }
 
     #[inline]
-    pub fn try_acquire_from(&self, start_bit: u32) -> Option<(u32, u64)> {
+    pub fn try_acquire_from(&self, start_bit: u64) -> Option<(u32, u64)> {
         let start = (start_bit as u64).min(63);
         for _ in 0..64 {
             let current = self.value.load(Ordering::Acquire);
@@ -209,17 +210,12 @@ impl TaskHandle {
     }
 
     #[inline(always)]
-    pub fn bit_idx(&self) -> u32 {
+    pub fn bit_idx(&self) -> u8 {
         self.task().signal_bit
     }
 
     #[inline(always)]
-    pub fn slot_index(&self) -> usize {
-        self.task().slot_idx as usize
-    }
-
-    #[inline(always)]
-    pub fn global_id(&self, _tasks_per_leaf: usize) -> u64 {
+    pub fn global_id(&self, _tasks_per_leaf: usize) -> u32 {
         self.task().global_id()
     }
 }
@@ -295,7 +291,7 @@ pub struct ArenaLayout {
 }
 
 impl ArenaLayout {
-    fn new(config: &ArenaConfig) -> Self {
+    fn new(config: &TaskArenaConfig) -> Self {
         let signals_per_leaf = (config.tasks_per_leaf + 63) / 64;
 
         // Only allocate task slots and tasks in mmap
@@ -352,8 +348,8 @@ impl FutureAllocator {
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TaskStats {
-    pub polls: u64,
-    pub yields: u64,
+    pub polls: u32,
+    pub yields: u32,
     pub cpu_time_ns: u64,
 }
 
@@ -368,17 +364,16 @@ impl TaskStats {
 
 #[repr(C)]
 pub struct Task {
-    global_id: u64,
-    leaf_idx: u32,
-    signal_idx: u32,
-    slot_idx: u32,
-    signal_bit: u32,
-    signal_ptr: *const TaskSignal,
-    slot_ptr: AtomicPtr<TaskSlot>,
-    summary_tree_ptr: *const crate::summary_tree::SummaryTree,
+    global_id: u32,
+    leaf_idx: u16,
+    signal_idx: u8,
+    signal_bit: u8,
     state: AtomicU8,
     yielded: AtomicBool,
     cpu_time_enabled: AtomicBool,
+    signal_ptr: *const TaskSignal,
+    slot_ptr: AtomicPtr<TaskSlot>,
+    summary_tree_ptr: *const SummaryTree,
     future_ptr: AtomicPtr<()>,
     // Safety: stats are mutated without synchronization based on executor guarantees that
     // only the owning worker thread records updates while other threads may only clone/copy.
@@ -405,11 +400,10 @@ impl Task {
 
     unsafe fn construct(
         ptr: *mut Task,
-        global_id: u64,
-        leaf_idx: u32,
-        signal_idx: u32,
-        slot_idx: u32,
-        signal_bit: u32,
+        global_id: u32,
+        leaf_idx: u16,
+        signal_idx: u8,
+        signal_bit: u8,
         signal_ptr: *const TaskSignal,
         slot_ptr: *mut TaskSlot,
     ) {
@@ -420,7 +414,6 @@ impl Task {
                     global_id,
                     leaf_idx,
                     signal_idx,
-                    slot_idx,
                     signal_bit,
                     signal_ptr,
                     slot_ptr: AtomicPtr::new(slot_ptr),
@@ -446,22 +439,22 @@ impl Task {
         self.summary_tree_ptr = summary_tree;
     }
 
-    pub fn global_id(&self) -> u64 {
+    pub fn global_id(&self) -> u32 {
         self.global_id
     }
 
     #[inline(always)]
-    pub fn leaf_idx(&self) -> u32 {
+    pub fn leaf_idx(&self) -> u16 {
         self.leaf_idx
     }
 
     #[inline(always)]
-    pub fn signal_idx(&self) -> u32 {
+    pub fn signal_idx(&self) -> u8 {
         self.signal_idx
     }
 
     #[inline(always)]
-    pub fn signal_bit(&self) -> u32 {
+    pub fn signal_bit(&self) -> u8 {
         self.signal_bit
     }
 
@@ -508,6 +501,11 @@ impl Task {
     #[inline(always)]
     pub fn clear_slot(&self) {
         self.slot_ptr.store(ptr::null_mut(), Ordering::Release);
+    }
+
+    #[inline(always)]
+    pub fn state(&self) -> &AtomicU8 {
+        &self.state
     }
 
     /// Attempts to schedule this queue for execution (IDLE -> SCHEDULED transition).
@@ -572,7 +570,7 @@ impl Task {
 
         if scheduled_nor_executing {
             let signal = unsafe { &*self.signal_ptr };
-            let (_was_empty, was_set) = signal.set(self.signal_bit);
+            let (_was_empty, was_set) = signal.set(self.signal_bit as u64);
             if was_set && !self.summary_tree_ptr.is_null() {
                 unsafe {
                     (*self.summary_tree_ptr)
@@ -632,7 +630,7 @@ impl Task {
     /// }
     /// ```
     #[inline(always)]
-    pub fn begin(&self) {
+    pub(crate) fn begin(&self) {
         self.state.store(TASK_EXECUTING, Ordering::Release);
     }
 
@@ -685,11 +683,11 @@ impl Task {
     /// gate.finish();  // Automatically reschedules if more work arrived
     /// ```
     #[inline(always)]
-    pub fn finish(&self) {
+    pub(crate) fn finish(&self) {
         let after_flags = self.state.fetch_sub(TASK_EXECUTING, Ordering::AcqRel);
         if after_flags & TASK_SCHEDULED != TASK_IDLE {
             let signal = unsafe { &*self.signal_ptr };
-            let (_was_empty, was_set) = signal.set(self.signal_bit);
+            let (_was_empty, was_set) = signal.set(self.signal_bit as u64);
             if was_set && !self.summary_tree_ptr.is_null() {
                 unsafe {
                     (*self.summary_tree_ptr)
@@ -757,10 +755,10 @@ impl Task {
     /// }
     /// ```
     #[inline(always)]
-    pub fn finish_and_schedule(&self) {
+    pub(crate) fn finish_and_schedule(&self) {
         self.state.store(TASK_SCHEDULED, Ordering::Release);
         let signal = unsafe { &*self.signal_ptr };
-        let (was_empty, was_set) = signal.set(self.signal_bit);
+        let (was_empty, was_set) = signal.set(self.signal_bit as u64);
         if was_empty && was_set && !self.summary_tree_ptr.is_null() {
             unsafe {
                 (*self.summary_tree_ptr)
@@ -770,7 +768,7 @@ impl Task {
     }
 
     #[inline(always)]
-    pub fn clear_yielded(&self) {
+    pub(crate) fn clear_yielded(&self) {
         self.yielded.store(false, Ordering::Relaxed);
     }
 
@@ -884,18 +882,16 @@ impl Task {
     #[inline(always)]
     pub unsafe fn reset(
         &mut self,
-        global_id: u64,
-        leaf_idx: u32,
-        signal_idx: u32,
-        slot_idx: u32,
-        signal_bit: u32,
+        global_id: u32,
+        leaf_idx: u16,
+        signal_idx: u8,
+        signal_bit: u8,
         signal_ptr: *const TaskSignal,
         slot_ptr: *mut TaskSlot,
     ) {
         self.global_id = global_id;
         self.leaf_idx = leaf_idx;
         self.signal_idx = signal_idx;
-        self.slot_idx = slot_idx;
         self.signal_bit = signal_bit;
         self.signal_ptr = signal_ptr;
         self.slot_ptr.store(slot_ptr, Ordering::Release);
@@ -912,10 +908,10 @@ impl Task {
     }
 }
 
-pub struct ExecutorArena {
+pub struct TaskArena {
     memory: NonNull<u8>,
     size: usize,
-    config: ArenaConfig,
+    config: TaskArenaConfig,
     layout: ArenaLayout,
     task_signals: Box<[TaskSignal]>, // Heap-allocated task signals
     total_tasks: AtomicU64,
@@ -945,11 +941,11 @@ impl fmt::Display for SpawnError {
 
 impl std::error::Error for SpawnError {}
 
-unsafe impl Send for ExecutorArena {}
-unsafe impl Sync for ExecutorArena {}
+unsafe impl Send for TaskArena {}
+unsafe impl Sync for TaskArena {}
 
-impl ExecutorArena {
-    pub fn with_config(config: ArenaConfig, options: ArenaOptions) -> io::Result<Self> {
+impl TaskArena {
+    pub fn with_config(config: TaskArenaConfig, options: TaskArenaOptions) -> io::Result<Self> {
         let layout = ArenaLayout::new(&config);
         let memory_ptr = Self::allocate_memory(layout.total_size, &options)?;
         let memory = NonNull::new(memory_ptr)
@@ -968,7 +964,7 @@ impl ExecutorArena {
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
-        let arena = ExecutorArena {
+        let arena = TaskArena {
             memory,
             size: layout.total_size,
             config,
@@ -987,8 +983,8 @@ impl ExecutorArena {
 
     pub fn new(leaf_count: usize, tasks_per_leaf: usize) -> io::Result<Self> {
         Self::with_config(
-            ArenaConfig::new(leaf_count, tasks_per_leaf)?,
-            ArenaOptions::default(),
+            TaskArenaConfig::new(leaf_count, tasks_per_leaf)?,
+            TaskArenaOptions::default(),
         )
     }
 
@@ -1003,7 +999,7 @@ impl ExecutorArena {
     }
 
     #[inline]
-    pub fn config(&self) -> &ArenaConfig {
+    pub fn config(&self) -> &TaskArenaConfig {
         &self.config
     }
 
@@ -1021,56 +1017,6 @@ impl ExecutorArena {
     pub fn decrement_total_tasks(&self) {
         self.total_tasks.fetch_sub(1, Ordering::Relaxed);
     }
-
-    // NOTE: This method has been removed because reserve_task and release_task
-    // are now on WorkerService, not ExecutorArena. Use RuntimeInner::spawn instead.
-    //
-    // /// Spawns a new asynchronous task onto the arena.
-    // ///
-    // /// The returned [`TaskHandle`] remains reserved until
-    // /// [`MmapExecutorArena::release_task`] is called. Callers should release
-    // /// the handle once the future has completed so the slot can be reused.
-    // ///
-    // /// # Errors
-    // ///
-    // /// Returns [`SpawnError::Closed`] if the arena has been closed, or
-    // /// [`SpawnError::NoCapacity`] if all task slots are currently reserved.
-    // /// [`SpawnError::AttachFailed`] is returned if the reserved task already has
-    // /// a future attached (which should not happen under normal usage).
-    // pub fn spawn<F>(&self, future: F) -> Result<TaskHandle, SpawnError>
-    // where
-    //     F: IntoFuture<Output = ()>,
-    //     F::IntoFuture: Future<Output = ()> + Send + 'static,
-    // {
-    //     if self.is_closed.load(Ordering::Acquire) {
-    //         return Err(SpawnError::Closed);
-    //     }
-    //
-    //     let Some(handle) = self.reserve_task() else {
-    //         return Err(if self.is_closed.load(Ordering::Acquire) {
-    //             SpawnError::Closed
-    //         } else {
-    //             SpawnError::NoCapacity
-    //         });
-    //     };
-    //
-    //     let global_id = handle.global_id(self.config.tasks_per_leaf);
-    //     self.init_task(global_id);
-    //
-    //     let task = handle.task();
-    //     let future = future.into_future();
-    //     let future_ptr = FutureAllocator::box_future(future);
-    //
-    //     if task.attach_future(future_ptr).is_err() {
-    //         unsafe { FutureAllocator::drop_boxed(future_ptr) };
-    //         self.release_task(handle);
-    //         return Err(SpawnError::AttachFailed);
-    //     }
-    //
-    //     task.schedule();
-    //
-    //     Ok(handle)
-    // }
 
     fn initialize_task_slots(&self) {
         let total = self.config.leaf_count * self.config.tasks_per_leaf;
@@ -1093,17 +1039,16 @@ impl ExecutorArena {
                 for slot in 0..tasks_per_leaf {
                     let idx = leaf * tasks_per_leaf + slot;
                     let signal_idx = slot / 64;
-                    let signal_bit = (slot % 64) as u32;
+                    let signal_bit = (slot % 64) as u8;
                     let signal_ptr = self.task_signal_ptr(leaf, signal_idx);
-                    let global_id = (leaf * tasks_per_leaf + slot) as u64;
+                    let global_id = (leaf * tasks_per_leaf + slot) as u32;
                     let task_ptr = tasks_ptr.add(idx);
                     let slot_ptr = self.task_slot_ptr(leaf, slot);
                     Task::construct(
                         task_ptr,
                         global_id,
-                        leaf as u32,
-                        signal_idx as u32,
-                        slot as u32,
+                        leaf as u16,
+                        signal_idx as u8,
                         signal_bit,
                         signal_ptr,
                         slot_ptr,
@@ -1163,12 +1108,12 @@ impl ExecutorArena {
     }
 
     #[inline]
-    pub fn compose_id(&self, leaf_idx: usize, slot_idx: usize) -> u64 {
-        (leaf_idx * self.config.tasks_per_leaf + slot_idx) as u64
+    pub fn compose_id(&self, leaf_idx: usize, slot_idx: usize) -> u32 {
+        (leaf_idx * self.config.tasks_per_leaf + slot_idx) as u32
     }
 
     #[inline]
-    pub fn decompose_id(&self, global_id: u64) -> (usize, usize) {
+    pub fn decompose_id(&self, global_id: u32) -> (usize, usize) {
         let tasks_per_leaf = self.config.tasks_per_leaf;
         let leaf_idx = (global_id as usize) / tasks_per_leaf;
         let slot_idx = (global_id as usize) % tasks_per_leaf;
@@ -1180,7 +1125,7 @@ impl ExecutorArena {
         debug_assert!(leaf_idx < self.config.leaf_count);
         debug_assert!(slot_idx < self.config.tasks_per_leaf);
         let signal_idx = slot_idx / 64;
-        let bit_idx = (slot_idx % 64) as u32;
+        let bit_idx = (slot_idx % 64) as u8;
         let task_ptr = self
             .ensure_task_initialized(leaf_idx, signal_idx, bit_idx)
             .expect("task slot not initialized");
@@ -1191,7 +1136,7 @@ impl ExecutorArena {
         &self,
         leaf_idx: usize,
         signal_idx: usize,
-        bit_idx: u32,
+        bit_idx: u8,
     ) -> Option<NonNull<Task>> {
         let slot_idx = signal_idx * 64 + bit_idx as usize;
         if slot_idx >= self.config.tasks_per_leaf {
@@ -1225,9 +1170,8 @@ impl ExecutorArena {
                     Task::construct(
                         task_ptr,
                         global_id,
-                        leaf_idx as u32,
-                        signal_idx as u32,
-                        slot_idx as u32,
+                        leaf_idx as u16,
+                        signal_idx as u8,
                         bit_idx,
                         signal_ptr,
                         slot_ptr,
@@ -1258,16 +1202,16 @@ impl ExecutorArena {
         &self,
         leaf_idx: usize,
         signal_idx: usize,
-        bit_idx: u32,
+        bit_idx: u8,
     ) -> Option<TaskHandle> {
         self.ensure_task_initialized(leaf_idx, signal_idx, bit_idx)
             .map(TaskHandle::from_non_null)
     }
 
-    pub fn init_task(&self, global_id: u64, summary_tree: *const crate::summary_tree::SummaryTree) {
+    pub fn init_task(&self, global_id: u32, summary_tree: *const crate::summary_tree::SummaryTree) {
         let (leaf_idx, slot_idx) = self.decompose_id(global_id);
         let signal_idx = slot_idx / 64;
-        let signal_bit = (slot_idx % 64) as u32;
+        let signal_bit = (slot_idx % 64) as u8;
 
         debug_assert!(signal_idx < self.layout.signals_per_leaf);
 
@@ -1281,9 +1225,8 @@ impl ExecutorArena {
             let signal_ptr = self.task_signal_ptr(leaf_idx, signal_idx);
             task.reset(
                 global_id,
-                leaf_idx as u32,
-                signal_idx as u32,
-                slot_idx as u32,
+                leaf_idx as u16,
+                signal_idx as u8,
                 signal_bit,
                 signal_ptr,
                 slot_ptr,
@@ -1315,15 +1258,15 @@ impl ExecutorArena {
         NonNull::new(ptr as *mut Task).map(TaskHandle::from_non_null)
     }
 
-    pub fn stats(&self) -> ArenaStats {
-        ArenaStats {
+    pub fn stats(&self) -> TaskArenaStats {
+        TaskArenaStats {
             total_capacity: self.config.leaf_count * self.config.tasks_per_leaf,
             active_tasks: self.total_tasks.load(Ordering::Relaxed) as usize,
             worker_count: 0, // Worker count now managed by WorkerService
         }
     }
 
-    fn allocate_memory(size: usize, options: &ArenaOptions) -> io::Result<*mut u8> {
+    fn allocate_memory(size: usize, options: &TaskArenaOptions) -> io::Result<*mut u8> {
         #[cfg(unix)]
         {
             let mut flags = MAP_PRIVATE | MAP_ANONYMOUS;
@@ -1355,7 +1298,7 @@ impl ExecutorArena {
     }
 }
 
-impl Drop for ExecutorArena {
+impl Drop for TaskArena {
     fn drop(&mut self) {
         unsafe {
             #[cfg(unix)]
@@ -1372,17 +1315,14 @@ impl Drop for ExecutorArena {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ArenaStats {
+pub struct TaskArenaStats {
     pub total_capacity: usize,
     pub active_tasks: usize,
     pub worker_count: usize,
 }
 
-// NOTE: These tests have been temporarily disabled because they test ExecutorArena internals
-// using methods (reserve_task, release_task, active_tree, etc.) that have been moved to
-// WorkerService as part of the architectural refactor. These tests need to be rewritten to
-// work with the new architecture where WorkerService owns both ExecutorArena and SummaryTree.
-#[cfg(all(test, feature = "disabled_tests"))]
+// Tests for Task, TaskSignal, TaskArena, and related functionality
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::worker::Worker;
@@ -1405,9 +1345,9 @@ mod tests {
         unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) }
     }
 
-    fn setup_arena(leaf_count: usize, tasks_per_leaf: usize) -> Arc<ExecutorArena> {
-        let config = ArenaConfig::new(leaf_count, tasks_per_leaf).unwrap();
-        Arc::new(ExecutorArena::with_config(config, ArenaOptions::default()).unwrap())
+    fn setup_arena(leaf_count: usize, tasks_per_leaf: usize) -> Arc<TaskArena> {
+        let config = TaskArenaConfig::new(leaf_count, tasks_per_leaf).unwrap();
+        Arc::new(TaskArena::with_config(config, TaskArenaOptions::default()).unwrap())
     }
 
     #[test]
@@ -1485,7 +1425,7 @@ mod tests {
     #[test]
     fn task_signal_try_acquire_from_selects_nearest() {
         let signal = TaskSignal::new();
-        for bit in [2u32, 6, 10] {
+        for bit in [2u64, 6, 10] {
             signal.set(bit);
         }
         let (bit, remaining) = signal
@@ -1496,6 +1436,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Needs WorkerService helper - uses reserve_task()"]
+    #[cfg(feature = "disabled_tests")]
     fn schedule_begin_finish_flow_clears_summary() {
         let arena = setup_arena(1, 64);
         let handle = arena.reserve_task().expect("reserve task");
@@ -1533,6 +1475,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Needs WorkerService helper - uses reserve_task()"]
+    #[cfg(feature = "disabled_tests")]
     fn finish_reschedules_when_work_arrives_during_execution() {
         let arena = setup_arena(1, 64);
         let handle = arena.reserve_task().expect("reserve task");
@@ -1571,7 +1515,7 @@ mod tests {
         let leaf = 2;
         let slot = 113;
         let signal = slot / 64;
-        let bit = (slot % 64) as u32;
+        let bit = (slot % 64) as u8;
         let task = unsafe { arena.task(leaf, slot) };
         let handle = TaskHandle::from_task(task);
         assert_eq!(handle.leaf_idx(), leaf);
@@ -1604,6 +1548,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "disabled_tests")] // References old Task fields (slot_idx)
     fn task_construct_initializes_fields() {
         let mut storage = MaybeUninit::<Task>::uninit();
         let mut slot_storage = MaybeUninit::<TaskSlot>::uninit();
@@ -1637,6 +1582,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "disabled_tests")] // References old Task fields (arena_ptr, bind_arena)
     fn task_bind_arena_sets_pointer() {
         let mut storage = MaybeUninit::<Task>::uninit();
         let mut slot_storage = MaybeUninit::<TaskSlot>::uninit();
@@ -1668,224 +1614,241 @@ mod tests {
         }
     }
 
-    #[test]
-    fn task_schedule_is_idempotent() {
-        let arena = setup_arena(1, 64);
-        let handle = arena.reserve_task().expect("reserve task");
-        let global = handle.global_id(arena.tasks_per_leaf());
-        arena.init_task(global);
-        let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
-        let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
-        let signal = unsafe { &*task.signal_ptr };
+    // The following tests require WorkerService helper methods (reserve_task, release_task, active_tree)
+    // that have been moved from TaskArena to WorkerService. They are disabled until we create
+    // a test helper that sets up WorkerService properly.
+    #[cfg(feature = "disabled_tests")]
+    mod needs_worker_service {
+        use super::*;
 
-        task.schedule();
-        let summary_after_first = arena
-            .active_summary(handle.leaf_idx())
-            .load(Ordering::Relaxed);
-        assert!(summary_after_first & (1 << handle.signal_idx()) != 0);
+        #[test]
+        #[ignore = "Needs WorkerService helper - uses reserve_task()"]
+        fn task_schedule_is_idempotent() {
+            let arena = setup_arena(1, 64);
+            let handle = arena.reserve_task().expect("reserve task");
+            let global = handle.global_id(arena.tasks_per_leaf());
+            arena.init_task(global);
+            let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
+            let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
+            let signal = unsafe { &*task.signal_ptr };
 
-        task.schedule();
-        let summary_after_second = arena
-            .active_summary(handle.leaf_idx())
-            .load(Ordering::Relaxed);
-        assert_eq!(summary_after_first, summary_after_second);
-        assert_eq!(signal.load(Ordering::Relaxed), 1 << task.signal_bit);
+            task.schedule();
+            let summary_after_first = arena
+                .active_summary(handle.leaf_idx())
+                .load(Ordering::Relaxed);
+            assert!(summary_after_first & (1 << handle.signal_idx()) != 0);
 
-        arena.deactivate_task(handle);
-        arena.release_task(handle);
-    }
+            task.schedule();
+            let summary_after_second = arena
+                .active_summary(handle.leaf_idx())
+                .load(Ordering::Relaxed);
+            assert_eq!(summary_after_first, summary_after_second);
+            assert_eq!(signal.load(Ordering::Relaxed), 1 << task.signal_bit);
 
-    #[test]
-    fn task_begin_overwrites_state() {
-        let arena = setup_arena(1, 64);
-        let handle = arena.reserve_task().expect("reserve task");
-        let global = handle.global_id(arena.tasks_per_leaf());
-        arena.init_task(global);
-        let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
-        let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
-
-        task.schedule();
-        task.begin();
-        assert_eq!(task.state.load(Ordering::Relaxed), TASK_EXECUTING);
-
-        arena.deactivate_task(handle);
-        arena.release_task(handle);
-    }
-
-    #[test]
-    fn task_finish_without_new_schedule_clears_signal() {
-        let arena = setup_arena(1, 64);
-        let handle = arena.reserve_task().expect("reserve task");
-        let leaf = handle.leaf_idx();
-        let signal_idx = handle.signal_idx();
-        let bit_idx = handle.bit_idx();
-        let global = handle.global_id(arena.tasks_per_leaf());
-        arena.init_task(global);
-        let slot_idx = signal_idx * 64 + bit_idx as usize;
-        let task = unsafe { arena.task(leaf, slot_idx) };
-        let signal = unsafe { &*task.signal_ptr };
-
-        task.schedule();
-        let (remaining, acquired) = signal.try_acquire(bit_idx);
-        assert!(acquired);
-        if remaining == 0 {
-            arena.active_tree().mark_signal_inactive(leaf, signal_idx);
+            arena.deactivate_task(handle);
+            arena.release_task(handle);
         }
-        task.begin();
-        task.finish();
 
-        assert_eq!(task.state.load(Ordering::Relaxed), TASK_IDLE);
-        assert_eq!(signal.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            arena.active_summary(leaf).load(Ordering::Relaxed) & (1 << signal_idx),
-            0
-        );
+        #[test]
+        #[ignore = "Needs WorkerService helper - uses reserve_task()"]
+        fn task_begin_overwrites_state() {
+            let arena = setup_arena(1, 64);
+            let handle = arena.reserve_task().expect("reserve task");
+            let global = handle.global_id(arena.tasks_per_leaf());
+            arena.init_task(global);
+            let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
+            let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
 
-        arena.release_task(handle);
-    }
+            task.schedule();
+            task.begin();
+            assert_eq!(task.state.load(Ordering::Relaxed), TASK_EXECUTING);
 
-    #[test]
-    fn task_finish_and_schedule_sets_signal() {
-        let arena = setup_arena(1, 64);
-        let handle = arena.reserve_task().expect("reserve task");
-        let leaf = handle.leaf_idx();
-        let signal_idx = handle.signal_idx();
-        let bit_idx = handle.bit_idx();
-        let global = handle.global_id(arena.tasks_per_leaf());
-        arena.init_task(global);
-        let slot_idx = signal_idx * 64 + bit_idx as usize;
-        let task = unsafe { arena.task(leaf, slot_idx) };
-        let signal = unsafe { &*task.signal_ptr };
+            arena.deactivate_task(handle);
+            arena.release_task(handle);
+        }
 
-        task.finish_and_schedule();
-        assert_eq!(task.state.load(Ordering::Relaxed), TASK_SCHEDULED);
-        assert!(signal.is_set(task.signal_bit));
-        assert_ne!(
-            arena.active_summary(leaf).load(Ordering::Relaxed) & (1 << signal_idx),
-            0
-        );
+        #[test]
+        #[ignore = "Needs WorkerService helper - uses reserve_task()"]
+        fn task_finish_without_new_schedule_clears_signal() {
+            let arena = setup_arena(1, 64);
+            let handle = arena.reserve_task().expect("reserve task");
+            let leaf = handle.leaf_idx();
+            let signal_idx = handle.signal_idx();
+            let bit_idx = handle.bit_idx();
+            let global = handle.global_id(arena.tasks_per_leaf());
+            arena.init_task(global);
+            let slot_idx = signal_idx * 64 + bit_idx as usize;
+            let task = unsafe { arena.task(leaf, slot_idx) };
+            let signal = unsafe { &*task.signal_ptr };
 
-        arena.deactivate_task(handle);
-        arena.release_task(handle);
-    }
+            task.schedule();
+            let (remaining, acquired) = signal.try_acquire(bit_idx);
+            assert!(acquired);
+            if remaining == 0 {
+                arena.active_tree().mark_signal_inactive(leaf, signal_idx);
+            }
+            task.begin();
+            task.finish();
 
-    #[test]
-    fn task_clear_yielded_and_is_yielded() {
-        let arena = setup_arena(1, 64);
-        let handle = arena.reserve_task().expect("reserve task");
-        let global = handle.global_id(arena.tasks_per_leaf());
-        arena.init_task(global);
-        let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
-        let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
+            assert_eq!(task.state.load(Ordering::Relaxed), TASK_IDLE);
+            assert_eq!(signal.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                arena.active_summary(leaf).load(Ordering::Relaxed) & (1 << signal_idx),
+                0
+            );
 
-        task.yielded.store(true, Ordering::Relaxed);
-        assert!(task.is_yielded());
-        task.clear_yielded();
-        assert!(!task.is_yielded());
+            arena.release_task(handle);
+        }
 
-        arena.release_task(handle);
-    }
+        #[test]
+        #[ignore = "Needs WorkerService helper - uses reserve_task()"]
+        fn task_finish_and_schedule_sets_signal() {
+            let arena = setup_arena(1, 64);
+            let handle = arena.reserve_task().expect("reserve task");
+            let leaf = handle.leaf_idx();
+            let signal_idx = handle.signal_idx();
+            let bit_idx = handle.bit_idx();
+            let global = handle.global_id(arena.tasks_per_leaf());
+            arena.init_task(global);
+            let slot_idx = signal_idx * 64 + bit_idx as usize;
+            let task = unsafe { arena.task(leaf, slot_idx) };
+            let signal = unsafe { &*task.signal_ptr };
 
-    #[test]
-    fn task_attach_future_rejects_second_future() {
-        let arena = setup_arena(1, 64);
-        let handle = arena.reserve_task().expect("reserve task");
-        let global = handle.global_id(arena.tasks_per_leaf());
-        arena.init_task(global);
-        let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
-        let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
+            task.finish_and_schedule();
+            assert_eq!(task.state.load(Ordering::Relaxed), TASK_SCHEDULED);
+            assert!(signal.is_set(task.signal_bit));
+            assert_ne!(
+                arena.active_summary(leaf).load(Ordering::Relaxed) & (1 << signal_idx),
+                0
+            );
 
-        let first_ptr = FutureAllocator::box_future(async {});
-        task.attach_future(first_ptr).unwrap();
-        let second_ptr = FutureAllocator::box_future(async {});
-        let existing = task.attach_future(second_ptr).unwrap_err();
-        assert_eq!(existing, first_ptr);
-        unsafe { FutureAllocator::drop_boxed(second_ptr) };
+            arena.deactivate_task(handle);
+            arena.release_task(handle);
+        }
 
-        let ptr = task.take_future().unwrap();
-        unsafe { FutureAllocator::drop_boxed(ptr) };
-        arena.release_task(handle);
-    }
+        #[test]
+        #[ignore = "Needs WorkerService helper - uses reserve_task()"]
+        fn task_clear_yielded_and_is_yielded() {
+            let arena = setup_arena(1, 64);
+            let handle = arena.reserve_task().expect("reserve task");
+            let global = handle.global_id(arena.tasks_per_leaf());
+            arena.init_task(global);
+            let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
+            let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
 
-    #[test]
-    fn task_take_future_clears_pointer() {
-        let arena = setup_arena(1, 64);
-        let handle = arena.reserve_task().expect("reserve task");
-        let global = handle.global_id(arena.tasks_per_leaf());
-        arena.init_task(global);
-        let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
-        let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
+            task.yielded.store(true, Ordering::Relaxed);
+            assert!(task.is_yielded());
+            task.clear_yielded();
+            assert!(!task.is_yielded());
 
-        let future_ptr = FutureAllocator::box_future(async {});
-        task.attach_future(future_ptr).unwrap();
-        let returned = task.take_future().unwrap();
-        assert_eq!(returned, future_ptr);
-        assert!(task.take_future().is_none());
-        unsafe { FutureAllocator::drop_boxed(returned) };
-        arena.release_task(handle);
-    }
+            arena.release_task(handle);
+        }
 
-    // TODO: These tests need to be updated to use WorkerService instead of direct Worker construction
-    // #[test]
-    // fn arena_spawn_executes_future() {
-    //     let arena = setup_arena(1, 8);
-    //     let counter = Arc::new(AtomicUsize::new(0));
-    //     let counter_clone = counter.clone();
-    //
-    //     let handle = arena
-    //         .spawn(async move {
-    //             counter_clone.fetch_add(1, Ordering::Relaxed);
-    //         })
-    //         .expect("spawn task");
-    //
-    //     // Worker construction now requires WorkerService
-    //     // let service = WorkerService::start(arena.clone(), WorkerServiceConfig::default());
-    //     // service.spawn_worker()?;
-    //
-    //     assert_eq!(counter.load(Ordering::Relaxed), 1);
-    //     arena.release_task(handle);
-    // }
-    //
-    // #[test]
-    // fn arena_spawn_returns_no_capacity_error() {
-    //     let arena = setup_arena(1, 1);
-    //
-    //     let handle = arena.spawn(async {}).expect("first spawn succeeds");
-    //     let err = arena.spawn(async {}).expect_err("second spawn should fail");
-    //     assert_eq!(err, SpawnError::NoCapacity);
-    //
-    //     arena.release_task(handle);
-    // }
+        #[test]
+        #[ignore = "Needs WorkerService helper - uses reserve_task()"]
+        fn task_attach_future_rejects_second_future() {
+            let arena = setup_arena(1, 64);
+            let handle = arena.reserve_task().expect("reserve task");
+            let global = handle.global_id(arena.tasks_per_leaf());
+            arena.init_task(global);
+            let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
+            let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
 
-    #[test]
-    fn reserve_task_in_leaf_exhaustion() {
-        let arena = setup_arena(1, 64);
-        let mut bits = Vec::with_capacity(64);
-        for _ in 0..64 {
+            let first_ptr = FutureAllocator::box_future(async {});
+            task.attach_future(first_ptr).unwrap();
+            let second_ptr = FutureAllocator::box_future(async {});
+            let existing = task.attach_future(second_ptr).unwrap_err();
+            assert_eq!(existing, first_ptr);
+            unsafe { FutureAllocator::drop_boxed(second_ptr) };
+
+            let ptr = task.take_future().unwrap();
+            unsafe { FutureAllocator::drop_boxed(ptr) };
+            arena.release_task(handle);
+        }
+
+        #[test]
+        #[ignore = "Needs WorkerService helper - uses reserve_task()"]
+        fn task_take_future_clears_pointer() {
+            let arena = setup_arena(1, 64);
+            let handle = arena.reserve_task().expect("reserve task");
+            let global = handle.global_id(arena.tasks_per_leaf());
+            arena.init_task(global);
+            let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
+            let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
+
+            let future_ptr = FutureAllocator::box_future(async {});
+            task.attach_future(future_ptr).unwrap();
+            let returned = task.take_future().unwrap();
+            assert_eq!(returned, future_ptr);
+            assert!(task.take_future().is_none());
+            unsafe { FutureAllocator::drop_boxed(returned) };
+            arena.release_task(handle);
+        }
+
+        // TODO: These tests need to be updated to use WorkerService instead of direct Worker construction
+        // #[test]
+        // fn arena_spawn_executes_future() {
+        //     let arena = setup_arena(1, 8);
+        //     let counter = Arc::new(AtomicUsize::new(0));
+        //     let counter_clone = counter.clone();
+        //
+        //     let handle = arena
+        //         .spawn(async move {
+        //             counter_clone.fetch_add(1, Ordering::Relaxed);
+        //         })
+        //         .expect("spawn task");
+        //
+        //     // Worker construction now requires WorkerService
+        //     // let service = WorkerService::start(arena.clone(), WorkerServiceConfig::default());
+        //     // service.spawn_worker()?;
+        //
+        //     assert_eq!(counter.load(Ordering::Relaxed), 1);
+        //     arena.release_task(handle);
+        // }
+        //
+        // #[test]
+        // fn arena_spawn_returns_no_capacity_error() {
+        //     let arena = setup_arena(1, 1);
+        //
+        //     let handle = arena.spawn(async {}).expect("first spawn succeeds");
+        //     let err = arena.spawn(async {}).expect_err("second spawn should fail");
+        //     assert_eq!(err, SpawnError::NoCapacity);
+        //
+        //     arena.release_task(handle);
+        // }
+
+        #[test]
+        #[ignore = "Needs WorkerService helper - uses active_tree()"]
+        fn reserve_task_in_leaf_exhaustion() {
+            let arena = setup_arena(1, 64);
+            let mut bits = Vec::with_capacity(64);
+            for _ in 0..64 {
+                let bit = arena
+                    .active_tree()
+                    .reserve_task_in_leaf(0, 0)
+                    .expect("expected available bit");
+                bits.push(bit);
+            }
+            assert!(arena.active_tree().reserve_task_in_leaf(0, 0).is_none());
+            for bit in &bits {
+                arena.active_tree().release_task_in_leaf(0, 0, *bit);
+            }
+        }
+
+        #[test]
+        #[ignore = "Needs WorkerService helper - uses active_tree()"]
+        fn reserve_task_in_leaf_after_release() {
+            let arena = setup_arena(1, 64);
             let bit = arena
                 .active_tree()
                 .reserve_task_in_leaf(0, 0)
-                .expect("expected available bit");
-            bits.push(bit);
+                .expect("expected bit");
+            arena.active_tree().release_task_in_leaf(0, 0, bit);
+            let new_bit = arena
+                .active_tree()
+                .reserve_task_in_leaf(0, 0)
+                .expect("bit after release");
+            arena.active_tree().release_task_in_leaf(0, 0, new_bit);
         }
-        assert!(arena.active_tree().reserve_task_in_leaf(0, 0).is_none());
-        for bit in &bits {
-            arena.active_tree().release_task_in_leaf(0, 0, *bit);
-        }
-    }
-
-    #[test]
-    fn reserve_task_in_leaf_after_release() {
-        let arena = setup_arena(1, 64);
-        let bit = arena
-            .active_tree()
-            .reserve_task_in_leaf(0, 0)
-            .expect("expected bit");
-        arena.active_tree().release_task_in_leaf(0, 0, bit);
-        let new_bit = arena
-            .active_tree()
-            .reserve_task_in_leaf(0, 0)
-            .expect("bit after release");
-        arena.active_tree().release_task_in_leaf(0, 0, new_bit);
-    }
+    } // mod needs_worker_service
 }

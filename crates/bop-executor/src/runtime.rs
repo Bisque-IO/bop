@@ -1,5 +1,6 @@
 use crate::task::{
-    ArenaConfig, ArenaOptions, ArenaStats, ExecutorArena, FutureAllocator, SpawnError, TaskHandle,
+    FutureAllocator, SpawnError, TaskArena, TaskArenaConfig, TaskArenaOptions, TaskArenaStats,
+    TaskHandle,
 };
 use crate::worker::{WaitStrategy, Worker, WorkerService, WorkerServiceConfig};
 use std::future::{Future, IntoFuture};
@@ -81,11 +82,11 @@ impl<const P: usize, const NUM_SEGS_P2: usize> RuntimeInner<P, NUM_SEGS_P2> {
 
 impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
     pub fn new(
-        config: ArenaConfig,
-        options: ArenaOptions,
+        config: TaskArenaConfig,
+        options: TaskArenaOptions,
         worker_count: usize,
     ) -> io::Result<Self> {
-        let arena = ExecutorArena::with_config(config, options)?;
+        let arena = TaskArena::with_config(config, options)?;
 
         // Create config with desired worker count as min_workers
         // This ensures workers start immediately on WorkerService::start()
@@ -119,7 +120,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
     }
 
     /// Returns current arena statistics.
-    pub fn stats(&self) -> ArenaStats {
+    pub fn stats(&self) -> TaskArenaStats {
         self.inner.service.arena().stats()
     }
 }
@@ -249,9 +250,12 @@ mod tests {
 
     #[test]
     fn runtime_spawn_completes() {
-        let runtime =
-            Runtime::<10, 6>::new(ArenaConfig::new(1, 8).unwrap(), ArenaOptions::default(), 1)
-                .expect("runtime");
+        let runtime = Runtime::<10, 6>::new(
+            TaskArenaConfig::new(1, 8).unwrap(),
+            TaskArenaOptions::default(),
+            1,
+        )
+        .expect("runtime");
         let counter = Arc::new(AtomicUsize::new(0));
         let cloned = counter.clone();
 
@@ -267,9 +271,12 @@ mod tests {
 
     #[test]
     fn join_handle_reports_completion() {
-        let runtime =
-            Runtime::<10, 6>::new(ArenaConfig::new(1, 4).unwrap(), ArenaOptions::default(), 1)
-                .expect("runtime");
+        let runtime = Runtime::<10, 6>::new(
+            TaskArenaConfig::new(1, 4).unwrap(),
+            TaskArenaOptions::default(),
+            1,
+        )
+        .expect("runtime");
         let join = runtime.spawn(async {}).expect("spawn");
         assert!(!join.is_finished());
         block_on(join);

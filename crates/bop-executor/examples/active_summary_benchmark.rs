@@ -1,4 +1,4 @@
-use bop_executor::task::{ArenaConfig, ArenaOptions, ExecutorArena};
+use bop_executor::task::{TaskArena, TaskArenaConfig, TaskArenaOptions};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -26,12 +26,12 @@ fn run_scenario(s: &Scenario) {
         s.name, s.leaf_count, s.max_tasks, s.threads, s.ops_per_thread
     );
 
-    let config = ArenaConfig::new(s.leaf_count, s.max_tasks)
+    let config = TaskArenaConfig::new(s.leaf_count, s.max_tasks)
         .expect("invalid arena configuration")
         .with_max_workers(s.leaf_count);
 
     let arena = Arc::new(
-        ExecutorArena::with_config(config, ArenaOptions::default())
+        TaskArena::with_config(config, TaskArenaOptions::default())
             .expect("failed to create arena"),
     );
 
@@ -82,13 +82,13 @@ fn run_scenario(s: &Scenario) {
     );
 }
 
-fn reserve_release(arena: &ExecutorArena) {
+fn reserve_release(arena: &TaskArena) {
     if let Some(handle) = arena.reserve_task() {
         arena.release_task(handle);
     }
 }
 
-fn activate_deactivate(arena: &ExecutorArena) {
+fn activate_deactivate(arena: &TaskArena) {
     if let Some(handle) = arena.reserve_task() {
         arena.activate_task(handle);
         arena.deactivate_task(handle);
@@ -96,7 +96,7 @@ fn activate_deactivate(arena: &ExecutorArena) {
     }
 }
 
-fn yield_flip(arena: &ExecutorArena, worker_slot: usize) {
+fn yield_flip(arena: &TaskArena, worker_slot: usize) {
     // TODO: This benchmark needs update - yield bits moved to WorkerService
     let _ = (arena, worker_slot);
 }

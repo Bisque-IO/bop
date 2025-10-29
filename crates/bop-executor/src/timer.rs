@@ -20,7 +20,7 @@ pub enum TimerState {
 #[derive(Clone, Copy, Debug)]
 pub struct TimerHandle {
     task_slot: NonNull<TaskSlot>,
-    task_id: u64,
+    task_id: u32,
     worker_id: u32,
     timer_id: u64,
 }
@@ -29,7 +29,7 @@ impl TimerHandle {
     #[inline(always)]
     pub(crate) fn new(
         task_slot: NonNull<TaskSlot>,
-        task_id: u64,
+        task_id: u32,
         worker_id: u32,
         timer_id: u64,
     ) -> Self {
@@ -47,7 +47,7 @@ impl TimerHandle {
     }
 
     #[inline(always)]
-    pub(crate) fn task_id(&self) -> u64 {
+    pub(crate) fn task_id(&self) -> u32 {
         self.task_id
     }
 
@@ -70,7 +70,7 @@ pub struct Timer {
     state: Cell<TimerState>,
     deadline_ns: Cell<u64>,
     task_slot: Cell<*mut TaskSlot>,
-    task_id: Cell<u64>,
+    task_id: Cell<u32>,
     worker_id: Cell<u32>,
     timer_id: Cell<u64>,
 }
@@ -116,7 +116,7 @@ impl Timer {
     pub(crate) fn prepare(
         &self,
         task_slot: NonNull<TaskSlot>,
-        task_id: u64,
+        task_id: u32,
         worker_id: u32,
     ) -> TimerHandle {
         self.task_slot.set(task_slot.as_ptr());

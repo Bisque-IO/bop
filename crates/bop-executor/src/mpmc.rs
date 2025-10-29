@@ -371,7 +371,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
                             // Create new queue (SegSpsc doesn't need signals/waker)
                             let new_queue = Box::into_raw(Box::new(unsafe {
                                 SegSpsc::<T, P, NUM_SEGS_P2>::new_unsafe_with_gate(SignalGate::new(
-                                    bit_index as u64,
+                                    bit_index as u8,
                                     self.inner.signals[signal_index].clone(),
                                     Arc::clone(&self.inner.waker),
                                 ))
@@ -498,7 +498,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
                         // Create new queue
                         let new_queue = Box::into_raw(Box::new(unsafe {
                             SegSpsc::<T, P, NUM_SEGS_P2>::new_unsafe_with_gate(SignalGate::new(
-                                bit_index as u64,
+                                bit_index as u8,
                                 self.inner.signals[signal_index].clone(),
                                 Arc::clone(&self.inner.waker),
                             ))

@@ -27,7 +27,6 @@ pub mod event;
 mod loom_exports;
 pub mod mpmc;
 pub mod mpsc;
-pub mod mpsc_dynamic;
 pub mod multishot;
 pub mod parking;
 pub mod runtime;

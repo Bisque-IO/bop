@@ -43,10 +43,6 @@ multishot = "0.3"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(diatomic_waker_loom)', 'cfg(multishot_loom)', 'cfg(async_event_loom)'] }
 # unexpected_cfgs = { level = "warn", check-cfg = ['cfg(diatomic_waker_loom)'] }
 
-[[example]]
-name = "timers_gc_benchmark"
-required-features = ["timers-introspection"]
-
 [[bench]]
 name = "mpsc_local_sender"
 harness = false

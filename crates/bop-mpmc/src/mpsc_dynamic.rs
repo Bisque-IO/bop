@@ -163,7 +163,7 @@ impl<T> Inner<T> {
                         self.seg_shift,
                         self.num_segs_shift,
                         SignalGate::new(
-                            bit_index as u64,
+                            bit_index as u8,
                             self.signals[signal_index].clone(),
                             Arc::clone(&self.waker),
                         ),

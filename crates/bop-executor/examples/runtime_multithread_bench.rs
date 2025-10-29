@@ -1,5 +1,5 @@
 use bop_executor::runtime::Runtime;
-use bop_executor::task::{ArenaConfig, ArenaOptions};
+use bop_executor::task::{TaskArenaConfig, TaskArenaOptions};
 use bop_executor::timer::Timer;
 use futures_lite::future::{block_on, poll_fn};
 use futures_lite::pin;
@@ -102,8 +102,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         opts.tasks_per_leaf
     );
 
-    let arena_config = ArenaConfig::new(opts.leaf_count, opts.tasks_per_leaf)?;
-    let runtime: Runtime<10, 6> = Runtime::new(arena_config, ArenaOptions::default(), worker_count)?;
+    let arena_config = TaskArenaConfig::new(opts.leaf_count, opts.tasks_per_leaf)?;
+    let runtime: Runtime<10, 6> =
+        Runtime::new(arena_config, TaskArenaOptions::default(), worker_count)?;
     let operations = Arc::new(AtomicUsize::new(0));
 
     let start = Instant::now();

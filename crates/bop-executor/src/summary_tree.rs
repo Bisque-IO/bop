@@ -1,4 +1,5 @@
 use crate::bits;
+use crate::signal_waker::SignalWaker;
 use crate::utils::CachePadded;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -25,17 +26,12 @@ pub struct SummaryTree {
     next_leaf: CachePadded<AtomicUsize>,
     next_signal_per_leaf: Box<[CachePadded<AtomicUsize>]>,
 
-    // Wake/sleep synchronization
-    permits: CachePadded<AtomicU64>,
-    sleepers: CachePadded<AtomicUsize>,
-    lock: Mutex<()>,
-    cv: Condvar,
-
     // Partition owner notification
     // Raw pointer to WorkerService.wakers array (lifetime guaranteed by WorkerService ownership)
-    wakers: *const std::sync::Arc<crate::signal_waker::SignalWaker>,
+    wakers: *const std::sync::Arc<SignalWaker>,
     wakers_len: usize,
-    worker_count: CachePadded<AtomicUsize>,
+    // Reference to WorkerService.worker_count - single source of truth
+    worker_count: *const AtomicUsize,
 }
 
 unsafe impl Send for SummaryTree {}
@@ -48,14 +44,16 @@ impl SummaryTree {
     /// * `leaf_count` - Number of leaf nodes (typically matches worker partition count)
     /// * `signals_per_leaf` - Number of task signal words per leaf (typically tasks_per_leaf / 64)
     /// * `wakers` - Slice of SignalWakers for partition owner notification
+    /// * `worker_count` - Reference to WorkerService's worker_count atomic (single source of truth)
     ///
     /// # Safety
-    /// The wakers slice must remain valid for the lifetime of this SummaryTree.
-    /// This is guaranteed when SummaryTree is owned by WorkerService which also owns the wakers.
+    /// The wakers slice and worker_count reference must remain valid for the lifetime of this SummaryTree.
+    /// This is guaranteed when SummaryTree is owned by WorkerService which also owns the wakers and worker_count.
     pub fn new(
         leaf_count: usize,
         signals_per_leaf: usize,
         wakers: &[std::sync::Arc<crate::signal_waker::SignalWaker>],
+        worker_count: &AtomicUsize,
     ) -> Self {
         assert!(leaf_count > 0, "leaf_count must be > 0");
         assert!(signals_per_leaf > 0, "signals_per_leaf must be > 0");
@@ -93,27 +91,17 @@ impl SummaryTree {
             leaf_summary_mask,
             next_leaf: CachePadded::new(AtomicUsize::new(0)),
             next_signal_per_leaf,
-            permits: CachePadded::new(AtomicU64::new(0)),
-            sleepers: CachePadded::new(AtomicUsize::new(0)),
-            lock: Mutex::new(()),
-            cv: Condvar::new(),
             wakers: wakers.as_ptr(),
             wakers_len: wakers.len(),
-            worker_count: CachePadded::new(AtomicUsize::new(0)),
+            worker_count: worker_count as *const AtomicUsize,
         }
     }
 
-    /// Update the worker count for partition ownership calculations.
-    /// Should be called when workers are registered/unregistered.
-    #[inline]
-    pub fn set_worker_count(&self, count: usize) {
-        self.worker_count.store(count, Ordering::Relaxed);
-    }
-
-    /// Get the current worker count.
+    /// Get the current worker count from WorkerService.
+    /// Reads directly from the single source of truth.
     #[inline]
     pub fn get_worker_count(&self) -> usize {
-        self.worker_count.load(Ordering::Relaxed)
+        unsafe { &*self.worker_count }.load(Ordering::Relaxed)
     }
 
     #[inline(always)]
@@ -130,7 +118,7 @@ impl SummaryTree {
     /// Notify the partition owner's SignalWaker that a leaf in their partition became active.
     #[inline(always)]
     fn notify_partition_owner_active(&self, leaf_idx: usize) {
-        let worker_count = self.worker_count.load(Ordering::Relaxed);
+        let worker_count = unsafe { &*self.worker_count }.load(Ordering::Relaxed);
         if worker_count == 0 {
             return;
         }
@@ -152,7 +140,7 @@ impl SummaryTree {
     /// Notify the partition owner's SignalWaker that a leaf in their partition became inactive.
     #[inline(always)]
     fn notify_partition_owner_inactive(&self, leaf_idx: usize) {
-        let worker_count = self.worker_count.load(Ordering::Relaxed);
+        let worker_count = unsafe { &*self.worker_count }.load(Ordering::Relaxed);
         if worker_count == 0 {
             return;
         }
@@ -225,7 +213,7 @@ impl SummaryTree {
 
     /// Attempts to reserve a task slot within (`leaf_idx`, `signal_idx`).
     /// Returns the bit index on success.
-    pub fn reserve_task_in_leaf(&self, leaf_idx: usize, signal_idx: usize) -> Option<u32> {
+    pub fn reserve_task_in_leaf(&self, leaf_idx: usize, signal_idx: usize) -> Option<u8> {
         if leaf_idx >= self.leaf_count || signal_idx >= self.signals_per_leaf {
             return None;
         }
@@ -236,7 +224,7 @@ impl SummaryTree {
             if free == 0 {
                 return None;
             }
-            let bit = free.trailing_zeros() as u32;
+            let bit = free.trailing_zeros() as u8;
             let mask = 1u64 << bit;
             match reservations.compare_exchange(
                 current,
@@ -251,7 +239,7 @@ impl SummaryTree {
     }
 
     /// Clears a previously reserved task slot.
-    pub fn release_task_in_leaf(&self, leaf_idx: usize, signal_idx: usize, bit: u32) {
+    pub fn release_task_in_leaf(&self, leaf_idx: usize, signal_idx: usize, bit: usize) {
         if leaf_idx >= self.leaf_count || signal_idx >= self.signals_per_leaf || bit >= 64 {
             return;
         }
@@ -261,7 +249,7 @@ impl SummaryTree {
     }
 
     /// Convenience function: reserve the first available task slot across the arena.
-    pub fn reserve_task(&self) -> Option<(usize, usize, u32)> {
+    pub fn reserve_task(&self) -> Option<(usize, usize, u8)> {
         if self.leaf_count == 0 {
             return None;
         }
@@ -295,78 +283,6 @@ impl SummaryTree {
         if signal.load(Ordering::Relaxed) == 0 {
             self.mark_signal_inactive(leaf_idx, signal_idx);
         }
-    }
-
-    // NOTE: snapshot_summary_word, snapshot_summary, summary_select, and summary removed
-    // because root_words was removed. Root-level summary is no longer needed
-    // with partition-based notification. Workers scan their local partitions directly.
-
-    #[inline]
-    pub fn try_acquire(&self) -> bool {
-        self.permits
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |p| p.checked_sub(1))
-            .is_ok()
-    }
-
-    pub fn acquire(&self) {
-        if self.try_acquire() {
-            return;
-        }
-        let mut guard = self.lock.lock().expect("active summary mutex poisoned");
-        self.sleepers.fetch_add(1, Ordering::Relaxed);
-        loop {
-            if self.try_acquire() {
-                self.sleepers.fetch_sub(1, Ordering::Relaxed);
-                return;
-            }
-            guard = self
-                .cv
-                .wait(guard)
-                .expect("active summary condvar wait poisoned");
-        }
-    }
-
-    pub fn acquire_timeout(&self, timeout: Duration) -> bool {
-        if self.try_acquire() {
-            return true;
-        }
-        let start = std::time::Instant::now();
-        let mut guard = self.lock.lock().expect("active summary mutex poisoned");
-        self.sleepers.fetch_add(1, Ordering::Relaxed);
-        while start.elapsed() < timeout {
-            if self.try_acquire() {
-                self.sleepers.fetch_sub(1, Ordering::Relaxed);
-                return true;
-            }
-            let remaining = timeout.saturating_sub(start.elapsed());
-            let (g, res) = self
-                .cv
-                .wait_timeout(guard, remaining)
-                .expect("active summary condvar wait poisoned");
-            guard = g;
-            if res.timed_out() {
-                break;
-            }
-        }
-        self.sleepers.fetch_sub(1, Ordering::Relaxed);
-        false
-    }
-
-    #[inline(always)]
-    pub fn release(&self, n: usize) {
-        if n == 0 {
-            return;
-        }
-        self.permits.fetch_add(n as u64, Ordering::Release);
-        let to_wake = n.min(self.sleepers.load(Ordering::Relaxed));
-        for _ in 0..to_wake {
-            self.cv.notify_one();
-        }
-    }
-
-    #[inline(always)]
-    pub fn sleepers(&self) -> usize {
-        self.sleepers.load(Ordering::Relaxed)
     }
 
     #[inline(always)]
@@ -502,6 +418,8 @@ impl SummaryTree {
 
 #[cfg(test)]
 mod tests {
+    use crate::signal_waker::SignalWaker;
+
     use super::*;
     use std::collections::HashSet;
     use std::sync::{Arc, Barrier, Mutex};
@@ -509,17 +427,17 @@ mod tests {
     use std::thread::yield_now;
     use std::time::{Duration, Instant};
 
-    fn setup_tree(leaf_count: usize, signals_per_leaf: usize) -> SummaryTree {
+    fn setup_tree(leaf_count: usize, signals_per_leaf: usize) -> (SummaryTree, AtomicUsize) {
         // Create dummy wakers for testing
-        let wakers: Vec<Arc<crate::signal_waker::SignalWaker>> = (0..4)
-            .map(|_| Arc::new(crate::signal_waker::SignalWaker::new()))
-            .collect();
-        SummaryTree::new(leaf_count, signals_per_leaf, &wakers)
+        let wakers: Vec<Arc<SignalWaker>> = (0..4).map(|_| Arc::new(SignalWaker::new())).collect();
+        let worker_count = AtomicUsize::new(4);
+        let tree = SummaryTree::new(leaf_count, signals_per_leaf, &wakers, &worker_count);
+        (tree, worker_count)
     }
 
     #[test]
     fn mark_signal_active_updates_root_and_leaf() {
-        let tree = setup_tree(4, 4);
+        let (tree, _worker_count) = setup_tree(4, 4);
         assert!(tree.mark_signal_active(1, 1));
         assert_eq!(tree.leaf_words[1].load(Ordering::Relaxed), 1u64 << 1);
         // assert_ne!(tree.root_words[0].load(Ordering::Relaxed) & (1u64 << 1), 0); // root_words removed
@@ -532,7 +450,7 @@ mod tests {
 
     #[test]
     fn mark_signal_inactive_if_empty_clears_summary() {
-        let tree = setup_tree(1, 2);
+        let (tree, _worker_count) = setup_tree(1, 2);
         assert!(tree.mark_signal_active(0, 1));
         let signal = AtomicU64::new(0);
         tree.mark_signal_inactive_if_empty(0, 1, &signal);
@@ -542,7 +460,7 @@ mod tests {
 
     #[test]
     fn reserve_task_in_leaf_exhausts_all_bits() {
-        let tree = setup_tree(1, 1);
+        let (tree, _worker_count) = setup_tree(1, 1);
         let mut bits = Vec::with_capacity(64);
         for _ in 0..64 {
             let bit = tree.reserve_task_in_leaf(0, 0).expect("expected free bit");
@@ -555,42 +473,27 @@ mod tests {
             "all bits should be exhausted"
         );
         for bit in bits {
-            tree.release_task_in_leaf(0, 0, bit);
+            tree.release_task_in_leaf(0, 0, bit as usize);
         }
     }
 
     #[test]
     fn reserve_task_round_robin_visits_all_leaves() {
-        let tree = setup_tree(4, 1);
+        let (tree, _worker_count) = setup_tree(4, 1);
         let mut observed = Vec::with_capacity(4);
         for _ in 0..4 {
             let (leaf, sig, bit) = tree.reserve_task().expect("reserve task");
             observed.push(leaf);
-            tree.release_task_in_leaf(leaf, sig, bit);
+            tree.release_task_in_leaf(leaf, sig, bit as usize);
         }
         observed.sort_unstable();
         assert_eq!(observed, vec![0, 1, 2, 3]);
     }
 
     #[test]
-    fn summary_select_prefers_nearest_active_leaf() {
-        let tree = setup_tree(8, 1);
-        assert!(tree.mark_signal_active(0, 0));
-        assert!(tree.mark_signal_active(5, 0));
-
-        let idx0 = tree.summary_select(0);
-        assert_eq!(idx0, 0);
-
-        let idx_near_five = tree.summary_select(6);
-        assert_eq!(idx_near_five, 5);
-
-        assert!(tree.mark_signal_inactive(0, 0));
-        assert!(tree.mark_signal_inactive(5, 0));
-    }
-
-    #[test]
     fn concurrent_reservations_are_unique() {
-        let tree = Arc::new(setup_tree(4, 1));
+        let (tree, _worker_count) = setup_tree(4, 1);
+        let tree = Arc::new(tree);
         let threads = 8;
         let reservations_per_thread = 8;
         let barrier = Arc::new(Barrier::new(threads));
@@ -634,40 +537,13 @@ mod tests {
         assert_eq!(guard.len(), threads * reservations_per_thread);
 
         for &(leaf, signal, bit) in guard.iter() {
-            tree.release_task_in_leaf(leaf, signal, bit);
+            tree.release_task_in_leaf(leaf, signal, bit as usize);
         }
     }
 
     #[test]
-    fn acquire_timeout_unblocks_after_release() {
-        let tree = Arc::new(setup_tree(1, 1));
-        let barrier = Arc::new(Barrier::new(2));
-
-        let tree_thread = Arc::clone(&tree);
-        let barrier_thread = Arc::clone(&barrier);
-        let handle = thread::spawn(move || {
-            barrier_thread.wait();
-            let start = Instant::now();
-            let ok = tree_thread.acquire_timeout(Duration::from_millis(200));
-            (ok, start.elapsed())
-        });
-
-        barrier.wait();
-        thread::sleep(Duration::from_millis(50));
-        tree.release(1);
-
-        let (ok, elapsed) = handle.join().expect("thread panicked");
-        assert!(ok, "acquire_timeout should succeed after release");
-        assert!(
-            elapsed < Duration::from_millis(200),
-            "acquire should unblock before timeout"
-        );
-        assert_eq!(tree.sleepers(), 0);
-    }
-
-    #[test]
     fn reserve_and_release_task_updates_reservations() {
-        let tree = setup_tree(4, 1);
+        let (tree, _worker_count) = setup_tree(4, 1);
         let handle = tree.reserve_task().expect("task handle");
         assert_eq!(handle.1, 0); // signal idx
 
@@ -678,7 +554,7 @@ mod tests {
             .load(Ordering::Relaxed);
         assert_ne!(reservation, 0);
 
-        tree.release_task_in_leaf(handle.0, handle.1, handle.2);
+        tree.release_task_in_leaf(handle.0, handle.1, handle.2 as usize);
         let reservation = tree
             .task_reservations
             .get(handle.0 * 1 + handle.1)

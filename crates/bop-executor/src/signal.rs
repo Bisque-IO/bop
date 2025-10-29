@@ -52,9 +52,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-use crossbeam_utils::CachePadded;
-
 use crate::signal_waker::SignalWaker;
+use crate::utils::CachePadded;
 
 /// Number of bits per signal word (64-bit atomic).
 ///
@@ -70,20 +69,6 @@ pub const SIGNAL_CAPACITY: u64 = 64;
 /// bit_index = queue_id & SIGNAL_MASK;
 /// ```
 pub const SIGNAL_MASK: u64 = SIGNAL_CAPACITY - 1;
-
-/// Number of signal words per group in the executor.
-///
-/// This is an implementation detail for grouping signals. The actual number
-/// of signal words is determined by `SignalWaker::MAX_SIGNALS` (typically 64).
-const SIGNAL_GROUP_WIDTH: usize = 8;
-
-/// Maximum number of queues per signal group.
-///
-/// Calculated as: `SIGNAL_GROUP_WIDTH * SIGNAL_CAPACITY = 8 * 64 = 512 queues`.
-///
-/// With 64 signal groups (SignalWaker limit), the system supports up to
-/// 4096 concurrent queues total.
-pub const SLOTS_PER_GROUP: usize = SIGNAL_GROUP_WIDTH * SIGNAL_CAPACITY as usize;
 
 /// A cache-line padded 64-bit atomic bitmap for tracking queue readiness.
 ///
@@ -583,7 +568,7 @@ pub struct SignalGate {
     /// Bit position within the Signal's 64-bit bitmap (0-63).
     ///
     /// This queue's ready state is represented by bit `1 << bit_index` in the signal.
-    bit_index: u64,
+    bit_index: u8,
 
     /// Reference to the Signal word containing this queue's bit.
     ///
@@ -613,7 +598,7 @@ impl SignalGate {
     /// let gate = SignalGate::new(5, signal, waker);
     /// // This gate controls bit 5 in signal[0]
     /// ```
-    pub fn new(bit_index: u64, signal: Signal, waker: Arc<SignalWaker>) -> Self {
+    pub fn new(bit_index: u8, signal: Signal, waker: Arc<SignalWaker>) -> Self {
         Self {
             flags: AtomicU8::new(IDLE),
             bit_index,
@@ -682,7 +667,7 @@ impl SignalGate {
         let scheduled_nor_executing = (previous_flags & (SCHEDULED | EXECUTING)) == IDLE;
 
         if scheduled_nor_executing {
-            let (was_empty, was_set) = self.signal.set(self.bit_index);
+            let (was_empty, was_set) = self.signal.set(self.bit_index as u64);
             if was_empty && was_set {
                 self.waker.mark_active(self.signal.index());
             }
@@ -785,7 +770,7 @@ impl SignalGate {
     pub fn finish(&self) {
         let after_flags = self.flags.fetch_sub(EXECUTING, Ordering::AcqRel);
         if after_flags & SCHEDULED != IDLE {
-            self.signal.set(self.bit_index);
+            self.signal.set(self.bit_index as u64);
         }
     }
 
@@ -849,7 +834,7 @@ impl SignalGate {
     #[inline(always)]
     pub fn finish_and_schedule(&self) {
         self.flags.store(SCHEDULED, Ordering::Release);
-        let (was_empty, was_set) = self.signal.set(self.bit_index);
+        let (was_empty, was_set) = self.signal.set(self.bit_index as u64);
         if was_empty && was_set {
             self.waker.mark_active(self.signal.index());
         }

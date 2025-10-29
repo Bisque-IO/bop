@@ -39,7 +39,7 @@ pub fn new<T, const P: usize, const NUM_SEGS_P2: usize>() -> Receiver<T, P, NUM_
 /// let receiver = mpsc::new_with_waker(waker);
 /// ```
 pub fn new_with_waker<T, const P: usize, const NUM_SEGS_P2: usize>(
-    waker: Arc<SignalWaker>
+    waker: Arc<SignalWaker>,
 ) -> Receiver<T, P, NUM_SEGS_P2> {
     // Create sparse array of AtomicPtr, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
@@ -218,7 +218,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
                 let arc = Arc::new(unsafe {
                     SegSpsc::<T, P, NUM_SEGS_P2>::new_unsafe_with_gate_and_config(
                         SignalGate::new(
-                            bit_index as u64,
+                            bit_index as u8,
                             self.signals[signal_index].clone(),
                             Arc::clone(&self.waker),
                         ),

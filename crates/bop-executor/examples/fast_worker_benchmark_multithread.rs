@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bop_executor::runtime::Runtime;
-use bop_executor::task::{ArenaConfig, ArenaOptions};
+use bop_executor::task::{TaskArenaConfig, TaskArenaOptions};
 use futures_lite::future::{block_on, yield_now};
 
 const DEFAULT_LEAVES: usize = 64;
@@ -59,9 +59,13 @@ fn run_benchmark(config: &BenchmarkConfig) {
     );
 
     let arena_config =
-        ArenaConfig::new(DEFAULT_LEAVES, DEFAULT_TASKS_PER_LEAF).expect("arena config");
-    let runtime: Runtime<10, 6> =
-        Runtime::new(arena_config, ArenaOptions::default(), config.worker_count).expect("runtime");
+        TaskArenaConfig::new(DEFAULT_LEAVES, DEFAULT_TASKS_PER_LEAF).expect("arena config");
+    let runtime: Runtime<10, 6> = Runtime::new(
+        arena_config,
+        TaskArenaOptions::default(),
+        config.worker_count,
+    )
+    .expect("runtime");
     let completion_counter = Arc::new(AtomicUsize::new(0));
 
     let start = Instant::now();
@@ -76,7 +80,7 @@ fn run_benchmark(config: &BenchmarkConfig) {
         handles.push(runtime.spawn(task).expect("spawn task for benchmark"));
     }
 
-    for (idx, handle) in handles.into_iter().enumerate() {
+    for (_, handle) in handles.into_iter().enumerate() {
         block_on(handle);
         // if (idx + 1) % 10 == 0 || idx + 1 == config.total_tasks {
         //     println!("    joined {}/{} tasks", idx + 1, config.total_tasks);

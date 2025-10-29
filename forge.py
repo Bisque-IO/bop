@@ -10,6 +10,7 @@ from typing import List
 IS_WINDOWS = platform.system() == "Windows"
 IS_LINUX = platform.system() == "Linux"
 IS_MAC = platform.system() == "Darwin"
+IS_FREEBSD = platform.system() == "FreeBSD"
 
 arch = platform.machine().lower()
 
@@ -19,7 +20,7 @@ IS_RISCV64 = False
 LIB_DIR = ""
 SO_SUFFIX = ""
 
-if IS_LINUX:
+if IS_LINUX or IS_FREEBSD:
     SO_SUFFIX = ".so"
 elif IS_MAC:
     SO_SUFFIX = ".dylib"
@@ -37,6 +38,8 @@ if arch in ("x86_64", "amd64"):
         LIB_DIR = os.path.join(LIB_ROOT, "macos", "amd64")
     elif IS_WINDOWS:
         LIB_DIR = os.path.join(LIB_ROOT, "windows", "amd64")
+    elif IS_FREEBSD:
+        LIB_DIR = os.path.join(LIB_ROOT, "freebsd", "amd64")
 elif arch in ("aarch64", "arm64"):
     IS_ARM64 = True
     if IS_LINUX:
@@ -45,6 +48,8 @@ elif arch in ("aarch64", "arm64"):
         LIB_DIR = os.path.join(LIB_ROOT, "macos", "arm64")
     elif IS_WINDOWS:
         LIB_DIR = os.path.join(LIB_ROOT, "windows", "arm64")
+    elif IS_FREEBSD:
+        LIB_DIR = os.path.join(LIB_ROOT, "freebsd", "arm64")
 elif arch in ("riscv64",):
     IS_RISCV64 = True
     if IS_LINUX:
@@ -720,6 +725,8 @@ def xmake_configure_and_build_bop(platform: str, arch: str, toolchain: str, debu
         platform_name = "macos"
     elif platform == "windows" or platform == "mingw" or platform == "win":
         platform_name = "windows"
+    elif platform == "freebsd":
+        platform_name = "freebsd"
 
     arch_name = arch
     if arch == "x86_64" or arch == "amd64" or arch == "x64":
@@ -865,6 +872,10 @@ def wolfssl_do_configure_build(
         args += ["--enable-armasm"]
     elif IS_LINUX and host.startswith("riscv64"):
         args += ["--enable-riscv-asm"]
+    elif IS_FREEBSD and host.startswith("x86_64"):
+        args += ["--enable-aesni"]
+    elif IS_FREEBSD and host.startswith("aarch64"):
+        args += ["--enable-armasm"]
 
     # ./configure --host=aarch64-linux-gnu CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ --enable-static --enable-pic --enable-opensslall --enable-opensslextra --enable-asio
     # print(" ".join(args))
@@ -903,6 +914,11 @@ def wolfssl_do_configure_build(
             dst_dir = os.path.join(LIB_ROOT, "linux", "arm64")
         elif host.startswith("riscv64"):
             dst_dir = os.path.join(LIB_ROOT, "linux", "riscv64")
+    elif IS_FREEBSD:
+        if host.startswith("x86_64"):
+            dst_dir = os.path.join(LIB_ROOT, "freebsd", "amd64")
+        elif host.startswith("aarch64"):
+            dst_dir = os.path.join(LIB_ROOT, "freebsd", "arm64")
 
     if len(dst_dir) == 0:
         print("unknown arch: expected amd64, arm64 or riscv64")
@@ -940,6 +956,10 @@ def wolfssl_build(args: List[str]):
             wolfssl_do_configure_build("arm64-apple-darwin", "", "")
         return
 
+    if IS_FREEBSD:
+        wolfssl_do_configure_build("", "", "")
+        return
+
     print("only nix systems are supported")
     sys.exit(-1)
     # xmake f -v -p cross -a arm64 --cross=aarch64-linux-gnu-
@@ -968,7 +988,7 @@ sudo apt update
 sudo apt install g++-aarch64-linux-gnu gcc-aarch64-linux-gnu \
                  libc6-dev-arm64-cross pkg-config-aarch64-linux-gnu \
                  qemu-user-static
-                 
+
 cmake .. -DWASM_ENABLE_AOT=1 -DWASM_ENABLE_THREAD_MGR=1 -DWASM_ENABLE_DEBUG_INTERP=1 -DWASM_ENABLE_DEBUG_AOT=1 -DWASM_ENABLE_FAST_INTERP=1 -DWASM_ENABLE_MULTI_MODULE=1 -DWAMR_BUILD_FAST_INTERP=1 -DWAMR_BUILD_AOT=1 -DWAMR_BUILD_GC=0 -DWAMR_BUILD_REF_TYPES=1 -DWAMR_BUILD_MEMORY64=1 -DWAMR_BUILD_MULTI_MEMORY=1 -DWAMR_BUILD_TAIL_CALL=1 -DWAMR_RELAX_MMAP_LOW_ADDR=ON -DWASM_ENABLE_AOT_STACK_FRAME=1
 cmake .. -G Ninja -DWASM_ENABLE_AOT=1 -DWASM_ENABLE_THREAD_MGR=1 -DWASM_ENABLE_DEBUG_INTERP=1 -DWASM_ENABLE_DEBUG_AOT=1 -DWASM_ENABLE_FAST_INTERP=1 -DWASM_ENABLE_MULTI_MODULE=1 -DWAMR_BUILD_FAST_INTERP=1 -DWAMR_BUILD_AOT=1 -DWAMR_BUILD_GC=0 -DWAMR_BUILD_REF_TYPES=1 -DWAMR_BUILD_MEMORY64=1 -DWAMR_BUILD_MULTI_MEMORY=1 -DWAMR_BUILD_TAIL_CALL=1 -DWAMR_RELAX_MMAP_LOW_ADDR=ON -DWASM_ENABLE_AOT_STACK_FRAME=1
 cmake -DCMAKE_TOOLCHAIN_FILE=../build-scripts/linux_aarch64_toolchain.cmake .. -G Ninja -DWASM_ENABLE_AOT=1 -DWASM_ENABLE_THREAD_MGR=1 -DWASM_ENABLE_DEBUG_INTERP=1 -DWASM_ENABLE_DEBUG_AOT=1 -DWASM_ENABLE_FAST_INTERP=0 -DWASM_ENABLE_MULTI_MODULE=1 -DWAMR_BUILD_FAST_INTERP=1 -DWAMR_BUILD_AOT=1 -DWAMR_BUILD_GC=0 -DWAMR_BUILD_REF_TYPES=1 -DWAMR_BUILD_MEMORY64=1 -DWAMR_BUILD_MULTI_MEMORY=1 -DWAMR_BUILD_TAIL_CALL=1 -DWAMR_RELAX_MMAP_LOW_ADDR=ON -DWASM_ENABLE_AOT_STACK_FRAME=1

@@ -1,5 +1,5 @@
 use bop_executor::runtime::Runtime;
-use bop_executor::task::{ArenaConfig, ArenaOptions};
+use bop_executor::task::{TaskArenaConfig, TaskArenaOptions};
 use bop_executor::timer::Timer;
 use futures_lite::future::block_on;
 use num_cpus;
@@ -13,8 +13,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let futures = 128;
     let iterations = 16;
 
-    let arena_config = ArenaConfig::new(4, 256)?;
-    let runtime: Runtime<10, 6> = Runtime::new(arena_config, ArenaOptions::default(), workers.min(4))?;
+    let arena_config = TaskArenaConfig::new(4, 256)?;
+    let runtime: Runtime<10, 6> =
+        Runtime::new(arena_config, TaskArenaOptions::default(), workers.min(4))?;
     let operations = Arc::new(AtomicUsize::new(0));
 
     let start = Instant::now();

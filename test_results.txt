@@ -1,0 +1,86 @@
+warning: C:\Users\info\repos\bisque-io\bop\crates\bop-mpmc\Cargo.toml: unused manifest key: build
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\bop-executor\src\task.rs:1322:17
+     |
+1322 | #[cfg(all(test, feature = "disabled_tests"))]
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `timers-introspection`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+     = note: requested on the command line with `-W unexpected-cfgs`
+
+warning: `bop-executor` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+     Running tests\comprehensive_executor_tests.rs (target\debug\deps\comprehensive_executor_tests-350af68c96b2f213.exe)
+
+running 64 tests
+test edge_case_concurrent_runtime_operations ... ok
+test error_handling_rapid_spawn_attempts ... ok
+test edge_case_empty_runtime_drop ... ok
+test summary_tree_edge_case_single_leaf ... ok
+test summary_tree_global_to_local_leaf_conversion ... ok
+test summary_tree_concurrent_signal_operations ... ok
+test summary_tree_concurrent_reservations ... ok
+test summary_tree_maximum_leaves ... ok
+test summary_tree_partition_boundary_cases ... ok
+test summary_tree_partition_ownership ... ok
+test summary_tree_partition_rebalancing ... ok
+test summary_tree_reserve_exhaustion ... ok
+test summary_tree_reserve_release_stress ... ok
+test summary_tree_reserve_task_round_robin ... ok
+test summary_tree_signal_active_inactive ... ok
+test task_arena_close ... ok
+test task_arena_compose_decompose_identity ... ok
+test task_arena_config_power_of_two_adjustment ... ok
+test task_arena_handle_for_location_comprehensive ... ok
+test task_arena_initialization ... ok
+test task_arena_lazy_initialization ... ok
+test task_arena_multiple_init_task_calls ... ok
+test task_arena_preinitialize ... ok
+test runtime_spawn_returning_complex_types ... ok
+test task_arena_signal_ptr_validity ... ok
+test summary_tree_signal_transitions_stress ... ok
+test task_arena_stats_accuracy ... ok
+test runtime_large_result_propagation ... ok
+test runtime_multiple_concurrent_spawns ... ok
+test runtime_interleaved_spawn_complete ... ok
+test runtime_spawn_chain_dependencies ... ok
+test runtime_join_handle_is_finished ... ok
+test runtime_stats_tracking ... ok
+test worker_service_basic_startup ... ok
+test worker_service_tick_stats_progression ... FAILED
+test runtime_spawn_burst_load ... ok
+test worker_service_tick_thread ... FAILED
+test runtime_spawn_with_async_blocks ... ok
+test runtime_basic_spawn_and_complete ... ok
+test integration_producer_consumer_pattern ... ok
+test integration_full_task_execution_cycle ... ok
+test worker_service_multiple_worker_coordination ... ok
+test runtime_mixed_duration_tasks ... ok
+test runtime_spawn_with_immediate_drop ... ok
+test stress_test_alternating_work_idle ... ok
+test runtime_spawn_after_capacity ... ok
+test worker_service_dynamic_worker_count ... ok
+test error_handling_spawn_zero_capacity ... ok
+test stress_test_maximum_concurrent_tasks ... ok
+test runtime_nested_spawn ... ok
+test integration_many_short_tasks ... ok
+test runtime_heavy_computation_tasks ... ok
+test integration_fan_out_fan_in ... ok
+test worker_service_task_reservation ... ok
+test worker_service_has_work_detection ... ok
+test worker_service_reserve_after_shutdown ... ok
+test worker_service_clock_monotonicity ... ok
+test stress_test_continuous_spawn_complete ... FAILED
+test integration_barrier_synchronization has been running for over 60 seconds
+test integration_recursive_spawn has been running for over 60 seconds
+test integration_sequential_runtime_creation has been running for over 60 seconds
+test integration_stress_spawn_release_cycle has been running for over 60 seconds
+test runtime_graceful_shutdown has been running for over 60 seconds
+test runtime_panic_isolation has been running for over 60 seconds
+error: test failed, to rerun pass `-p bop-executor --test comprehensive_executor_tests`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\info\repos\bisque-io\bop\target\debug\deps\comprehensive_executor_tests-350af68c96b2f213.exe` (exit code: 0xc000013a, STATUS_CONTROL_C_EXIT)
+note: test exited abnormally; to see the full output pass --nocapture to the harness.

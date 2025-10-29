@@ -213,7 +213,7 @@ impl SignalWaker {
     #[inline]
     pub fn try_unmark_yield(&self) {
         if is_set(&self.status, 0) {
-            self.summary.fetch_and(!(1u64 << 0), Ordering::Relaxed);
+            self.status.fetch_and(!(1u64 << 0), Ordering::Relaxed);
         }
     }
 
@@ -231,7 +231,7 @@ impl SignalWaker {
     #[inline]
     pub fn try_unmark_tasks(&self) {
         if is_set(&self.status, 1) {
-            self.summary.fetch_and(!(1u64 << 1), Ordering::Relaxed);
+            self.status.fetch_and(!(1u64 << 1), Ordering::Relaxed);
         }
     }
 
@@ -769,9 +769,9 @@ impl SignalWaker {
         leaf_words: &[AtomicU64],
     ) -> bool {
         debug_assert!(
-            partition_end - partition_start <= 64,
+            partition_end.saturating_sub(partition_start) <= 64,
             "partition size {} exceeds 64-bit bitmap capacity",
-            partition_end - partition_start
+            partition_end.saturating_sub(partition_start)
         );
 
         let mut new_summary = 0u64;
