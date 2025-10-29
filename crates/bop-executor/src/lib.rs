@@ -32,7 +32,6 @@ pub mod parking;
 pub mod runtime;
 pub mod seg_spmc;
 pub mod seg_spsc;
-pub mod seg_spsc_dynamic;
 pub mod selector;
 pub mod signal;
 pub mod signal_waker;
