@@ -7,18 +7,18 @@
 //! # Architecture
 //!
 //! ```text
-//! SignalWaker (Summary Layer)
+//! SignalWaker (Status Layer)
 //! ┌──────────────────────────────────────────────┐
-//! │ Summary: [bit0, bit1, ..., bit63]            │  64 bits (one per signal group)
+//! │ Status: [bit0, bit1, ..., bit61, flags...]   │  62 queue bits + control flags
 //! └──────────────────────────────────────────────┘
 //!        │       │                  │
 //!        ▼       ▼                  ▼
-//!   Signal[0] Signal[1]  ...   Signal[63]           64 signal words
+//!   Signal[0] Signal[1]  ...   Signal[61]           62 signal words
 //!   [64 bits] [64 bits]       [64 bits]             (one per group of 64 queues)
 //!      │  │      │  │            │  │
 //!      ▼  ▼      ▼  ▼            ▼  ▼
-//!   Queue Queue Queue Queue ... Queue Queue         Up to 4096 queues total
-//!      0    1     64   65      4030  4031
+//!   Queue Queue Queue Queue ... Queue Queue         Up to 3,968 queues total
+//!      0    1     64   65      3902  3903
 //! ```
 //!
 //! # Components
@@ -52,7 +52,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-use crate::signal_waker::SignalWaker;
+use crate::signal_waker::{STATUS_SUMMARY_WORDS, SignalWaker};
 use crate::utils::CachePadded;
 
 /// Number of bits per signal word (64-bit atomic).
@@ -157,7 +157,7 @@ impl Signal {
 ///
 /// # Fields
 ///
-/// - `index`: The signal's position in the SignalWaker's signal array (0-63)
+/// - `index`: The signal's position in the SignalWaker's signal array (0-61)
 /// - `value`: 64-bit atomic bitmap where each bit represents a queue's readiness
 struct SignalInner {
     /// Signal index in the SignalWaker array.
@@ -184,7 +184,7 @@ impl Signal {
     ///
     /// # Parameters
     ///
-    /// - `index`: Position in the SignalWaker's signal array (0-63)
+    /// - `index`: Position in the SignalWaker's signal array (0-61)
     ///
     /// # Example
     ///
@@ -194,6 +194,12 @@ impl Signal {
     /// assert!(signal.is_empty());
     /// ```
     pub fn with_index(index: u64) -> Self {
+        debug_assert!(
+            index < STATUS_SUMMARY_WORDS as u64,
+            "signal index {} exceeds status summary capacity {}",
+            index,
+            STATUS_SUMMARY_WORDS
+        );
         Self::with_value(index, 0)
     }
 
@@ -204,7 +210,7 @@ impl Signal {
     ///
     /// # Parameters
     ///
-    /// - `index`: Position in the SignalWaker's signal array (0-63)
+    /// - `index`: Position in the SignalWaker's signal array (0-61)
     /// - `value`: Initial 64-bit bitmap value
     ///
     /// # Example
@@ -218,6 +224,12 @@ impl Signal {
     /// assert!(signal.is_set(10));
     /// ```
     pub fn with_value(index: u64, value: u64) -> Self {
+        debug_assert!(
+            index < STATUS_SUMMARY_WORDS as u64,
+            "signal index {} exceeds status summary capacity {}",
+            index,
+            STATUS_SUMMARY_WORDS
+        );
         Self {
             inner: Arc::new(CachePadded::new(SignalInner {
                 index,
@@ -577,7 +589,7 @@ pub struct SignalGate {
 
     /// Reference to the top-level SignalWaker for summary updates.
     ///
-    /// Shared among all queues in the executor (up to 4096 queues).
+    /// Shared among all queues in the executor (up to 3,968 queues).
     waker: Arc<SignalWaker>,
 }
 

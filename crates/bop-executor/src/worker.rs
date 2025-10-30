@@ -39,8 +39,8 @@ const MESSAGE_BATCH_SIZE: usize = 4096;
 
 // Worker status is now managed via SignalWaker:
 // - SignalWaker.summary: mpsc queue signals (bits 0-63)
-// - SignalWaker.status bit 0: yield queue has items
-// - SignalWaker.status bit 1: task partition has work
+// - SignalWaker.status bit 63: yield queue has items
+// - SignalWaker.status bit 62: partition cache has work
 
 /// Trait for cross-worker operations that don't depend on const parameters
 trait CrossWorkerOps: Send + Sync {
@@ -231,8 +231,8 @@ pub struct WorkerService<
 
     // Per-worker SignalWakers - each tracks all three work types:
     // - summary: mpsc queue signals (bits 0-63 for different signal words)
-    // - status bit 0: yield queue has items
-    // - status bit 1: task partition has work
+    // - status bit 63: yield queue has items
+    // - status bit 62: task partition has work
     wakers: Box<[Arc<SignalWaker>]>,
 
     worker_actives: Box<[AtomicU64]>,
@@ -1347,8 +1347,8 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         let waker = &self.service.wakers[self.worker_id as usize];
 
         // Check status bits (fast path):
-        // - bit 0: yield queue has items
-        // - bit 1: partition has tasks (synced from SummaryTree)
+        // - bit 63: yield queue has items
+        // - bit 62: partition cache reports tasks (synced from SummaryTree)
         let status = waker.status();
         if status != 0 {
             return true;

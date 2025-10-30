@@ -4,8 +4,7 @@
 /// BUG #2: try_unmark_yield() was clearing summary bit instead of status bit
 ///
 /// These tests ensure the fixes remain correct and detect any future regressions.
-
-use bop_executor::signal_waker::SignalWaker;
+use bop_executor::signal_waker::{STATUS_SUMMARY_BITS, STATUS_SUMMARY_MASK, SignalWaker};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -331,9 +330,9 @@ fn regression_rapid_status_cycling_preserves_summary() {
     let waker = SignalWaker::new();
 
     // Establish a stable summary state
-    for i in 0..64 {
+    for i in 0..STATUS_SUMMARY_BITS {
         if i % 3 == 0 {
-            waker.mark_active(i);
+            waker.mark_active(i as u64);
         }
     }
     let expected_summary = waker.snapshot_summary();
@@ -374,9 +373,10 @@ fn regression_concurrent_status_summary_operations() {
     let waker1 = waker.clone();
     let handle1 = thread::spawn(move || {
         for i in 0..100 {
-            waker1.mark_active(i % 64);
+            let bit = (i as u64) % (STATUS_SUMMARY_BITS as u64);
+            waker1.mark_active(bit);
             if i % 10 == 0 {
-                waker1.try_unmark(i % 64);
+                waker1.try_unmark(bit);
             }
         }
     });
@@ -395,7 +395,7 @@ fn regression_concurrent_status_summary_operations() {
     // Thread 3: Manipulate partition summary
     let waker3 = waker.clone();
     let handle3 = thread::spawn(move || {
-        for i in 0..50 {
+        for i in 0..(STATUS_SUMMARY_BITS as usize) {
             waker3.mark_partition_leaf_active(i % 64);
         }
         for i in 0..50 {
@@ -455,8 +455,6 @@ fn regression_status_bit_toctou_is_safe() {
 
 #[test]
 fn regression_status_and_summary_full_independence() {
-    let waker = SignalWaker::new();
-
     // Enumerate all possible status states
     let status_states = vec![
         (false, false), // Neither bit set
@@ -466,7 +464,7 @@ fn regression_status_and_summary_full_independence() {
     ];
 
     // Enumerate some summary states
-    let summary_states = vec![0u64, 0b1, 0b11, 0xFF, u64::MAX];
+    let summary_states = vec![0u64, 0b1, 0b11, 0xFF, STATUS_SUMMARY_MASK];
 
     for &(should_have_yield, should_have_tasks) in &status_states {
         for &summary_mask in &summary_states {
@@ -474,9 +472,9 @@ fn regression_status_and_summary_full_independence() {
             let waker = SignalWaker::new();
 
             // Set summary state
-            for i in 0..64 {
+            for i in 0..STATUS_SUMMARY_BITS {
                 if (summary_mask >> i) & 1 != 0 {
-                    waker.mark_active(i);
+                    waker.mark_active(i as u64);
                 }
             }
 

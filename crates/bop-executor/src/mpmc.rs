@@ -3,7 +3,7 @@ use crate::seg_spmc::SegSpmc;
 use crate::seg_spsc::SegSpsc;
 use crate::selector::Selector;
 use crate::signal::{SIGNAL_MASK, Signal, SignalGate};
-use crate::signal_waker::SignalWaker;
+use crate::signal_waker::{STATUS_SUMMARY_WORDS, SignalWaker};
 use crate::{PopError, PushError};
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
@@ -12,15 +12,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::thread;
 
-/// Maximum number of producers
-const MAX_QUEUES: usize = 4096;
-const MAX_QUEUES_MASK: usize = MAX_QUEUES - 1;
+/// Maximum number of producers (limited by SignalWaker summary capacity)
+const MAX_QUEUES: usize = STATUS_SUMMARY_WORDS * 64;
 const QUEUES_PER_PRODUCER: usize = 1;
 const MAX_PRODUCERS: usize = MAX_QUEUES / QUEUES_PER_PRODUCER;
 const MAX_PRODUCERS_MASK: usize = QUEUES_PER_PRODUCER - 1;
 
 /// Number of u64 words needed for the signal bitset
-const SIGNAL_WORDS: usize = (MAX_QUEUES + 63) / 64;
+const SIGNAL_WORDS: usize = STATUS_SUMMARY_WORDS;
 
 /// Thread-local cache of SPSC queues for each producer thread
 /// Stores (producer_id, queue_ptr, close_fn) where close_fn can close the queue
@@ -754,7 +753,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
             }
 
             // Get signal index from selector for fairness
-            let mut producer_id = (selector.next() as usize) & MAX_QUEUES_MASK;
+            let mut producer_id = (selector.next() as usize) % MAX_QUEUES;
             let signal_index = producer_id / 64;
             let mut signal_bit = (producer_id - (signal_index * 64)) as u64;
 
@@ -949,13 +948,7 @@ impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM
         // let thread_id: u64 = std::thread::current().id().as_u64().into();
         // let mut signal_index = self.inner.waker.summary_select((thread_id as u64) & 63) as usize;
         // let mut signal_index = self.inner.waker.summary_select((random as u64) & 63) as usize;
-        // let mut signal_index = (thread_id as usize) & 3;
-        let mut signal_index = 64;
-        // let mut signal_index = 0;
-
-        if signal_index >= 64 {
-            signal_index = random & 63;
-        }
+        let signal_index = random % SIGNAL_WORDS;
 
         let mut signal_bit = selector.next() & 63;
         let signal = &self.inner.signals[signal_index];

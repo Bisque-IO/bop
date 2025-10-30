@@ -6,30 +6,39 @@ use crate::utils::CachePadded;
 
 use crate::bits::is_set;
 
-/// A cache-optimized, summary-driven waker for coordinating up to 4096 lock-free queues.
+pub const STATUS_SUMMARY_BITS: u32 = 62;
+pub const STATUS_SUMMARY_MASK: u64 = (1u64 << STATUS_SUMMARY_BITS) - 1;
+pub const STATUS_SUMMARY_WORDS: usize = STATUS_SUMMARY_BITS as usize;
+pub const STATUS_BIT_PARTITION: u64 = 1u64 << 62;
+pub const STATUS_BIT_YIELD: u64 = 1u64 << 63;
+
+/// A cache-optimized waker that packs queue summaries and control flags into a single status word.
 ///
 /// # Architecture
 ///
-/// `SignalWaker` implements a **two-level hierarchy** for efficient work discovery:
+/// `SignalWaker` implements a **two-level hierarchy** for efficient work discovery while
+/// keeping a single atomic source of truth for coordination data:
 ///
 /// ```text
-/// Level 1: Summary Word (64 bits)
+/// Level 1: Status Word (64 bits)
 ///          ┌─────────────────────────────────────┐
-///          │ Bit 0  Bit 1  ...  Bit 63           │  Each bit = "word has work"
+///          │ Bits 0-61  │ Bit 62 │ Bit 63        │
+///          │ Queue map  │ Part.  │ Yield         │
 ///          └─────────────────────────────────────┘
-///                 │      │           │
-///                 ▼      ▼           ▼
+///                 │           │
+///                 ▼           ▼
 /// Level 2: Signal Words (external AtomicU64s)
-///          Word 0  Word 1  ...  Word 63
+///          Word 0  Word 1  ...  Word 61
 ///          [64 q]  [64 q]  ...  [64 q]           Each bit = individual queue state
 ///
-/// Total: 64 words × 64 bits = 4096 queues
+/// Total: 62 words × 64 bits = 3,968 queues
 /// ```
 ///
 /// # Core Components
 ///
-/// 1. **Summary Bitmap** (`summary`): Single u64 where bit `i` indicates whether
-///    word `i` has any active queues. Enables O(1) lookup instead of O(N) scanning.
+/// 1. **Status Bitmap** (`status`): Single u64 that stores queue-word summary bits
+///    (0‒61) plus control flags (partition/yield). Enables O(1) lookup without a
+///    second atomic.
 ///
 /// 2. **Counting Semaphore** (`permits`): Tracks how many threads should be awake.
 ///    Each queue transition from empty→non-empty adds exactly 1 permit, guaranteeing
@@ -46,7 +55,7 @@ use crate::bits::is_set;
 /// - Producer/consumer paths access different cache lines
 ///
 /// ## Memory Ordering Strategy
-/// - **Summary**: `Relaxed` - hint-based, false positives acceptable
+/// - **Status summary bits**: `Relaxed` - hint-based, false positives acceptable
 /// - **Permits**: `AcqRel/Release` - proper synchronization for wakeups
 /// - **Sleepers**: `Relaxed` - approximate count is sufficient
 ///
@@ -103,16 +112,13 @@ use crate::bits::is_set;
 /// without coordination beyond the internal atomics and mutex/condvar for blocking.
 #[repr(align(64))]
 pub struct SignalWaker {
-    /// **Summary bitmap**: Bit `i` set means word `i` has at least one active queue.
+    /// **Status bitmap**: Queue-word summary bits (0‒61) plus control flags.
     ///
-    /// This enables O(1) work discovery: consumers check this u64 instead of
-    /// scanning all 4096 queues. Updated with `Relaxed` ordering since it's a
-    /// hint (false positives are safe, cleaned up lazily).
+    /// - Bits 0‒61: Queue-word hot bits (`mark_active`, `try_unmark_if_empty`, etc.)
+    /// - Bit 62 (`STATUS_BIT_PARTITION`): Partition cache says work is present
+    /// - Bit 63 (`STATUS_BIT_YIELD`): Worker should yield ASAP
     ///
-    /// - Producer: Sets bits via `mark_active()` or `mark_active_mask()`
-    /// - Consumer: Reads via `snapshot_summary()`, clears via `try_unmark_if_empty()`
-    summary: CachePadded<AtomicU64>,
-
+    /// Keeping everything in one atomic avoids races between independent u64s.
     status: CachePadded<AtomicU64>,
 
     /// **Counting semaphore**: Number of threads that should be awake (available permits).
@@ -158,7 +164,7 @@ pub struct SignalWaker {
     /// Updated via `sync_partition_summary()` before parking. Uses `Relaxed` ordering
     /// since it's a hint (false positives are safe, workers verify actual task availability).
     ///
-    /// When partition_summary transitions 0→non-zero, status bit 1 (STATUS_TASKS_AVAILABLE)
+    /// When partition_summary transitions 0→non-zero, `STATUS_BIT_PARTITION`
     /// is set and a permit is added to wake the worker.
     partition_summary: CachePadded<AtomicU64>,
 
@@ -171,8 +177,12 @@ pub struct SignalWaker {
 
 impl SignalWaker {
     pub fn new() -> Self {
+        debug_assert_eq!(
+            (STATUS_BIT_PARTITION | STATUS_BIT_YIELD) & STATUS_SUMMARY_MASK,
+            0,
+            "status control bits must not overlap summary mask"
+        );
         Self {
-            summary: CachePadded::new(AtomicU64::new(0)),
             status: CachePadded::new(AtomicU64::new(0)),
             permits: CachePadded::new(AtomicU64::new(0)),
             sleepers: CachePadded::new(AtomicUsize::new(0)),
@@ -195,43 +205,88 @@ impl SignalWaker {
     #[inline]
     pub fn status_bits(&self) -> (bool, bool) {
         let status = self.status.load(Ordering::Relaxed);
-        // (yield, tasks)
-        (status & (1u64 << 0) != 0, status & (1u64 << 1) != 0)
+        // (yield, partition)
+        (
+            status & STATUS_BIT_YIELD != 0,
+            status & STATUS_BIT_PARTITION != 0,
+        )
     }
 
     #[inline]
     pub fn mark_yield(&self) {
-        if is_set(&self.status, 0) {
+        if self.status.load(Ordering::Relaxed) & STATUS_BIT_YIELD != 0 {
             return;
         }
-        let prev = self.status.fetch_or(1u64 << 0, Ordering::Relaxed);
-        if prev & (1u64 << 0) == 0 {
+        let prev = self.status.fetch_or(STATUS_BIT_YIELD, Ordering::Relaxed);
+        if prev & STATUS_BIT_YIELD == 0 {
             self.release(1);
         }
     }
 
     #[inline]
     pub fn try_unmark_yield(&self) {
-        if is_set(&self.status, 0) {
-            self.status.fetch_and(!(1u64 << 0), Ordering::Relaxed);
+        loop {
+            let snapshot = self.status.load(Ordering::Relaxed);
+            if snapshot & STATUS_BIT_YIELD == 0 {
+                return;
+            }
+
+            match self.status.compare_exchange(
+                snapshot,
+                snapshot & !STATUS_BIT_YIELD,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => {
+                    if actual & STATUS_BIT_YIELD == 0 {
+                        return;
+                    }
+                }
+            }
         }
     }
 
     #[inline]
     pub fn mark_tasks(&self) {
-        if is_set(&self.status, 1) {
+        if self.status.load(Ordering::Relaxed) & STATUS_BIT_PARTITION != 0 {
             return;
         }
-        let prev = self.status.fetch_or(1u64 << 1, Ordering::Relaxed);
-        if prev & (1u64 << 1) == 0 {
+        let prev = self
+            .status
+            .fetch_or(STATUS_BIT_PARTITION, Ordering::Relaxed);
+        if prev & STATUS_BIT_PARTITION == 0 {
             self.release(1);
         }
     }
 
     #[inline]
     pub fn try_unmark_tasks(&self) {
-        if is_set(&self.status, 1) {
-            self.status.fetch_and(!(1u64 << 1), Ordering::Relaxed);
+        loop {
+            let snapshot = self.status.load(Ordering::Relaxed);
+            if snapshot & STATUS_BIT_PARTITION == 0 {
+                return;
+            }
+
+            match self.status.compare_exchange(
+                snapshot,
+                snapshot & !STATUS_BIT_PARTITION,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    // If new partition work arrived concurrently, re-arm the bit
+                    if self.partition_summary.load(Ordering::Acquire) != 0 {
+                        self.mark_tasks();
+                    }
+                    return;
+                }
+                Err(actual) => {
+                    if actual & STATUS_BIT_PARTITION == 0 {
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -261,11 +316,17 @@ impl SignalWaker {
     /// ```
     #[inline]
     pub fn mark_active(&self, index: u64) {
-        if is_set(&self.summary, index) {
+        debug_assert!(
+            index < STATUS_SUMMARY_BITS as u64,
+            "summary index {} exceeds {} bits",
+            index,
+            STATUS_SUMMARY_BITS
+        );
+        let mask = 1u64 << index;
+        if self.status.load(Ordering::Relaxed) & mask != 0 {
             return;
         }
-        let mask = 1u64 << index;
-        let prev = self.summary.fetch_or(mask, Ordering::Relaxed);
+        let prev = self.status.fetch_or(mask, Ordering::Relaxed);
         if prev & mask == 0 {
             self.release(1);
         }
@@ -300,11 +361,12 @@ impl SignalWaker {
     /// ```
     #[inline]
     pub fn mark_active_mask(&self, mask: u64) {
-        if mask == 0 {
+        let summary_mask = mask & STATUS_SUMMARY_MASK;
+        if summary_mask == 0 {
             return;
         }
-        let prev = self.summary.fetch_or(mask, Ordering::Relaxed);
-        let newly = (!prev) & mask;
+        let prev = self.status.fetch_or(summary_mask, Ordering::Relaxed);
+        let newly = (!prev) & summary_mask;
         let k = newly.count_ones() as usize;
         if k > 0 {
             self.release(k);
@@ -330,9 +392,43 @@ impl SignalWaker {
     /// ```
     #[inline]
     pub fn try_unmark_if_empty(&self, bit_index: u64, signal: &AtomicU64) {
-        if signal.load(Ordering::Relaxed) == 0 {
-            self.summary
-                .fetch_and(!(1u64 << bit_index), Ordering::Relaxed);
+        debug_assert!(
+            bit_index < STATUS_SUMMARY_BITS as u64,
+            "summary index {} exceeds {} bits",
+            bit_index,
+            STATUS_SUMMARY_BITS
+        );
+        let mask = 1u64 << bit_index;
+
+        loop {
+            if signal.load(Ordering::Acquire) != 0 {
+                return;
+            }
+
+            let snapshot = self.status.load(Ordering::Relaxed);
+            if snapshot & mask == 0 {
+                return;
+            }
+
+            match self.status.compare_exchange(
+                snapshot,
+                snapshot & !mask,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    if signal.load(Ordering::Acquire) != 0 {
+                        // Re-arm summary and release if work arrived concurrently.
+                        self.mark_active(bit_index);
+                    }
+                    return;
+                }
+                Err(actual) => {
+                    if actual & mask == 0 {
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -346,8 +442,15 @@ impl SignalWaker {
     /// * `bit_index` - Word index (0..63) to clear
     #[inline]
     pub fn try_unmark(&self, bit_index: u64) {
-        if is_set(&self.summary, bit_index) {
-            self.summary
+        debug_assert!(
+            bit_index < STATUS_SUMMARY_BITS as u64,
+            "summary index {} exceeds {} bits",
+            bit_index,
+            STATUS_SUMMARY_BITS
+        );
+        let mask = 1u64 << bit_index;
+        if self.status.load(Ordering::Relaxed) & mask != 0 {
+            self.status
                 .fetch_and(!(1u64 << bit_index), Ordering::Relaxed);
         }
     }
@@ -383,7 +486,7 @@ impl SignalWaker {
     /// ```
     #[inline]
     pub fn snapshot_summary(&self) -> u64 {
-        self.summary.load(Ordering::Relaxed)
+        self.status.load(Ordering::Relaxed) & STATUS_SUMMARY_MASK
     }
 
     /// Finds the nearest set bit to `nearest_to_index` in the summary.
@@ -410,7 +513,8 @@ impl SignalWaker {
     /// ```
     #[inline]
     pub fn summary_select(&self, nearest_to_index: u64) -> u64 {
-        crate::bits::find_nearest(self.summary.load(Ordering::Relaxed), nearest_to_index)
+        let summary = self.status.load(Ordering::Relaxed) & STATUS_SUMMARY_MASK;
+        crate::bits::find_nearest(summary, nearest_to_index)
     }
 
     // ────────────────────────────────────────────────────────────────────────────
@@ -590,7 +694,7 @@ impl SignalWaker {
     /// uses `Acquire` ordering for stronger visibility guarantees.
     #[inline]
     pub fn summary_bits(&self) -> u64 {
-        self.summary.load(Ordering::Acquire)
+        self.status.load(Ordering::Acquire) & STATUS_SUMMARY_MASK
     }
 
     /// Returns the current number of available permits.
@@ -731,8 +835,8 @@ impl SignalWaker {
     ///
     /// Samples the worker's assigned partition of the SummaryTree and updates
     /// the local `partition_summary` bitmap. When the partition transitions from
-    /// empty to non-empty, sets status bit 1 (STATUS_TASKS_AVAILABLE) and adds
-    /// a permit to wake the worker.
+    /// empty to non-empty, sets `STATUS_BIT_PARTITION` and adds a permit to wake
+    /// the worker.
     ///
     /// This should be called before parking to ensure the worker doesn't sleep
     /// when tasks are available in its partition.
@@ -769,40 +873,84 @@ impl SignalWaker {
         leaf_words: &[AtomicU64],
     ) -> bool {
         debug_assert!(
-            partition_end.saturating_sub(partition_start) <= 64,
-            "partition size {} exceeds 64-bit bitmap capacity",
-            partition_end.saturating_sub(partition_start)
+            partition_end >= partition_start,
+            "partition_end ({}) must be >= partition_start ({})",
+            partition_end,
+            partition_start
         );
 
-        let mut new_summary = 0u64;
+        let partition_len = partition_end.saturating_sub(partition_start);
+        if partition_len == 0 {
+            let prev = self.partition_summary.swap(0, Ordering::AcqRel);
+            if prev != 0 {
+                self.try_unmark_tasks();
+            }
+            return false;
+        }
 
-        // Sample leaf words in our partition
-        for leaf_idx in partition_start..partition_end {
-            if let Some(leaf_word) = leaf_words.get(leaf_idx) {
-                let leaf_value = leaf_word.load(Ordering::Relaxed);
-                if leaf_value != 0 {
-                    let bit_idx = leaf_idx - partition_start;
-                    new_summary |= 1u64 << bit_idx;
+        debug_assert!(
+            partition_len <= 64,
+            "partition size {} exceeds 64-bit bitmap capacity",
+            partition_len
+        );
+
+        let partition_mask = if partition_len >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << partition_len) - 1
+        };
+
+        loop {
+            let mut new_summary = 0u64;
+
+            for (offset, leaf_idx) in (partition_start..partition_end).enumerate() {
+                if let Some(leaf_word) = leaf_words.get(leaf_idx) {
+                    if leaf_word.load(Ordering::Acquire) != 0 {
+                        new_summary |= 1u64 << offset;
+                    }
                 }
             }
+
+            let prev = self.partition_summary.load(Ordering::Acquire);
+            let prev_masked = prev & partition_mask;
+
+            if prev_masked != 0 {
+                let mut to_clear = prev_masked & !new_summary;
+                while to_clear != 0 {
+                    let bit = to_clear.trailing_zeros() as usize;
+                    let leaf_idx = partition_start + bit;
+                    if let Some(leaf_word) = leaf_words.get(leaf_idx) {
+                        if leaf_word.load(Ordering::Acquire) != 0 {
+                            new_summary |= 1u64 << bit;
+                        }
+                    }
+                    to_clear &= to_clear - 1;
+                }
+            }
+
+            let desired = (prev & !partition_mask) | new_summary;
+
+            match self.partition_summary.compare_exchange(
+                prev,
+                desired,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    let had_work = prev_masked != 0;
+                    let has_work = (desired & partition_mask) != 0;
+
+                    if has_work && !had_work {
+                        self.mark_tasks();
+                    } else if !has_work && had_work {
+                        self.try_unmark_tasks();
+                    }
+
+                    return has_work;
+                }
+                Err(_) => continue,
+            }
         }
-
-        // Update partition summary
-        let old_summary = self.partition_summary.swap(new_summary, Ordering::Relaxed);
-
-        // Update status bit 1 based on summary
-        let had_work = old_summary != 0;
-        let has_work = new_summary != 0;
-
-        if has_work && !had_work {
-            // 0→1 transition: mark tasks available
-            self.mark_tasks();
-        } else if !has_work && had_work {
-            // 1→0 transition: try unmark
-            self.try_unmark_tasks();
-        }
-
-        has_work
     }
 
     /// Get current partition summary bitmap.
@@ -868,7 +1016,7 @@ impl SignalWaker {
     /// // When scheduling a task, immediately update owner's partition summary
     /// let owner_waker = &service.wakers[owner_id];
     /// if owner_waker.mark_partition_leaf_active(local_leaf_idx) {
-    ///     // This was the first task - worker will be woken by mark_tasks()
+    ///     // This was the first task - worker will be woken by the partition flag
     /// }
     /// ```
     pub fn mark_partition_leaf_active(&self, local_leaf_idx: usize) -> bool {
@@ -881,7 +1029,7 @@ impl SignalWaker {
         let mask = 1u64 << local_leaf_idx;
         let old_summary = self.partition_summary.fetch_or(mask, Ordering::Relaxed);
 
-        // If partition was empty, mark tasks available
+        // If partition was empty, mark partition flag to wake the worker
         if old_summary == 0 {
             self.mark_tasks();
             true
@@ -893,7 +1041,7 @@ impl SignalWaker {
     /// Clear partition summary for a specific leaf.
     ///
     /// Called when a leaf becomes empty. If this was the last active leaf,
-    /// attempts to clear the tasks status bit.
+    /// attempts to clear the partition status bit.
     ///
     /// # Arguments
     ///
@@ -905,11 +1053,10 @@ impl SignalWaker {
             local_leaf_idx
         );
 
-        let mask = !(1u64 << local_leaf_idx);
-        let new_summary = self.partition_summary.fetch_and(mask, Ordering::Relaxed) & mask;
+        let bit = 1u64 << local_leaf_idx;
+        let old_summary = self.partition_summary.fetch_and(!bit, Ordering::AcqRel);
 
-        // If partition is now empty, try to unmark tasks
-        if new_summary == 0 {
+        if (old_summary & bit) != 0 && (old_summary & !bit) == 0 {
             self.try_unmark_tasks();
         }
     }

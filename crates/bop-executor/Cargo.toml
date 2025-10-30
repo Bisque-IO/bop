@@ -46,3 +46,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(diatomic_wake
 [[bench]]
 name = "mpsc_local_sender"
 harness = false
+
+[[bench]]
+name = "signal_waker_perf"
+harness = false
