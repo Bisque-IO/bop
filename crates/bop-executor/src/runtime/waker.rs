@@ -50,7 +50,7 @@ pub const STATUS_BIT_YIELD: u64 = 1u64 << 63;
 /// # Design Patterns
 ///
 /// ## Cache Optimization
-/// - `#[repr(align(64))]` on struct for cache-line alignment
+/// - `CachePadded` on struct for cache-line alignment
 /// - `CachePadded` on hot atomics to prevent false sharing
 /// - Producer/consumer paths access different cache lines
 ///
@@ -66,16 +66,16 @@ pub const STATUS_BIT_YIELD: u64 = 1u64 << 63;
 ///
 /// # Guarantees
 ///
-/// ✅ **No lost wakeups**: Permits accumulate even if no threads are sleeping
-/// ✅ **Bounded notifications**: Never wakes more than `sleepers` threads
-/// ✅ **Lock-free fast path**: `try_acquire()` uses only atomics
-/// ✅ **Summary consistency**: false positives OK, false negatives impossible
+/// - **No lost wakeups**: Permits accumulate even if no threads are sleeping
+/// - **Bounded notifications**: Never wakes more than `sleepers` threads
+/// - **Lock-free fast path**: `try_acquire()` uses only atomics
+/// - **Summary consistency**: false positives OK, false negatives impossible
 ///
 /// # Trade-offs
 ///
-/// ⚠️ **False positives**: Summary may indicate work when queues are empty (lazy cleanup)
-/// ⚠️ **Approximate sleeper count**: May over-notify slightly (but safely)
-/// ⚠️ **64-word limit**: Summary is single u64 (extensible if needed)
+/// - **False positives**: Summary may indicate work when queues are empty (lazy cleanup)
+/// - **Approximate sleeper count**: May over-notify slightly (but safely)
+/// - **64-word limit**: Summary is single u64 (extensible if needed)
 ///
 /// # Usage Example
 ///
@@ -111,7 +111,7 @@ pub const STATUS_BIT_YIELD: u64 = 1u64 << 63;
 /// All methods are thread-safe. Producers and consumers can operate concurrently
 /// without coordination beyond the internal atomics and mutex/condvar for blocking.
 #[repr(align(64))]
-pub struct SignalWaker {
+pub struct WorkerWaker {
     /// **Status bitmap**: Queue-word summary bits (0‒61) plus control flags.
     ///
     /// - Bits 0‒61: Queue-word hot bits (`mark_active`, `try_unmark_if_empty`, etc.)
@@ -175,7 +175,7 @@ pub struct SignalWaker {
     cv: Condvar,
 }
 
-impl SignalWaker {
+impl WorkerWaker {
     pub fn new() -> Self {
         debug_assert_eq!(
             (STATUS_BIT_PARTITION | STATUS_BIT_YIELD) & STATUS_SUMMARY_MASK,
@@ -197,11 +197,38 @@ impl SignalWaker {
     // PRODUCER-SIDE API
     // ────────────────────────────────────────────────────────────────────────────
 
+    /// Returns the full 64-bit raw status word for this worker,
+    /// which contains all control and summary bits.
+    ///
+    /// # Details
+    /// The status word encodes:
+    /// - Status control bits (e.g., yield, partition-ready)
+    /// - Partition summary bits (track active leafs in this partition)
+    ///
+    /// This is a low-level snapshot, useful for diagnostics, debugging,
+    /// or fast checks on global/partition state.
+    ///
+    /// # Memory Ordering
+    /// Uses relaxed ordering for performance, as consumers
+    /// tolerate minor staleness and correctness is ensured elsewhere.
     #[inline]
     pub fn status(&self) -> u64 {
         self.status.load(Ordering::Relaxed)
     }
 
+    /// Returns the current state of the primary control bits ("yield" and "partition").
+    ///
+    /// # Returns
+    /// A tuple `(is_yield, is_partition_active)` representing:
+    /// - `is_yield`: Whether the yield control bit is set, instructing the worker to yield.
+    /// - `is_partition_active`: Whether the partition summary bit is set, indicating there is pending work detected in this worker's assigned partition.
+    ///
+    /// This allows higher-level logic to react based on whether the worker
+    /// should yield or has instant work available.
+    ///
+    /// # Memory Ordering
+    /// Uses relaxed ordering for performance, as spurious
+    /// staleness is benign and status is periodically refreshed.
     #[inline]
     pub fn status_bits(&self) -> (bool, bool) {
         let status = self.status.load(Ordering::Relaxed);
@@ -212,32 +239,75 @@ impl SignalWaker {
         )
     }
 
+    /// Sets the `STATUS_BIT_YIELD` flag for this worker and releases a permit if it was not previously set.
+    ///
+    /// # Purpose
+    /// Requests the worker to yield (i.e., temporarily relinquish active scheduling)
+    /// so that other workers can take priority or perform balancing. This enables
+    /// cooperative multitasking among workers in high-contention or handoff scenarios.
+    ///
+    /// # Behavior
+    /// - If the yield bit was previously unset (i.e., this is the first request to yield),
+    ///   this method also releases one permit to ensure the sleeping worker receives a wakeup.
+    /// - If already set, does nothing except marking the yield flag again (idempotent).
+    ///
+    /// # Concurrency
+    /// Safe for concurrent use: races to set the yield bit and release permits are benign.
+    ///
+    /// # Memory Ordering
+    /// Uses Acquire/Release ordering to ensure that the yield bit is
+    /// visible to consumers before subsequent state changes or wakeups.
     #[inline]
     pub fn mark_yield(&self) {
-        if self.status.load(Ordering::Relaxed) & STATUS_BIT_YIELD != 0 {
-            return;
-        }
-        let prev = self.status.fetch_or(STATUS_BIT_YIELD, Ordering::Relaxed);
+        let prev = self.status.fetch_or(STATUS_BIT_YIELD, Ordering::AcqRel);
         if prev & STATUS_BIT_YIELD == 0 {
             self.release(1);
         }
     }
 
+    /// Attempts to clear the yield bit (`STATUS_BIT_YIELD`) in the status word.
+    ///
+    /// # Purpose
+    ///
+    /// This function is used to indicate that the current worker should stop yielding,
+    /// i.e., it is no longer in a yielded state and is eligible to process new work.
+    /// The yield bit is typically set to signal a worker to yield and released to
+    /// allow the worker to resume normal operation. Clearing this bit is a
+    /// coordinated operation to avoid spurious lost work or premature reactivation.
+    ///
+    /// # Concurrency
+    ///
+    /// The method uses a loop with atomic compare-and-exchange to guarantee that the
+    /// yield bit is only cleared if it was previously set, handling concurrent attempts
+    /// to manipulate this bit. In case there is a race and the bit has already been
+    /// cleared by another thread, this function will exit quietly and make no changes.
+    ///
+    /// # Behavior
+    ///
+    /// - If the yield bit is already clear, the function returns immediately.
+    /// - Otherwise, it performs a compare-and-exchange to clear the bit. If this
+    ///   succeeds, it exits; if not, it reloads the word and repeats the process,
+    ///   only trying again if the yield bit is still set.
     #[inline]
     pub fn try_unmark_yield(&self) {
         loop {
-            let snapshot = self.status.load(Ordering::Relaxed);
+            // Load the current status word with Acquire ordering to observe the latest status.
+            let snapshot = self.status.load(Ordering::Acquire);
+            // If the yield bit is not set, no action is needed.
             if snapshot & STATUS_BIT_YIELD == 0 {
                 return;
             }
 
+            // Attempt to clear the yield bit atomically while preserving other bits.
             match self.status.compare_exchange(
                 snapshot,
                 snapshot & !STATUS_BIT_YIELD,
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
+                // If successful, the yield bit was cleared; return.
                 Ok(_) => return,
+                // If status changed in the meantime, reload and retry if the yield bit is still set.
                 Err(actual) => {
                     if actual & STATUS_BIT_YIELD == 0 {
                         return;
@@ -247,19 +317,43 @@ impl SignalWaker {
         }
     }
 
+    /// Marks the partition bit as active, indicating there is work in the partition.
+    ///
+    /// This sets the `STATUS_BIT_PARTITION` bit in the status word. If this was a
+    /// transition from no active partition to active (i.e., the bit was previously
+    /// clear), it releases one permit to wake up a worker to process tasks in this
+    /// partition.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// // Called when a leaf in the partition becomes non-empty
+    /// waker.mark_tasks();
+    /// ```
     #[inline]
     pub fn mark_tasks(&self) {
-        if self.status.load(Ordering::Relaxed) & STATUS_BIT_PARTITION != 0 {
-            return;
-        }
-        let prev = self
-            .status
-            .fetch_or(STATUS_BIT_PARTITION, Ordering::Relaxed);
+        let prev = self.status.fetch_or(STATUS_BIT_PARTITION, Ordering::AcqRel);
         if prev & STATUS_BIT_PARTITION == 0 {
             self.release(1);
         }
     }
 
+    /// Attempts to clear the partition active bit (`STATUS_BIT_PARTITION`) in the status word if no
+    /// leaves in the partition are active.
+    ///
+    /// This is typically called after a partition leaf transitions to empty. If the bit was set
+    /// (partition was active), this function clears it, indicating no more work is present in the partition.
+    /// If new work becomes available (i.e., the partition_summary is nonzero) after the bit is cleared,
+    /// it immediately re-arms the bit to avoid lost wakeups.
+    ///
+    /// This function is safe to call spuriously and will exit without making changes if the partition bit
+    /// is already clear.
+    ///
+    /// # Concurrency
+    ///
+    /// Uses a loop with atomic compare-and-exchange to ensure the bit is only cleared if no other
+    /// thread has concurrently set it again. If racing with a producer, the bit will be re-armed as needed to
+    /// prevent missing new work.
     #[inline]
     pub fn try_unmark_tasks(&self) {
         loop {
@@ -1027,7 +1121,7 @@ impl SignalWaker {
         );
 
         let mask = 1u64 << local_leaf_idx;
-        let old_summary = self.partition_summary.fetch_or(mask, Ordering::Relaxed);
+        let old_summary = self.partition_summary.fetch_or(mask, Ordering::AcqRel);
 
         // If partition was empty, mark partition flag to wake the worker
         if old_summary == 0 {
@@ -1062,7 +1156,7 @@ impl SignalWaker {
     }
 }
 
-impl Default for SignalWaker {
+impl Default for WorkerWaker {
     fn default() -> Self {
         Self::new()
     }

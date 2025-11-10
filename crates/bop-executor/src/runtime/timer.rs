@@ -1,5 +1,5 @@
-use crate::task::TaskSlot;
-use crate::worker::{
+use super::task::TaskSlot;
+use super::worker::{
     cancel_timer_for_current_task, current_worker_now_ns, schedule_timer_for_current_task,
 };
 use std::cell::Cell;

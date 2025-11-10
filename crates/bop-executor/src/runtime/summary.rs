@@ -1,8 +1,8 @@
 use crate::bits;
-use crate::signal_waker::SignalWaker;
 use crate::utils::CachePadded;
+use super::waker::WorkerWaker;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// Single-level summary tree for task work-stealing.
@@ -12,7 +12,7 @@ use std::time::Duration;
 ///
 /// The SummaryTree coordinates with SignalWakers to notify partition owners
 /// when their assigned leafs become active/inactive.
-pub struct SummaryTree {
+pub struct Summary {
     // Owned heap allocations
     pub(crate) leaf_words: Box<[AtomicU64]>, // Pub for Worker access
     task_reservations: Box<[AtomicU64]>,
@@ -28,16 +28,16 @@ pub struct SummaryTree {
 
     // Partition owner notification
     // Raw pointer to WorkerService.wakers array (lifetime guaranteed by WorkerService ownership)
-    wakers: *const std::sync::Arc<SignalWaker>,
+    wakers: *const Arc<WorkerWaker>,
     wakers_len: usize,
     // Reference to WorkerService.worker_count - single source of truth
     worker_count: *const AtomicUsize,
 }
 
-unsafe impl Send for SummaryTree {}
-unsafe impl Sync for SummaryTree {}
+unsafe impl Send for Summary {}
+unsafe impl Sync for Summary {}
 
-impl SummaryTree {
+impl Summary {
     /// Creates a new SummaryTree with the specified dimensions.
     ///
     /// # Arguments
@@ -52,7 +52,7 @@ impl SummaryTree {
     pub fn new(
         leaf_count: usize,
         signals_per_leaf: usize,
-        wakers: &[std::sync::Arc<crate::signal_waker::SignalWaker>],
+        wakers: &[Arc<WorkerWaker>],
         worker_count: &AtomicUsize,
     ) -> Self {
         assert!(leaf_count > 0, "leaf_count must be > 0");
@@ -418,7 +418,7 @@ impl SummaryTree {
 
 #[cfg(test)]
 mod tests {
-    use crate::signal_waker::SignalWaker;
+    use crate::runtime::waker::WorkerWaker;
 
     use super::*;
     use std::collections::HashSet;
@@ -427,11 +427,11 @@ mod tests {
     use std::thread::yield_now;
     use std::time::{Duration, Instant};
 
-    fn setup_tree(leaf_count: usize, signals_per_leaf: usize) -> (SummaryTree, AtomicUsize) {
+    fn setup_tree(leaf_count: usize, signals_per_leaf: usize) -> (Summary, AtomicUsize) {
         // Create dummy wakers for testing
-        let wakers: Vec<Arc<SignalWaker>> = (0..4).map(|_| Arc::new(SignalWaker::new())).collect();
+        let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
         let worker_count = AtomicUsize::new(4);
-        let tree = SummaryTree::new(leaf_count, signals_per_leaf, &wakers, &worker_count);
+        let tree = Summary::new(leaf_count, signals_per_leaf, &wakers, &worker_count);
         (tree, worker_count)
     }
 

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bop_executor::runtime::Runtime;
-use bop_executor::task::{TaskArenaConfig, TaskArenaOptions};
+use bop_executor::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 use futures_lite::future::{block_on, yield_now};
 
 const DEFAULT_LEAVES: usize = 64;

@@ -1,15 +1,16 @@
-use crate::deque::{StealStatus, Stealer, Worker as YieldWorker};
-use crate::mpsc;
-use crate::mpsc::Receiver;
-use crate::signal_waker::SignalWaker;
-use crate::task::{
+use super::deque::{StealStatus, Stealer, Worker as YieldWorker};
+use crate::runtime::mpsc;
+use crate::runtime::mpsc::Receiver;
+use super::task::{
     FutureAllocator, TASK_EXECUTING, TASK_IDLE, TASK_SCHEDULED, TASK_SCHEDULED_AND_EXECUTING, Task,
     TaskArena, TaskHandle, TaskSlot,
 };
-use crate::timer::{Timer, TimerHandle};
-use crate::timer_wheel::TimerWheel;
+use super::timer::{Timer, TimerHandle};
+use super::timer_wheel::TimerWheel;
+use super::waker::WorkerWaker;
+use super::summary::Summary;
 use crate::{PopError, bits};
-use crate::{PushError, SummaryTree};
+use crate::{PushError};
 use std::cell::{Cell, UnsafeCell};
 use std::mem::MaybeUninit;
 use std::ptr::{self, NonNull};
@@ -37,10 +38,10 @@ const TIMER_TICKS_PER_WHEEL: usize = 1024 * 1;
 const TIMER_EXPIRE_BUDGET: usize = 4096;
 const MESSAGE_BATCH_SIZE: usize = 4096;
 
-// Worker status is now managed via SignalWaker:
-// - SignalWaker.summary: mpsc queue signals (bits 0-63)
-// - SignalWaker.status bit 63: yield queue has items
-// - SignalWaker.status bit 62: partition cache has work
+// Worker status is now managed via WorkerWaker:
+// - WorkerWaker.summary: mpsc queue signals (bits 0-63)
+// - WorkerWaker.status bit 63: yield queue has items
+// - WorkerWaker.status bit 62: partition cache has work
 
 /// Trait for cross-worker operations that don't depend on const parameters
 trait CrossWorkerOps: Send + Sync {
@@ -222,18 +223,18 @@ pub struct WorkerService<
 > {
     // Core ownership - WorkerService owns the arena and coordinates work via SummaryTree
     arena: TaskArena,
-    summary_tree: SummaryTree,
+    summary_tree: Summary,
 
     config: WorkerServiceConfig,
     tick_duration: Duration,
     tick_duration_ns: u64,
     clock_ns: Arc<AtomicU64>,
 
-    // Per-worker SignalWakers - each tracks all three work types:
+    // Per-worker WorkerWakers - each tracks all three work types:
     // - summary: mpsc queue signals (bits 0-63 for different signal words)
     // - status bit 63: yield queue has items
     // - status bit 62: task partition has work
-    wakers: Box<[Arc<SignalWaker>]>,
+    wakers: Box<[Arc<WorkerWaker>]>,
 
     worker_actives: Box<[AtomicU64]>,
     worker_now_ns: Box<[AtomicU64]>,
@@ -269,10 +270,10 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         let min_workers = config.min_workers.max(1);
         let max_workers = config.max_workers.max(min_workers).min(MAX_WORKER_LIMIT);
 
-        // Create per-worker SignalWakers
+        // Create per-worker WorkerWakers
         let mut wakers = Vec::with_capacity(max_workers);
         for _ in 0..max_workers {
-            wakers.push(Arc::new(crate::signal_waker::SignalWaker::new()));
+            wakers.push(Arc::new(WorkerWaker::new()));
         }
         let wakers = wakers.into_boxed_slice();
 
@@ -280,7 +281,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         let worker_count = AtomicUsize::new(0);
 
         // Create SummaryTree with reference to wakers and worker_count
-        let summary_tree = crate::summary_tree::SummaryTree::new(
+        let summary_tree = Summary::new(
             arena.config().leaf_count,
             arena.layout().signals_per_leaf,
             &wakers,
@@ -313,7 +314,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             max_workers * max_workers,
         );
         for worker_id in 0..max_workers {
-            // Use the worker's SignalWaker for mpsc queue
+            // Use the worker's WorkerWaker for mpsc queue
             let rx = mpsc::new_with_waker(Arc::clone(&wakers[worker_id]));
             receivers.push(UnsafeCell::new(rx));
         }
@@ -413,7 +414,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
     /// Get a reference to the SummaryTree owned by this service.
     #[inline]
-    pub fn summary_tree(&self) -> &crate::summary_tree::SummaryTree {
+    pub fn summary(&self) -> &Summary {
         &self.summary_tree
     }
 
@@ -539,8 +540,19 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             let ops_ref: &'static dyn CrossWorkerOps =
                 unsafe { &*(&*service as *const dyn CrossWorkerOps) };
             CROSS_WORKER_OPS.set(Some(ops_ref));
-            let _ = std::panic::catch_unwind(|| {});
-            w.run();
+
+            // Catch panics to prevent thread termination from propagating
+            // SAFETY: Worker cleanup code (service counter updates) will still execute after a panic
+            // We use a raw pointer wrapped in AssertUnwindSafe because Worker contains mutable
+            // references that don't implement UnwindSafe, but the cleanup code will still execute.
+            let w_ptr = &mut w as *mut Worker<'_, P, NUM_SEGS_P2>;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                unsafe { (*w_ptr).run() };
+            }));
+            if let Err(e) = result {
+                eprintln!("[Worker {}] Panicked: {:?}", worker_id, e);
+            }
+            // w.run();
 
             // Worker exited - clean up counters
             service.worker_count.fetch_sub(1, Ordering::SeqCst);
@@ -564,7 +576,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         to_worker_id: u32,
         message: WorkerMessage,
     ) -> Result<(), PushError<WorkerMessage>> {
-        // mpsc will automatically set bits in the target worker's SignalWaker.summary
+        // mpsc will automatically set bits in the target worker's WorkerWaker.summary
         unsafe {
             self.senders
                 [((from_worker_id as usize) * self.config.max_workers) + (to_worker_id as usize)]
@@ -676,7 +688,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
     fn spawn_tick_thread(
         self: &Arc<Self>,
-        worker_senders: Box<[crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>]>,
+        worker_senders: Box<[crate::runtime::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>]>,
     ) {
         let service = Arc::clone(self);
         let tick_duration = service.tick_duration;
@@ -834,7 +846,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     /// Supervisor: Health monitoring - check for stuck workers and collect metrics
     fn supervisor_health_check(
         service: &Arc<WorkerService<P, NUM_SEGS_P2>>,
-        worker_senders: &mut [crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
+        worker_senders: &mut [crate::runtime::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
         current_time_ns: u64,
     ) {
         let max_workers = service.worker_max_id.load(Ordering::Relaxed);
@@ -871,7 +883,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     /// Supervisor: Rebalance task partitions across workers
     fn supervisor_rebalance_partitions(
         service: &Arc<WorkerService<P, NUM_SEGS_P2>>,
-        worker_senders: &mut [crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
+        worker_senders: &mut [crate::runtime::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
     ) {
         let active_workers = service.worker_count.load(Ordering::Relaxed);
         if active_workers == 0 {
@@ -915,7 +927,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     /// Supervisor: Graceful shutdown coordination
     fn supervisor_graceful_shutdown(
         service: &Arc<WorkerService<P, NUM_SEGS_P2>>,
-        worker_senders: &mut [crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
+        worker_senders: &mut [crate::runtime::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
     ) {
         let max_workers = service.worker_max_id.load(Ordering::Relaxed);
 
@@ -984,13 +996,13 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     /// Supervisor: Dynamic worker scaling based on load
     fn supervisor_dynamic_scaling(
         service: &Arc<WorkerService<P, NUM_SEGS_P2>>,
-        worker_senders: &mut [crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
+        worker_senders: &mut [crate::runtime::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
     ) {
         let active_workers = service.worker_count.load(Ordering::Relaxed);
         let min_workers = service.config.min_workers;
         let max_workers_config = service.config.max_workers;
 
-        // Calculate total work pressure by checking SignalWakers
+        // Calculate total work pressure by checking WorkerWakers
         let mut total_work_signals = 0u64;
         let max_worker_id = service.worker_max_id.load(Ordering::Relaxed);
 
@@ -1068,7 +1080,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     /// Migrates tasks from overloaded workers to underloaded workers
     fn supervisor_task_migration(
         service: &Arc<WorkerService<P, NUM_SEGS_P2>>,
-        worker_senders: &mut [crate::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
+        worker_senders: &mut [crate::runtime::mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>],
     ) {
         let max_worker_id = service.worker_max_id.load(Ordering::Relaxed);
 
@@ -1515,10 +1527,10 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 self.service.wakers[waker_id].sync_partition_summary(
                     self.partition_start,
                     self.partition_end,
-                    &self.service.summary_tree().leaf_words,
+                    &self.service.summary().leaf_words,
                 );
 
-                // Park on SignalWaker with timer-aware timeout
+                // Park on WorkerWaker with timer-aware timeout
                 match park_duration {
                     Some(duration) if duration.is_zero() => {
                         // Timer ready - don't park, continue immediately
@@ -1653,7 +1665,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         self.service.wakers[waker_id].sync_partition_summary(
             partition_start,
             partition_end,
-            &self.service.summary_tree().leaf_words,
+            &self.service.summary().leaf_words,
         );
 
         true
@@ -1839,10 +1851,11 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             return false;
         }
 
-        // TODO (Phase 2): support cross-worker cancellation.
-        false
+        self.service
+            .post_cancel_message(self.worker_id, worker_id, timer_id)
     }
 
+    #[inline]
     fn cancel_remote_timer(&mut self, worker_id: u32, timer_id: u64) -> bool {
         if worker_id != self.worker_id {
             return false;
@@ -1930,7 +1943,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 self.service.wakers[waker_id].sync_partition_summary(
                     self.partition_start,
                     self.partition_end,
-                    &self.service.summary_tree().leaf_words,
+                    &self.service.summary().leaf_words,
                 );
 
                 match park_duration {
@@ -1939,14 +1952,14 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                         return false;
                     }
                     Some(timeout) => {
-                        // Park with timeout on SignalWaker
+                        // Park with timeout on WorkerWaker
                         if !self.service.wakers[waker_id].acquire_timeout(timeout) {
                             // Timed out - possibly for timer deadline
                             return false;
                         }
                     }
                     None => {
-                        // No timeout - park indefinitely on SignalWaker
+                        // No timeout - park indefinitely on WorkerWaker
                         self.service.wakers[waker_id].acquire();
                     }
                 }
@@ -1969,7 +1982,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
         self.stats.leaf_summary_checks = self.stats.leaf_summary_checks.saturating_add(1);
         let mut available =
-            self.service.summary_tree().leaf_words[leaf_idx].load(Ordering::Acquire) & mask;
+            self.service.summary().leaf_words[leaf_idx].load(Ordering::Acquire) & mask;
         if available == 0 {
             self.stats.empty_scans = self.stats.empty_scans.saturating_add(1);
             return None;
@@ -1987,7 +2000,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 if candidate >= 64 {
                     self.stats.leaf_summary_checks =
                         self.stats.leaf_summary_checks.saturating_add(1);
-                    available = self.service.summary_tree().leaf_words[leaf_idx]
+                    available = self.service.summary().leaf_words[leaf_idx]
                         .load(Ordering::Acquire)
                         & mask;
                     if available == 0 {
@@ -2003,7 +2016,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 if bits == 0 {
                     available &= !(1u64 << bit_index);
                     self.service
-                        .summary_tree()
+                        .summary()
                         .mark_signal_inactive(leaf_idx, bit_index);
                     attempts -= 1;
                     continue;
@@ -2033,7 +2046,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             let remaining_mask = remaining;
             if remaining_mask == 0 {
                 self.service
-                    .summary_tree()
+                    .summary()
                     .mark_signal_inactive(leaf_idx, signal_idx);
             }
 
@@ -2051,7 +2064,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     fn enqueue_yield(&mut self, handle: TaskHandle) {
         let was_empty = self.yield_queue.push_with_status(handle);
         if was_empty {
-            // Set yield_bit in SignalWaker status
+            // Set yield_bit in WorkerWaker status
             self.service.wakers[self.worker_id as usize].mark_yield();
         }
     }
@@ -2061,7 +2074,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         let (item, was_last) = self.yield_queue.pop_with_status();
         if let Some(handle) = item {
             if was_last {
-                // Clear yield_bit in SignalWaker status
+                // Clear yield_bit in WorkerWaker status
                 self.service.wakers[self.worker_id as usize].try_unmark_yield();
             }
             return Some(handle);

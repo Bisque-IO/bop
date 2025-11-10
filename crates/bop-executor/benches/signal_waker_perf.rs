@@ -1,11 +1,11 @@
-use bop_executor::signal_waker::SignalWaker;
+use bop_executor::worker_waker::WorkerWaker;
 use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn bench_mark_active_paths(c: &mut Criterion) {
     let mut group = c.benchmark_group("signal_waker_mark_active");
     group.bench_function("cold_path", |b| {
-        let waker = SignalWaker::new();
+        let waker = WorkerWaker::new();
         let bit = 0u64;
         b.iter(|| {
             waker.try_unmark(bit);
@@ -15,7 +15,7 @@ fn bench_mark_active_paths(c: &mut Criterion) {
     });
 
     group.bench_function("hot_path", |b| {
-        let waker = SignalWaker::new();
+        let waker = WorkerWaker::new();
         let bit = 0u64;
         waker.mark_active(bit);
         let _ = waker.try_acquire();
@@ -34,7 +34,7 @@ fn bench_sync_partition_summary(c: &mut Criterion) {
             BenchmarkId::from_parameter(len),
             &len,
             |b, &partition_len| {
-                let waker = SignalWaker::new();
+                let waker = WorkerWaker::new();
                 let leaves: Vec<AtomicU64> = (0..partition_len)
                     .map(|idx| AtomicU64::new(if idx % 2 == 0 { !0u64 } else { 0 }))
                     .collect();
@@ -63,7 +63,7 @@ fn bench_worker_mixed_loop(c: &mut Criterion) {
     c.bench_function("worker_simulated_mixed_loop", |b| {
         b.iter_batched(
             || {
-                let waker = SignalWaker::new();
+                let waker = WorkerWaker::new();
                 let signals: Vec<AtomicU64> =
                     (0..SIGNAL_WORDS).map(|_| AtomicU64::new(0)).collect();
                 let leaves: Vec<AtomicU64> = (0..LEAF_WORDS).map(|_| AtomicU64::new(0)).collect();

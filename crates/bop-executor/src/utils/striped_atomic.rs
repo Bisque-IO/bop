@@ -1,137 +1,15 @@
-use core::fmt;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::boxed::Box;
 use std::vec::Vec;
 
+use crate::CachePadded;
 use std::{
-    future::{Future, IntoFuture},
-    sync::Arc,
-    task::{Context, Poll, Wake, Waker},
-    thread,
+	future::{Future, IntoFuture}
+	,
+	task::Wake
+	,
 };
-
-/// Pads and aligns a value to the length of a cache line.
-///
-/// In concurrent programming, sometimes it is desirable to make sure commonly accessed pieces of
-/// data are not placed into the same cache line. Updating an atomic value invalidates the whole
-/// cache line it belongs to, which makes the next access to the same cache line slower for other
-/// CPU cores. Use `CachePadded` to ensure updating one piece of data doesn't invalidate other
-/// cached data.
-///
-/// # Size and alignment
-///
-/// Cache lines are assumed to be N bytes long, depending on the architecture:
-///
-/// * On x86-64, aarch64, and powerpc64, N = 128.
-/// * On arm, mips, mips64, sparc, and hexagon, N = 32.
-/// * On m68k, N = 16.
-/// * On s390x, N = 256.
-/// * On all others, N = 64.
-///
-/// Note that N is just a reasonable guess and is not guaranteed to match the actual cache line
-/// length of the machine the program is running on. On modern Intel architectures, spatial
-/// prefetcher is pulling pairs of 64-byte cache lines at a time, so we pessimistically assume that
-/// cache lines are 128 bytes long.
-///
-/// The size of `CachePadded<T>` is the smallest multiple of N bytes large enough to accommodate
-/// a value of type `T`.
-///
-/// The alignment of `CachePadded<T>` is the maximum of N bytes and the alignment of `T`.
-#[derive(Clone, Copy, Default, Hash, PartialEq, Eq)]
-#[cfg_attr(any(target_arch = "x86_64",), repr(align(64)))]
-#[cfg_attr(
-    any(
-        target_arch = "aarch64",
-        target_arch = "arm64ec",
-        target_arch = "powerpc64",
-    ),
-    repr(align(128))
-)]
-#[cfg_attr(
-    any(
-        target_arch = "arm",
-        target_arch = "mips",
-        target_arch = "mips32r6",
-        target_arch = "mips64",
-        target_arch = "mips64r6",
-        target_arch = "sparc",
-        target_arch = "hexagon",
-    ),
-    repr(align(32))
-)]
-#[cfg_attr(target_arch = "m68k", repr(align(16)))]
-#[cfg_attr(target_arch = "s390x", repr(align(256)))]
-#[cfg_attr(
-    not(any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "arm64ec",
-        target_arch = "powerpc64",
-        target_arch = "arm",
-        target_arch = "mips",
-        target_arch = "mips32r6",
-        target_arch = "mips64",
-        target_arch = "mips64r6",
-        target_arch = "sparc",
-        target_arch = "hexagon",
-        target_arch = "m68k",
-        target_arch = "s390x",
-    )),
-    repr(align(64))
-)]
-pub struct CachePadded<T> {
-    value: T,
-}
-
-unsafe impl<T: Send> Send for CachePadded<T> {}
-unsafe impl<T: Sync> Sync for CachePadded<T> {}
-
-impl<T> CachePadded<T> {
-    /// Pads and aligns a value to the length of a cache line.
-    pub const fn new(t: T) -> CachePadded<T> {
-        CachePadded::<T> { value: t }
-    }
-
-    /// Returns the inner value.
-    pub fn into_inner(self) -> T {
-        self.value
-    }
-}
-
-impl<T> Deref for CachePadded<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        &self.value
-    }
-}
-
-impl<T> DerefMut for CachePadded<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.value
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for CachePadded<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CachePadded")
-            .field("value", &self.value)
-            .finish()
-    }
-}
-
-impl<T> From<T> for CachePadded<T> {
-    fn from(t: T) -> Self {
-        CachePadded::new(t)
-    }
-}
-
-impl<T: fmt::Display> fmt::Display for CachePadded<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.value, f)
-    }
-}
 
 /// Stripe-sharded `AtomicU64` counters backed by cache-line padded lanes.
 ///
@@ -293,87 +171,12 @@ impl Default for StripedAtomicU64 {
     }
 }
 
-thread_local! {
-    // A local reusable signal for each thread.
-    static LOCAL_THREAD_SIGNAL: Arc<Signal> = Arc::new(Signal {
-        owning_thread: thread::current(),
-    });
-}
-
-// #[cfg(feature = "macro")]
-// pub use bop_executor_macro::{main, test};
-
-/// An extension trait that allows blocking on a future in suffix position.
-pub trait FutureExt: Future {
-    /// Block the thread until the future is ready.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use pollster::FutureExt as _;
-    ///
-    /// let my_fut = async {};
-    ///
-    /// let result = my_fut.block_on();
-    /// ```
-    fn block_on(self) -> Self::Output
-    where
-        Self: Sized,
-    {
-        block_on(self)
-    }
-}
-
-impl<F: Future> FutureExt for F {}
-
-struct Signal {
-    /// The thread that owns the signal.
-    owning_thread: thread::Thread,
-}
-
-impl Wake for Signal {
-    fn wake(self: Arc<Self>) {
-        self.owning_thread.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.owning_thread.unpark();
-    }
-}
-
-/// Block the thread until the future is ready.
-///
-/// # Example
-///
-/// ```
-/// let my_fut = async {};
-/// let result = pollster::block_on(my_fut);
-/// ```
-pub fn block_on<F: IntoFuture>(fut: F) -> F::Output {
-    let mut fut = core::pin::pin!(fut.into_future());
-
-    // A signal used to wake up the thread for polling as the future moves to completion.
-    LOCAL_THREAD_SIGNAL.with(|signal| {
-        // Create a waker and a context to be passed to the future.
-        let waker = Waker::from(Arc::clone(signal));
-        let mut context = Context::from_waker(&waker);
-
-        // Poll the future to completion.
-        loop {
-            match fut.as_mut().poll(&mut context) {
-                Poll::Pending => thread::park(),
-                Poll::Ready(item) => break item,
-            }
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::StripedAtomicU64;
-    use core::sync::atomic::Ordering;
+	use super::StripedAtomicU64;
+	use core::sync::atomic::Ordering;
 
-    #[test]
+	#[test]
     fn striped_atomic_u64_basic_accounting() {
         let counter = StripedAtomicU64::new(8);
         for i in 0..64 {

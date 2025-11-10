@@ -1344,10 +1344,10 @@ fn main() {
     // stress_test_spsc_push::<256>(10_000_000);
     //
     println!("\n--- SegSpsc Single Item Slow Tests ---");
-    // stress_test_seg_spsc_push_slow::<6, 14>(5_000, 32, Duration::from_millis(1));
-    // stress_test_seg_spsc_push_slow::<6, 14>(5_000, 64, Duration::from_millis(1));
-    // stress_test_seg_spsc_push_slow::<6, 14>(50_000, 256, Duration::from_millis(1));
-    //
+    stress_test_seg_spsc_push_slow::<8, 8>(5_000, 32, Duration::from_millis(1));
+    stress_test_seg_spsc_push_slow::<8, 8>(5_000, 64, Duration::from_millis(1));
+    stress_test_seg_spsc_push_slow::<8, 8>(50_000, 256, Duration::from_millis(1));
+
     println!("\n--- SegSpsc Zero-Copy Consume Tests ---");
     // seg_spsc_consume_in_place_benchmark::<8, 8>(50_000_000, 64);
     // seg_spsc_consume_in_place_benchmark::<8, 8>(50_000_000, 256);

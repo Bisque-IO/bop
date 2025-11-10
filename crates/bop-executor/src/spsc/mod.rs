@@ -77,7 +77,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use bop_mpmc::seg_spsc::SegSpsc;
+//! use bop_executor::spsc::SegSpsc;
 //!
 //! // 64 items/segment, 256 segments = 16,383 capacity
 //! type Queue = SegSpsc<usize, 6, 8>;
@@ -113,7 +113,87 @@ use std::sync::Arc;
 use crate::utils::CachePadded;
 
 use crate::{PopError, PushError};
-use crate::runtime::signal::SignalGate;
+
+/// Trait for types that can schedule queue execution.
+///
+/// This trait abstracts the signal scheduling interface used by `SegSpsc` to notify
+/// executors when work is available. Implementations handle the state machine transitions
+/// needed to coordinate between producers and consumers.
+///
+/// # Required Methods
+///
+/// - `schedule()`: Attempts to schedule the queue for execution (IDLE → SCHEDULED)
+/// - `begin()`: Marks the queue as EXECUTING (SCHEDULED → EXECUTING)
+/// - `finish()`: Marks the queue as IDLE, handling concurrent schedules
+/// - `finish_and_schedule()`: Atomically marks as SCHEDULED for re-execution
+///
+/// # Safety
+///
+/// Implementations must be safe for concurrent access from multiple threads.
+/// The trait requires `Send + Sync` to ensure thread safety.
+pub trait SignalSchedule: Send + Sync {
+    /// Attempts to schedule this queue for execution.
+    ///
+    /// Returns `true` if the queue was successfully transitioned from IDLE to SCHEDULED,
+    /// `false` if it was already scheduled or executing.
+    fn schedule(&self) -> bool;
+
+    /// Marks the queue as EXECUTING.
+    ///
+    /// Called by the executor when it begins processing this queue.
+    fn mark(&self);
+
+    /// Marks the queue as IDLE and handles concurrent schedules.
+    ///
+    /// Called by the executor after processing a batch of items.
+    /// Automatically reschedules if new work arrived during processing.
+    fn unmark(&self);
+
+    /// Atomically marks the queue as SCHEDULED, ensuring re-execution.
+    ///
+    /// Called by the executor when it knows more work exists but wants to yield
+    /// the timeslice for fairness.
+    fn unmark_and_schedule(&self);
+}
+
+/// No-op signal scheduler that does nothing.
+///
+/// This is the default signal scheduler used when no signal integration is needed.
+/// All methods are empty implementations that have zero cost.
+///
+/// # Use Cases
+///
+/// - Queues without executor integration
+/// - Standalone SPSC queues
+/// - Testing environments
+///
+/// # Performance
+///
+/// All methods are zero-cost no-ops (compiled away as dead code).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoOpSignal;
+
+impl SignalSchedule for NoOpSignal {
+    #[inline(always)]
+    fn schedule(&self) -> bool {
+        false
+    }
+
+    #[inline(always)]
+    fn mark(&self) {
+        // No-op
+    }
+
+    #[inline(always)]
+    fn unmark(&self) {
+        // No-op
+    }
+
+    #[inline(always)]
+    fn unmark_and_schedule(&self) {
+        // No-op
+    }
+}
 
 /// Cache-line aligned producer state (hot path for enqueue operations).
 ///
@@ -271,6 +351,7 @@ impl ConsumerState {
 /// - `T`: Item type, must be `Copy` (allows lock-free memcpy semantics)
 /// - `P`: Segment size exponent (segment_size = 2^P items)
 /// - `NUM_SEGS_P2`: Number of segments exponent (num_segs = 2^NUM_SEGS_P2)
+/// - `S`: Signal scheduler type implementing `SignalSchedule` (defaults to `NoOpSignal`)
 ///
 /// # Capacity
 ///
@@ -317,7 +398,7 @@ impl ConsumerState {
 /// # Example
 ///
 /// ```ignore
-/// use bop_mpmc::SegSpsc;
+/// use bop_executor::SegSpsc;
 ///
 /// type Queue = SegSpsc<u64, 10, 0>;  // 1023-item queue
 /// let (producer, consumer) = Queue::new();
@@ -345,11 +426,11 @@ impl ConsumerState {
 /// - [`Receiver`]: The consumer half
 /// - [`Spsc`]: The underlying shared queue structure
 /// - [`PushError`]: Error types for push operations
-pub struct Sender<T, const P: usize, const NUM_SEGS_P2: usize> {
-    queue: Arc<Spsc<T, P, NUM_SEGS_P2>>,
+pub struct Sender<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule> {
+    queue: Arc<Spsc<T, P, NUM_SEGS_P2, S>>,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
+impl<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule> Sender<T, P, NUM_SEGS_P2, S> {
     /// Returns the number of items currently in the queue.
     ///
     /// This is calculated as `head - tail`, where both positions are monotonically
@@ -714,7 +795,9 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS_P2> {
+impl<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule> Drop
+    for Sender<T, P, NUM_SEGS_P2, S>
+{
     fn drop(&mut self) {
         unsafe {
             self.queue.close();
@@ -754,6 +837,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS
 /// - `T`: Item type, must be `Copy` (allows lock-free memcpy semantics)
 /// - `P`: Segment size exponent (segment_size = 2^P items)
 /// - `NUM_SEGS_P2`: Number of segments exponent (num_segs = 2^NUM_SEGS_P2)
+/// - `S`: Signal scheduler type implementing `SignalSchedule` (defaults to `NoOpSignal`)
 ///
 /// # Capacity
 ///
@@ -810,7 +894,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS
 /// # Example
 ///
 /// ```ignore
-/// use bop_mpmc::SegSpsc;
+/// use bop_executor::SegSpsc;
 ///
 /// type Queue = SegSpsc<u64, 10, 0>;  // 1023-item queue
 /// let (producer, consumer) = Queue::new();
@@ -844,11 +928,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS
 /// - [`Sender`]: The producer half
 /// - [`Spsc`]: The underlying shared queue structure
 /// - [`PopError`]: Error types for pop operations
-pub struct Receiver<T, const P: usize, const NUM_SEGS_P2: usize> {
-    queue: Arc<Spsc<T, P, NUM_SEGS_P2>>,
+pub struct Receiver<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule> {
+    queue: Arc<Spsc<T, P, NUM_SEGS_P2, S>>,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
+impl<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule>
+    Receiver<T, P, NUM_SEGS_P2, S>
+{
     /// Returns the number of items currently in the queue.
     ///
     /// This is calculated as `head - tail`, where both positions are monotonically
@@ -1427,6 +1513,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
 /// - `T`: Item type (must be `Copy` for efficient memcpy and no Drop concerns)
 /// - `P`: log2(segment_size) - Each segment holds `2^P` items
 /// - `NUM_SEGS_P2`: log2(directory_size) - Directory has `2^NUM_SEGS_P2` slots
+/// - `S`: Signal scheduler type implementing `SignalSchedule` (defaults to `NoOpSignal`)
 ///
 /// # Capacity
 ///
@@ -1464,12 +1551,18 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
 /// - Close is **one-way** (cannot reopen)
 /// - Close is **lock-free** (encoded in head position)
 ///
+/// # Signal Integration
+///
+/// The queue integrates with a signal scheduler to notify executors when
+/// work is available. The signal type is generic and must implement the `SignalSchedule` trait.
+/// By default, `NoOpSignal` is used which does nothing (zero-cost).
+///
 /// # Examples
 ///
 /// ## Basic Push/Pop
 ///
 /// ```ignore
-/// use bop_mpmc::seg_spsc::SegSpsc;
+/// use bop_executor::spsc::SegSpsc;
 ///
 /// type Queue = SegSpsc<u64, 6, 8>;  // 64 items/seg, 256 segs
 /// let q = Queue::new();
@@ -1515,7 +1608,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
 /// }
 /// // Now sees PopError::Closed
 /// ```
-pub struct Spsc<T, const P: usize, const NUM_SEGS_P2: usize> {
+pub struct Spsc<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule> {
     /// **Segment directory**: Fixed array of `AtomicPtr<MaybeUninit<T>>` slots.
     ///
     /// Each slot either:
@@ -1531,10 +1624,11 @@ pub struct Spsc<T, const P: usize, const NUM_SEGS_P2: usize> {
     /// **Consumer state**: Cache-padded to avoid false sharing with producer.
     consumer: CachePadded<ConsumerState>,
 
-    /// **Optional signal gate**: For integration with `SignalWaker` (MPMC use case).
+    /// **Signal scheduler**: For integration with executors.
     ///
-    /// If present, `schedule()` is called after pushes to wake consumer threads.
-    signal: CachePadded<Option<SignalGate>>,
+    /// `schedule()` is called after pushes to wake consumer threads.
+    /// Defaults to `NoOpSignal` which does nothing.
+    signal: CachePadded<S>,
 
     /// **Target pooled segments**: Target number of segments to maintain in sealed pool.
     ///
@@ -1547,7 +1641,7 @@ pub struct Spsc<T, const P: usize, const NUM_SEGS_P2: usize> {
     max_pooled_segments: usize,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
+impl<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule> Spsc<T, P, NUM_SEGS_P2, S> {
     /// Items per segment (2^P)
     pub const SEG_SIZE: usize = 1usize << P;
 
@@ -1570,133 +1664,6 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// Used to extract the actual position from head: `head & RIGHT_MASK`
     const RIGHT_MASK: u64 = !Self::CLOSED_CHANNEL_MASK;
 
-    /// Creates a new segmented SPSC queue, returning producer and consumer halves.
-    ///
-    /// This is the primary constructor for safe queue creation. It allocates the segment
-    /// directory but defers segment allocation until the producer writes to them (lazy allocation).
-    ///
-    /// # Type Parameters
-    ///
-    /// - `T`: Item type, must be `Copy` (enables lock-free memcpy)
-    /// - `P`: Segment size exponent (segment_size = 2^P items)
-    /// - `NUM_SEGS_P2`: Number of segments exponent (num_segs = 2^NUM_SEGS_P2)
-    ///
-    /// # Capacity
-    ///
-    /// The queue capacity is `(2^P × 2^NUM_SEGS_P2) - 1` items:
-    /// ```ignore
-    /// type SmallQueue = SegSpsc<u64, 10, 0>;  // 1023 items (2^10 × 2^0 - 1)
-    /// type LargeQueue = SegSpsc<u64, 13, 2>;  // 32767 items (2^13 × 2^2 - 1)
-    /// ```
-    ///
-    /// # Memory Usage
-    ///
-    /// **Initial allocation**:
-    /// - Directory: `NUM_SEGS × 8 bytes` (AtomicPtr slots)
-    /// - Producer state: ~128 bytes (cache-padded)
-    /// - Consumer state: ~128 bytes (cache-padded)
-    ///
-    /// **Per-segment allocation** (lazy):
-    /// - Each segment: `SEG_SIZE × sizeof(T)` bytes
-    ///
-    /// Example for `SegSpsc<u64, 10, 2>`:
-    /// - Initial: `4 × 8 + 256 = 288 bytes`
-    /// - Max (4 segments): `288 + 4 × 1024 × 8 = 33,056 bytes`
-    ///
-    /// # No Signal Integration
-    ///
-    /// This constructor does not attach a `SignalGate`. For integration with `SignalWaker`,
-    /// use [`new_with_gate()`](Self::new_with_gate) instead.
-    ///
-    /// # Thread Safety
-    ///
-    /// The returned `Sender` and `Receiver` can be sent to different threads:
-    /// ```ignore
-    /// let (producer, consumer) = SegSpsc::<u64, 10, 0>::new();
-    ///
-    /// let prod_thread = std::thread::spawn(move || {
-    ///     producer.try_push(42).unwrap();
-    /// });
-    ///
-    /// let cons_thread = std::thread::spawn(move || {
-    ///     assert_eq!(consumer.try_pop(), Some(42));
-    /// });
-    /// ```
-    ///
-    /// # Performance Notes
-    ///
-    /// - **Initial cost**: ~100-200 ns (directory allocation)
-    /// - **Segment allocation**: ~50-100 ns per segment (amortized across SEG_SIZE pushes)
-    /// - **Steady state**: ~5-15 ns per push/pop (cache-friendly operation)
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use bop_mpmc::SegSpsc;
-    ///
-    /// // Create a 1023-item queue for u64 values
-    /// type MyQueue = SegSpsc<u64, 10, 0>;
-    /// let (producer, consumer) = MyQueue::new();
-    ///
-    /// // Enqueue some items
-    /// producer.try_push(1)?;
-    /// producer.try_push(2)?;
-    /// producer.try_push(3)?;
-    ///
-    /// // Dequeue items
-    /// assert_eq!(consumer.try_pop(), Some(1));
-    /// assert_eq!(consumer.try_pop(), Some(2));
-    /// assert_eq!(consumer.try_pop(), Some(3));
-    /// assert_eq!(consumer.try_pop(), None);
-    /// ```
-    ///
-    /// # See Also
-    ///
-    /// - [`new_with_gate()`](Self::new_with_gate): Constructor with signal integration
-    /// - [`new_unsafe()`](Self::new_unsafe): Unsafe constructor (internal use)
-    /// - [`capacity()`](Self::capacity): Returns maximum capacity
-    pub fn new() -> (Sender<T, P, NUM_SEGS_P2>, Receiver<T, P, NUM_SEGS_P2>) {
-        Self::new_with_config(usize::MAX) // Unbounded pool (deallocation disabled)
-    }
-
-    /// Creates a new segmented SPSC queue with configurable max pooled segments.
-    ///
-    /// # Arguments
-    ///
-    /// * `max_pooled_segments` - Maximum number of segments to keep in the sealed pool.
-    ///   When the sealed pool [sealable_lo, sealable_hi) exceeds this limit, the consumer
-    ///   deallocates the oldest segments during boundary crossing to limit memory usage.
-    ///
-    ///   - `0` = deallocate all pooled segments (maximum memory reclamation)
-    ///   - `N` = keep N segments pooled (recommended: 4-16 for most workloads)
-    ///   - `usize::MAX` = disable deallocation (unbounded pool)
-    ///
-    /// # Memory Management Strategy
-    ///
-    /// During bursty workloads, the producer may allocate all NUM_SEGS segments. This
-    /// configuration allows the consumer to gradually deallocate segments that fall
-    /// outside the active working set, bringing memory usage back down after the burst.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Limit to 8 pooled segments (deallocate excess)
-    /// let (producer, consumer) = SegSpsc::<u64, 10, 4>::new_with_config(8);
-    /// ```
-    pub fn new_with_config(
-        max_pooled_segments: usize,
-    ) -> (Sender<T, P, NUM_SEGS_P2>, Receiver<T, P, NUM_SEGS_P2>) {
-        let queue = Arc::new(unsafe { Self::new_unsafe_with_config(max_pooled_segments) });
-        (
-            Sender {
-                queue: Arc::clone(&queue),
-            },
-            Receiver {
-                queue: Arc::clone(&queue),
-            },
-        )
-    }
-
     /// Creates a new segmented SPSC queue with signal integration, returning producer and consumer halves.
     ///
     /// This constructor attaches a `SignalGate` to the queue, enabling automatic signaling
@@ -1711,7 +1678,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// - **Work-stealing**: Signal idle workers that work is available
     /// - **Event loops**: Notify event loop threads of new events
     ///
-    /// For simple SPSC usage without executor integration, use [`new()`](Self::new) instead.
+    /// For simple SPSC usage without executor integration, use [`NoOpSignal`](NoOpSignal) with [`new_with_gate()`](Self::new_with_gate).
     ///
     /// # Arguments
     ///
@@ -1746,7 +1713,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// # Example
     ///
     /// ```ignore
-    /// use bop_mpmc::{SignalGate, SignalWaker, SegSpsc};
+    /// use bop_executor::{SignalGate, SignalWaker, SegSpsc};
     /// use std::sync::Arc;
     ///
     /// // Create shared waker
@@ -1780,24 +1747,24 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     ///
     /// # See Also
     ///
-    /// - [`new()`](Self::new): Constructor without signal integration
-    /// - [`new_unsafe_with_gate()`](Self::new_unsafe_with_gate): Unsafe constructor with gate
+    /// - [`new_with_gate()`](Self::new_with_gate): Constructor with signal integration
+    /// - [`new_unsafe_with_gate()`](Self::new_unsafe_with_gate): Unsafe constructor with signal
     /// - [`schedule()`](Self::schedule): Manually schedule the gate
     /// - `SignalGate`: Per-queue signal state
     /// - `SignalWaker`: Global executor waker
     pub fn new_with_gate(
-        gate: SignalGate,
-    ) -> (Sender<T, P, NUM_SEGS_P2>, Receiver<T, P, NUM_SEGS_P2>) {
-        Self::new_with_gate_and_config(gate, 0)
+        signal: S,
+    ) -> (Sender<T, P, NUM_SEGS_P2, S>, Receiver<T, P, NUM_SEGS_P2, S>) {
+        Self::new_with_gate_and_config(signal, 0)
     }
 
-    /// Creates a new segmented SPSC queue with signal gate and configurable max pooled segments.
+    /// Creates a new segmented SPSC queue with signal integration and configurable max pooled segments.
     ///
     /// Combines signal integration with memory management configuration.
     ///
     /// # Arguments
     ///
-    /// * `gate` - The signal gate for executor integration
+    /// * `signal` - The signal scheduler for executor integration
     /// * `max_pooled_segments` - Maximum number of segments to keep in the sealed pool.
     ///   - `0` = deallocate all pooled segments
     ///   - `N` = keep N segments pooled
@@ -1806,15 +1773,15 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// # Example
     ///
     /// ```ignore
-    /// let gate = SignalGate::new(0, signal_word, waker);
-    /// let (producer, consumer) = SegSpsc::<u64, 10, 4>::new_with_gate_and_config(gate, 8);
+    /// let signal = NoOpSignal; // or SignalGate::new(...)
+    /// let (producer, consumer) = SegSpsc::<u64, 10, 4, _>::new_with_gate_and_config(signal, 8);
     /// ```
     pub fn new_with_gate_and_config(
-        gate: SignalGate,
+        signal: S,
         max_pooled_segments: usize,
-    ) -> (Sender<T, P, NUM_SEGS_P2>, Receiver<T, P, NUM_SEGS_P2>) {
+    ) -> (Sender<T, P, NUM_SEGS_P2, S>, Receiver<T, P, NUM_SEGS_P2, S>) {
         let queue =
-            Arc::new(unsafe { Self::new_unsafe_with_gate_and_config(gate, max_pooled_segments) });
+            Arc::new(unsafe { Self::new_unsafe_with_gate_and_config(signal, max_pooled_segments) });
         (
             Sender {
                 queue: Arc::clone(&queue),
@@ -1823,99 +1790,6 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
                 queue: Arc::clone(&queue),
             },
         )
-    }
-
-    /// Creates a new empty queue with all segments unallocated (unsafe, internal use).
-    ///
-    /// This is the low-level constructor called by [`new()`](Self::new). It is marked
-    /// `unsafe` because it returns a raw `Self` value that must be immediately wrapped
-    /// in an `Arc` to maintain the SPSC safety guarantees.
-    ///
-    /// # Safety
-    ///
-    /// Callers must ensure:
-    /// 1. The returned value is immediately wrapped in `Arc<Self>`
-    /// 2. Only one `Sender` is created from the Arc (single producer)
-    /// 3. Only one `Receiver` is created from the Arc (single consumer)
-    ///
-    /// The `new()` and `new_with_gate()` constructors handle this correctly.
-    ///
-    /// # Memory Layout
-    ///
-    /// The segment directory is allocated (NUM_SEGS slots), but individual segments
-    /// are **not** allocated until the producer writes to them. This minimizes
-    /// initial memory footprint.
-    ///
-    /// **Initial allocation**:
-    /// - Directory: `NUM_SEGS × 8 bytes` (AtomicPtr slots, all null)
-    /// - Producer state: ~128 bytes (cache-padded, head=0, tail_cache=0)
-    /// - Consumer state: ~128 bytes (cache-padded, tail=0, head_cache=0)
-    ///
-    /// **Segment allocation** (lazy, on first write to segment):
-    /// - Per segment: `SEG_SIZE × sizeof(T)` bytes
-    ///
-    /// # No Signal Integration
-    ///
-    /// This constructor does not attach a `SignalGate`. Use [`new_unsafe_with_gate()`](Self::new_unsafe_with_gate)
-    /// for signal integration.
-    ///
-    /// # Initialization State
-    ///
-    /// All atomic counters are initialized to zero:
-    /// ```ignore
-    /// producer.head = 0
-    /// producer.tail_cache = 0
-    /// producer.sealable_lo = 0
-    /// producer.fresh_allocations = 0
-    /// producer.pool_reuses = 0
-    ///
-    /// consumer.tail = 0
-    /// consumer.head_cache = 0
-    /// consumer.sealable_hi = null
-    /// ```
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Internal usage (wrapped in Arc by new())
-    /// let queue = Arc::new(unsafe { SegSpsc::<u64, 10, 0>::new_unsafe() });
-    /// let producer = Sender { queue: Arc::clone(&queue) };
-    /// let consumer = Receiver { queue: Arc::clone(&queue) };
-    /// ```
-    ///
-    /// # See Also
-    ///
-    /// - [`new()`](Self::new): Safe public constructor
-    /// - [`new_unsafe_with_gate()`](Self::new_unsafe_with_gate): Unsafe constructor with signal
-    pub unsafe fn new_unsafe() -> Self {
-        unsafe { Self::new_unsafe_with_config(0) }
-    }
-
-    /// Creates a new empty queue with configurable max pooled segments (unsafe, internal use).
-    ///
-    /// # Arguments
-    ///
-    /// * `max_pooled_segments` - Maximum number of segments to keep in the sealed pool.
-    ///   - `0` = deallocate all pooled segments
-    ///   - `N` = keep N segments pooled
-    ///   - `usize::MAX` = disable deallocation (unbounded pool)
-    ///
-    /// # Safety
-    ///
-    /// Same safety requirements as `new_unsafe()`.
-    pub unsafe fn new_unsafe_with_config(max_pooled_segments: usize) -> Self {
-        let mut v = Vec::with_capacity(Self::NUM_SEGS);
-        for _ in 0..Self::NUM_SEGS {
-            v.push(AtomicPtr::new(ptr::null_mut()));
-        }
-
-        Self {
-            segs: v.into_boxed_slice(),
-            producer: CachePadded::new(ProducerState::new()),
-            consumer: CachePadded::new(ConsumerState::new()),
-            signal: CachePadded::new(None),
-            max_pooled_segments,
-        }
     }
 
     /// Creates a new empty queue with signal integration (unsafe, internal use).
@@ -1930,24 +1804,22 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// 1. The returned value is immediately wrapped in `Arc<Self>`
     /// 2. Only one `Sender` is created from the Arc (single producer)
     /// 3. Only one `Receiver` is created from the Arc (single consumer)
-    /// 4. The `signal` gate is properly configured with valid signal word and waker references
+    /// 4. The `signal` parameter is properly configured and valid
     ///
     /// The `new_with_gate()` constructor handles this correctly.
     ///
     /// # Arguments
     ///
-    /// * `signal` - The `SignalGate` to schedule after each push
+    /// * `signal` - The `SignalSchedule` implementation to use for this queue
     ///
     /// # Signal Integration
     ///
-    /// The provided `SignalGate` is stored in `self.signal` and automatically invoked
+    /// The provided `SignalSchedule` is stored in `self.signal` and automatically invoked
     /// after each successful push operation:
     /// ```ignore
     /// queue.try_push(item)?;
     /// // Internally:
-    /// if let Some(gate) = &self.signal {
-    ///     gate.schedule();  // Sets bit in signal word, wakes executor
-    /// }
+    /// queue.schedule();  // Calls signal.schedule() to wake executor
     /// ```
     ///
     /// # Memory Layout
@@ -1972,7 +1844,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// # Example
     ///
     /// ```ignore
-    /// use bop_mpmc::{SignalGate, SignalWaker, SegSpsc};
+    /// use bop_executor::{SignalGate, SignalWaker, SegSpsc};
     /// use std::sync::Arc;
     ///
     /// let waker = Arc::new(SignalWaker::new());
@@ -1990,15 +1862,15 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// - [`new_with_gate()`](Self::new_with_gate): Safe public constructor with signal
     /// - [`new_unsafe()`](Self::new_unsafe): Unsafe constructor without signal
     /// - [`schedule()`](Self::schedule): Manually invoke the signal gate
-    pub unsafe fn new_unsafe_with_gate(signal: SignalGate) -> Self {
+    pub unsafe fn new_unsafe_with_gate(signal: S) -> Self {
         unsafe { Self::new_unsafe_with_gate_and_config(signal, 0) }
     }
 
-    /// Creates a new empty queue with signal gate and configurable max pooled segments (unsafe, internal use).
+    /// Creates a new empty queue with signal integration and configurable max pooled segments (unsafe, internal use).
     ///
     /// # Arguments
     ///
-    /// * `signal` - The signal gate for executor integration
+    /// * `signal` - The signal scheduler for executor integration
     /// * `max_pooled_segments` - Maximum number of segments to keep in the sealed pool.
     ///   - `0` = deallocate all pooled segments
     ///   - `N` = keep N segments pooled
@@ -2006,11 +1878,8 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     ///
     /// # Safety
     ///
-    /// Same safety requirements as `new_unsafe()`.
-    pub unsafe fn new_unsafe_with_gate_and_config(
-        signal: SignalGate,
-        max_pooled_segments: usize,
-    ) -> Self {
+    /// Same safety requirements as `new_unsafe_with_gate()`.
+    pub unsafe fn new_unsafe_with_gate_and_config(signal: S, max_pooled_segments: usize) -> Self {
         let mut v = Vec::with_capacity(Self::NUM_SEGS);
         for _ in 0..Self::NUM_SEGS {
             v.push(AtomicPtr::new(ptr::null_mut()));
@@ -2020,7 +1889,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
             segs: v.into_boxed_slice(),
             producer: CachePadded::new(ProducerState::new()),
             consumer: CachePadded::new(ConsumerState::new()),
-            signal: CachePadded::new(Some(signal)),
+            signal: CachePadded::new(signal),
             max_pooled_segments,
         }
     }
@@ -2074,14 +1943,12 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     ///
     /// # Performance
     ///
-    /// - No-op if no signal gate configured (0 ns)
-    /// - ~2-5 ns if already scheduled/executing
+    /// - No-op if using `NoOpSignal` (0 ns, compiled away)
+    /// - ~2-5 ns if already scheduled/executing (for `SignalGate`)
     /// - ~10-20 ns for successful schedule (includes atomic ops + potential waker notification)
     #[inline(always)]
     pub fn schedule(&self) {
-        if let Some(s) = &self.signal.as_ref() {
-            let _ = s.schedule();
-        }
+        let _ = self.signal.schedule();
     }
 
     /// Marks this queue as EXECUTING, preventing redundant scheduling.
@@ -2103,9 +1970,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// The signal protocol assumes single-threaded consumption.
     #[inline(always)]
     pub(crate) fn mark(&self) {
-        if let Some(s) = &self.signal.as_ref() {
-            let _ = s.mark();
-        }
+        self.signal.mark();
     }
 
     /// Marks this queue as IDLE, completing the current execution cycle.
@@ -2131,9 +1996,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// signal bit, ensuring the queue remains visible to the executor.
     #[inline(always)]
     pub(crate) fn unmark(&self) {
-        if let Some(s) = &self.signal.as_ref() {
-            let _ = s.unmark();
-        }
+        self.signal.unmark();
     }
 
     /// Atomically marks the queue as IDLE and schedules it for re-execution.
@@ -2165,9 +2028,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// ```
     #[inline(always)]
     pub(crate) fn unmark_and_schedule(&self) {
-        if let Some(s) = &self.signal.as_ref() {
-            let _ = s.unmark_and_schedule();
-        }
+        self.signal.unmark_and_schedule();
     }
 
     // ──────────────────────────────────────────────────────────────────────────────
@@ -2556,7 +2417,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// - No overlap between source and destination (guaranteed by design)
     /// - Size calculation accounts for `sizeof::<T>()`
     pub fn try_push_n(&self, src: &[T]) -> Result<usize, PushError<()>> {
-        let h = self.producer.head.load(Ordering::Relaxed);
+        let h = self.producer.head.load(Ordering::Acquire);
 
         // Check if queue is closed
         if h & Self::CLOSED_CHANNEL_MASK != 0 {
@@ -2594,7 +2455,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
                 ptr::copy_nonoverlapping(
                     src_ptr as *const u8,
                     dst_ptr as *mut u8,
-                    can * core::mem::size_of::<T>(),
+                    can * size_of::<T>(),
                 );
             }
 
@@ -2609,9 +2470,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
 
         self.producer.head.store(i, Ordering::Release);
 
-        if let Some(s) = &self.signal.as_ref() {
-            let _ = s.schedule();
-        }
+        let _ = self.signal.schedule();
         Ok(copied)
     }
 
@@ -2754,7 +2613,6 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// - Source segment is allocated and contains initialized items
     /// - Destination slice is valid for writes
     /// - No overlap between source and destination (guaranteed by design)
-    /// - Items are `Copy`, so no double-drop concerns
     pub fn try_pop_n(&self, dst: &mut [T]) -> Result<usize, PopError> {
         let t = self.consumer.tail.load(Ordering::Relaxed);
 
@@ -3384,18 +3242,49 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
 
     /// Internal helper to deallocate sealed pool segments down to a target size.
     ///
-    /// # Safety
+    /// This method implements consumer-side garbage collection for the segment pool,
+    /// allowing memory reclamation during periods of low activity.
     ///
-    /// Only safe to call when queue is empty (tail == head) due to circular
-    /// directory wraparound races. Uses CAS to claim exclusive ownership of
-    /// pool positions before deallocation.
+    /// # Safety Requirements
+    ///
+    /// **CRITICAL**: Only safe to call when queue is empty (tail == head) due to
+    /// circular directory wraparound races. With the circular directory design,
+    /// segment at position N and segment at position N+NUM_SEGS both map to the
+    /// same directory index. We can only safely deallocate when there are no
+    /// active segments that could collide with sealed pool positions.
+    ///
+    /// # CAS (Compare-and-Swap) Coordination
+    ///
+    /// Uses CAS on `sealable_lo` to coordinate with concurrent producer operations:
+    /// ```rust
+    /// // Producer increments sealable_lo when stealing from pool
+    /// // Consumer increments sealable_lo when deallocating
+    /// // CAS ensures only one thread owns each pool position
+    /// ```
+    ///
+    /// # Edge Cases and Safety Guarantees
+    ///
+    /// 1. **Queue Non-Empty**: Returns early if `tail != head` to prevent wraparound races
+    /// 2. **Concurrent Producer**: CAS prevents deallocating segments the producer needs
+    /// 3. **Multiple Directory Slots**: Handles the case where multiple pool positions
+    ///    map to the same directory index due to circular indexing
+    /// 4. **Null Pointers**: Safely handles null pointers in pool (race condition remnants)
+    /// 5. **CAS Failures**: Retries with updated `lo` value when producer concurrently
+    ///    increments `sealable_lo`
+    ///
+    /// # Deallocation Strategy
+    ///
+    /// 1. **Count Phase**: Scan directory to count actual allocated segments
+    /// 2. **Target Calculation**: Determine how many segments to deallocate
+    /// 3. **CAS Loop**: Atomically claim pool positions and deallocate segments
+    /// 4. **Update Tracking**: Decrement `total_allocated_segments` counter
     ///
     /// # Arguments
     ///
     /// * `target_pool_size` - Target number of segments to keep in the pool.
     ///   Excess segments beyond this will be deallocated.
     fn try_deallocate_pool_to(&self, target_pool_size: usize) -> u64 {
-        let hi = self.consumer.sealable_hi.load(Ordering::Acquire);
+        let mut hi = self.consumer.sealable_hi.load(Ordering::Acquire);
         let lo = self.producer.sealable_lo.load(Ordering::Acquire);
         let pool_size = hi.saturating_sub(lo);
 
@@ -3404,10 +3293,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
             return 0; // Already at or below target
         }
 
-        // CRITICAL SAFETY: Only deallocate when queue is empty to avoid wraparound races
-        // With circular indexing, segment at position N and segment at position N+NUM_SEGS
-        // both map to the same dir_idx. We can only safely deallocate when there are no
-        // active segments that could collide with sealed pool positions.
+        // CRITICAL SAFETY: Only deallocate when queue is empty to avoid directory aliasing
+        // With segment directory indexing, seg(N) and seg(N+NUM_SEGS) map to the same dir_idx
+        // due to circular addressing: dir_idx = (position >> P) & DIR_MASK
+        // We can only safely deallocate when there are no active segments that could
+        // collide with sealed pool positions.
+        //
+
         let head = self.producer.head.load(Ordering::Acquire) & Self::RIGHT_MASK;
         let tail = self.consumer.tail.load(Ordering::Acquire);
 
@@ -3415,13 +3307,20 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
             return 0; // Queue has items - not safe to deallocate
         }
 
+        // Memory ordering: We use Acquire to ensure visibility of any pending
+        // producer writes. This prevents deallocating segments that might still
+        // be in use from the producer's perspective.
+        // 
         // Queue is empty - safe to deallocate excess from sealed pool
         // Strategy: Count allocated segments, then deallocate oldest to reach target
-
+        //
         // Important: With circular directory, multiple pool positions map to same dir_idx.
         // Count actual allocated segments by scanning directory, not pool positions.
-
+        //
         // First pass: count allocated segments in directory
+        // We scan the directory rather than trusting pool positions because
+        // multiple pool positions can map to the same directory slot due to
+        // circular indexing. This ensures accurate counting.
         let mut total_allocated = 0u64;
         for i in 0..Self::NUM_SEGS {
             let seg_ptr = self.segs[i].load(Ordering::Acquire);
@@ -3429,6 +3328,9 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
                 total_allocated += 1;
             }
         }
+
+        // Memory ordering: Using Acquire ensures we see the latest state of
+        // all segment allocations. This is important for accurate counting.
 
         if total_allocated <= target_pool_size as u64 {
             return 0; // Already at or below target
@@ -3442,19 +3344,21 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
         while current_lo < hi && deallocated_count < need_to_dealloc {
             let dir_idx = (current_lo as usize) & Self::DIR_MASK;
 
-            // Try to atomically claim this pool position using CAS
+            // CAS prevents race conditions between producer stealing and consumer deallocating
+            // AcqRel ordering ensures atomic ownership transfer and visibility guarantees
             match self.producer.sealable_lo.compare_exchange(
                 current_lo,
                 current_lo + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
+                Ordering::AcqRel,  // Atomic ownership transfer
+                Ordering::Acquire, // Synchronize with previous loads
             ) {
                 Ok(_) => {
-                    // Successfully claimed - check if segment is allocated
+                    // Successfully claimed this pool position
+                    // Safe to manipulate segment because we now own the position
                     let seg_ptr = self.segs[dir_idx].swap(ptr::null_mut(), Ordering::AcqRel);
 
                     if !seg_ptr.is_null() {
-                        // Deallocate this segment
+                        // Deallocate this segment - CAS ownership ensures no conflict with producer
                         unsafe {
                             free_segment::<T>(seg_ptr, Self::SEG_SIZE);
                         }
@@ -3464,8 +3368,15 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
                     current_lo += 1;
                 }
                 Err(new_lo_val) => {
-                    // Producer claimed this position - update and continue
+                    // Producer concurrently incremented sealable_lo and claimed this position
+                    // Update our position and continue - this ensures forward progress
                     current_lo = new_lo_val;
+
+                    // Reload hi in case consumer also updated sealable_hi concurrently
+                    let new_hi = self.consumer.sealable_hi.load(Ordering::Acquire);
+                    if new_hi < hi {
+                        hi = new_hi;
+                    }
                 }
             }
         }
@@ -3497,6 +3408,32 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     ///    - Allocate new segment via system allocator
     ///    - Increment `fresh_allocations` counter
     ///
+    /// # CAS (Compare-and-Swap) Loop Analysis
+    ///
+    /// The CAS loop handles concurrent access between producer and consumer:
+    /// ```rust
+    /// while lo < hi {
+    ///     match self.producer.sealable_lo.compare_exchange(lo, lo + 1, ...) {
+    ///         Ok(_) => {
+    ///             // Successfully claimed this pool position
+    ///             // Safe to take segment because we own the position
+    ///         }
+    ///         Err(new_lo) => {
+    ///             // Another thread claimed this position
+    ///             // Retry with updated lo value
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// **Why CAS is needed**: Both producer and consumer can modify `sealable_lo`:
+    /// - Producer increments it when stealing from pool
+    /// - Consumer increments it during deallocation
+    /// CAS ensures atomic, race-free coordination.
+    ///
+    /// **When CAS fails**: Another thread successfully incremented `sealable_lo`
+    /// before us. We retry with the new value, ensuring forward progress.
+    ///
     /// # Segment Pooling
     ///
     /// Sealed segments form a FIFO pool:
@@ -3514,6 +3451,14 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     /// - Segment loads: `Acquire` (ensure data visibility)
     /// - Segment stores: `Release` (publish segment availability)
     /// - Counter updates: `Relaxed` (stats don't require synchronization)
+    /// - CAS operations: `AcqRel` (atomic ownership transfer)
+    ///
+    /// # Edge Cases Handled
+    ///
+    /// 1. **Empty pool**: If `lo == hi`, falls through to fresh allocation
+    /// 2. **Concurrent deallocation**: CAS prevents stealing deallocated segments
+    /// 3. **Pool size limits**: Integrates with `max_pooled_segments` for memory control
+    /// 4. **Null segments**: Handles cases where pool entries are null (race conditions)
     ///
     /// # Returns
     ///
@@ -3633,7 +3578,9 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Spsc<T, P, NUM_SEGS_P2> {
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Spsc<T, P, NUM_SEGS_P2> {
+impl<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule> Drop
+    for Spsc<T, P, NUM_SEGS_P2, S>
+{
     fn drop(&mut self) {
         for slot in self.segs.iter() {
             let p = slot.load(Ordering::Relaxed);
@@ -3675,11 +3622,11 @@ mod tests {
     use super::*;
     const P: usize = 6; // 64 items/segment
     const NUM_SEGS_P2: usize = 8;
-    type Q = Spsc<u64, P, NUM_SEGS_P2>;
+    type Q = Spsc<u64, P, NUM_SEGS_P2, NoOpSignal>;
 
     #[test]
     fn basic_push_pop() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         for i in 0..200u64 {
             q.try_push(i).unwrap();
         }
@@ -3691,7 +3638,7 @@ mod tests {
 
     #[test]
     fn zero_copy_consume_in_place() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let n = 64 * 3 + 5; // crosses segments
         for i in 0..n as u64 {
             q.try_push(i).unwrap();
@@ -3701,7 +3648,7 @@ mod tests {
         // repeatedly consume up to 50, in-place (callback may be invoked multiple times per call)
         while seen < n as u64 {
             let mut local_seen = seen;
-            let took = q.consume_in_place(50, |chunk| {
+            let took = q.consume_in_place(50, |chunk: &[u64]| {
                 for (k, &v) in chunk.iter().enumerate() {
                     assert_eq!(v, local_seen + k as u64, "Mismatch at local offset {}", k);
                 }
@@ -3725,7 +3672,7 @@ mod tests {
 
     #[test]
     fn test_new_queue_is_empty() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         assert!(q.is_empty());
         assert!(!q.is_full());
         assert_eq!(q.len(), 0);
@@ -3733,7 +3680,7 @@ mod tests {
 
     #[test]
     fn test_single_item_operations() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         assert!(q.is_empty());
 
         // Push single item
@@ -3749,7 +3696,7 @@ mod tests {
 
     #[test]
     fn test_push_pop_order() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let items = [1, 2, 3, 4, 5];
 
         for &item in &items {
@@ -3763,7 +3710,7 @@ mod tests {
 
     #[test]
     fn test_try_push_n() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let items = [10, 20, 30, 40, 50];
 
         // Push all items at once
@@ -3779,7 +3726,7 @@ mod tests {
 
     #[test]
     fn test_try_pop_n() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let items = [1, 2, 3, 4, 5, 6, 7, 8];
 
         // Push all items
@@ -3802,7 +3749,7 @@ mod tests {
 
     #[test]
     fn test_operations_on_empty_queue() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         // Pop from empty queue
         assert_eq!(q.try_pop(), None);
@@ -3818,7 +3765,7 @@ mod tests {
 
     #[test]
     fn test_operations_on_full_queue() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         // Fill the queue completely
         let capacity = Q::capacity();
@@ -3844,7 +3791,7 @@ mod tests {
 
     #[test]
     fn test_consume_in_place_partial() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let items = [1, 2, 3, 4, 5, 6, 7, 8];
 
         for &item in &items {
@@ -3853,7 +3800,7 @@ mod tests {
 
         // Consume only half of what's available
         let mut consumed_count = 0;
-        let consumed = q.consume_in_place(4, |chunk| {
+        let consumed = q.consume_in_place(4, |chunk: &[u64]| {
             consumed_count += chunk.len();
             chunk.len() // consume all items in the chunk
         });
@@ -3870,7 +3817,7 @@ mod tests {
 
     #[test]
     fn test_consume_zero_items_in_place() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         q.try_push(1).unwrap();
         q.try_push(2).unwrap();
 
@@ -3882,7 +3829,7 @@ mod tests {
 
     #[test]
     fn test_segment_boundaries() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let seg_size = Q::SEG_SIZE;
 
         // Push exactly one segment
@@ -3903,7 +3850,7 @@ mod tests {
 
     #[test]
     fn test_multiple_segments() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let seg_size = Q::SEG_SIZE;
         let num_segments = 3;
         let total_items = seg_size * num_segments;
@@ -3923,7 +3870,7 @@ mod tests {
 
     #[test]
     fn test_large_batch_operations() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let batch_size = 200;
         let mut items = Vec::with_capacity(batch_size);
 
@@ -3944,7 +3891,7 @@ mod tests {
 
     #[test]
     fn test_alternating_push_consume() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         // Push some items
         for i in 0..50 {
@@ -3952,7 +3899,7 @@ mod tests {
         }
 
         // Consume some in-place
-        let consumed = q.consume_in_place(25, |chunk| chunk.len());
+        let consumed = q.consume_in_place(25, |chunk: &[u64]| chunk.len());
         assert_eq!(consumed, 25);
 
         // Push more items
@@ -3974,7 +3921,7 @@ mod tests {
 
     #[test]
     fn test_queue_reuse_after_drain() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         // First round: fill and drain
         for i in 0..1000 {
@@ -4006,8 +3953,8 @@ mod tests {
             b: i64,
         }
 
-        type QStruct = Spsc<TestStruct, 5, 6>;
-        let q = unsafe { QStruct::new_unsafe() };
+        type QStruct = Spsc<TestStruct, 5, 6, NoOpSignal>;
+        let q = unsafe { QStruct::new_unsafe_with_gate(NoOpSignal) };
 
         let item1 = TestStruct { a: 1, b: -1 };
         let item2 = TestStruct { a: 2, b: -2 };
@@ -4023,8 +3970,8 @@ mod tests {
     #[test]
     fn test_small_queue_configuration() {
         // Test with a smaller queue configuration
-        type SmallQ = Spsc<u32, 2, 2>; // 4 items per segment, 4 segments = 15 capacity
-        let q = unsafe { SmallQ::new_unsafe() };
+        type SmallQ = Spsc<u32, 2, 2, NoOpSignal>; // 4 items per segment, 4 segments = 15 capacity
+        let q = unsafe { SmallQ::new_unsafe_with_gate(NoOpSignal) };
 
         assert_eq!(SmallQ::capacity(), 15);
         assert_eq!(SmallQ::SEG_SIZE, 4);
@@ -4048,7 +3995,7 @@ mod tests {
 
     #[test]
     fn test_consume_with_empty_callback() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         // Push some items
         for i in 0..10 {
@@ -4061,14 +4008,14 @@ mod tests {
         assert_eq!(q.len(), 10); // No items should be consumed
 
         // Normal consumption should still work
-        let consumed2 = q.consume_in_place(5, |chunk| chunk.len());
+        let consumed2 = q.consume_in_place(5, |chunk: &[u64]| chunk.len());
         assert_eq!(consumed2, 5);
         assert_eq!(q.len(), 5);
     }
 
     #[test]
     fn test_length_tracking() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         assert_eq!(q.len(), 0);
 
@@ -4089,7 +4036,7 @@ mod tests {
 
     #[test]
     fn test_allocation_stats_initial() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         // Initially no allocations should have occurred
         assert_eq!(q.fresh_allocations(), 0);
@@ -4099,7 +4046,7 @@ mod tests {
 
     #[test]
     fn test_allocation_stats_fresh_allocations() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let seg_size = Q::SEG_SIZE;
 
         // Push enough items to require multiple segment allocations
@@ -4125,7 +4072,7 @@ mod tests {
 
     #[test]
     fn test_allocation_stats_pool_reuse() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let seg_size = Q::SEG_SIZE;
 
         // Phase 1: Fill and consume to create pool entries
@@ -4167,7 +4114,7 @@ mod tests {
 
     #[test]
     fn test_allocation_stats_reset() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         // Push enough items to trigger allocations
         for i in 0..(Q::SEG_SIZE * 2) as u64 {
@@ -4188,7 +4135,7 @@ mod tests {
 
     #[test]
     fn test_allocation_stats_mixed_operations() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let seg_size = Q::SEG_SIZE;
 
         // Simulate realistic usage: push some, consume some, repeat
@@ -4225,7 +4172,7 @@ mod tests {
 
     #[test]
     fn test_allocation_stats_with_consume_in_place() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let seg_size = Q::SEG_SIZE;
 
         // Push items to fill multiple segments
@@ -4238,7 +4185,7 @@ mod tests {
         // Use consume_in_place to efficiently process items
         let mut total_consumed = 0;
         while total_consumed < seg_size * 3 {
-            let consumed = q.consume_in_place(64, |chunk| chunk.len());
+            let consumed = q.consume_in_place(64, |chunk: &[u64]| chunk.len());
             total_consumed += consumed;
         }
 
@@ -4275,7 +4222,7 @@ mod tests {
 
     #[test]
     fn test_close_bit_encoding() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         // Initially queue should not be closed
         assert!(!q.is_closed());
@@ -4315,7 +4262,7 @@ mod tests {
 
     #[test]
     fn test_close_with_try_pop_n() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         // Push items
         for i in 0..10u64 {
@@ -4342,7 +4289,7 @@ mod tests {
 
     #[test]
     fn test_close_with_consume_in_place() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
 
         // Push items
         for i in 0..20u64 {
@@ -4356,7 +4303,7 @@ mod tests {
 
         // Should be able to consume existing items
         let mut consumed_values = Vec::new();
-        let total = q.consume_in_place(20, |chunk| {
+        let total = q.consume_in_place(20, |chunk: &[u64]| {
             consumed_values.extend_from_slice(chunk);
             chunk.len()
         });
@@ -4373,7 +4320,7 @@ mod tests {
 
     #[test]
     fn test_cache_hit_miss_behavior() {
-        let q = unsafe { Q::new_unsafe() };
+        let q = unsafe { Q::new_unsafe_with_gate(NoOpSignal) };
         let seg_size = Q::SEG_SIZE;
         let num_segments = Q::NUM_SEGS;
 
@@ -4479,10 +4426,10 @@ mod tests {
         // Test that max_pooled_segments limits memory usage during bursts
         const TEST_P: usize = 6; // 64 items/segment
         const TEST_NUM_SEGS_P2: usize = 8; // 256 segments max
-        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2>;
+        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2, NoOpSignal>;
 
         const MAX_POOLED: usize = 8;
-        let (producer, consumer) = TestQ::new_with_config(MAX_POOLED);
+        let (producer, consumer) = TestQ::new_with_gate_and_config(NoOpSignal, MAX_POOLED);
 
         // Phase 1: Burst - fill many segments
         println!("\n=== Phase 1: Burst - Fill Many Segments ===");
@@ -4545,10 +4492,10 @@ mod tests {
         // (producer at consumer's heel) and consumer starts draining
         const TEST_P: usize = 6; // 64 items/segment
         const TEST_NUM_SEGS_P2: usize = 4; // 16 segments (1024 capacity)
-        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2>;
+        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2, NoOpSignal>;
 
         const MAX_POOLED: usize = 4;
-        let (producer, consumer) = TestQ::new_with_config(MAX_POOLED);
+        let (producer, consumer) = TestQ::new_with_gate_and_config(NoOpSignal, MAX_POOLED);
 
         let capacity = TestQ::capacity();
 
@@ -4592,9 +4539,9 @@ mod tests {
         // Test that max_pooled_segments=usize::MAX disables deallocation
         const TEST_P: usize = 6;
         const TEST_NUM_SEGS_P2: usize = 6;
-        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2>;
+        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2, NoOpSignal>;
 
-        let (producer, consumer) = TestQ::new_with_config(usize::MAX); // usize::MAX = disabled
+        let (producer, consumer) = TestQ::new_with_gate_and_config(NoOpSignal, usize::MAX); // usize::MAX = disabled
 
         // Fill and drain many times
         for cycle in 0..5 {
@@ -4622,9 +4569,9 @@ mod tests {
         // Test that max_pooled_segments=0 deallocates all segments
         const TEST_P: usize = 6; // 64 items/segment
         const TEST_NUM_SEGS_P2: usize = 6; // 64 segments
-        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2>;
+        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2, NoOpSignal>;
 
-        let (producer, consumer) = TestQ::new_with_config(0); // 0 = keep 0 pooled
+        let (producer, consumer) = TestQ::new_with_gate_and_config(NoOpSignal, 0); // 0 = keep 0 pooled
 
         println!("\n=== Testing max_pooled_segments = 0 (deallocate all) ===");
 
@@ -4700,10 +4647,10 @@ mod tests {
         // Simulate realistic bursty workload with varying load
         const TEST_P: usize = 6; // 64 items/segment
         const TEST_NUM_SEGS_P2: usize = 8; // 256 segments
-        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2>;
+        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2, NoOpSignal>;
 
         const MAX_POOLED: usize = 8;
-        let (producer, consumer) = TestQ::new_with_config(MAX_POOLED);
+        let (producer, consumer) = TestQ::new_with_gate_and_config(NoOpSignal, MAX_POOLED);
 
         println!("\n=== Simulating Bursty Workload ===");
 
@@ -4763,10 +4710,10 @@ mod tests {
         // Test that allocated_segments() accurately tracks live memory
         const TEST_P: usize = 6; // 64 items/segment
         const TEST_NUM_SEGS_P2: usize = 8; // 256 segments max
-        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2>;
+        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2, NoOpSignal>;
 
         const MAX_POOLED: usize = 8;
-        let (producer, consumer) = TestQ::new_with_config(MAX_POOLED);
+        let (producer, consumer) = TestQ::new_with_gate_and_config(NoOpSignal, MAX_POOLED);
 
         println!("\n=== Testing Allocated Segments Tracking ===");
 
@@ -4898,9 +4845,9 @@ mod tests {
         // Test that allocated_segments() works correctly when deallocation is disabled
         const TEST_P: usize = 6;
         const TEST_NUM_SEGS_P2: usize = 6;
-        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2>;
+        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2, NoOpSignal>;
 
-        let (producer, consumer) = TestQ::new_with_config(0); // Deallocation disabled
+        let (producer, consumer) = TestQ::new_with_gate_and_config(NoOpSignal, 0); // Deallocation disabled
 
         // Allocate some segments
         for i in 0..500 {
@@ -4931,9 +4878,9 @@ mod tests {
         // Test the allocated_memory_bytes() calculation
         const TEST_P: usize = 10; // 1024 items/segment
         const TEST_NUM_SEGS_P2: usize = 4;
-        type TestQ = Spsc<u32, TEST_P, TEST_NUM_SEGS_P2>;
+        type TestQ = Spsc<u32, TEST_P, TEST_NUM_SEGS_P2, NoOpSignal>;
 
-        let (producer, consumer) = TestQ::new_with_config(4);
+        let (producer, consumer) = TestQ::new_with_gate_and_config(NoOpSignal, 4);
 
         assert_eq!(
             producer.allocated_memory_bytes(),
@@ -4962,9 +4909,9 @@ mod tests {
         const TEST_P: usize = 6; // 64 items/segment
         const TEST_NUM_SEGS_P2: usize = 8; // 256 segments
         const MAX_POOLED: usize = 8;
-        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2>;
+        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2, NoOpSignal>;
 
-        let (producer, consumer) = TestQ::new_with_config(MAX_POOLED);
+        let (producer, consumer) = TestQ::new_with_gate_and_config(NoOpSignal, MAX_POOLED);
 
         println!("\n=== Testing Consumer-Side Deallocation ===");
         println!("Max pooled segments: {}", MAX_POOLED);
@@ -5036,10 +4983,10 @@ mod tests {
         // Test both consumer-side and producer-side deallocation working together
         const TEST_P: usize = 6; // 64 items/segment
         const TEST_NUM_SEGS_P2: usize = 8;
-        const MAX_POOLED: usize = 10;
-        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2>;
+        const MAX_POOLED: usize = 8;
+        type TestQ = Spsc<u64, TEST_P, TEST_NUM_SEGS_P2, NoOpSignal>;
 
-        let (producer, consumer) = TestQ::new_with_config(MAX_POOLED);
+        let (producer, consumer) = TestQ::new_with_gate_and_config(NoOpSignal, MAX_POOLED);
 
         println!("\n=== Testing Combined Deallocation ===");
 

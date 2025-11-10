@@ -4,7 +4,7 @@
 /// BUG #2: try_unmark_yield() was clearing summary bit instead of status bit
 ///
 /// These tests ensure the fixes remain correct and detect any future regressions.
-use bop_executor::signal_waker::{STATUS_SUMMARY_BITS, STATUS_SUMMARY_MASK, SignalWaker};
+use bop_executor::runtime::waker::{STATUS_SUMMARY_BITS, STATUS_SUMMARY_MASK, WorkerWaker};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[test]
 fn regression_try_unmark_tasks_clears_status_not_summary() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Set some summary bits to detect corruption
     waker.mark_active(0);
@@ -57,7 +57,7 @@ fn regression_try_unmark_tasks_clears_status_not_summary() {
 
 #[test]
 fn regression_try_unmark_yield_clears_status_not_summary() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Set some summary bits to detect corruption
     waker.mark_active(0); // Bit 0 in summary - should NOT be affected by try_unmark_yield
@@ -105,7 +105,7 @@ fn regression_try_unmark_yield_clears_status_not_summary() {
 
 #[test]
 fn regression_status_bits_full_lifecycle() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Set summary bits (should be independent)
     for i in 0..10 {
@@ -165,7 +165,7 @@ fn regression_status_bits_full_lifecycle() {
 
 #[test]
 fn regression_sync_partition_summary_updates_status_not_summary() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Set some summary bits for signal words
     waker.mark_active(5);
@@ -234,7 +234,7 @@ fn regression_sync_partition_summary_updates_status_not_summary() {
 
 #[test]
 fn regression_clear_partition_leaf_updates_status_not_summary() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Set summary bits for signal words
     for i in 0..20 {
@@ -282,7 +282,7 @@ fn regression_clear_partition_leaf_updates_status_not_summary() {
 
 #[test]
 fn regression_mark_partition_leaf_active_updates_status_not_summary() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Set summary bits
     for i in 0..30 {
@@ -327,7 +327,7 @@ fn regression_mark_partition_leaf_active_updates_status_not_summary() {
 
 #[test]
 fn regression_rapid_status_cycling_preserves_summary() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Establish a stable summary state
     for i in 0..STATUS_SUMMARY_BITS {
@@ -367,7 +367,7 @@ fn regression_concurrent_status_summary_operations() {
     use std::sync::Arc;
     use std::thread;
 
-    let waker = Arc::new(SignalWaker::new());
+    let waker = Arc::new(WorkerWaker::new());
 
     // Thread 1: Manipulate summary bits
     let waker1 = waker.clone();
@@ -428,7 +428,7 @@ fn regression_status_bit_toctou_is_safe() {
     // Even if the bit is set again between check and clear, it's acceptable
     // because worst case is a spurious wakeup
 
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Set tasks bit
     waker.mark_tasks();
@@ -469,7 +469,7 @@ fn regression_status_and_summary_full_independence() {
     for &(should_have_yield, should_have_tasks) in &status_states {
         for &summary_mask in &summary_states {
             // Reset waker
-            let waker = SignalWaker::new();
+            let waker = WorkerWaker::new();
 
             // Set summary state
             for i in 0..STATUS_SUMMARY_BITS {

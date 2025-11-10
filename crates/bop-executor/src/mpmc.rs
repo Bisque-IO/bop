@@ -3,7 +3,7 @@ use crate::seg_spmc::SegSpmc;
 use crate::seg_spsc::SegSpsc;
 use crate::selector::Selector;
 use crate::signal::{SIGNAL_MASK, Signal, SignalGate};
-use crate::signal_waker::{STATUS_SUMMARY_WORDS, SignalWaker};
+use crate::worker_waker::{STATUS_SUMMARY_WORDS, WorkerWaker};
 use crate::{PopError, PushError};
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
@@ -172,7 +172,7 @@ struct MpmcInner<T: Copy, const P: usize, const NUM_SEGS_P2: usize> {
     producer_count: AtomicUsize,
     /// Closed flag
     closed: AtomicPtr<()>,
-    waker: Arc<SignalWaker>,
+    waker: Arc<WorkerWaker>,
     /// Signal bitset - one bit per producer indicating which queues has data
     signals: Arc<[Signal; SIGNAL_WORDS]>,
 }
@@ -211,7 +211,7 @@ pub struct Mpmc<T: Copy, const P: usize = 6, const NUM_SEGS_P2: usize = 10> {
 impl<T: 'static + Copy, const P: usize, const NUM_SEGS_P2: usize> Mpmc<T, P, NUM_SEGS_P2> {
     /// Create a new blocking MPSC queue
     pub fn new() -> Self {
-        let waker = Arc::new(SignalWaker::new());
+        let waker = Arc::new(WorkerWaker::new());
         // Create sparse array of AtomicPtr, all initialized to null
         let queues: [AtomicPtr<SegSpsc<T, P, NUM_SEGS_P2>>; MAX_QUEUES] =
             std::array::from_fn(|_| AtomicPtr::new(ptr::null_mut()));

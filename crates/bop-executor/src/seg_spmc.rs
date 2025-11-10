@@ -1,7 +1,7 @@
 use rand::RngCore;
 use std::sync::Arc;
 
-use crate::{PushError, loom_exports::cell::UnsafeCell, seg_spsc::SegSpsc};
+use crate::{PushError, loom_exports::cell::UnsafeCell, seg_spsc::Spsc};
 
 const RND_MULTIPLIER: u64 = 0x5DEECE66D;
 const RND_ADDEND: u64 = 0xB;
@@ -18,7 +18,7 @@ fn next_random(seed: &mut u64) -> u64 {
 }
 
 pub struct SegSpmc<T: Copy, const SHARDS: usize, const P: usize, const NUM_SEGS_P2: usize> {
-    pub queues: Box<[*mut SegSpsc<T, P, NUM_SEGS_P2>]>,
+    pub queues: Box<[*mut Spsc<T, P, NUM_SEGS_P2>]>,
     seed: UnsafeCell<u64>,
 }
 
@@ -32,7 +32,7 @@ impl<T: Copy, const SHARDS: usize, const P: usize, const NUM_SEGS_P2: usize>
         let mut v = Vec::with_capacity(SHARDS);
         for _ in 0..SHARDS {
             v.push(Box::into_raw(Box::new(unsafe {
-                SegSpsc::<T, P, NUM_SEGS_P2>::new_unsafe()
+                Spsc::<T, P, NUM_SEGS_P2>::new_unsafe()
             })));
         }
         Self {
@@ -41,7 +41,7 @@ impl<T: Copy, const SHARDS: usize, const P: usize, const NUM_SEGS_P2: usize>
         }
     }
 
-    pub fn with_queues(queues: Vec<*mut SegSpsc<T, P, NUM_SEGS_P2>>) -> Self {
+    pub fn with_queues(queues: Vec<*mut Spsc<T, P, NUM_SEGS_P2>>) -> Self {
         assert_eq!(queues.len(), SHARDS);
         Self {
             queues: queues.into_boxed_slice(),

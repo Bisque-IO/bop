@@ -1,15 +1,15 @@
 /// Comprehensive test suite for bop-executor components:
 /// - Runtime: spawn, shutdown, JoinHandle behavior
-/// - SummaryTree: partition management, concurrent reservations
+/// - Summary: partition management, concurrent reservations
 /// - Worker: task polling, work stealing, message handling
 /// - Task: lifecycle, scheduling, state transitions
 /// - Integration: cross-component interactions
 use bop_executor::{
-    SummaryTree,
-    runtime::Runtime,
-    task::{TaskArena, TaskArenaConfig, TaskArenaOptions},
-    utils::block_on,
-    worker::{WorkerService, WorkerServiceConfig},
+	runtime::summary::Summary,
+	runtime::Runtime,
+	runtime::task::{TaskArena, TaskArenaConfig, TaskArenaOptions},
+	utils::block_on,
+	runtime::worker::{WorkerService, WorkerServiceConfig},
 };
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -272,12 +272,12 @@ fn runtime_graceful_shutdown() {
 
 #[test]
 fn summary_tree_reserve_task_round_robin() {
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..4).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(2);
 
-    let tree = SummaryTree::new(4, 2, &wakers, &worker_count);
+    let tree = Summary::new(4, 2, &wakers, &worker_count);
 
     let mut reservations = Vec::new();
 
@@ -306,12 +306,12 @@ fn summary_tree_reserve_task_round_robin() {
 
 #[test]
 fn summary_tree_reserve_exhaustion() {
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..2).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(2);
 
-    let tree = SummaryTree::new(2, 1, &wakers, &worker_count); // 2 leaves * 1 signal * 64 bits = 128 tasks
+    let tree = Summary::new(2, 1, &wakers, &worker_count); // 2 leaves * 1 signal * 64 bits = 128 tasks
 
     let mut handles = Vec::new();
 
@@ -345,12 +345,12 @@ fn summary_tree_reserve_exhaustion() {
 
 #[test]
 fn summary_tree_concurrent_reservations() {
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..4).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(4);
 
-    let tree = Arc::new(SummaryTree::new(4, 2, &wakers, &worker_count));
+    let tree = Arc::new(Summary::new(4, 2, &wakers, &worker_count));
 
     let barrier = Arc::new(Barrier::new(8));
     let results = Arc::new(Mutex::new(Vec::new()));
@@ -398,12 +398,12 @@ fn summary_tree_concurrent_reservations() {
 
 #[test]
 fn summary_tree_partition_ownership() {
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..4).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(4);
 
-    let tree = SummaryTree::new(8, 1, &wakers, &worker_count);
+    let tree = Summary::new(8, 1, &wakers, &worker_count);
 
     // Test partition calculation
     for leaf_idx in 0..8 {
@@ -441,12 +441,12 @@ fn summary_tree_partition_ownership() {
 
 #[test]
 fn summary_tree_signal_active_inactive() {
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..2).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(2);
 
-    let tree = SummaryTree::new(2, 2, &wakers, &worker_count);
+    let tree = Summary::new(2, 2, &wakers, &worker_count);
 
     // Mark signal active
     let was_empty = tree.mark_signal_active(0, 1);
@@ -912,12 +912,12 @@ fn runtime_mixed_duration_tasks() {
 #[test]
 fn summary_tree_partition_rebalancing() {
     // Test that partition calculations work correctly with different worker counts
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..8).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..8).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count_atomic = AtomicUsize::new(0);
 
-    let tree = SummaryTree::new(16, 1, &wakers, &worker_count_atomic);
+    let tree = Summary::new(16, 1, &wakers, &worker_count_atomic);
 
     // Test with different worker counts
     for worker_count in 1..=8 {
@@ -959,12 +959,12 @@ fn summary_tree_partition_rebalancing() {
 #[test]
 fn summary_tree_reserve_release_stress() {
     // Stress test reserve/release cycles
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..4).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(4);
 
-    let tree = Arc::new(SummaryTree::new(4, 2, &wakers, &worker_count));
+    let tree = Arc::new(Summary::new(4, 2, &wakers, &worker_count));
 
     let iterations = 100;
     let reservations_per_iteration = 20;
@@ -999,12 +999,12 @@ fn summary_tree_reserve_release_stress() {
 #[test]
 fn summary_tree_signal_transitions_stress() {
     // Test rapid signal active/inactive transitions
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..2).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(2);
 
-    let tree = SummaryTree::new(2, 4, &wakers, &worker_count);
+    let tree = Summary::new(2, 4, &wakers, &worker_count);
 
     for _ in 0..1000 {
         for leaf in 0..2 {
@@ -1023,12 +1023,12 @@ fn summary_tree_signal_transitions_stress() {
 #[test]
 fn summary_tree_global_to_local_leaf_conversion() {
     // Test global to local leaf index conversion
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..4).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(4);
 
-    let tree = SummaryTree::new(12, 1, &wakers, &worker_count);
+    let tree = Summary::new(12, 1, &wakers, &worker_count);
 
     // Test conversion for each leaf
     for leaf_idx in 0..12 {
@@ -1579,12 +1579,12 @@ fn runtime_interleaved_spawn_complete() {
 
 #[test]
 fn summary_tree_edge_case_single_leaf() {
-    // Test SummaryTree with just 1 leaf
-    use bop_executor::signal_waker::SignalWaker;
+    // Test Summary with just 1 leaf
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = vec![Arc::new(SignalWaker::new())];
+    let wakers: Vec<Arc<WorkerWaker>> = vec![Arc::new(WorkerWaker::new())];
     let worker_count = AtomicUsize::new(1);
-    let tree = SummaryTree::new(1, 1, &wakers, &worker_count);
+    let tree = Summary::new(1, 1, &wakers, &worker_count);
 
     // Should still work with minimal configuration
     let handle = tree.reserve_task();
@@ -1603,12 +1603,12 @@ fn summary_tree_edge_case_single_leaf() {
 #[test]
 fn summary_tree_maximum_leaves() {
     // Test with large number of leaves
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..16).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..16).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(8);
 
-    let tree = SummaryTree::new(64, 1, &wakers, &worker_count);
+    let tree = Summary::new(64, 1, &wakers, &worker_count);
 
     // Reserve from many leaves
     let mut handles = Vec::new();
@@ -1636,12 +1636,12 @@ fn summary_tree_maximum_leaves() {
 #[test]
 fn summary_tree_concurrent_signal_operations() {
     // Test concurrent mark_signal_active/inactive
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..4).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(4);
 
-    let tree = Arc::new(SummaryTree::new(8, 2, &wakers, &worker_count));
+    let tree = Arc::new(Summary::new(8, 2, &wakers, &worker_count));
 
     let barrier = Arc::new(Barrier::new(4));
     let mut threads = Vec::new();
@@ -1677,12 +1677,12 @@ fn summary_tree_concurrent_signal_operations() {
 #[test]
 fn summary_tree_partition_boundary_cases() {
     // Test partition calculations at boundaries
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
-    let wakers: Vec<Arc<SignalWaker>> = (0..8).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<Arc<WorkerWaker>> = (0..8).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count_atomic = AtomicUsize::new(0);
 
-    let tree = SummaryTree::new(17, 1, &wakers, &worker_count_atomic); // Prime number of leaves
+    let tree = Summary::new(17, 1, &wakers, &worker_count_atomic); // Prime number of leaves
 
     // Test with various worker counts
     for worker_count in 1..=9 {
@@ -1821,7 +1821,7 @@ fn task_arena_signal_ptr_validity() {
 #[test]
 fn task_arena_handle_for_location_comprehensive() {
     // Test handle_for_location with all valid locations
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
     let arena = TaskArena::with_config(
         TaskArenaConfig::new(2, 64).unwrap(),
@@ -1829,10 +1829,10 @@ fn task_arena_handle_for_location_comprehensive() {
     )
     .expect("failed to create arena");
 
-    let wakers: Vec<Arc<SignalWaker>> =
-        vec![Arc::new(SignalWaker::new()), Arc::new(SignalWaker::new())];
+    let wakers: Vec<Arc<WorkerWaker>> =
+        vec![Arc::new(WorkerWaker::new()), Arc::new(WorkerWaker::new())];
     let worker_count = AtomicUsize::new(2);
-    let tree = SummaryTree::new(2, 1, &wakers, &worker_count);
+    let tree = Summary::new(2, 1, &wakers, &worker_count);
 
     // Initialize all tasks
     for leaf in 0..2 {
@@ -1862,7 +1862,7 @@ fn task_arena_handle_for_location_comprehensive() {
 #[test]
 fn task_arena_multiple_init_task_calls() {
     // Test that init_task can be called multiple times (reset)
-    use bop_executor::signal_waker::SignalWaker;
+    use bop_executor::runtime::waker::WorkerWaker;
 
     let arena = TaskArena::with_config(
         TaskArenaConfig::new(1, 8).unwrap(),
@@ -1870,9 +1870,9 @@ fn task_arena_multiple_init_task_calls() {
     )
     .expect("failed to create arena");
 
-    let wakers: Vec<Arc<SignalWaker>> = vec![Arc::new(SignalWaker::new())];
+    let wakers: Vec<Arc<WorkerWaker>> = vec![Arc::new(WorkerWaker::new())];
     let worker_count = AtomicUsize::new(1);
-    let tree = SummaryTree::new(1, 1, &wakers, &worker_count);
+    let tree = Summary::new(1, 1, &wakers, &worker_count);
 
     let global_id = 0;
 

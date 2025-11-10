@@ -1,13 +1,13 @@
-use bop_executor::signal_waker::SignalWaker;
-use bop_executor::summary_tree::SummaryTree;
+use bop_executor::runtime::summary::Summary;
+use bop_executor::runtime::waker::WorkerWaker;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 #[test]
 fn summary_tree_notifies_partition_owner_on_activity() {
-    let wakers: Vec<_> = (0..2).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<_> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(2);
-    let tree = SummaryTree::new(4, 1, &wakers, &worker_count);
+    let tree = Summary::new(4, 1, &wakers, &worker_count);
 
     // Leaf 3 belongs to worker 1 (leaves {0,1} -> worker 0, {2,3} -> worker 1).
     assert!(tree.mark_signal_active(3, 0));
@@ -53,9 +53,9 @@ fn summary_tree_notifies_partition_owner_on_activity() {
 
 #[test]
 fn summary_tree_compute_partition_owner_matches_layout() {
-    let wakers: Vec<_> = (0..3).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<_> = (0..3).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(3);
-    let tree = SummaryTree::new(7, 1, &wakers, &worker_count);
+    let tree = Summary::new(7, 1, &wakers, &worker_count);
 
     // Layout with 7 leaves and 3 workers => first worker gets 3 leaves, others 2 each.
     assert_eq!(tree.compute_partition_owner(0, 3), 0);
@@ -76,9 +76,9 @@ fn summary_tree_compute_partition_owner_matches_layout() {
 
 #[test]
 fn summary_tree_reservations_are_unique_and_release_cleanly() {
-    let wakers: Vec<_> = (0..1).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<_> = (0..1).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(1);
-    let tree = SummaryTree::new(1, 1, &wakers, &worker_count);
+    let tree = Summary::new(1, 1, &wakers, &worker_count);
 
     let mut slots = vec![];
     for _ in 0..64 {
@@ -104,9 +104,9 @@ fn summary_tree_reservations_are_unique_and_release_cleanly() {
 
 #[test]
 fn summary_tree_mark_signal_active_is_idempotent() {
-    let wakers: Vec<_> = (0..1).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<_> = (0..1).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(1);
-    let tree = SummaryTree::new(2, 1, &wakers, &worker_count);
+    let tree = Summary::new(2, 1, &wakers, &worker_count);
 
     let owner = &wakers[0];
     assert_eq!(owner.permits(), 0);
@@ -150,9 +150,9 @@ fn summary_tree_mark_signal_active_is_idempotent() {
 
 #[test]
 fn summary_tree_mark_signal_inactive_only_when_leaf_empty() {
-    let wakers: Vec<_> = (0..1).map(|_| Arc::new(SignalWaker::new())).collect();
+    let wakers: Vec<_> = (0..1).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(1);
-    let tree = SummaryTree::new(1, 2, &wakers, &worker_count);
+    let tree = Summary::new(1, 2, &wakers, &worker_count);
 
     assert!(tree.mark_signal_active(0, 0));
     assert!(!tree.mark_signal_active(0, 1), "leaf already non-empty");

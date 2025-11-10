@@ -1,9 +1,8 @@
-use crate::CachePadded;
+use crate::utils::CachePadded;
 use crate::bits::find_nearest;
-use crate::seg_spsc::SegSpsc;
 use crate::selector::Selector;
-use crate::signal::{SIGNAL_MASK, Signal, SignalGate};
-use crate::signal_waker::{STATUS_SUMMARY_WORDS, SignalWaker};
+use super::signal::{SIGNAL_MASK, Signal, SignalGate};
+use super::waker::{STATUS_SUMMARY_WORDS, WorkerWaker};
 use crate::{PopError, PushError};
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
@@ -13,10 +12,11 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::thread;
 
 use rand::RngCore;
+use crate::spsc::Spsc;
 
 /// Create a new blocking MPSC queue
 pub fn new<T, const P: usize, const NUM_SEGS_P2: usize>() -> Receiver<T, P, NUM_SEGS_P2> {
-    new_with_waker(Arc::new(SignalWaker::new()))
+    new_with_waker(Arc::new(WorkerWaker::new()))
 }
 
 /// Create a new blocking MPSC queue with a custom SignalWaker
@@ -39,7 +39,7 @@ pub fn new<T, const P: usize, const NUM_SEGS_P2: usize>() -> Receiver<T, P, NUM_
 /// let receiver = mpsc::new_with_waker(waker);
 /// ```
 pub fn new_with_waker<T, const P: usize, const NUM_SEGS_P2: usize>(
-    waker: Arc<SignalWaker>,
+    waker: Arc<WorkerWaker>,
 ) -> Receiver<T, P, NUM_SEGS_P2> {
     // Create sparse array of AtomicPtr, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
@@ -69,7 +69,7 @@ pub fn new_with_waker<T, const P: usize, const NUM_SEGS_P2: usize>(
 
 pub fn new_with_sender<T, const P: usize, const NUM_SEGS_P2: usize>()
 -> (Sender<T, P, NUM_SEGS_P2>, Receiver<T, P, NUM_SEGS_P2>) {
-    let waker = Arc::new(SignalWaker::new());
+    let waker = Arc::new(WorkerWaker::new());
     // Create sparse array of AtomicPtr, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
     for _ in 0..MAX_QUEUES {
@@ -122,14 +122,14 @@ type CloseFn = Box<dyn FnOnce()>;
 struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
     /// Sparse array of producer queues - always MAX_PRODUCERS size
     /// Each slot is an AtomicPtr for thread-safe registration and access
-    queues: Box<[AtomicPtr<SegSpsc<T, P, NUM_SEGS_P2>>]>,
+    queues: Box<[AtomicPtr<Spsc<T, P, NUM_SEGS_P2, SignalGate>>]>,
     queue_count: CachePadded<AtomicUsize>,
     /// Number of registered producers
     producer_count: CachePadded<AtomicUsize>,
     max_producer_id: AtomicUsize,
     /// Closed flag
     closed: CachePadded<AtomicBool>,
-    waker: Arc<SignalWaker>,
+    waker: Arc<WorkerWaker>,
     /// Signal bitset - one bit per producer indicating which queues has data
     signals: Arc<[Signal; SIGNAL_WORDS]>,
 }
@@ -202,7 +202,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
         }
 
         let mut assigned_id = None;
-        let mut queue_arc: Option<Arc<SegSpsc<T, P, NUM_SEGS_P2>>> = None;
+        let mut queue_arc: Option<Arc<Spsc<T, P, NUM_SEGS_P2, SignalGate>>> = None;
 
         for signal_index in 0..SIGNAL_WORDS {
             for bit_index in 0..64 {
@@ -215,7 +215,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
                 }
 
                 let arc = Arc::new(unsafe {
-                    SegSpsc::<T, P, NUM_SEGS_P2>::new_unsafe_with_gate_and_config(
+                    Spsc::<T, P, NUM_SEGS_P2, SignalGate>::new_unsafe_with_gate_and_config(
                         SignalGate::new(
                             bit_index as u8,
                             self.signals[signal_index].clone(),
@@ -225,7 +225,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
                     )
                 });
 
-                let raw = Arc::into_raw(Arc::clone(&arc)) as *mut SegSpsc<T, P, NUM_SEGS_P2>;
+                let raw = Arc::into_raw(Arc::clone(&arc)) as *mut Spsc<T, P, NUM_SEGS_P2, SignalGate>;
                 match self.queues[queue_index].compare_exchange(
                     ptr::null_mut(),
                     raw,
@@ -348,7 +348,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
 /// ```ignore
 pub struct Sender<T, const P: usize, const NUM_SEGS_P2: usize> {
     inner: Arc<Inner<T, P, NUM_SEGS_P2>>,
-    queue: Arc<SegSpsc<T, P, NUM_SEGS_P2>>,
+    queue: Arc<Spsc<T, P, NUM_SEGS_P2, SignalGate>>,
     producer_id: usize,
 }
 
@@ -671,28 +671,45 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
     // }
 
     pub fn try_pop_n(&mut self, batch: &mut [T]) -> usize {
-        let total_drained = 0;
-        let max_count = batch.len();
+        self.try_pop_n_with_producer(batch).0
+    }
 
+    /// Attempts to pop a single value and returns the item along with the producer id.
+    pub fn try_pop_with_id(&mut self) -> Result<(T, usize), PopError> {
+        let mut slot = MaybeUninit::<T>::uninit();
+        let slice = unsafe { std::slice::from_raw_parts_mut(slot.as_mut_ptr(), 1) };
+        let (drained, producer_id) = self.try_pop_n_with_producer(slice);
+        if drained == 0 {
+            if self.is_closed() && self.inner.producer_count.load(Ordering::Acquire) == 0 {
+                Err(PopError::Closed)
+            } else {
+                Err(PopError::Empty)
+            }
+        } else {
+            debug_assert!(producer_id.is_some());
+            let value = unsafe { slot.assume_init() };
+            Ok((
+                value,
+                producer_id.expect("producer id missing for drained item"),
+            ))
+        }
+    }
+
+    fn try_pop_n_with_producer(&mut self, batch: &mut [T]) -> (usize, Option<usize>) {
         for _ in 0..64 {
             match self.acquire() {
                 Some((producer_id, queue)) => {
-                    // Drain from this producer's queue using consume_in_place
                     match queue.try_pop_n(batch) {
                         Ok(size) => {
-                            // total_drained += size;
-                            // remaining -= size;
                             queue.unmark_and_schedule();
-                            return size;
+                            return (size, Some(producer_id));
                         }
                         Err(PopError::Closed) => {
                             queue.unmark();
-                            // Queue is empty and closed - clean up the slot
                             let old_ptr = self.inner.queues[producer_id]
                                 .swap(ptr::null_mut(), Ordering::AcqRel);
 
                             if !old_ptr.is_null() {
-                                // Decrement producer count
                                 self.inner.producer_count.fetch_sub(1, Ordering::Relaxed);
                                 self.inner.queue_count.fetch_sub(1, Ordering::Relaxed);
 
@@ -703,21 +720,20 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
                         }
                         Err(_) => {
                             queue.unmark();
-                            // Queue is empty
                             self.misses += 1;
                         }
                     };
                 }
                 None => {
-                    // std::hint::spin_loop();
+                    // No available producer this round
                 }
             }
         }
 
-        total_drained
+        (0, None)
     }
 
-    fn acquire<'a>(&mut self) -> Option<(usize, &'a SegSpsc<T, P, NUM_SEGS_P2>)> {
+    fn acquire<'a>(&mut self) -> Option<(usize, &'a Spsc<T, P, NUM_SEGS_P2, SignalGate>)> {
         let random = self.next() as usize;
         // Try selecting signal index from summary hint
         let random_word = random % SIGNAL_WORDS;

@@ -50,6 +50,7 @@ Goals: prove we never lose wakeups or tasks, preserve task/permit invariants acr
 - Yield queue transitions producing `mark_yield` / `try_unmark_yield`.
 - Timer wheel tick updates verifying the waker sees partition activity.
 - `try_partition_*` strategies verifying they honor `partition_summary` hints first.
+- Async wrappers: coverage for `seg_spsc_async` and `mpsc_async` blocking behaviour (`seg_spsc_async_tests`, `mpsc_async_tests`).
 
 ---
 

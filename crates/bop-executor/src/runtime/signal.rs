@@ -51,9 +51,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-
-use crate::signal_waker::{STATUS_SUMMARY_WORDS, SignalWaker};
+use crate::spsc::SignalSchedule;
 use crate::utils::CachePadded;
+use super::waker::{STATUS_SUMMARY_WORDS, WorkerWaker};
 
 /// Number of bits per signal word (64-bit atomic).
 ///
@@ -590,7 +590,7 @@ pub struct SignalGate {
     /// Reference to the top-level SignalWaker for summary updates.
     ///
     /// Shared among all queues in the executor (up to 3,968 queues).
-    waker: Arc<SignalWaker>,
+    waker: Arc<WorkerWaker>,
 }
 
 impl SignalGate {
@@ -610,7 +610,7 @@ impl SignalGate {
     /// let gate = SignalGate::new(5, signal, waker);
     /// // This gate controls bit 5 in signal[0]
     /// ```
-    pub fn new(bit_index: u8, signal: Signal, waker: Arc<SignalWaker>) -> Self {
+    pub fn new(bit_index: u8, signal: Signal, waker: Arc<WorkerWaker>) -> Self {
         Self {
             flags: AtomicU8::new(IDLE),
             bit_index,
@@ -726,7 +726,7 @@ impl SignalGate {
     /// }
     /// ```
     #[inline(always)]
-    pub fn begin(&self) {
+    pub fn mark(&self) {
         self.flags.store(EXECUTING, Ordering::Release);
     }
 
@@ -779,7 +779,7 @@ impl SignalGate {
     /// gate.finish();  // Automatically reschedules if more work arrived
     /// ```
     #[inline(always)]
-    pub fn finish(&self) {
+    pub fn unmark(&self) {
         let after_flags = self.flags.fetch_sub(EXECUTING, Ordering::AcqRel);
         if after_flags & SCHEDULED != IDLE {
             self.signal.set(self.bit_index as u64);
@@ -844,12 +844,30 @@ impl SignalGate {
     /// }
     /// ```
     #[inline(always)]
-    pub fn finish_and_schedule(&self) {
+    pub fn unmark_and_schedule(&self) {
         self.flags.store(SCHEDULED, Ordering::Release);
         let (was_empty, was_set) = self.signal.set(self.bit_index as u64);
         if was_empty && was_set {
             self.waker.mark_active(self.signal.index());
         }
+    }
+}
+
+impl SignalSchedule for SignalGate {
+    fn schedule(&self) -> bool {
+        SignalGate::schedule(self)
+    }
+
+    fn mark(&self) {
+        SignalGate::mark(self);
+    }
+
+    fn unmark(&self) {
+        SignalGate::unmark(self);
+    }
+
+    fn unmark_and_schedule(&self) {
+        SignalGate::unmark_and_schedule(self);
     }
 }
 

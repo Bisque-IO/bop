@@ -1,7 +1,7 @@
 use crate::bits;
-use crate::summary_tree::SummaryTree;
-use crate::timer::TimerHandle;
-use crate::worker::Worker;
+use super::summary::Summary;
+use super::timer::TimerHandle;
+use super::worker::Worker;
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::future::{Future, IntoFuture};
@@ -373,7 +373,7 @@ pub struct Task {
     cpu_time_enabled: AtomicBool,
     signal_ptr: *const TaskSignal,
     slot_ptr: AtomicPtr<TaskSlot>,
-    summary_tree_ptr: *const SummaryTree,
+    summary_tree_ptr: *const Summary,
     future_ptr: AtomicPtr<()>,
     // Safety: stats are mutated without synchronization based on executor guarantees that
     // only the owning worker thread records updates while other threads may only clone/copy.
@@ -435,7 +435,7 @@ impl Task {
     /// The summary_tree pointer must remain valid for the lifetime of this task.
     /// This must only be called once during initialization.
     #[inline]
-    unsafe fn bind_summary_tree(&mut self, summary_tree: *const crate::summary_tree::SummaryTree) {
+    unsafe fn bind_summary_tree(&mut self, summary_tree: *const Summary) {
         self.summary_tree_ptr = summary_tree;
     }
 
@@ -1208,7 +1208,7 @@ impl TaskArena {
             .map(TaskHandle::from_non_null)
     }
 
-    pub fn init_task(&self, global_id: u32, summary_tree: *const crate::summary_tree::SummaryTree) {
+    pub fn init_task(&self, global_id: u32, summary_tree: *const Summary) {
         let (leaf_idx, slot_idx) = self.decompose_id(global_id);
         let signal_idx = slot_idx / 64;
         let signal_bit = (slot_idx % 64) as u8;
@@ -1325,7 +1325,7 @@ pub struct TaskArenaStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker::Worker;
+    use crate::runtime::worker::Worker;
     use std::future::poll_fn;
     use std::mem::{self, MaybeUninit};
     use std::ptr;

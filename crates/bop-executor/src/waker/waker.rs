@@ -97,6 +97,22 @@ impl DiatomicWaker {
     /// This automatically unregisters any waker that may have been previously
     /// registered.
     pub fn notify(&self) {
+        // Fast path: check if anyone is actually waiting.
+        // If the REGISTERED bit is not set, there's no waker to notify.
+        // We can safely return without attempting to acquire the lock.
+        //
+        // Ordering: Relaxed is sufficient here because:
+        // - We're only checking if work needs to be done
+        // - If REGISTERED is set, try_lock() will re-load with proper ordering
+        // - If we miss a concurrent registration due to reordering, the registering
+        //   thread will either succeed (and we'll notify on next call) or will set
+        //   NOTIFICATION bit for us to handle
+        let state = self.state.load(Ordering::Relaxed);
+        if (state & REGISTERED) == 0 {
+            return;
+        }
+
+        // Slow path: someone is waiting, acquire the lock and notify.
         // Transitions: see `try_lock` and `try_unlock`.
 
         let mut state = if let Ok(s) = try_lock(&self.state) {
@@ -158,6 +174,32 @@ impl DiatomicWaker {
         // |-----------------|-----------------|
         // |  n  l  r  u  i  |  n  l  1  1  i  |
 
+        // Fast path: check if we're already registered with the same waker.
+        // This is a common case during steady-state polling where the same
+        // task repeatedly checks readiness with the same waker.
+        //
+        // Ordering: Relaxed is sufficient for this check because:
+        // - If we see REGISTERED=1 and the waker is the same, we can skip the fetch_or
+        // - If state is stale, we'll fall through to the slow path which re-checks
+        // - The slow path uses proper Acquire ordering for synchronization
+        let fast_state = self.state.load(Ordering::Relaxed);
+        if (fast_state & REGISTERED) != 0 {
+            // Already registered, check if it's the same waker
+            let idx = fast_state & INDEX;
+            let recent_idx = if fast_state & UPDATE == 0 {
+                idx
+            } else {
+                idx ^ INDEX // XOR is faster than subtraction
+            };
+
+            if unsafe { self.will_wake(recent_idx, waker) } {
+                // Same waker already registered, nothing to do.
+                // No need to fetch_or(REGISTERED) since it's already set.
+                return;
+            }
+        }
+
+        // Slow path: need to register a new waker or update registration.
         // Ordering: Acquire ordering is necessary to synchronize with the
         // Release unlocking operation in `notify`, which ensures that all calls
         // to the waker in the redundant slot have completed.
@@ -170,7 +212,7 @@ impl DiatomicWaker {
         let recent_idx = if state & UPDATE == 0 {
             idx
         } else {
-            INDEX - idx
+            idx ^ INDEX // XOR is faster than subtraction
         };
 
         // Safety: it is safe to call `will_wake` since the registering thread
@@ -230,7 +272,7 @@ impl DiatomicWaker {
 
         // Always store the new waker in the redundant slot to avoid racing with
         // a notifier.
-        let redundant_idx = 1 - idx;
+        let redundant_idx = idx ^ INDEX; // XOR is faster than subtraction (1 - idx)
 
         // Store the new waker.
         //
@@ -371,16 +413,19 @@ fn try_lock(state: &AtomicUsize) -> Result<usize, ()> {
     let mut old_state = state.load(Ordering::Relaxed);
 
     loop {
+        // Early exit: if no waker is registered, no need to acquire lock
+        if (old_state & REGISTERED) == 0 {
+            return Err(());
+        }
+
         if old_state & (LOCKED | REGISTERED) == REGISTERED {
             // Success path.
 
-            // If `UPDATE` is set, clear `UPDATE` and flip `INDEX` with the xor
-            // mask.
+            // If `UPDATE` is set, clear `UPDATE` and flip `INDEX` with the xor mask.
+            // Then set `LOCKED` and clear `REGISTERED`.
+            // Combine all operations into a single xor_mask calculation.
             let update_bit = old_state & UPDATE;
-            let xor_mask = update_bit | (update_bit >> 1);
-
-            // Set `LOCKED` and clear `REGISTERED` with the xor mask.
-            let xor_mask = xor_mask | LOCKED | REGISTERED;
+            let xor_mask = update_bit | (update_bit >> 1) | LOCKED | REGISTERED;
 
             let new_state = old_state ^ xor_mask;
 
@@ -466,11 +511,10 @@ fn try_unlock(state: &AtomicUsize, mut old_state: usize) -> Result<(), usize> {
             // Failure path.
 
             // If `UPDATE` is set, clear `UPDATE` and flip `INDEX` with the xor mask.
+            // Then clear `NOTIFICATION` and `REGISTERED`.
+            // Combine all operations into a single xor_mask calculation.
             let update_bit = old_state & UPDATE;
-            let xor_mask = update_bit | (update_bit >> 1);
-
-            // Clear `NOTIFICATION` and `REGISTERED` with the xor mask.
-            let xor_mask = xor_mask | NOTIFICATION | REGISTERED;
+            let xor_mask = update_bit | (update_bit >> 1) | NOTIFICATION | REGISTERED;
 
             let new_state = old_state ^ xor_mask;
 

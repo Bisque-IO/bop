@@ -1,9 +1,9 @@
 //! Property and fuzz-style tests covering Section 5 of the signalling plan.
-use bop_executor::signal_waker::{SignalWaker, STATUS_SUMMARY_BITS};
-use bop_executor::summary_tree::SummaryTree;
-use rand::{rngs::SmallRng, Rng, SeedableRng};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use bop_executor::runtime::summary::Summary;
+use bop_executor::runtime::waker::{STATUS_SUMMARY_BITS, WorkerWaker};
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Randomised sequences of producer/consumer events must keep the permit counter in lock-step
 /// with the modelled number of 0→1 transitions minus acquisitions.
@@ -14,7 +14,7 @@ fn property_signal_waker_permit_consistency() {
 
     for seed in 0..SEEDS {
         let mut rng = SmallRng::seed_from_u64(0x516E_A100_u64 ^ seed);
-        let waker = SignalWaker::new();
+        let waker = WorkerWaker::new();
         let signals: Vec<AtomicU64> = (0..STATUS_SUMMARY_BITS as usize)
             .map(|_| AtomicU64::new(0))
             .collect();
@@ -78,7 +78,7 @@ fn property_signal_waker_permit_consistency() {
     }
 }
 
-/// Differential property: SummaryTree notifications plus explicit sync must never lose active
+/// Differential property: Summary notifications plus explicit sync must never lose active
 /// leaves, even as partitions resize while random leaves toggle.
 #[test]
 fn property_partition_hint_accuracy() {
@@ -91,11 +91,11 @@ fn property_partition_hint_accuracy() {
         let signals_per_leaf = rng.random_range(1..=4);
         let worker_count = rng.random_range(1..=leaf_count.max(1).min(8));
 
-        let wakers: Vec<Arc<SignalWaker>> = (0..worker_count)
-            .map(|_| Arc::new(SignalWaker::new()))
+        let wakers: Vec<Arc<WorkerWaker>> = (0..worker_count)
+            .map(|_| Arc::new(WorkerWaker::new()))
             .collect();
         let worker_count_cell = AtomicUsize::new(worker_count);
-        let tree = SummaryTree::new(leaf_count, signals_per_leaf, &wakers, &worker_count_cell);
+        let tree = Summary::new(leaf_count, signals_per_leaf, &wakers, &worker_count_cell);
 
         let mut leaf_masks = vec![0u64; leaf_count];
         let leaf_words: Vec<AtomicU64> = (0..leaf_count).map(|_| AtomicU64::new(0)).collect();
@@ -153,8 +153,7 @@ fn property_partition_hint_accuracy() {
             let worker_id = rng.random_range(0..worker_count);
             let start = tree.partition_start_for_worker(worker_id, worker_count);
             let end = tree.partition_end_for_worker(worker_id, worker_count);
-            let has_work = wakers[worker_id]
-                .sync_partition_summary(start, end, &leaf_words);
+            let has_work = wakers[worker_id].sync_partition_summary(start, end, &leaf_words);
             let partition_len = end.saturating_sub(start);
             let expected_summary = (start..end).enumerate().fold(0u64, |acc, (local, idx)| {
                 if leaf_masks[idx] != 0 {
@@ -190,8 +189,7 @@ fn property_partition_hint_accuracy() {
         for worker_id in 0..worker_count {
             let start = tree.partition_start_for_worker(worker_id, worker_count);
             let end = tree.partition_end_for_worker(worker_id, worker_count);
-            let has_work =
-                wakers[worker_id].sync_partition_summary(start, end, &leaf_words);
+            let has_work = wakers[worker_id].sync_partition_summary(start, end, &leaf_words);
             let expected_summary = (start..end).enumerate().fold(0u64, |acc, (local, idx)| {
                 if leaf_masks[idx] != 0 {
                     acc | (1u64 << local)
@@ -220,11 +218,11 @@ fn property_summary_tree_reserve_fairness() {
         let leaf_count = rng.random_range(worker_count..=worker_count * 4);
         let signals_per_leaf = rng.random_range(1..=4);
 
-        let wakers: Vec<Arc<SignalWaker>> = (0..worker_count)
-            .map(|_| Arc::new(SignalWaker::new()))
+        let wakers: Vec<Arc<WorkerWaker>> = (0..worker_count)
+            .map(|_| Arc::new(WorkerWaker::new()))
             .collect();
         let worker_count_cell = AtomicUsize::new(worker_count);
-        let tree = SummaryTree::new(leaf_count, signals_per_leaf, &wakers, &worker_count_cell);
+        let tree = Summary::new(leaf_count, signals_per_leaf, &wakers, &worker_count_cell);
 
         let window = leaf_count * signals_per_leaf * 2;
         let total_steps = window * 4;
@@ -253,6 +251,9 @@ fn property_summary_tree_reserve_fairness() {
             }
         }
 
-        assert!(all_seen, "reserve_task never visited all leaves (seed {seed})");
+        assert!(
+            all_seen,
+            "reserve_task never visited all leaves (seed {seed})"
+        );
     }
 }

@@ -1,6 +1,6 @@
 use bop_executor::runtime::Runtime;
-use bop_executor::task::{TaskArenaConfig, TaskArenaOptions};
-use bop_executor::timer::Timer;
+use bop_executor::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+use bop_executor::runtime::timer::Timer;
 use futures_lite::future::{block_on, poll_fn};
 use futures_lite::pin;
 use num_cpus;

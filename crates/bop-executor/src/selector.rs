@@ -1,5 +1,5 @@
 use crate::bits;
-use crate::signal::{SIGNAL_CAPACITY, SIGNAL_MASK};
+use crate::runtime::signal::{SIGNAL_CAPACITY, SIGNAL_MASK};
 use rand::RngCore;
 
 const RND_MULTIPLIER: u64 = 0x5DEECE66D;

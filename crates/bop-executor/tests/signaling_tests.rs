@@ -6,7 +6,7 @@
 /// 2. Status vs summary field independence
 /// 3. Partition summary management
 /// 4. Bug regression prevention
-use bop_executor::signal_waker::{STATUS_SUMMARY_BITS, STATUS_SUMMARY_MASK, SignalWaker};
+use bop_executor::runtime::waker::{STATUS_SUMMARY_BITS, STATUS_SUMMARY_MASK, WorkerWaker};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -18,7 +18,7 @@ use std::time::Duration;
 
 #[test]
 fn test_signal_waker_status_bit_yield_lifecycle() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Initial state: no bits set
     let (yield_bit, tasks_bit) = waker.status_bits();
@@ -53,7 +53,7 @@ fn test_signal_waker_status_bit_yield_lifecycle() {
 
 #[test]
 fn test_signal_waker_status_bit_tasks_lifecycle() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Initial state
     let (yield_bit, tasks_bit) = waker.status_bits();
@@ -88,7 +88,7 @@ fn test_signal_waker_status_bit_tasks_lifecycle() {
 
 #[test]
 fn test_signal_waker_status_bits_idempotent() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Multiple mark_yield calls should only add one permit
     waker.mark_yield();
@@ -115,7 +115,7 @@ fn test_signal_waker_status_bits_idempotent() {
 
 #[test]
 fn test_signal_waker_status_bits_independent() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Set both bits
     waker.mark_yield();
@@ -140,7 +140,7 @@ fn test_signal_waker_status_bits_independent() {
 
 #[test]
 fn test_signal_waker_mark_active_mask_semantics() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     let mask = (1 << 1) | (1 << 3) | (1 << 5);
     waker.mark_active_mask(mask);
@@ -175,7 +175,7 @@ fn test_signal_waker_mark_active_mask_semantics() {
 
 #[test]
 fn test_signal_waker_mark_active_permit_semantics() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
     assert_eq!(waker.permits(), 0);
 
     waker.mark_active(5);
@@ -210,7 +210,7 @@ fn test_signal_waker_mark_active_permit_semantics() {
 
 #[test]
 fn test_signal_waker_permits_track_acquisition() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     waker.mark_active(1);
     waker.mark_active(7);
@@ -231,7 +231,7 @@ fn test_signal_waker_permits_track_acquisition() {
 fn test_signal_waker_sleepers_balance_after_timeout() {
     use std::thread;
 
-    let waker = Arc::new(SignalWaker::new());
+    let waker = Arc::new(WorkerWaker::new());
     let clone = Arc::clone(&waker);
 
     let handle = thread::spawn(move || {
@@ -254,7 +254,7 @@ fn test_signal_waker_sleepers_balance_after_timeout() {
 fn stress_signal_waker_partition_sync_race() {
     use rand::{Rng, SeedableRng, rngs::SmallRng};
 
-    let waker = Arc::new(SignalWaker::new());
+    let waker = Arc::new(WorkerWaker::new());
     let leaves: Arc<Vec<AtomicU64>> = Arc::new((0..8).map(|_| AtomicU64::new(0)).collect());
     let barrier = Arc::new(Barrier::new(3));
     const ITERATIONS: usize = 1_000;
@@ -346,7 +346,7 @@ fn stress_signal_waker_partition_sync_race() {
 fn stress_signal_waker_summary_race() {
     use rand::{Rng, SeedableRng, rngs::SmallRng};
 
-    let waker = Arc::new(SignalWaker::new());
+    let waker = Arc::new(WorkerWaker::new());
     let signals: Arc<Vec<AtomicU64>> = Arc::new((0..4).map(|_| AtomicU64::new(0)).collect());
     let barrier = Arc::new(Barrier::new(3));
     const ITERATIONS: usize = 1_000;
@@ -420,7 +420,7 @@ fn stress_signal_waker_summary_race() {
 
 #[test]
 fn test_signal_waker_try_unmark_if_empty_behaves() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
     waker.mark_active(11);
     let signal = AtomicU64::new(1 << 11);
 
@@ -444,7 +444,7 @@ fn test_signal_waker_try_unmark_if_empty_behaves() {
 
 #[test]
 fn test_signal_waker_partition_summary_superset() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
     let leaves: Vec<AtomicU64> = (0..4).map(|_| AtomicU64::new(0)).collect();
 
     // Activate a single leaf and confirm partition + status engage.
@@ -486,7 +486,7 @@ fn test_signal_waker_partition_summary_superset() {
 
 #[test]
 fn test_signal_waker_summary_vs_status_separation() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Mark signal words active in summary
     waker.mark_active(0);
@@ -536,7 +536,7 @@ fn test_signal_waker_summary_vs_status_separation() {
 
 #[test]
 fn test_signal_waker_partition_summary_transitions() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Initial state: empty partition
     assert_eq!(waker.partition_summary(), 0);
@@ -584,7 +584,7 @@ fn test_signal_waker_partition_summary_transitions() {
 
 #[test]
 fn test_signal_waker_sync_partition_summary() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Simulate SummaryTree leaf_words
     let leaf_words: Vec<AtomicU64> = (0..8).map(|i| AtomicU64::new(i % 2)).collect();
@@ -634,7 +634,7 @@ fn test_signal_waker_sync_partition_summary() {
 #[test]
 fn test_status_bit_race_on_partition_empty_to_nonempty() {
     // Test that rapid empty→non-empty transitions don't lose permits
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
     let summary_bits = STATUS_SUMMARY_BITS as usize;
 
     // Simulate rapid transitions
@@ -659,7 +659,7 @@ fn test_status_bit_race_on_partition_empty_to_nonempty() {
 
 #[test]
 fn test_try_unmark_when_already_clear() {
-    let waker = SignalWaker::new();
+    let waker = WorkerWaker::new();
 
     // Try to unmark when already clear (should be no-op)
     waker.try_unmark_yield();
@@ -673,7 +673,7 @@ fn test_try_unmark_when_already_clear() {
 
 #[test]
 fn test_concurrent_signal_waker_operations() {
-    let waker = Arc::new(SignalWaker::new());
+    let waker = Arc::new(WorkerWaker::new());
     let barrier = Arc::new(Barrier::new(3));
 
     let waker1 = waker.clone();
@@ -717,7 +717,7 @@ fn test_concurrent_signal_waker_operations() {
 
 #[test]
 fn test_parking_and_waking() {
-    let waker = Arc::new(SignalWaker::new());
+    let waker = Arc::new(WorkerWaker::new());
     let waker_clone = waker.clone();
 
     let handle = std::thread::spawn(move || {

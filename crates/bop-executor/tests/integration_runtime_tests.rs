@@ -1,7 +1,7 @@
 use bop_executor::{
-    runtime::Runtime,
-    task::{TaskArenaConfig, TaskArenaOptions},
-    utils::block_on,
+	runtime::Runtime,
+	runtime::task::{TaskArenaConfig, TaskArenaOptions},
+	utils::block_on,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -148,7 +148,7 @@ fn integration_runtime_shutdown_under_load() {
 
 #[test]
 fn integration_runtime_randomized_load() {
-    use rand::{rngs::SmallRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::SmallRng};
 
     let runtime = Runtime::<10, 6>::new(
         TaskArenaConfig::new(4, 96).unwrap(),

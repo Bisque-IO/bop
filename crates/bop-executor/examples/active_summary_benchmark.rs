@@ -1,4 +1,4 @@
-use bop_executor::task::{TaskArena, TaskArenaConfig, TaskArenaOptions};
+use bop_executor::runtime::task::{TaskArena, TaskArenaConfig, TaskArenaOptions};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
