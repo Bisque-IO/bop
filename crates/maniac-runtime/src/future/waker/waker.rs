@@ -101,13 +101,13 @@ impl DiatomicWaker {
         // If the REGISTERED bit is not set, there's no waker to notify.
         // We can safely return without attempting to acquire the lock.
         //
-        // Ordering: Relaxed is sufficient here because:
+        // Ordering: Acquire is sufficient here because:
         // - We're only checking if work needs to be done
         // - If REGISTERED is set, try_lock() will re-load with proper ordering
         // - If we miss a concurrent registration due to reordering, the registering
         //   thread will either succeed (and we'll notify on next call) or will set
         //   NOTIFICATION bit for us to handle
-        let state = self.state.load(Ordering::Relaxed);
+        let state = self.state.load(Ordering::Acquire);
         if (state & REGISTERED) == 0 {
             return;
         }
@@ -178,11 +178,11 @@ impl DiatomicWaker {
         // This is a common case during steady-state polling where the same
         // task repeatedly checks readiness with the same waker.
         //
-        // Ordering: Relaxed is sufficient for this check because:
+        // Ordering: Acquire is sufficient for this check because:
         // - If we see REGISTERED=1 and the waker is the same, we can skip the fetch_or
         // - If state is stale, we'll fall through to the slow path which re-checks
         // - The slow path uses proper Acquire ordering for synchronization
-        let fast_state = self.state.load(Ordering::Relaxed);
+        let fast_state = self.state.load(Ordering::Acquire);
         if (fast_state & REGISTERED) != 0 {
             // Already registered, check if it's the same waker
             let idx = fast_state & INDEX;
@@ -317,9 +317,9 @@ impl DiatomicWaker {
         // case when the next waker to be registered will be the same as the one
         // being unregistered.
         //
-        // Ordering: no waker was modified so Relaxed ordering is sufficient.
+        // Ordering: no waker was modified so Release ordering is sufficient.
         self.state
-            .fetch_and(!(REGISTERED | NOTIFICATION), Ordering::Relaxed);
+            .fetch_and(!(REGISTERED | NOTIFICATION), Ordering::Release);
     }
 
     /// Returns a future that can be `await`ed until the provided predicate
@@ -345,7 +345,7 @@ impl DiatomicWaker {
     /// The caller must have exclusive access to the waker at index `idx`.
     unsafe fn set_waker(&self, idx: usize, new: Waker) {
         unsafe {
-            self.waker[idx].with_mut(|waker| (*waker) = Some(new));
+            self.waker[idx].with_mut(|waker| *waker = Some(new));
         }
     }
 
@@ -410,7 +410,7 @@ unsafe impl Sync for DiatomicWaker {}
 /// |  n  1  1  u  i  |  1  1  1  u  i  | (failure)
 ///
 fn try_lock(state: &AtomicUsize) -> Result<usize, ()> {
-    let mut old_state = state.load(Ordering::Relaxed);
+    let mut old_state = state.load(Ordering::Acquire);
 
     loop {
         // Early exit: if no waker is registered, no need to acquire lock
