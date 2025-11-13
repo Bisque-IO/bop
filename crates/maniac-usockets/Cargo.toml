@@ -1,0 +1,12 @@
+[package]
+name = "maniac-usockets"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+usockets-udp = []
+
+[dependencies]
+maniac-sys = { workspace = true }
+thiserror = { workspace = true }

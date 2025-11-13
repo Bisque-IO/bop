@@ -1,0 +1,45 @@
+[package]
+name = "maniac-executor"
+edition = "2024"
+version.workspace = true
+
+[features]
+timers-introspection = []
+
+[dependencies]
+congee = "0.4.1"
+core_affinity = "0.8"
+crossbeam = { workspace = true }
+crossbeam-deque = "0.8"
+crossbeam-epoch = "0.9"
+crossbeam-queue = "0.3"
+crossbeam-utils = "0.8"
+dashmap = "6.1"
+futures-lite = "2.6"
+futures = { workspace = true }
+generator = "0.8"
+num_cpus = "1.16"
+pin-project-lite = "0.2"
+rand = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["memoryapi", "winnt", "sysinfoapi"] }
+
+[dev-dependencies]
+loom = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+criterion = "0.5"
+pollster = "0.4"
+diatomic-waker = "0.2.3"
+multishot = "0.3"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(diatomic_waker_loom)', 'cfg(multishot_loom)', 'cfg(async_event_loom)'] }
+# unexpected_cfgs = { level = "warn", check-cfg = ['cfg(diatomic_waker_loom)'] }
+
+[[bench]]
+name = "signal_waker_perf"
+harness = false

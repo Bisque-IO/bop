@@ -1,0 +1,16 @@
+[package]
+name = "maniac-mdbx"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+maniac-sys = { workspace = true }
+bitflags = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+heed = "0.22"
+
+[[example]]
+name = "sync_durable"
+harness = false
