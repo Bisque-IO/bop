@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::slice;
 
-use bop_sys::*;
+use maniac_sys::*;
 
 use crate::buffer::Buffer;
 use crate::error::{RaftError, RaftResult};

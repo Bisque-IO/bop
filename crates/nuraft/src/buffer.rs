@@ -1,6 +1,6 @@
 use std::ptr::{self, NonNull};
 
-use bop_sys::*;
+use maniac_sys::*;
 
 use crate::error::{RaftError, RaftResult};
 

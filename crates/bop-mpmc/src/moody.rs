@@ -1,4 +1,4 @@
-use bop_sys::*;
+use maniac_sys::*;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::sync::Arc;

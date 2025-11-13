@@ -4,7 +4,7 @@
 /// BUG #2: try_unmark_yield() was clearing summary bit instead of status bit
 ///
 /// These tests ensure the fixes remain correct and detect any future regressions.
-use maniac_executor::runtime::waker::{STATUS_SUMMARY_BITS, STATUS_SUMMARY_MASK, WorkerWaker};
+use maniac_runtime::runtime::waker::{STATUS_SUMMARY_BITS, STATUS_SUMMARY_MASK, WorkerWaker};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================

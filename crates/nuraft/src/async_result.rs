@@ -5,7 +5,7 @@ use std::ptr::{self, NonNull};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use bop_sys::*;
+use maniac_sys::*;
 
 use crate::buffer::Buffer;
 use crate::error::{RaftError, RaftResult};
@@ -435,7 +435,7 @@ unsafe extern "C" fn async_buffer_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bop_sys::{
+    use maniac_sys::{
         bop_raft_async_bool_get_user_data, bop_raft_async_bool_get_when_ready,
         bop_raft_async_buffer_get_user_data, bop_raft_async_buffer_get_when_ready,
         bop_raft_async_u64_get_user_data, bop_raft_async_u64_get_when_ready,

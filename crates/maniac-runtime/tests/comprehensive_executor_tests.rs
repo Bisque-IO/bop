@@ -4,7 +4,7 @@
 /// - Worker: task polling, work stealing, message handling
 /// - Task: lifecycle, scheduling, state transitions
 /// - Integration: cross-component interactions
-use maniac_executor::{
+use maniac_runtime::{
     runtime::Runtime,
     runtime::summary::Summary,
     runtime::task::{TaskArena, TaskArenaConfig, TaskArenaOptions},
@@ -272,7 +272,7 @@ fn runtime_graceful_shutdown() {
 
 #[test]
 fn summary_tree_reserve_task_round_robin() {
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(2);
@@ -306,7 +306,7 @@ fn summary_tree_reserve_task_round_robin() {
 
 #[test]
 fn summary_tree_reserve_exhaustion() {
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(2);
@@ -345,7 +345,7 @@ fn summary_tree_reserve_exhaustion() {
 
 #[test]
 fn summary_tree_concurrent_reservations() {
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(4);
@@ -398,7 +398,7 @@ fn summary_tree_concurrent_reservations() {
 
 #[test]
 fn summary_tree_partition_ownership() {
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(4);
@@ -441,7 +441,7 @@ fn summary_tree_partition_ownership() {
 
 #[test]
 fn summary_tree_signal_active_inactive() {
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(2);
@@ -912,7 +912,7 @@ fn runtime_mixed_duration_tasks() {
 #[test]
 fn summary_tree_partition_rebalancing() {
     // Test that partition calculations work correctly with different worker counts
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..8).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count_atomic = AtomicUsize::new(0);
@@ -959,7 +959,7 @@ fn summary_tree_partition_rebalancing() {
 #[test]
 fn summary_tree_reserve_release_stress() {
     // Stress test reserve/release cycles
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(4);
@@ -999,7 +999,7 @@ fn summary_tree_reserve_release_stress() {
 #[test]
 fn summary_tree_signal_transitions_stress() {
     // Test rapid signal active/inactive transitions
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(2);
@@ -1023,7 +1023,7 @@ fn summary_tree_signal_transitions_stress() {
 #[test]
 fn summary_tree_global_to_local_leaf_conversion() {
     // Test global to local leaf index conversion
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(4);
@@ -1580,7 +1580,7 @@ fn runtime_interleaved_spawn_complete() {
 #[test]
 fn summary_tree_edge_case_single_leaf() {
     // Test Summary with just 1 leaf
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = vec![Arc::new(WorkerWaker::new())];
     let worker_count = AtomicUsize::new(1);
@@ -1603,7 +1603,7 @@ fn summary_tree_edge_case_single_leaf() {
 #[test]
 fn summary_tree_maximum_leaves() {
     // Test with large number of leaves
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..16).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(8);
@@ -1636,7 +1636,7 @@ fn summary_tree_maximum_leaves() {
 #[test]
 fn summary_tree_concurrent_signal_operations() {
     // Test concurrent mark_signal_active/inactive
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count = AtomicUsize::new(4);
@@ -1677,7 +1677,7 @@ fn summary_tree_concurrent_signal_operations() {
 #[test]
 fn summary_tree_partition_boundary_cases() {
     // Test partition calculations at boundaries
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..8).map(|_| Arc::new(WorkerWaker::new())).collect();
     let worker_count_atomic = AtomicUsize::new(0);
@@ -1821,7 +1821,7 @@ fn task_arena_signal_ptr_validity() {
 #[test]
 fn task_arena_handle_for_location_comprehensive() {
     // Test handle_for_location with all valid locations
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let arena = TaskArena::with_config(
         TaskArenaConfig::new(2, 64).unwrap(),
@@ -1862,7 +1862,7 @@ fn task_arena_handle_for_location_comprehensive() {
 #[test]
 fn task_arena_multiple_init_task_calls() {
     // Test that init_task can be called multiple times (reset)
-    use maniac_executor::runtime::waker::WorkerWaker;
+    use maniac_runtime::runtime::waker::WorkerWaker;
 
     let arena = TaskArena::with_config(
         TaskArenaConfig::new(1, 8).unwrap(),

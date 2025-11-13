@@ -2,7 +2,7 @@ use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use bop_sys::{bop_raft_logger_delete, bop_raft_logger_make, bop_raft_logger_ptr};
+use maniac_sys::{bop_raft_logger_delete, bop_raft_logger_make, bop_raft_logger_ptr};
 
 use crate::error::{RaftError, RaftResult};
 use crate::traits::Logger;

@@ -212,7 +212,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_millis();
-        let dir = std::env::temp_dir().join(format!("bop-raft-mdbx-{suffix}"));
+        let dir = std::env::temp_dir().join(format!("nuraft-mdbx-{suffix}"));
 
         let storage = crate::mdbx::MdbxStorage::new(config, dir.clone());
         let components = storage.into_components();

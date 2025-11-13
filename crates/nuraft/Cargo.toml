@@ -1,5 +1,5 @@
 [package]
-name = "bop-raft"
+name = "nuraft"
 version = "0.1.0"
 edition = "2024"
 
@@ -10,9 +10,8 @@ serde = ["dep:serde", "dep:serde_json"]
 tracing = ["dep:tracing"]
 
 [dependencies]
-bop-sys = { workspace = true }
-bop-aof = { workspace = true }
-bop-storage = { workspace = true }
+maniac-sys = { workspace = true }
+maniac-storage = { workspace = true }
 crc64fast-nvme = { workspace = true }
 crc32fast = { workspace = true }
 thiserror = { workspace = true }

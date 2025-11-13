@@ -44,12 +44,6 @@ pub use fsm::{State, process_message};
 pub use wire::{FramedMessage, Message, PROTOCOL_VERSION, RequestId, StateSyncOperation};
 // Note: TcpServer is generic over the handler type, use net::TcpServer<YourHandler> directly
 
-// Re-export BOP platform components
-pub use bop_rs::{
-    allocator,
-    // raft (when compilation issues are resolved)
-};
-
 use std::sync::Arc;
 
 /// Application wrapper that holds the cluster manager state

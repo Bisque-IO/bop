@@ -40,7 +40,7 @@ struct MockStateManager;
 impl StateManagerInterface for MockStateManager { /* load/save stubs returning Ok(()) */ }
 
 fn acquire_native_asio_service() -> bop_raft::RaftResult<AsioService> {
-    // Wrap bop_sys::bop_raft_asio_service_make once the helper is available.
+    // Wrap maniac_sys::bop_raft_asio_service_make once the helper is available.
     todo!("Provide an AsioService handle from bop-sys");
 }
 

@@ -1,9 +1,8 @@
-use maniac_executor::runtime::Runtime;
-use maniac_executor::runtime::task::{TaskArenaConfig, TaskArenaOptions};
-use maniac_executor::runtime::timer::Timer;
+use maniac_runtime::runtime::Runtime;
+use maniac_runtime::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+use maniac_runtime::runtime::timer::Timer;
 use futures_lite::future::{block_on, poll_fn};
 use futures_lite::pin;
-use num_cpus;
 use std::env;
 use std::error::Error;
 use std::sync::Arc;
@@ -25,7 +24,7 @@ struct BenchOptions {
 impl BenchOptions {
     fn from_args() -> Self {
         let mut opts = Self {
-            workers: num_cpus::get().max(1),
+            workers: maniac_runtime::utils::num_cpus().max(1),
             leaf_count: 4,
             tasks_per_leaf: 256,
             futures: 1024,

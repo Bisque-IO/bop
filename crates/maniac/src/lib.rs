@@ -3,11 +3,11 @@ pub mod allocator {
 }
 
 pub mod runtime {
-	pub use maniac_executor::runtime::*;
+	pub use maniac_runtime::runtime::*;
 }
 
 pub mod sync {
-	pub use maniac_executor::sync::*;
+	pub use maniac_runtime::sync::*;
 }
 
 pub mod usockets {
@@ -17,7 +17,7 @@ pub mod usockets {
 #[cfg(test)]
 mod tests {
 	use std::time::Duration;
-	use maniac_executor::future::block_on;
+	use maniac_runtime::future::block_on;
 	use super::*;
 
 	#[test]

@@ -1,7 +1,7 @@
 //! A multi-producer, multi-consumer channel of capacity 1 for sending
 //! `NonZeroUsize` values.
 
-use maniac_executor::future::event::Event;
+use maniac_runtime::future::event::Event;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

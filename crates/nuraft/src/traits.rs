@@ -8,7 +8,7 @@ use crate::log_entry::{LogEntryRecord, LogEntryView};
 use crate::state::{ServerState, ServerStateView};
 use crate::storage::StorageBackendKind;
 use crate::types::{CallbackAction, CallbackContext, LogIndex, LogLevel, ServerId, Term};
-use bop_sys::bop_raft_snapshot;
+use maniac_sys::bop_raft_snapshot;
 
 /// Snapshot type forwarded from the NuRaft layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

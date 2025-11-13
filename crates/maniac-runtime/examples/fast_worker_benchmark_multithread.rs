@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use maniac_executor::runtime::Runtime;
-use maniac_executor::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+use maniac_runtime::runtime::Runtime;
+use maniac_runtime::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 use futures_lite::future::{block_on, yield_now};
 
 const DEFAULT_LEAVES: usize = 64;

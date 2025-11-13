@@ -1,4 +1,4 @@
-// use maniac_executor::runtime::task::{TaskArena, TaskArenaConfig, TaskArenaOptions};
+// use maniac_runtime::runtime::task::{TaskArena, TaskArenaConfig, TaskArenaOptions};
 // use std::sync::Arc;
 // use std::thread;
 // use std::time::Instant;

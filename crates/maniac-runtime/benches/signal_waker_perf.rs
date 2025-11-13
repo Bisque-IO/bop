@@ -1,4 +1,4 @@
-use maniac_executor::runtime::waker::WorkerWaker;
+use maniac_runtime::runtime::waker::WorkerWaker;
 use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::sync::atomic::{AtomicU64, Ordering};
 

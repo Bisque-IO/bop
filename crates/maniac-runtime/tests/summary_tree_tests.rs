@@ -1,5 +1,5 @@
-use maniac_executor::runtime::summary::Summary;
-use maniac_executor::runtime::waker::WorkerWaker;
+use maniac_runtime::runtime::summary::Summary;
+use maniac_runtime::runtime::waker::WorkerWaker;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 

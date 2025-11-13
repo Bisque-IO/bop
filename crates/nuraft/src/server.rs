@@ -4,7 +4,7 @@ use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bop_sys::*;
+use maniac_sys::*;
 
 use crate::aof_state_manager::{AofStateManager, AofStateManagerConfig};
 use crate::async_result::{AsyncBool, AsyncBuffer, AsyncU64};

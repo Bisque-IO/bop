@@ -13,7 +13,7 @@ use crate::state::{ServerState, ServerStateView};
 use crate::traits::StateManagerInterface;
 use crate::types::ServerId;
 
-use bop_sys::{
+use maniac_sys::{
     bop_raft_cluster_config_deserialize, bop_raft_cluster_config_serialize,
     bop_raft_srv_state_deserialize, bop_raft_srv_state_serialize,
 };
@@ -390,7 +390,7 @@ mod tests {
         election_allowed: bool,
         catching_up: bool,
         receiving_snapshot: bool,
-    ) -> RaftResult<*mut bop_sys::bop_raft_srv_state> {
+    ) -> RaftResult<*mut maniac_sys::bop_raft_srv_state> {
         let mut bytes = Vec::with_capacity(16);
         bytes.push(2); // version
         bytes.extend_from_slice(&term.to_le_bytes());
@@ -400,7 +400,7 @@ mod tests {
         bytes.push(if receiving_snapshot { 1 } else { 0 });
 
         let mut buffer = Buffer::from_bytes(&bytes)?;
-        let ptr = unsafe { bop_sys::bop_raft_srv_state_deserialize(buffer.as_ptr()) };
+        let ptr = unsafe { maniac_sys::bop_raft_srv_state_deserialize(buffer.as_ptr()) };
         if ptr.is_null() {
             Err(RaftError::StateMachineError(
                 "failed to deserialize test server state".to_string(),
@@ -423,14 +423,14 @@ mod tests {
         let view1 = unsafe { ServerStateView::new(state1).expect("state view") };
         manager.save_state(view1)?;
         unsafe {
-            bop_sys::bop_raft_srv_state_delete(state1);
+            maniac_sys::bop_raft_srv_state_delete(state1);
         }
 
         let state2 = make_state_ptr(9, 11, false, true, true)?;
         let view2 = unsafe { ServerStateView::new(state2).expect("state view") };
         manager.save_state(view2)?;
         unsafe {
-            bop_sys::bop_raft_srv_state_delete(state2);
+            maniac_sys::bop_raft_srv_state_delete(state2);
         }
 
         let config1 = ClusterConfig::new()?;

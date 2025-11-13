@@ -6,7 +6,7 @@
 /// 2. Status vs summary field independence
 /// 3. Partition summary management
 /// 4. Bug regression prevention
-use maniac_executor::runtime::waker::{STATUS_SUMMARY_BITS, STATUS_SUMMARY_MASK, WorkerWaker};
+use maniac_runtime::runtime::waker::{STATUS_SUMMARY_BITS, STATUS_SUMMARY_MASK, WorkerWaker};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;

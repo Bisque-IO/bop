@@ -3,7 +3,7 @@ use std::ptr::{self, NonNull};
 use std::slice;
 use std::sync::Mutex;
 
-use bop_sys::{
+use maniac_sys::{
     bop_raft_buffer, bop_raft_log_entry, bop_raft_log_entry_ptr, bop_raft_log_entry_vec_push,
     bop_raft_log_entry_vector, bop_raft_log_store_delete, bop_raft_log_store_make,
     bop_raft_log_store_ptr,
@@ -32,7 +32,7 @@ enum LogStoreHandleInner {
 impl LogStoreHandle {
     pub(crate) fn new(
         build: LogStoreBuild,
-        mut _logger_ptr: Option<*mut bop_sys::bop_raft_logger_ptr>,
+        mut _logger_ptr: Option<*mut maniac_sys::bop_raft_logger_ptr>,
     ) -> RaftResult<Self> {
         match build {
             LogStoreBuild::Raw(raw) => {

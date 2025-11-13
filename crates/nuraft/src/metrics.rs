@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 #[cfg(feature = "serde")]
 use serde::ser::SerializeStruct;
 
-use bop_sys::*;
+use maniac_sys::*;
 
 use crate::error::{RaftError, RaftResult};
 use crate::types::{DataCenterId, LogIndex, ServerId};

@@ -74,7 +74,7 @@ pub struct Runtime<const P: usize = 10, const NUM_SEGS_P2: usize = 6> {
 
 impl<const P: usize, const NUM_SEGS_P2: usize> Default for Runtime<P, NUM_SEGS_P2> {
     fn default() -> Self {
-        let workers = num_cpus::get();
+        let workers = crate::utils::num_cpus();
 
         Self::new(
             TaskArenaConfig::new(workers * 8, 64).unwrap(),
@@ -303,7 +303,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
         // This ensures workers start immediately on WorkerService::start()
         let worker_config = WorkerServiceConfig {
             min_workers: worker_count,
-            max_workers: worker_count.max(num_cpus::get()),
+            max_workers: worker_count.max(crate::utils::num_cpus()),
             ..WorkerServiceConfig::default()
         };
 

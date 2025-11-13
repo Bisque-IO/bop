@@ -4,7 +4,7 @@ use std::ptr::{self, NonNull};
 use std::slice;
 use std::sync::Mutex;
 
-use bop_sys::{
+use maniac_sys::{
     bop_raft_buffer, bop_raft_buffer_data, bop_raft_buffer_size, bop_raft_cluster_config,
     bop_raft_fsm_adjust_commit_index_params, bop_raft_fsm_adjust_commit_index_peer_indexes,
     bop_raft_fsm_delete, bop_raft_fsm_make, bop_raft_fsm_ptr, bop_raft_snapshot,

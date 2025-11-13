@@ -1,7 +1,7 @@
 # bop-raft Wrapper Plan
 
 ## Objectives
-- Provide a 100% safe, idiomatic facade over `bop_sys::bop_raft_*` while keeping zero-cost abstraction guarantees and predictable performance.
+- Provide a 100% safe, idiomatic facade over `maniac_sys::bop_raft_*` while keeping zero-cost abstraction guarantees and predictable performance.
 - Encapsulate ownership of every raw pointer exported by the C API inside RAII handles with explicit lifetimes, thread-safety markers, and fallbacks for advanced users.
 - Deliver a cohesive developer experience that guides applications through configuration, launching, operating, and shutting down Raft clusters.
 - Expose async-friendly APIs that integrate cleanly with Tokio/async-std without leaking callbacks or blocking threads.

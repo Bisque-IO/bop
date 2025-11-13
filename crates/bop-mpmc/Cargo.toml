@@ -9,8 +9,8 @@ loom = []
 
 [dependencies]
 async-task = "4.7"
-bop-allocator = { workspace = true }
-bop-sys = { workspace = true }
+maniac-allocator = { workspace = true }
+maniac-sys = { workspace = true }
 crossbeam = { workspace = true }
 crossbeam-deque = "0.8"
 crossbeam-queue = "0.3"
@@ -29,7 +29,7 @@ st3 = "0.4"
 loom = "0.7"
 
 [dev-dependencies]
-bop-allocator = { workspace = true }
+maniac-allocator = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 num_cpus = "1.17"
 generator = "0.8"
@@ -50,5 +50,5 @@ path = "examples/minimal_spsc_executor_benchmark.rs"
 loom = "0.7"
 waker-fn = "1.1"
 
-[build]
-rustflags = ["-A", "warnings"]
+# [[build]]
+# rustflags = ["-A", "warnings"]

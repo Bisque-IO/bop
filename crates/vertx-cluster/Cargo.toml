@@ -9,7 +9,7 @@ repository = "https://github.com/bisque-io/bop"
 
 [dependencies]
 # Local dependencies
-bop-sys = { workspace = true }
+maniac-sys = { workspace = true }
 
 # Serialization and data handling
 serde = { workspace = true, features = ["derive"] }

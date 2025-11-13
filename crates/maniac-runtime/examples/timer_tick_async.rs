@@ -1,5 +1,5 @@
-use maniac_executor::runtime::Runtime;
-use maniac_executor::runtime::timer::Timer;
+use maniac_runtime::runtime::Runtime;
+use maniac_runtime::runtime::timer::Timer;
 use futures_lite::future::block_on;
 use std::error::Error;
 use std::time::Duration;

@@ -4,14 +4,11 @@ use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bop_aof::AofManagerConfig;
-use bop_aof::config::AofConfig;
-use bop_aof::manifest::ManifestLogWriterConfig;
-use bop_storage::{
+use maniac_storage::{
     PodStatus, StorageConfig as FleetStorageConfig, StorageFleet, StorageFleetConfig,
     StorageFleetError, StoragePodConfig, StoragePodError, StoragePodHandle, StoragePodId,
 };
-use bop_sys::{
+use maniac_sys::{
     bop_raft_log_store_delete, bop_raft_log_store_ptr, bop_raft_state_mgr_delete,
     bop_raft_state_mgr_ptr,
 };

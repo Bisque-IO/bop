@@ -1,6 +1,6 @@
 //! Property and fuzz-style tests covering Section 5 of the signalling plan.
-use maniac_executor::runtime::summary::Summary;
-use maniac_executor::runtime::waker::{STATUS_SUMMARY_BITS, WorkerWaker};
+use maniac_runtime::runtime::summary::Summary;
+use maniac_runtime::runtime::waker::{STATUS_SUMMARY_BITS, WorkerWaker};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

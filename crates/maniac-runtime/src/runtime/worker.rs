@@ -7,7 +7,7 @@ use super::task::{
 use super::timer::{Timer, TimerHandle};
 use super::timer_wheel::TimerWheel;
 use super::waker::WorkerWaker;
-use crate::PushError;
+use crate::{utils, PushError};
 use crate::runtime::mpsc;
 use crate::PopError;
 use std::cell::{Cell, UnsafeCell};
@@ -216,8 +216,8 @@ impl Default for WorkerServiceConfig {
     fn default() -> Self {
         Self {
             tick_duration: Duration::from_nanos(DEFAULT_TICK_DURATION_NS),
-            min_workers: num_cpus::get(),
-            max_workers: num_cpus::get(),
+            min_workers: utils::num_cpus(),
+            max_workers: utils::num_cpus(),
         }
     }
 }

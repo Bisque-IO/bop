@@ -1,4 +1,4 @@
-use maniac_executor::{
+use maniac_runtime::{
     runtime::Runtime,
     runtime::task::{TaskArenaConfig, TaskArenaOptions},
     future::block_on,

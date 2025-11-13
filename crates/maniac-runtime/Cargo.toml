@@ -1,24 +1,27 @@
 [package]
-name = "maniac-executor"
+name = "maniac-runtime"
 edition = "2024"
 version.workspace = true
 
 [features]
+default = ["std", "race"]
+std = []
+race = []
 timers-introspection = []
+standard = []
 
 [dependencies]
-congee = "0.4.1"
+#congee = "0.4.1"
 core_affinity = "0.8"
 crossbeam = { workspace = true }
-crossbeam-deque = "0.8"
+#crossbeam-deque = "0.8"
 crossbeam-epoch = "0.9"
-crossbeam-queue = "0.3"
 crossbeam-utils = "0.8"
-dashmap = "6.1"
+#dashmap = "6.1"
 futures-lite = "2.6"
 futures = { workspace = true }
 generator = "0.8"
-num_cpus = "1.16"
+#num_cpus = "1.16"
 pin-project-lite = "0.2"
 rand = { workspace = true }
 
@@ -31,10 +34,9 @@ winapi = { version = "0.3", features = ["memoryapi", "winnt", "sysinfoapi"] }
 [dev-dependencies]
 loom = "0.7"
 tokio = { version = "1.0", features = ["full"] }
-criterion = "0.5"
+criterion = "0.7"
 pollster = "0.4"
-diatomic-waker = "0.2.3"
-multishot = "0.3"
+#diatomic-waker = "0.2.3"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(diatomic_waker_loom)', 'cfg(multishot_loom)', 'cfg(async_event_loom)'] }

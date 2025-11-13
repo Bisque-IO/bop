@@ -2,7 +2,7 @@ use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::Mutex;
 
-use bop_sys::{
+use maniac_sys::{
     bop_raft_cluster_config, bop_raft_log_store_ptr, bop_raft_srv_state, bop_raft_state_mgr_delete,
     bop_raft_state_mgr_make, bop_raft_state_mgr_ptr,
 };
@@ -35,7 +35,7 @@ impl StateManagerHandle {
     pub(crate) fn new(
         state_manager: StateManagerBuild,
         log_store: Option<LogStoreHandle>,
-        mut _logger_ptr: Option<*mut bop_sys::bop_raft_logger_ptr>,
+        mut _logger_ptr: Option<*mut maniac_sys::bop_raft_logger_ptr>,
     ) -> RaftResult<Self> {
         match state_manager {
             StateManagerBuild::Callbacks { backend, manager } => {

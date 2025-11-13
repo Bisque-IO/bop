@@ -2,7 +2,7 @@ use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bop_sys::{
+use maniac_sys::{
     MDBX_env_flags_MDBX_LIFORECLAIM, MDBX_env_flags_MDBX_NOMEMINIT,
     MDBX_env_flags_MDBX_NOSTICKYTHREADS, MDBX_env_flags_MDBX_NOSUBDIR,
     MDBX_env_flags_MDBX_SYNC_DURABLE, bop_raft_log_store_ptr, bop_raft_logger_ptr,

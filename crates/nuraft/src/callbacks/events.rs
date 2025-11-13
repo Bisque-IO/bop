@@ -2,7 +2,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
-use bop_sys::{
+use maniac_sys::{
     bop_raft_cb_func, bop_raft_cb_param, bop_raft_cb_return_code_bop_raft_cb_return_code_ok,
     bop_raft_cb_return_code_bop_raft_cb_return_code_return_null,
 };

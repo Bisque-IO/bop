@@ -13,7 +13,7 @@ maniac-allocator = { workspace = true }
 maniac-sys = { workspace = true }
 maniac-storage = { workspace = true }
 maniac-usockets = { workspace = true }
-maniac-executor = { workspace = true }
+maniac-runtime = { workspace = true }
 
 # Serialization and data handling
 serde = { workspace = true, features = ["derive"] }

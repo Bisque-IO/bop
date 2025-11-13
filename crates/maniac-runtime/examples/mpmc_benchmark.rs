@@ -3,8 +3,8 @@
 // //! Stress test for the Mpmc (Multi-Producer Single-Consumer) queue implementation.
 // //! Measures throughput and latency with multiple producers using blocking operations.
 //
-// use maniac_executor::mpmc::Mpmc;
-// use maniac_executor::selector::Selector;
+// use maniac_runtime::mpmc::Mpmc;
+// use maniac_runtime::selector::Selector;
 // use std::sync::Arc;
 // use std::sync::atomic::{AtomicUsize, Ordering};
 // use std::thread;

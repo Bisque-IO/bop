@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 use std::marker::PhantomData;
 
-use bop_sys::bop_raft_cb_param;
+use maniac_sys::bop_raft_cb_param;
 
 /// Strong type for server IDs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

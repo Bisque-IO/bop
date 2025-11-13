@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use bop_sys::*;
+use maniac_sys::*;
 
 use crate::buffer::Buffer;
 use crate::error::{RaftError, RaftResult};
