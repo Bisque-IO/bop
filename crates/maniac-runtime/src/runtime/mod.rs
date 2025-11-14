@@ -22,8 +22,10 @@ pub mod timer_wheel;
 pub mod waker;
 pub mod worker;
 
+use std::any::TypeId;
 use std::future::{Future, IntoFuture};
 use std::io;
+use std::panic::Location;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -50,8 +52,8 @@ use worker::{WorkerService, WorkerServiceConfig};
 /// # Example
 ///
 /// ```no_run
-/// use bop_executor::runtime::Runtime;
-/// use bop_executor::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+/// use maniac::runtime::Runtime;
+/// use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 ///
 /// let runtime = Runtime::new(
 ///     TaskArenaConfig::new(1, 8).unwrap(),
@@ -133,7 +135,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> RuntimeInner<P, NUM_SEGS_P2> {
     /// - `SpawnError::Closed`: Runtime is shutting down or arena is closed
     /// - `SpawnError::NoCapacity`: No available task slots in the arena
     /// - `SpawnError::AttachFailed`: Failed to attach the future to the task
-    fn spawn<F, T>(&self, future: F) -> Result<JoinHandle<T>, SpawnError>
+    fn spawn<F, T>(&self, type_id: TypeId, location: &'static Location, future: F) -> Result<JoinHandle<T>, SpawnError>
     where
         F: IntoFuture<Output = T> + Send + 'static,
         F::IntoFuture: Future<Output = T> + Send + 'static,
@@ -244,6 +246,8 @@ impl RuntimeConfig {
         let max_tasks = max_tasks.min(max_workers);
         let mut tasks_per_leaf = 4096;
         let mut leaf_count = (max_tasks / tasks_per_leaf).max(1);
+
+        // TODO: Implement: compute the min tasks_per_leaf
         if leaf_count < max_workers {
             leaf_count = max_workers;
         }
@@ -279,8 +283,8 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
     /// # Example
     ///
     /// ```no_run
-    /// use bop_executor::runtime::Runtime;
-    /// use bop_executor::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+    /// use maniac::runtime::Runtime;
+    /// use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
     ///
     /// let runtime = Runtime::new(
     ///     TaskArenaConfig::new(1, 8).unwrap(),
@@ -340,8 +344,8 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
     /// # Example
     ///
     /// ```no_run
-    /// # use bop_executor::runtime::Runtime;
-    /// # use bop_executor::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+    /// # use maniac::runtime::Runtime;
+    /// # use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
     /// # let runtime = Runtime::new(
     /// #     TaskArenaConfig::new(1, 8).unwrap(),
     /// #     TaskArenaOptions::default(),
@@ -354,15 +358,18 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
     ///
     /// // Await the result
     /// // let result = handle.await;
-    /// # Ok::<(), bop_executor::runtime::task::SpawnError>(())
+    /// # Ok::<(), maniac::runtime::task::SpawnError>(())
     /// ```
+    #[track_caller]
     pub fn spawn<F, T>(&self, future: F) -> Result<JoinHandle<T>, SpawnError>
     where
         F: IntoFuture<Output = T> + Send + 'static,
         F::IntoFuture: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        self.inner.spawn(future)
+        let location = Location::caller();
+        let type_id = TypeId::of::<F>();
+        self.inner.spawn(type_id, location, future)
     }
 
     /// Returns current arena statistics.
@@ -538,8 +545,8 @@ impl<T> JoinShared<T> {
 /// # Example
 ///
 /// ```no_run
-/// # use bop_executor::runtime::Runtime;
-/// # use bop_executor::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+/// # use maniac::runtime::Runtime;
+/// # use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 /// # let runtime = Runtime::new(
 /// #     TaskArenaConfig::new(1, 8).unwrap(),
 /// #     TaskArenaOptions::default(),
@@ -549,7 +556,7 @@ impl<T> JoinShared<T> {
 ///
 /// // Await the result
 /// let result = handle.await;
-/// # Ok::<(), bop_executor::runtime::task::SpawnError>(())
+/// # Ok::<(), maniac::runtime::task::SpawnError>(())
 /// ```
 pub struct JoinHandle<T> {
     /// Shared state with the spawned task for synchronization
@@ -572,8 +579,8 @@ impl<T> JoinHandle<T> {
     /// # Example
     ///
     /// ```no_run
-    /// # use bop_executor::runtime::Runtime;
-    /// # use bop_executor::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+    /// # use maniac::runtime::Runtime;
+    /// # use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
     /// # let runtime = Runtime::new(
     /// #     TaskArenaConfig::new(1, 8).unwrap(),
     /// #     TaskArenaOptions::default(),
@@ -585,7 +592,7 @@ impl<T> JoinHandle<T> {
     /// if handle.is_finished() {
     ///     println!("Task completed!");
     /// }
-    /// # Ok::<(), bop_executor::runtime::task::SpawnError>(())
+    /// # Ok::<(), maniac::runtime::task::SpawnError>(())
     /// ```
     pub fn is_finished(&self) -> bool {
         self.shared.is_finished()

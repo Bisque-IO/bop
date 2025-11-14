@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::thread;
 
-use crate::spsc::Spsc;
+use crate::spsc::{UnboundedSpsc, UnboundedSender};
 use rand::RngCore;
 
 /// Create a new blocking MPSC queue
@@ -121,7 +121,7 @@ type CloseFn = Box<dyn FnOnce()>;
 struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
     /// Sparse array of producer queues - always MAX_PRODUCERS size
     /// Each slot is an AtomicPtr for thread-safe registration and access
-    queues: Box<[AtomicPtr<Spsc<T, P, NUM_SEGS_P2, SignalGate>>]>,
+    queues: Box<[AtomicPtr<UnboundedSpsc<T, P, NUM_SEGS_P2, Arc<SignalGate>>>]>,
     queue_count: CachePadded<AtomicUsize>,
     /// Number of registered producers
     producer_count: CachePadded<AtomicUsize>,
@@ -201,7 +201,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
         }
 
         let mut assigned_id = None;
-        let mut queue_arc: Option<Arc<Spsc<T, P, NUM_SEGS_P2, SignalGate>>> = None;
+        let mut sender: Option<UnboundedSender<T, P, NUM_SEGS_P2, Arc<SignalGate>>> = None;
 
         for signal_index in 0..SIGNAL_WORDS {
             for bit_index in 0..64 {
@@ -213,19 +213,18 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
                     continue;
                 }
 
-                let arc = Arc::new(unsafe {
-                    Spsc::<T, P, NUM_SEGS_P2, SignalGate>::new_unsafe_with_gate_and_config(
-                        SignalGate::new(
-                            bit_index as u8,
-                            self.signals[signal_index].clone(),
-                            Arc::clone(&self.waker),
-                        ),
-                        max_pooled_segments,
-                    )
-                });
+                let signal_gate = Arc::new(SignalGate::new(
+                    bit_index as u8,
+                    self.signals[signal_index].clone(),
+                    Arc::clone(&self.waker),
+                ));
 
-                let raw =
-                    Arc::into_raw(Arc::clone(&arc)) as *mut Spsc<T, P, NUM_SEGS_P2, SignalGate>;
+                let (tx, _rx) = UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<SignalGate>>::new_with_signal(signal_gate);
+                
+                // Get the Arc pointer to the UnboundedSpsc from the sender
+                let unbounded_arc = tx.unbounded_arc();
+                let raw = Arc::into_raw(unbounded_arc) as *mut UnboundedSpsc<T, P, NUM_SEGS_P2, Arc<SignalGate>>;
+                
                 match self.queues[queue_index].compare_exchange(
                     ptr::null_mut(),
                     raw,
@@ -235,7 +234,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
                     Ok(_) => {
                         self.queue_count.fetch_add(1, Ordering::Relaxed);
                         assigned_id = Some(queue_index);
-                        queue_arc = Some(arc);
+                        sender = Some(tx);
                         break;
                     }
                     Err(_) => unsafe {
@@ -278,11 +277,11 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
             }
         }
 
-        let queue_arc = queue_arc.expect("queue arc missing");
+        let sender = sender.expect("sender missing");
 
         Ok(Sender {
             inner: Arc::clone(&self),
-            queue: queue_arc,
+            sender,
             producer_id,
         })
     }
@@ -348,7 +347,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
 /// ```ignore
 pub struct Sender<T, const P: usize, const NUM_SEGS_P2: usize> {
     inner: Arc<Inner<T, P, NUM_SEGS_P2>>,
-    queue: Arc<Spsc<T, P, NUM_SEGS_P2, SignalGate>>,
+    sender: UnboundedSender<T, P, NUM_SEGS_P2, Arc<SignalGate>>,
     producer_id: usize,
 }
 
@@ -370,51 +369,33 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
 
     /// Push a value onto the queue
     ///
-    /// This will use the thread-local SPSC queue for this producer.
-    /// If successful, notifies any waiting consumer.
+    /// This will use the unbounded SPSC queue for this producer.
+    /// Never blocks since the queue is unbounded.
     pub fn try_push(&mut self, value: T) -> Result<(), PushError<T>> {
-        self.queue.try_push(value)
-    }
-
-    /// Push a value onto the queue (spins if full)
-    ///
-    /// This will use the thread-local SPSC queue for this producer.
-    /// If successful, notifies any waiting consumer.
-    pub fn push_spin(&mut self, mut value: T) -> Result<(), PushError<T>> {
-        loop {
-            match self.queue.try_push(value) {
-                Ok(()) => return Ok(()),
-                Err(PushError::Full(returned)) => {
-                    value = returned;
-                    std::hint::spin_loop();
-                }
-                Err(err @ PushError::Closed(_)) => return Err(err),
-            }
-        }
+        self.sender.try_push(value)
     }
 
     /// Push multiple values in bulk
-    pub fn try_push_n(&mut self, values: &[T]) -> Result<usize, PushError<()>> {
+    pub fn try_push_n(&mut self, values: &mut Vec<T>) -> Result<usize, PushError<()>> {
         if self.is_closed() {
             return Err(PushError::Closed(()));
         }
-        self.queue.try_push_n(values)
+        self.sender.try_push_n(values)
     }
 
     /// Push a value onto the queue
     ///
-    /// This will use the thread-local SPSC queue for this producer.
-    /// If successful, notifies any waiting consumer.
+    /// This will use the unbounded SPSC queue for this producer.
     pub unsafe fn unsafe_try_push(&self, value: T) -> Result<(), PushError<T>> {
-        self.queue.try_push(value)
+        self.sender.try_push(value)
     }
 
     /// Push multiple values in bulk
-    pub unsafe fn unsafe_try_push_n(&self, values: &[T]) -> Result<usize, PushError<()>> {
+    pub unsafe fn unsafe_try_push_n(&self, values: &mut Vec<T>) -> Result<usize, PushError<()>> {
         if self.is_closed() {
             return Err(PushError::Closed(()));
         }
-        self.queue.try_push_n(values)
+        self.sender.try_push_n(values)
     }
 
     /// Close the queue
@@ -436,9 +417,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for Sender<T, P, NUM_SEG
 
 impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS_P2> {
     fn drop(&mut self) {
-        unsafe {
-            self.queue.close();
-        }
+        self.sender.close_channel();
     }
 }
 
@@ -733,7 +712,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
         (0, None)
     }
 
-    fn acquire<'a>(&mut self) -> Option<(usize, &'a Spsc<T, P, NUM_SEGS_P2, SignalGate>)> {
+    fn acquire(&mut self) -> Option<(usize, crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<SignalGate>>)> {
         let random = self.next() as usize;
         // Try selecting signal index from summary hint
         let random_word = random % SIGNAL_WORDS;
@@ -791,12 +770,16 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
         }
 
         // SAFETY: The pointer is valid and we have exclusive consumer access
-        let queue = unsafe { &*queue_ptr };
-
+        let unbounded_arc = unsafe { Arc::from_raw(queue_ptr) };
+        let receiver = unbounded_arc.create_receiver();
+        
         // Mark as EXECUTING
-        queue.mark();
+        receiver.mark();
+        
+        // Don't drop the Arc - we're just borrowing it
+        let _ = Arc::into_raw(unbounded_arc);
 
-        Some((producer_id, queue))
+        Some((producer_id, receiver))
     }
 }
 

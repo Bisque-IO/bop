@@ -114,8 +114,10 @@ use crate::utils::CachePadded;
 
 use crate::{PopError, PushError};
 
+mod unbounded;
 mod l2;
 pub use l2::{LayeredReceiver, LayeredSender, LayeredSpsc};
+pub use unbounded::{UnboundedSpsc, UnboundedSender, UnboundedReceiver};
 
 /// Trait for types that can schedule queue execution.
 ///
@@ -195,6 +197,32 @@ impl SignalSchedule for NoOpSignal {
     #[inline(always)]
     fn unmark_and_schedule(&self) {
         // No-op
+    }
+}
+
+/// Implementation of SignalSchedule for Arc<T> where T: SignalSchedule.
+///
+/// This allows using Arc-wrapped signal schedulers, which is necessary when
+/// the signal scheduler doesn't implement Clone (e.g., AsyncSignalGate).
+impl<T: SignalSchedule> SignalSchedule for Arc<T> {
+    #[inline(always)]
+    fn schedule(&self) -> bool {
+        (**self).schedule()
+    }
+
+    #[inline(always)]
+    fn mark(&self) {
+        (**self).mark()
+    }
+
+    #[inline(always)]
+    fn unmark(&self) {
+        (**self).unmark()
+    }
+
+    #[inline(always)]
+    fn unmark_and_schedule(&self) {
+        (**self).unmark_and_schedule()
     }
 }
 
@@ -634,7 +662,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule> Sender<T, P
     /// - No overlap between source and destination (guaranteed by design)
     /// - Size calculation accounts for `sizeof::<T>()`
     #[inline(always)]
-    pub fn try_push_n(&self, src: &[T]) -> Result<usize, PushError<()>> {
+    pub fn try_push_n(&self, src: &mut Vec<T>) -> Result<usize, PushError<()>> {
         self.queue.try_push_n(src)
     }
 
@@ -1201,8 +1229,6 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule>
     /// - Source segment is allocated and contains initialized items
     /// - Destination slice is valid for writes
     /// - No overlap between source and destination (guaranteed by design)
-    /// - Items are `Copy`, so no double-drop concerns
-    #[inline(always)]
     pub fn try_pop_n(&self, dst: &mut [T]) -> Result<usize, PopError> {
         self.queue.try_pop_n(dst)
     }

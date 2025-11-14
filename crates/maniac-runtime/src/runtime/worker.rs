@@ -31,7 +31,7 @@ const RND_MULTIPLIER: u64 = 0x5DEECE66D;
 const RND_ADDEND: u64 = 0xB;
 const RND_MASK: u64 = (1 << 48) - 1;
 const DEFAULT_WAKE_BURST: usize = 4;
-const FULL_SUMMARY_SCAN_CADENCE_MASK: u64 = 1024 * 8;
+const FULL_SUMMARY_SCAN_CADENCE_MASK: u64 = 1024 * 8 - 1;
 const DEFAULT_TICK_DURATION_NS: u64 = 1 << 20; // ~1.05ms, power of two as required by TimerWheel
 const TIMER_TICKS_PER_WHEEL: usize = 1024 * 1;
 const TIMER_EXPIRE_BUDGET: usize = 4096;
@@ -246,7 +246,7 @@ pub struct WorkerService<
     worker_shutdowns: Box<[AtomicBool]>,
     worker_threads: Box<[Mutex<Option<thread::JoinHandle<()>>>]>,
     worker_stats: Box<[WorkerStats]>,
-    worker_count: AtomicUsize,
+    worker_count: Arc<AtomicUsize>,
     worker_max_id: AtomicUsize,
     receivers: Box<[UnsafeCell<mpsc::Receiver<WorkerMessage, P, NUM_SEGS_P2>>]>,
     senders: Box<[mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>]>,
@@ -283,7 +283,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         let wakers = wakers.into_boxed_slice();
 
         // Create worker_count early so we can pass it to SummaryTree (single source of truth)
-        let worker_count = AtomicUsize::new(0);
+        let worker_count = Arc::new(AtomicUsize::new(0));
 
         // Create SummaryTree with reference to wakers and worker_count
         let summary_tree = Summary::new(

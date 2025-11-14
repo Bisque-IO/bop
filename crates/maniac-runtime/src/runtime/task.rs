@@ -326,9 +326,10 @@ impl ArenaLayout {
     }
 }
 
-pub struct FutureAllocator;
+pub(crate) struct FutureAllocator;
 
 impl FutureAllocator {
+    #[inline(always)]
     pub fn box_future<F>(future: F) -> *mut ()
     where
         F: Future<Output = ()> + Send + 'static,
@@ -337,6 +338,7 @@ impl FutureAllocator {
         Box::into_raw(Box::new(boxed)) as *mut ()
     }
 
+    #[inline(always)]
     pub unsafe fn drop_boxed(ptr: *mut ()) {
         if ptr.is_null() {
             return;
@@ -346,6 +348,7 @@ impl FutureAllocator {
         }
     }
 
+    #[inline(always)]
     pub unsafe fn poll_boxed(ptr: *mut (), cx: &mut Context<'_>) -> Option<Poll<()>> {
         if ptr.is_null() {
             return None;

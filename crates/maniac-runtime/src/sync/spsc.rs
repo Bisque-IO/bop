@@ -57,13 +57,13 @@
 //! let (mut producer, mut consumer) = new_async_spsc(signal);
 //!
 //! // Producer task
-//! tokio::spawn(async move {
+//! maniac::spawn(async move {
 //!     producer.send(42).await.unwrap();
 //!     producer.send(43).await.unwrap();
 //! });
 //!
 //! // Consumer task
-//! tokio::spawn(async move {
+//! maniac::spawn(async move {
 //!     while let Some(item) = consumer.next().await {
 //!         println!("Got: {}", item);
 //!     }
@@ -100,7 +100,7 @@
 //! });
 //!
 //! // Consumer task (async)
-//! tokio::spawn(async move {
+//! maniac::spawn(async move {
 //!     let item = consumer.recv().await.unwrap();  // Wakes up blocking thread
 //! });
 //! ```
@@ -111,7 +111,7 @@
 //! let (mut producer, consumer) = new_async_blocking_spsc(signal);
 //!
 //! // Producer task (async)
-//! tokio::spawn(async move {
+//! maniac::spawn(async move {
 //!     producer.send(42).await.unwrap();  // Wakes up blocking thread
 //! });
 //!
@@ -328,32 +328,34 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncSpscProducer<T, P, NUM_SE
         }
     }
 
-    /// Sends an entire slice, awaiting at most once if the queue fills.
+    /// Sends an entire Vec, awaiting at most once if the queue fills.
     ///
     /// Makes progress whenever space is available, writing as many items as possible
-    /// in each attempt. Notifies consumers after each batch write (not just at the end),
+    /// in each attempt. Items are moved out of the Vec using move semantics.
+    /// Notifies consumers after each batch write (not just at the end),
     /// allowing the consumer to start processing while the producer is still sending.
+    ///
+    /// On return, the Vec will be empty if all items were sent, or contain only
+    /// the items that were not sent (if the channel closed).
     ///
     /// # Efficiency
     ///
     /// - Amortizes notification overhead across batch (single notify per write batch)
     /// - Allows progressive consumption (consumer doesn't wait for entire batch)
-    /// - Zero allocation (slice reference lives in Future stack frame)
-    pub async fn send_slice(&mut self, values: &[T]) -> Result<(), PushError<()>> {
+    /// - Move semantics (no Clone/Copy required)
+    pub async fn send_batch(&mut self, values: &mut Vec<T>) -> Result<(), PushError<()>> {
         if values.is_empty() {
             return Ok(());
         }
 
         let sender = &self.sender;
         let shared = &self.shared;
-        let mut remaining = values;
 
-        match sender.try_push_n(remaining) {
+        match sender.try_push_n(values) {
             Ok(written) => {
                 if written > 0 {
                     shared.notify_items();
-                    remaining = &remaining[written..];
-                    if remaining.is_empty() {
+                    if values.is_empty() {
                         return Ok(());
                     }
                 }
@@ -365,16 +367,15 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncSpscProducer<T, P, NUM_SE
         unsafe {
             shared
                 .wait_for_space(|| {
-                    if remaining.is_empty() {
+                    if values.is_empty() {
                         return Some(Ok(()));
                     }
 
-                    match sender.try_push_n(remaining) {
+                    match sender.try_push_n(values) {
                         Ok(written) => {
                             if written > 0 {
                                 shared.notify_items();
-                                remaining = &remaining[written..];
-                                if remaining.is_empty() {
+                                if values.is_empty() {
                                     return Some(Ok(()));
                                 }
                             }
@@ -389,7 +390,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncSpscProducer<T, P, NUM_SE
     }
 
     /// Sends every item from the iterator, awaiting as required.
-    pub async fn send_batch<I>(&mut self, iter: I) -> Result<(), PushError<T>>
+    pub async fn send_iter<I>(&mut self, iter: I) -> Result<(), PushError<T>>
     where
         I: IntoIterator<Item = T>,
     {
@@ -702,7 +703,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Stream for AsyncSpscConsumer<T
 /// });
 ///
 /// // Consumer task (async)
-/// tokio::spawn(async move {
+/// maniac::spawn(async move {
 ///     let item = async_consumer.recv().await.unwrap();
 /// });
 /// ```
@@ -794,24 +795,25 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingSpscProducer<T, P, NUM
         }
     }
 
-    /// Blocking send of a slice.
+    /// Blocking send of a Vec.
     ///
-    /// Makes progress whenever space is available. More efficient than calling
-    /// `send()` in a loop due to bulk operations.
-    pub fn send_slice(&self, values: &[T]) -> Result<(), PushError<()>> {
+    /// Makes progress whenever space is available. Items are moved out of the Vec
+    /// using move semantics. More efficient than calling `send()` in a loop due to
+    /// bulk operations.
+    ///
+    /// On return, the Vec will be empty if all items were sent, or contain only
+    /// the items that were not sent (if the channel closed).
+    pub fn send_slice(&self, values: &mut Vec<T>) -> Result<(), PushError<()>> {
         if values.is_empty() {
             return Ok(());
         }
 
-        let mut remaining = values;
-
         // Try immediate send of as much as possible
-        match self.sender.try_push_n(remaining) {
+        match self.sender.try_push_n(values) {
             Ok(written) => {
                 if written > 0 {
                     self.shared.notify_items();
-                    remaining = &remaining[written..];
-                    if remaining.is_empty() {
+                    if values.is_empty() {
                         return Ok(());
                     }
                 }
@@ -832,16 +834,15 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingSpscProducer<T, P, NUM
             }
 
             // Double-check and try to make progress
-            if remaining.is_empty() {
+            if values.is_empty() {
                 return Ok(());
             }
 
-            match self.sender.try_push_n(remaining) {
+            match self.sender.try_push_n(values) {
                 Ok(written) => {
                     if written > 0 {
                         self.shared.notify_items();
-                        remaining = &remaining[written..];
-                        if remaining.is_empty() {
+                        if values.is_empty() {
                             return Ok(());
                         }
                     }
@@ -885,7 +886,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingSpscProducer<T, P, NUM
 /// let (async_producer, blocking_consumer) = new_async_blocking_spsc(signal);
 ///
 /// // Producer task (async)
-/// tokio::spawn(async move {
+/// maniac::spawn(async move {
 ///     async_producer.send(42).await.unwrap();
 /// });
 ///
@@ -1154,7 +1155,7 @@ pub fn new_blocking_with_config<T, const P: usize, const NUM_SEGS_P2: usize>(
 /// });
 ///
 /// // Consumer task (async)
-/// tokio::spawn(async move {
+/// maniac::spawn(async move {
 ///     while let Some(item) = consumer.next().await {
 ///         println!("Got: {}", item);
 ///     }
@@ -1201,7 +1202,7 @@ pub fn new_blocking_async_with_config<T, const P: usize, const NUM_SEGS_P2: usiz
 /// let (producer, consumer) = new_async_blocking_spsc(signal);
 ///
 /// // Producer task (async)
-/// tokio::spawn(async move {
+/// maniac::spawn(async move {
 ///     producer.send(42).await.unwrap();
 ///     producer.send(43).await.unwrap();
 /// });
@@ -1239,5 +1240,628 @@ pub fn new_async_blocking_with_config<T, const P: usize, const NUM_SEGS_P2: usiz
     (
         AsyncSpscProducer::new(sender, Arc::clone(&shared)),
         BlockingSpscConsumer::new(receiver, shared),
+    )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Unbounded SPSC Variants
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Asynchronous producer for unbounded SPSC queue.
+///
+/// This type provides async send operations for an unbounded queue that automatically
+/// expands by creating new segments as needed. Never blocks on full queue since the
+/// queue grows dynamically.
+pub struct AsyncUnboundedSpscProducer<T, const P: usize, const NUM_SEGS_P2: usize> {
+    sender: crate::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+    shared: Arc<AsyncSpscShared>,
+}
+
+impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncUnboundedSpscProducer<T, P, NUM_SEGS_P2> {
+    fn new(
+        sender: crate::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+        shared: Arc<AsyncSpscShared>,
+    ) -> Self {
+        Self { sender, shared }
+    }
+
+    /// Fast-path send without suspension.
+    ///
+    /// For unbounded queues, this always succeeds unless the channel is closed.
+    #[inline]
+    pub fn try_send(&self, value: T) -> Result<(), PushError<T>> {
+        match self.sender.try_push(value) {
+            Ok(()) => {
+                self.shared.notify_items();
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Asynchronously sends a single item.
+    ///
+    /// For unbounded queues, this typically completes immediately unless the channel
+    /// is closed. The async interface is provided for API consistency.
+    pub async fn send(&mut self, value: T) -> Result<(), PushError<T>> {
+        self.try_send(value)
+    }
+
+    /// Sends an entire Vec, moving items out using bulk operations.
+    ///
+    /// On return, the Vec will be empty if all items were sent, or contain only
+    /// the items that were not sent (if the channel closed).
+    pub async fn send_batch(&mut self, values: &mut Vec<T>) -> Result<(), PushError<()>> {
+        if values.is_empty() {
+            return Ok(());
+        }
+
+        match self.sender.try_push_n(values) {
+            Ok(_) => {
+                self.shared.notify_items();
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Sends every item from the iterator.
+    pub async fn send_iter<I>(&mut self, iter: I) -> Result<(), PushError<T>>
+    where
+        I: IntoIterator<Item = T>,
+    {
+        for item in iter {
+            self.send(item).await?;
+        }
+        Ok(())
+    }
+
+    /// Closes the queue and wakes any waiters.
+    pub fn close(&mut self) {
+        self.sender.close_channel();
+        self.shared.notify_items();
+        self.shared.notify_space();
+    }
+
+    /// Returns the number of nodes in the unbounded queue.
+    pub fn node_count(&self) -> usize {
+        self.sender.node_count()
+    }
+
+    /// Returns the total capacity across all nodes.
+    pub fn total_capacity(&self) -> usize {
+        self.sender.total_capacity()
+    }
+}
+
+impl<T, const P: usize, const NUM_SEGS_P2: usize> Sink<T> for AsyncUnboundedSpscProducer<T, P, NUM_SEGS_P2> {
+    type Error = PushError<T>;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), PushError<T>>> {
+        // Unbounded queue is always ready (unless closed)
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), PushError<T>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        this.try_send(item)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), PushError<T>>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), PushError<T>>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        this.close();
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Asynchronous consumer for unbounded SPSC queue.
+pub struct AsyncUnboundedSpscConsumer<T, const P: usize, const NUM_SEGS_P2: usize> {
+    receiver: crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+    shared: Arc<AsyncSpscShared>,
+}
+
+impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncUnboundedSpscConsumer<T, P, NUM_SEGS_P2> {
+    fn new(
+        receiver: crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+        shared: Arc<AsyncSpscShared>,
+    ) -> Self {
+        Self { receiver, shared }
+    }
+
+    /// Attempts to receive without awaiting.
+    #[inline]
+    pub fn try_recv(&self) -> Result<T, PopError> {
+        match self.receiver.try_pop() {
+            Some(value) => {
+                self.shared.notify_space();
+                Ok(value)
+            }
+            None if self.receiver.is_closed() => Err(PopError::Closed),
+            None => Err(PopError::Empty),
+        }
+    }
+
+    /// Asynchronously receives a single item.
+    pub async fn recv(&mut self) -> Result<T, PopError> {
+        match self.try_recv() {
+            Ok(value) => return Ok(value),
+            Err(PopError::Empty) | Err(PopError::Timeout) => {}
+            Err(PopError::Closed) => return Err(PopError::Closed),
+        }
+
+        let receiver = &self.receiver;
+        let shared = &self.shared;
+        unsafe {
+            shared
+                .wait_for_items(|| match receiver.try_pop() {
+                    Some(value) => {
+                        shared.notify_space();
+                        Some(Ok(value))
+                    }
+                    None if receiver.is_closed() => Some(Err(PopError::Closed)),
+                    None => None,
+                })
+                .await
+        }
+    }
+
+    /// Receives up to `dst.len()` items.
+    pub async fn recv_batch(&mut self, dst: &mut [T]) -> Result<usize, PopError>
+    where
+        T: Clone,
+    {
+        if dst.is_empty() {
+            return Ok(0);
+        }
+
+        let receiver = &self.receiver;
+        let shared = &self.shared;
+        let mut filled = match receiver.try_pop_n(dst) {
+            Ok(count) => {
+                if count > 0 {
+                    shared.notify_space();
+                }
+                count
+            }
+            Err(PopError::Empty) | Err(PopError::Timeout) => 0,
+            Err(PopError::Closed) => return Err(PopError::Closed),
+        };
+
+        if filled == dst.len() {
+            return Ok(filled);
+        }
+
+        unsafe {
+            shared
+                .wait_for_items(|| {
+                    if filled == dst.len() {
+                        return Some(Ok(filled));
+                    }
+
+                    match receiver.try_pop_n(&mut dst[filled..]) {
+                        Ok(0) => {
+                            if receiver.is_closed() {
+                                Some(if filled > 0 {
+                                    Ok(filled)
+                                } else {
+                                    Err(PopError::Closed)
+                                })
+                            } else {
+                                None
+                            }
+                        }
+                        Ok(count) => {
+                            filled += count;
+                            shared.notify_space();
+                            if filled == dst.len() {
+                                Some(Ok(filled))
+                            } else {
+                                None
+                            }
+                        }
+                        Err(PopError::Empty) | Err(PopError::Timeout) => {
+                            if receiver.is_closed() {
+                                Some(if filled > 0 {
+                                    Ok(filled)
+                                } else {
+                                    Err(PopError::Closed)
+                                })
+                            } else {
+                                None
+                            }
+                        }
+                        Err(PopError::Closed) => Some(if filled > 0 {
+                            Ok(filled)
+                        } else {
+                            Err(PopError::Closed)
+                        }),
+                    }
+                })
+                .await
+        }
+    }
+
+    /// Returns the number of nodes in the unbounded queue.
+    pub fn node_count(&self) -> usize {
+        self.receiver.node_count()
+    }
+
+    /// Returns the total capacity across all nodes.
+    pub fn total_capacity(&self) -> usize {
+        self.receiver.total_capacity()
+    }
+}
+
+impl<T, const P: usize, const NUM_SEGS_P2: usize> Stream for AsyncUnboundedSpscConsumer<T, P, NUM_SEGS_P2> {
+    type Item = T;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        let this = unsafe { self.get_unchecked_mut() };
+
+        match this.try_recv() {
+            Ok(value) => Poll::Ready(Some(value)),
+            Err(PopError::Closed) => Poll::Ready(None),
+            Err(PopError::Empty) | Err(PopError::Timeout) => {
+                unsafe {
+                    this.shared.register_items(cx.waker());
+                }
+
+                match this.try_recv() {
+                    Ok(value) => Poll::Ready(Some(value)),
+                    Err(PopError::Closed) => Poll::Ready(None),
+                    Err(PopError::Empty) | Err(PopError::Timeout) => Poll::Pending,
+                }
+            }
+        }
+    }
+}
+
+/// Blocking producer for unbounded SPSC queue.
+pub struct BlockingUnboundedSpscProducer<T, const P: usize, const NUM_SEGS_P2: usize> {
+    sender: crate::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+    shared: Arc<AsyncSpscShared>,
+}
+
+impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingUnboundedSpscProducer<T, P, NUM_SEGS_P2> {
+    fn new(
+        sender: crate::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+        shared: Arc<AsyncSpscShared>,
+    ) -> Self {
+        Self { sender, shared }
+    }
+
+    /// Fast-path send without blocking.
+    ///
+    /// For unbounded queues, this always succeeds unless the channel is closed.
+    #[inline]
+    pub fn try_send(&self, value: T) -> Result<(), PushError<T>> {
+        match self.sender.try_push(value) {
+            Ok(()) => {
+                self.shared.notify_items();
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Sends a single item.
+    ///
+    /// For unbounded queues, this never blocks since the queue grows dynamically.
+    pub fn send(&self, value: T) -> Result<(), PushError<T>> {
+        self.try_send(value)
+    }
+
+    /// Sends a Vec of items using bulk operations.
+    ///
+    /// On return, the Vec will be empty if all items were sent, or contain only
+    /// the items that were not sent (if the channel closed).
+    pub fn send_slice(&self, values: &mut Vec<T>) -> Result<(), PushError<()>> {
+        if values.is_empty() {
+            return Ok(());
+        }
+
+        match self.sender.try_push_n(values) {
+            Ok(_) => {
+                self.shared.notify_items();
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Closes the queue and wakes any waiters.
+    pub fn close(&mut self) {
+        self.sender.close_channel();
+        self.shared.notify_items();
+        self.shared.notify_space();
+    }
+
+    /// Returns the number of nodes in the unbounded queue.
+    pub fn node_count(&self) -> usize {
+        self.sender.node_count()
+    }
+
+    /// Returns the total capacity across all nodes.
+    pub fn total_capacity(&self) -> usize {
+        self.sender.total_capacity()
+    }
+}
+
+/// Blocking consumer for unbounded SPSC queue.
+pub struct BlockingUnboundedSpscConsumer<T, const P: usize, const NUM_SEGS_P2: usize> {
+    receiver: crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+    shared: Arc<AsyncSpscShared>,
+}
+
+impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingUnboundedSpscConsumer<T, P, NUM_SEGS_P2> {
+    fn new(
+        receiver: crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+        shared: Arc<AsyncSpscShared>,
+    ) -> Self {
+        Self { receiver, shared }
+    }
+
+    /// Fast-path receive without blocking.
+    #[inline]
+    pub fn try_recv(&self) -> Result<T, PopError> {
+        match self.receiver.try_pop() {
+            Some(value) => {
+                self.shared.notify_space();
+                Ok(value)
+            }
+            None if self.receiver.is_closed() => Err(PopError::Closed),
+            None => Err(PopError::Empty),
+        }
+    }
+
+    /// Blocking receive that parks the thread until an item is available.
+    pub fn recv(&self) -> Result<T, PopError> {
+        match self.try_recv() {
+            Ok(value) => return Ok(value),
+            Err(PopError::Closed) => return Err(PopError::Closed),
+            Err(PopError::Empty) | Err(PopError::Timeout) => {}
+        }
+
+        let parker = Parker::new();
+        let unparker = parker.unparker();
+        let waker = Waker::from(Arc::new(ThreadUnparker { unparker }));
+
+        loop {
+            unsafe {
+                self.shared.register_items(&waker);
+            }
+
+            match self.receiver.try_pop() {
+                Some(value) => {
+                    self.shared.notify_space();
+                    return Ok(value);
+                }
+                None if self.receiver.is_closed() => {
+                    return Err(PopError::Closed);
+                }
+                None => {
+                    parker.park();
+                }
+            }
+        }
+    }
+
+    /// Blocking receive of multiple items.
+    pub fn recv_batch(&self, dst: &mut [T]) -> Result<usize, PopError>
+    where
+        T: Clone,
+    {
+        if dst.is_empty() {
+            return Ok(0);
+        }
+
+        let mut filled = match self.receiver.try_pop_n(dst) {
+            Ok(count) => {
+                if count > 0 {
+                    self.shared.notify_space();
+                    return Ok(count);
+                }
+                0
+            }
+            Err(PopError::Empty) | Err(PopError::Timeout) => 0,
+            Err(PopError::Closed) => return Err(PopError::Closed),
+        };
+
+        let parker = Parker::new();
+        let unparker = parker.unparker();
+        let waker = Waker::from(Arc::new(ThreadUnparker { unparker }));
+
+        loop {
+            unsafe {
+                self.shared.register_items(&waker);
+            }
+
+            match self.receiver.try_pop_n(&mut dst[filled..]) {
+                Ok(0) => {
+                    if self.receiver.is_closed() {
+                        return if filled > 0 {
+                            Ok(filled)
+                        } else {
+                            Err(PopError::Closed)
+                        };
+                    }
+                    parker.park();
+                }
+                Ok(count) => {
+                    filled += count;
+                    self.shared.notify_space();
+                    if filled == dst.len() || self.receiver.is_closed() {
+                        return Ok(filled);
+                    }
+                    parker.park();
+                }
+                Err(PopError::Empty) | Err(PopError::Timeout) => {
+                    if self.receiver.is_closed() {
+                        return if filled > 0 {
+                            Ok(filled)
+                        } else {
+                            Err(PopError::Closed)
+                        };
+                    }
+                    parker.park();
+                }
+                Err(PopError::Closed) => {
+                    return if filled > 0 {
+                        Ok(filled)
+                    } else {
+                        Err(PopError::Closed)
+                    };
+                }
+            }
+        }
+    }
+
+    /// Returns the number of nodes in the unbounded queue.
+    pub fn node_count(&self) -> usize {
+        self.receiver.node_count()
+    }
+
+    /// Returns the total capacity across all nodes.
+    pub fn total_capacity(&self) -> usize {
+        self.receiver.total_capacity()
+    }
+}
+
+/// Creates a default async unbounded SPSC queue.
+///
+/// The queue automatically grows by creating new segments as needed, so it never
+/// blocks on full. This is ideal for scenarios where you want to avoid backpressure.
+///
+/// # Example
+///
+/// ```ignore
+/// let (mut producer, mut consumer) = new_async_unbounded_spsc(signal);
+///
+/// // Producer never blocks on full
+/// producer.send(42).await.unwrap();
+/// producer.send(43).await.unwrap();
+///
+/// // Consumer receives items
+/// assert_eq!(consumer.recv().await.unwrap(), 42);
+/// ```
+pub fn new_async_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: usize>(
+    signal: AsyncSignalGate,
+) -> (
+    AsyncUnboundedSpscProducer<T, P, NUM_SEGS_P2>,
+    AsyncUnboundedSpscConsumer<T, P, NUM_SEGS_P2>,
+) {
+    let shared = Arc::new(AsyncSpscShared::new());
+    let signal_arc = Arc::new(signal);
+    let (sender, receiver) =
+        crate::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(signal_arc);
+    (
+        AsyncUnboundedSpscProducer::new(sender, Arc::clone(&shared)),
+        AsyncUnboundedSpscConsumer::new(receiver, shared),
+    )
+}
+
+/// Creates a default blocking unbounded SPSC queue.
+///
+/// The queue automatically grows by creating new segments as needed, so the producer
+/// never blocks on full. The consumer blocks when empty.
+///
+/// # Example
+///
+/// ```ignore
+/// let (producer, consumer) = new_blocking_unbounded_spsc(signal);
+///
+/// // Producer thread
+/// std::thread::spawn(move || {
+///     producer.send(42).unwrap();  // Never blocks on full
+/// });
+///
+/// // Consumer thread
+/// std::thread::spawn(move || {
+///     let item = consumer.recv().unwrap();  // Blocks until item available
+/// });
+/// ```
+pub fn new_blocking_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: usize>(
+    signal: AsyncSignalGate,
+) -> (
+    BlockingUnboundedSpscProducer<T, P, NUM_SEGS_P2>,
+    BlockingUnboundedSpscConsumer<T, P, NUM_SEGS_P2>,
+) {
+    let shared = Arc::new(AsyncSpscShared::new());
+    let signal_arc = Arc::new(signal);
+    let (sender, receiver) =
+        crate::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(signal_arc);
+    (
+        BlockingUnboundedSpscProducer::new(sender, Arc::clone(&shared)),
+        BlockingUnboundedSpscConsumer::new(receiver, shared),
+    )
+}
+
+/// Creates a mixed unbounded SPSC queue with blocking producer and async consumer.
+///
+/// # Example
+///
+/// ```ignore
+/// let (producer, consumer) = new_blocking_async_unbounded_spsc(signal);
+///
+/// // Producer thread (blocking)
+/// std::thread::spawn(move || {
+///     producer.send(42).unwrap();  // Never blocks on full
+/// });
+///
+/// // Consumer task (async)
+/// maniac::spawn(async move {
+///     let item = consumer.recv().await.unwrap();
+/// });
+/// ```
+pub fn new_blocking_async_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: usize>(
+    signal: AsyncSignalGate,
+) -> (
+    BlockingUnboundedSpscProducer<T, P, NUM_SEGS_P2>,
+    AsyncUnboundedSpscConsumer<T, P, NUM_SEGS_P2>,
+) {
+    let shared = Arc::new(AsyncSpscShared::new());
+    let signal_arc = Arc::new(signal);
+    let (sender, receiver) =
+        crate::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(signal_arc);
+    (
+        BlockingUnboundedSpscProducer::new(sender, Arc::clone(&shared)),
+        AsyncUnboundedSpscConsumer::new(receiver, shared),
+    )
+}
+
+/// Creates a mixed unbounded SPSC queue with async producer and blocking consumer.
+///
+/// # Example
+///
+/// ```ignore
+/// let (producer, consumer) = new_async_blocking_unbounded_spsc(signal);
+///
+/// // Producer task (async)
+/// maniac::spawn(async move {
+///     producer.send(42).await.unwrap();  // Never blocks on full
+/// });
+///
+/// // Consumer thread (blocking)
+/// std::thread::spawn(move || {
+///     let item = consumer.recv().unwrap();
+/// });
+/// ```
+pub fn new_async_blocking_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: usize>(
+    signal: AsyncSignalGate,
+) -> (
+    AsyncUnboundedSpscProducer<T, P, NUM_SEGS_P2>,
+    BlockingUnboundedSpscConsumer<T, P, NUM_SEGS_P2>,
+) {
+    let shared = Arc::new(AsyncSpscShared::new());
+    let signal_arc = Arc::new(signal);
+    let (sender, receiver) =
+        crate::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(signal_arc);
+    (
+        AsyncUnboundedSpscProducer::new(sender, Arc::clone(&shared)),
+        BlockingUnboundedSpscConsumer::new(receiver, shared),
     )
 }
