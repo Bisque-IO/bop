@@ -1,21 +1,23 @@
 use maniac_runtime::{
-    runtime::Runtime,
-    runtime::task::{TaskArenaConfig, TaskArenaOptions},
-    future::block_on,
+    future::block_on, runtime::{DefaultExecutor, Executor, task::{TaskArenaConfig, TaskArenaOptions}}
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+fn create_executor(num_workers: usize) -> DefaultExecutor {
+    DefaultExecutor::new(
+        TaskArenaConfig::new(2, 4096).unwrap(),
+        TaskArenaOptions::default(),
+        num_workers,
+        num_workers,
+    ).unwrap()
+}
+
 #[test]
 fn integration_single_worker_runtime_lifecycle() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 32).unwrap(),
-        TaskArenaOptions::default(),
-        1, // single worker
-    )
-    .expect("runtime creation failed");
+    let runtime = create_executor(1);
 
     let result = Arc::new(AtomicUsize::new(0));
     let mut joins = Vec::new();
@@ -40,12 +42,7 @@ fn integration_single_worker_runtime_lifecycle() {
 
 #[test]
 fn integration_multi_worker_runtime_throughput() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 64).unwrap(),
-        TaskArenaOptions::default(),
-        4, // multiple workers
-    )
-    .expect("runtime creation failed");
+    let runtime = create_executor(4);
 
     let counter = Arc::new(AtomicUsize::new(0));
     let mut joins = Vec::new();
@@ -73,12 +70,7 @@ fn integration_multi_worker_runtime_throughput() {
 
 #[test]
 fn integration_runtime_mixed_spawn_patterns() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 64).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("runtime creation failed");
+    let runtime = create_executor(2);
 
     let results = Arc::new(Mutex::new(Vec::new()));
     let mut joins = Vec::new();
@@ -112,12 +104,7 @@ fn integration_runtime_mixed_spawn_patterns() {
 
 #[test]
 fn integration_runtime_shutdown_under_load() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 32).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("runtime creation failed");
+    let runtime = create_executor(2);
 
     let counter = Arc::new(AtomicUsize::new(0));
 
@@ -150,12 +137,7 @@ fn integration_runtime_shutdown_under_load() {
 fn integration_runtime_randomized_load() {
     use rand::{Rng, SeedableRng, rngs::SmallRng};
 
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 96).unwrap(),
-        TaskArenaOptions::default(),
-        3,
-    )
-    .expect("runtime creation failed");
+    let runtime = create_executor(3);
 
     let counter = Arc::new(AtomicUsize::new(0));
     let mut joins = Vec::new();

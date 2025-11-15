@@ -1,4 +1,4 @@
-use maniac_runtime::runtime::Runtime;
+use maniac_runtime::runtime::{DefaultExecutor, Executor};
 use maniac_runtime::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 use maniac_runtime::runtime::timer::Timer;
 use futures_lite::future::block_on;
@@ -14,8 +14,7 @@ async fn tick_printer(ticks: usize, interval: Duration) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let runtime: Runtime<10, 6> =
-        Runtime::new(TaskArenaConfig::new(2, 16)?, TaskArenaOptions::default(), 1)?;
+    let runtime = DefaultExecutor::new_single_threaded();
 
     let tick_future = tick_printer(5, Duration::from_millis(500));
     let handle = runtime.spawn(tick_future)?;

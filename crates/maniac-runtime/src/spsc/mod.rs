@@ -114,9 +114,9 @@ use crate::utils::CachePadded;
 
 use crate::{PopError, PushError};
 
-mod unbounded;
 mod l2;
 pub use l2::{LayeredReceiver, LayeredSender, LayeredSpsc};
+pub mod unbounded;
 pub use unbounded::{UnboundedSpsc, UnboundedSender, UnboundedReceiver};
 
 /// Trait for types that can schedule queue execution.

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use maniac_runtime::runtime::Runtime;
+use maniac_runtime::runtime::{DefaultExecutor, Executor};
 use maniac_runtime::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 use futures_lite::future::{block_on, yield_now};
 
@@ -60,9 +60,10 @@ fn run_benchmark(config: &BenchmarkConfig) {
 
     let arena_config =
         TaskArenaConfig::new(DEFAULT_LEAVES, DEFAULT_TASKS_PER_LEAF).expect("arena config");
-    let runtime: Runtime<10, 6> = Runtime::new(
+    let runtime = DefaultExecutor::new(
         arena_config,
         TaskArenaOptions::default(),
+        config.worker_count,
         config.worker_count,
     )
     .expect("runtime");

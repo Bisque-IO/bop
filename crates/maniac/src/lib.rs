@@ -22,7 +22,7 @@ mod tests {
 
 	#[test]
     fn it_works() {
-        let rt = runtime::Runtime::<10, 10>::new_single_threaded();
+        let rt = runtime::Executor::<10, 10>::new_single_threaded();
         let join = rt.spawn(async move {
 					let timer = runtime::timer::Timer::new();
 					println!("waiting 1 second...");

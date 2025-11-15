@@ -1,0 +1,93 @@
+   Compiling maniac-runtime v0.1.0 (C:\Users\info\repos\bisque-io\bop\crates\maniac-runtime)
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\maniac-runtime\src\runtime\task.rs:1455:11
+     |
+1455 |     #[cfg(feature = "disabled_tests")]
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `default`, `race`, `standard`, `std`, and `timers-introspection`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+     = note: requested on the command line with `-W unexpected-cfgs`
+
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\maniac-runtime\src\runtime\task.rs:1494:11
+     |
+1494 |     #[cfg(feature = "disabled_tests")]
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `default`, `race`, `standard`, `std`, and `timers-introspection`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\maniac-runtime\src\runtime\task.rs:1566:11
+     |
+1566 |     #[cfg(feature = "disabled_tests")] // References old Task fields (slot_idx)
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `default`, `race`, `standard`, `std`, and `timers-introspection`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\maniac-runtime\src\runtime\task.rs:1600:11
+     |
+1600 |     #[cfg(feature = "disabled_tests")] // References old Task fields (arena_ptr, bind_arena)
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `default`, `race`, `standard`, `std`, and `timers-introspection`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\maniac-runtime\src\runtime\task.rs:1635:11
+     |
+1635 |     #[cfg(feature = "disabled_tests")]
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `default`, `race`, `standard`, `std`, and `timers-introspection`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: variable does not need to be mutable
+    --> crates\maniac-runtime\src\runtime\mpsc.rs:1088:19
+     |
+1088 |         let (tx1, mut rx) = new_with_sender::<u64, 6, 8>();
+     |                   ----^^
+     |                   |
+     |                   help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\maniac-runtime\src\runtime\mod.rs:247:13
+    |
+247 |         let mut tasks_per_leaf = 4096;
+    |             ----^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: value assigned to `leaf_count` is never read
+   --> crates\maniac-runtime\src\runtime\mod.rs:252:13
+    |
+252 |             leaf_count = max_workers;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+error[E0596]: cannot borrow `receiver` as mutable, as it is not declared as mutable
+    --> crates\maniac-runtime\src\sync\mpsc.rs:3262:23
+     |
+3262 |                 match receiver.recv().await {
+     |                       ^^^^^^^^ cannot borrow as mutable
+     |
+help: consider changing this to be mutable
+     |
+3243 |         let (sender, mut receiver) = unbounded::async_unbounded_mpsc::<u64>();
+     |                      +++
+
+For more information about this error, try `rustc --explain E0596`.
+warning: `maniac-runtime` (lib test) generated 8 warnings
+error: could not compile `maniac-runtime` (lib test) due to 1 previous error; 8 warnings emitted

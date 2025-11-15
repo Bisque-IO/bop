@@ -5,11 +5,7 @@
 /// - Task: lifecycle, scheduling, state transitions
 /// - Integration: cross-component interactions
 use maniac_runtime::{
-    runtime::Runtime,
-    runtime::summary::Summary,
-    runtime::task::{TaskArena, TaskArenaConfig, TaskArenaOptions},
-    runtime::worker::{WorkerService, WorkerServiceConfig},
-    future::block_on,
+    future::block_on, runtime::{DefaultExecutor, Executor, summary::Summary, task::{TaskArena, TaskArenaConfig, TaskArenaOptions}, worker::{WorkerService, WorkerServiceConfig}}
 };
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,18 +13,22 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+fn create_executor(num_workers: usize) -> DefaultExecutor {
+    DefaultExecutor::new(
+        TaskArenaConfig::new(2, 4096).unwrap(),
+        TaskArenaOptions::default(),
+        num_workers,
+        num_workers,
+    ).unwrap()
+}
+
 // ============================================================================
 // RUNTIME TESTS
 // ============================================================================
 
 #[test]
 fn runtime_basic_spawn_and_complete() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 8).unwrap(),
-        TaskArenaOptions::default(),
-        2, // Use 2 workers to avoid contention
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let result = Arc::new(AtomicUsize::new(0));
     let result_clone = result.clone();
@@ -51,12 +51,7 @@ fn runtime_basic_spawn_and_complete() {
 
 #[test]
 fn runtime_multiple_concurrent_spawns() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 16).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let counter = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
@@ -91,12 +86,7 @@ fn runtime_multiple_concurrent_spawns() {
 
 #[test]
 fn runtime_spawn_after_capacity() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(1, 4).unwrap(), // Only 4 task slots
-        TaskArenaOptions::default(),
-        1,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(1);
 
     let mut handles = Vec::new();
 
@@ -122,12 +112,7 @@ fn runtime_spawn_after_capacity() {
 
 #[test]
 fn runtime_join_handle_is_finished() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(1, 8).unwrap(),
-        TaskArenaOptions::default(),
-        2, // Use 2 workers to avoid contention
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let ready = Arc::new(AtomicBool::new(false));
     let ready_clone = ready.clone();
@@ -148,12 +133,7 @@ fn runtime_join_handle_is_finished() {
 
 #[test]
 fn runtime_stats_tracking() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 8).unwrap(),
-        TaskArenaOptions::default(),
-        2, // Use 2 workers instead of 1 for better scheduling
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let initial_stats = runtime.stats();
     assert_eq!(
@@ -182,14 +162,7 @@ fn runtime_stats_tracking() {
 
 #[test]
 fn runtime_nested_spawn() {
-    let runtime = Arc::new(
-        Runtime::<10, 6>::new(
-            TaskArenaConfig::new(2, 16).unwrap(),
-            TaskArenaOptions::default(),
-            2,
-        )
-        .expect("failed to create runtime"),
-    );
+    let runtime = create_executor(2);
 
     // Note: True nested spawning where an async task blocks on another task
     // doesn't work with block_on as it monopolizes the test thread.
@@ -222,12 +195,7 @@ fn runtime_nested_spawn() {
 
 #[test]
 fn runtime_graceful_shutdown() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 8).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let completed = Arc::new(AtomicUsize::new(0));
     let start_flag = Arc::new(AtomicBool::new(false));
@@ -275,7 +243,7 @@ fn summary_tree_reserve_task_round_robin() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(2);
+    let worker_count = Arc::new(AtomicUsize::new(2));
 
     let tree = Summary::new(4, 2, &wakers, &worker_count);
 
@@ -309,7 +277,7 @@ fn summary_tree_reserve_exhaustion() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(2);
+    let worker_count = Arc::new(AtomicUsize::new(2));
 
     let tree = Summary::new(2, 1, &wakers, &worker_count); // 2 leaves * 1 signal * 64 bits = 128 tasks
 
@@ -348,7 +316,7 @@ fn summary_tree_concurrent_reservations() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(4);
+    let worker_count = Arc::new(AtomicUsize::new(4));
 
     let tree = Arc::new(Summary::new(4, 2, &wakers, &worker_count));
 
@@ -401,7 +369,7 @@ fn summary_tree_partition_ownership() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(4);
+    let worker_count = Arc::new(AtomicUsize::new(4));
 
     let tree = Summary::new(8, 1, &wakers, &worker_count);
 
@@ -444,7 +412,7 @@ fn summary_tree_signal_active_inactive() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(2);
+    let worker_count = Arc::new(AtomicUsize::new(2));
 
     let tree = Summary::new(2, 2, &wakers, &worker_count);
 
@@ -601,12 +569,7 @@ fn task_arena_close() {
 
 #[test]
 fn integration_full_task_execution_cycle() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 16).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let executed = Arc::new(AtomicBool::new(false));
     let executed_clone = executed.clone();
@@ -626,12 +589,7 @@ fn integration_full_task_execution_cycle() {
 
 #[test]
 fn integration_many_short_tasks() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 32).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let counter = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::new();
@@ -655,12 +613,7 @@ fn integration_many_short_tasks() {
 
 #[test]
 fn integration_stress_spawn_release_cycle() {
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 64).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let counter = Arc::new(AtomicUsize::new(0));
 
@@ -703,12 +656,7 @@ fn integration_stress_spawn_release_cycle() {
 #[test]
 fn runtime_spawn_chain_dependencies() {
     // Test spawning tasks that depend on each other's results
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 16).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let shared_result = Arc::new(Mutex::new(Vec::new()));
 
@@ -747,12 +695,7 @@ fn runtime_spawn_chain_dependencies() {
 #[test]
 fn runtime_panic_isolation() {
     // Verify that panicking tasks don't crash the runtime
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 16).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let success_counter = Arc::new(AtomicUsize::new(0));
 
@@ -786,12 +729,7 @@ fn runtime_panic_isolation() {
 #[test]
 fn runtime_spawn_with_immediate_drop() {
     // Test behavior when JoinHandle is dropped immediately
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(1, 8).unwrap(),
-        TaskArenaOptions::default(),
-        1,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(1);
 
     let executed = Arc::new(AtomicBool::new(false));
     let executed_clone = executed.clone();
@@ -817,12 +755,7 @@ fn runtime_spawn_with_immediate_drop() {
 #[test]
 fn runtime_heavy_computation_tasks() {
     // Test with CPU-intensive tasks
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 16).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let mut handles = Vec::new();
 
@@ -851,12 +784,7 @@ fn runtime_heavy_computation_tasks() {
 #[test]
 fn runtime_mixed_duration_tasks() {
     // Test fairness with tasks of varying durations
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 32).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let completion_order = Arc::new(Mutex::new(Vec::new()));
 
@@ -915,7 +843,7 @@ fn summary_tree_partition_rebalancing() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..8).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count_atomic = AtomicUsize::new(0);
+    let worker_count_atomic = Arc::new(AtomicUsize::new(0));
 
     let tree = Summary::new(16, 1, &wakers, &worker_count_atomic);
 
@@ -962,7 +890,7 @@ fn summary_tree_reserve_release_stress() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(4);
+    let worker_count = Arc::new(AtomicUsize::new(4));
 
     let tree = Arc::new(Summary::new(4, 2, &wakers, &worker_count));
 
@@ -1002,7 +930,7 @@ fn summary_tree_signal_transitions_stress() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(2);
+    let worker_count = Arc::new(AtomicUsize::new(2));
 
     let tree = Summary::new(2, 4, &wakers, &worker_count);
 
@@ -1026,7 +954,7 @@ fn summary_tree_global_to_local_leaf_conversion() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(4);
+    let worker_count = Arc::new(AtomicUsize::new(4));
 
     let tree = Summary::new(12, 1, &wakers, &worker_count);
 
@@ -1268,12 +1196,7 @@ fn task_arena_config_power_of_two_adjustment() {
 #[test]
 fn error_handling_spawn_zero_capacity() {
     // Test spawning on an arena with minimal capacity
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(1, 2).unwrap(), // Only 2 slots
-        TaskArenaOptions::default(),
-        1,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(1);
 
     let handle1 = runtime.spawn(async {
         thread::sleep(Duration::from_millis(100));
@@ -1293,12 +1216,7 @@ fn error_handling_spawn_zero_capacity() {
 #[test]
 fn error_handling_rapid_spawn_attempts() {
     // Rapidly attempt spawns to test error handling under pressure
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(1, 8).unwrap(),
-        TaskArenaOptions::default(),
-        1,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(1);
 
     let mut success_count = 0;
     let mut error_count = 0;
@@ -1318,12 +1236,7 @@ fn error_handling_rapid_spawn_attempts() {
 #[test]
 fn edge_case_empty_runtime_drop() {
     // Test dropping runtime with no spawned tasks
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(1, 8).unwrap(),
-        TaskArenaOptions::default(),
-        1,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(1);
 
     // Drop immediately without spawning
     drop(runtime);
@@ -1334,14 +1247,7 @@ fn edge_case_empty_runtime_drop() {
 #[test]
 fn edge_case_concurrent_runtime_operations() {
     // Test concurrent spawn and stats calls
-    let runtime = Arc::new(
-        Runtime::<10, 6>::new(
-            TaskArenaConfig::new(2, 16).unwrap(),
-            TaskArenaOptions::default(),
-            2,
-        )
-        .expect("failed to create runtime"),
-    );
+    let runtime = create_executor(2);
 
     let barrier = Arc::new(Barrier::new(3));
 
@@ -1381,12 +1287,7 @@ fn edge_case_concurrent_runtime_operations() {
 fn integration_sequential_runtime_creation() {
     // Test creating and dropping multiple runtimes sequentially
     for i in 0..5 {
-        let runtime = Runtime::<10, 6>::new(
-            TaskArenaConfig::new(1, 8).unwrap(),
-            TaskArenaOptions::default(),
-            1,
-        )
-        .expect("failed to create runtime");
+        let runtime = create_executor(1);
 
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
@@ -1412,12 +1313,7 @@ fn integration_sequential_runtime_creation() {
 #[test]
 fn runtime_spawn_returning_complex_types() {
     // Test spawning tasks that return complex types
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 16).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     #[derive(Debug, PartialEq)]
     struct ComplexResult {
@@ -1449,12 +1345,7 @@ fn runtime_spawn_returning_complex_types() {
 #[test]
 fn runtime_spawn_with_async_blocks() {
     // Test various async block patterns
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 16).unwrap(),
-        TaskArenaOptions::default(),
-        1,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(1);
 
     let result = Arc::new(Mutex::new(Vec::new()));
 
@@ -1494,12 +1385,7 @@ fn runtime_spawn_with_async_blocks() {
 #[test]
 fn runtime_large_result_propagation() {
     // Test handling large result values
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 16).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let handle = runtime
         .spawn(async {
@@ -1515,12 +1401,7 @@ fn runtime_large_result_propagation() {
 #[test]
 fn runtime_spawn_burst_load() {
     // Test handling burst of spawns
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 64).unwrap(),
-        TaskArenaOptions::default(),
-        4,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(4);
 
     let counter = Arc::new(AtomicUsize::new(0));
     let start = Instant::now();
@@ -1553,12 +1434,7 @@ fn runtime_spawn_burst_load() {
 #[test]
 fn runtime_interleaved_spawn_complete() {
     // Test interleaving spawn and completion
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 16).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let mut completed_count = 0;
 
@@ -1583,7 +1459,7 @@ fn summary_tree_edge_case_single_leaf() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = vec![Arc::new(WorkerWaker::new())];
-    let worker_count = AtomicUsize::new(1);
+    let worker_count = Arc::new(AtomicUsize::new(1));
     let tree = Summary::new(1, 1, &wakers, &worker_count);
 
     // Should still work with minimal configuration
@@ -1606,7 +1482,7 @@ fn summary_tree_maximum_leaves() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..16).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(8);
+    let worker_count = Arc::new(AtomicUsize::new(8));
 
     let tree = Summary::new(64, 1, &wakers, &worker_count);
 
@@ -1639,7 +1515,7 @@ fn summary_tree_concurrent_signal_operations() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(4);
+    let worker_count = Arc::new(AtomicUsize::new(4));
 
     let tree = Arc::new(Summary::new(8, 2, &wakers, &worker_count));
 
@@ -1680,7 +1556,7 @@ fn summary_tree_partition_boundary_cases() {
     use maniac_runtime::runtime::waker::WorkerWaker;
 
     let wakers: Vec<Arc<WorkerWaker>> = (0..8).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count_atomic = AtomicUsize::new(0);
+    let worker_count_atomic = Arc::new(AtomicUsize::new(0));
 
     let tree = Summary::new(17, 1, &wakers, &worker_count_atomic); // Prime number of leaves
 
@@ -1831,7 +1707,7 @@ fn task_arena_handle_for_location_comprehensive() {
 
     let wakers: Vec<Arc<WorkerWaker>> =
         vec![Arc::new(WorkerWaker::new()), Arc::new(WorkerWaker::new())];
-    let worker_count = AtomicUsize::new(2);
+    let worker_count = Arc::new(AtomicUsize::new(2));
     let tree = Summary::new(2, 1, &wakers, &worker_count);
 
     // Initialize all tasks
@@ -1871,7 +1747,7 @@ fn task_arena_multiple_init_task_calls() {
     .expect("failed to create arena");
 
     let wakers: Vec<Arc<WorkerWaker>> = vec![Arc::new(WorkerWaker::new())];
-    let worker_count = AtomicUsize::new(1);
+    let worker_count = Arc::new(AtomicUsize::new(1));
     let tree = Summary::new(1, 1, &wakers, &worker_count);
 
     let global_id = 0;
@@ -1887,12 +1763,7 @@ fn task_arena_multiple_init_task_calls() {
 #[test]
 fn integration_producer_consumer_pattern() {
     // Test producer-consumer pattern
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 32).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let queue = Arc::new(Mutex::new(Vec::new()));
     let consumer_done = Arc::new(AtomicBool::new(false));
@@ -1946,12 +1817,7 @@ fn integration_producer_consumer_pattern() {
 #[test]
 fn integration_fan_out_fan_in() {
     // Test fan-out/fan-in pattern
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 32).unwrap(),
-        TaskArenaOptions::default(),
-        4,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(4);
 
     let results = Arc::new(Mutex::new(Vec::new()));
 
@@ -1985,14 +1851,7 @@ fn integration_fan_out_fan_in() {
 #[test]
 fn integration_recursive_spawn() {
     // Test recursive task spawning (limited depth to prevent exhaustion)
-    let runtime = Arc::new(
-        Runtime::<10, 6>::new(
-            TaskArenaConfig::new(4, 64).unwrap(), // More capacity for recursion
-            TaskArenaOptions::default(),
-            4,
-        )
-        .expect("failed to create runtime"),
-    );
+    let runtime = create_executor(4);
 
     // Note: Recursive spawning with block_on doesn't work because block_on
     // monopolizes the thread. This test uses a simpler iterative approach.
@@ -2026,12 +1885,7 @@ fn integration_recursive_spawn() {
 #[test]
 fn integration_barrier_synchronization() {
     // Test barrier-style synchronization
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 32).unwrap(),
-        TaskArenaOptions::default(),
-        4,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(4);
 
     let counter = Arc::new(AtomicUsize::new(0));
     let phase1_done = Arc::new(AtomicBool::new(false));
@@ -2070,12 +1924,7 @@ fn integration_barrier_synchronization() {
 #[test]
 fn stress_test_continuous_spawn_complete() {
     // Continuously spawn and complete tasks
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(4, 64).unwrap(),
-        TaskArenaOptions::default(),
-        4,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(4);
 
     let counter = Arc::new(AtomicUsize::new(0));
     let start = Instant::now();
@@ -2100,12 +1949,7 @@ fn stress_test_continuous_spawn_complete() {
 #[test]
 fn stress_test_maximum_concurrent_tasks() {
     // Test maximum concurrency with more realistic limits
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(8, 128).unwrap(),
-        TaskArenaOptions::default(),
-        8,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(8);
 
     let completed = Arc::new(AtomicUsize::new(0));
     let start_flag = Arc::new(AtomicBool::new(false));
@@ -2148,12 +1992,7 @@ fn stress_test_maximum_concurrent_tasks() {
 #[test]
 fn stress_test_alternating_work_idle() {
     // Test alternating between work and idle
-    let runtime = Runtime::<10, 6>::new(
-        TaskArenaConfig::new(2, 32).unwrap(),
-        TaskArenaOptions::default(),
-        2,
-    )
-    .expect("failed to create runtime");
+    let runtime = create_executor(2);
 
     let counter = Arc::new(AtomicUsize::new(0));
 

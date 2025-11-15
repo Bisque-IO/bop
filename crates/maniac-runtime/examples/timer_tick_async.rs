@@ -1,4 +1,4 @@
-use maniac_runtime::runtime::Runtime;
+use maniac_runtime::runtime::Executor;
 use maniac_runtime::runtime::timer::Timer;
 use futures_lite::future::block_on;
 use std::error::Error;
@@ -13,7 +13,7 @@ async fn tick_printer(ticks: usize, interval: Duration) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let runtime = Runtime::<10, 6>::new_single_threaded();
+    let runtime = Executor::<10, 6>::new_single_threaded();
 
     let handle = runtime.spawn(async move {
         tick_printer(50, Duration::from_millis(100)).await;

@@ -830,4 +830,274 @@ mod tests {
         assert_eq!(rx.producer_count(), 0);
         assert_eq!(rx.inner.queue_count.load(Ordering::SeqCst), 0);
     }
+
+    #[test]
+    fn single_producer_multiple_items() {
+        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+
+        // Push multiple items
+        for i in 0..100 {
+            tx.try_push(i).expect("push should not fail for unbounded queue");
+        }
+
+        // Pop and verify
+        for i in 0..100 {
+            assert_eq!(rx.try_pop().unwrap(), i);
+        }
+
+        // Queue should be empty
+        assert_eq!(rx.try_pop(), Err(PopError::Empty));
+    }
+
+    #[test]
+    fn multiple_producers_single_consumer() {
+        use std::thread;
+
+        let (tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        let mut received = vec![false; 30]; // Track which items we received
+
+        // Spawn 3 producer threads, each pushing 10 items
+        let handles: Vec<_> = (0..3)
+            .map(|producer_id| {
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    for i in 0..10 {
+                        let value = (producer_id * 10 + i) as u64;
+                        tx.clone().try_push(value).expect("push should succeed");
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all producers to finish
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Consume all items and verify they're in range
+        let mut count = 0;
+        for _ in 0..100 {
+            if let Ok(value) = rx.try_pop() {
+                assert!(value < 30, "received unexpected value: {}", value);
+                received[value as usize] = true;
+                count += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Should have received all 30 items
+        assert_eq!(count, 30, "expected 30 items, got {}", count);
+        for (i, &received_item) in received.iter().enumerate() {
+            assert!(received_item, "item {} was not received", i);
+        }
+    }
+
+    #[test]
+    fn unbounded_growth_with_large_batches() {
+        let (mut tx, mut rx) = new_with_sender::<u64, 2, 2>(); // Small segments for growth testing
+
+        // Push many items, causing growth
+        let mut items_to_push: Vec<u64> = (0..1000).collect();
+        let pushed = tx.try_push_n(&mut items_to_push).expect("bulk push should succeed");
+        assert_eq!(pushed, 1000, "should push all items");
+        assert!(items_to_push.is_empty(), "Vec should be drained");
+
+        // Verify all items are received
+        for i in 0..1000 {
+            assert_eq!(rx.try_pop().unwrap(), i as u64);
+        }
+
+        assert_eq!(rx.try_pop(), Err(PopError::Empty));
+    }
+
+    #[test]
+    fn close_stops_receives() {
+        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+
+        tx.try_push(42).unwrap();
+        assert_eq!(rx.try_pop().unwrap(), 42);
+
+        // Close the queue
+        rx.close();
+
+        // No more receives should succeed
+        assert_eq!(rx.try_pop(), Err(PopError::Closed));
+
+        // Tries to push should fail
+        assert_eq!(tx.try_push(100), Err(PushError::Closed(100)));
+    }
+
+    #[test]
+    fn multiple_senders_cloning() {
+        let (tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        assert_eq!(tx.producer_count(), 1);
+
+        let mut tx2 = tx.clone();
+        assert_eq!(tx2.producer_count(), 2);
+
+        let mut tx3 = tx.clone();
+        assert_eq!(tx3.producer_count(), 3);
+
+        // All clones can push
+        drop(tx);
+        tx2.try_push(1).unwrap();
+        tx3.try_push(2).unwrap();
+
+        // Collect items (order may vary with MPSC)
+        let mut items = Vec::new();
+        for _ in 0..2 {
+            if let Ok(val) = rx.try_pop() {
+                items.push(val);
+            }
+        }
+        
+        items.sort();
+        assert_eq!(items, vec![1, 2]);
+    }
+
+    #[test]
+    fn interleaved_push_pop() {
+        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+
+        // Push and pop interleaved
+        let mut received = Vec::new();
+        for i in 0..10 {
+            tx.try_push(i * 2).unwrap();
+            tx.try_push(i * 2 + 1).unwrap();
+            // Try to pop immediately - may or may not get anything
+            while let Ok(value) = rx.try_pop() {
+                received.push(value);
+            }
+        }
+
+        // Pop remaining items
+        while let Ok(value) = rx.try_pop() {
+            received.push(value);
+        }
+
+        // Verify we got all 20 items
+        assert_eq!(received.len(), 20);
+        received.sort();
+        for i in 0..20 {
+            assert_eq!(received[i], i as u64);
+        }
+
+        assert_eq!(rx.try_pop(), Err(PopError::Empty));
+    }
+
+    #[test]
+    fn batch_push_pop() {
+        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+
+        // Push batch
+        let mut items: Vec<u64> = (0..50).collect();
+        let pushed = tx.try_push_n(&mut items).expect("bulk push should succeed");
+        assert_eq!(pushed, 50);
+        assert!(items.is_empty());
+
+        // Pop all items
+        let mut dst = [0u64; 100];
+        let popped = rx.try_pop_n(&mut dst);
+        assert_eq!(popped, 50);
+
+        for i in 0..50 {
+            assert_eq!(dst[i], i as u64);
+        }
+    }
+
+    #[test]
+    fn concurrent_push_pop() {
+        use std::thread;
+        use std::sync::Arc;
+        use std::sync::{Mutex};
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let (tx, rx) = new_with_sender::<u64, 6, 8>();
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        let rx = Arc::new(Mutex::new(rx));
+        let rx_clone = Arc::clone(&rx);
+        let counter_clone = Arc::clone(&counter);
+
+        // Producer thread
+        let producer = thread::spawn(move || {
+            let mut tx = tx;
+            for i in 0..1000 {
+                tx.try_push(i).expect("push should succeed");
+                thread::yield_now();
+            }
+        });
+
+        // Consumer thread
+        let consumer = thread::spawn(move || {
+            let mut rx = rx_clone.lock().unwrap();
+            let mut count: usize = 0;
+            for _ in 0..10000 {
+                if let Ok(value) = rx.try_pop() {
+                    assert_eq!(value, count as u64);
+                    count += 1;
+                    if count >= 1000 {
+                        break;
+                    }
+                } else {
+                    thread::yield_now();
+                }
+            }
+            counter_clone.fetch_add(count, AtomicOrdering::Relaxed);
+        });
+
+        producer.join().unwrap();
+        consumer.join().unwrap();
+
+        let final_count = counter.load(AtomicOrdering::Relaxed);
+        assert_eq!(final_count, 1000, "should have received all 1000 items");
+    }
+
+    #[test]
+    fn stress_test_unbounded_expansion() {
+        let (mut tx, mut rx) = new_with_sender::<u64, 2, 2>(); // Very small segments
+
+        // Push 10000 items to force significant expansion
+        let mut items: Vec<u64> = (0..10000).collect();
+        let pushed = tx.try_push_n(&mut items).expect("bulk push should succeed");
+        assert_eq!(pushed, 10000);
+
+        // Verify all items in order
+        for i in 0..10000 {
+            assert_eq!(rx.try_pop().unwrap(), i as u64, "item {} mismatch", i);
+        }
+
+        assert_eq!(rx.try_pop(), Err(PopError::Empty));
+    }
+
+    #[test]
+    fn producer_id_uniqueness() {
+        let (tx1, _rx) = new_with_sender::<u64, 6, 8>();
+        let tx2 = tx1.clone();
+        let tx3 = tx1.clone();
+
+        // All should have different producer IDs
+        assert_ne!(tx1.producer_id(), tx2.producer_id());
+        assert_ne!(tx2.producer_id(), tx3.producer_id());
+        assert_ne!(tx1.producer_id(), tx3.producer_id());
+    }
+
+    #[test]
+    fn receiver_count_tracking() {
+        let (tx1, mut rx) = new_with_sender::<u64, 6, 8>();
+        assert_eq!(rx.producer_count(), 1);
+
+        let tx2 = tx1.clone();
+        assert_eq!(rx.producer_count(), 2);
+
+        let tx3 = tx2.clone();
+        assert_eq!(rx.producer_count(), 3);
+
+        drop(tx1);
+        rx.close(); // Trigger cleanup
+        
+        // After closing, all producers should be cleaned up
+        assert_eq!(rx.producer_count(), 0);
+    }
 }

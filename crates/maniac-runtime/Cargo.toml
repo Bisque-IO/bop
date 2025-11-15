@@ -17,11 +17,11 @@ crossbeam = { workspace = true }
 #crossbeam-deque = "0.8"
 crossbeam-epoch = "0.9"
 crossbeam-utils = "0.8"
-#dashmap = "6.1"
+dashmap = "6.1"
 futures-lite = "2.6"
 futures = { workspace = true }
 generator = "0.8"
-#num_cpus = "1.16"
+once_cell = "1.21"
 pin-project-lite = "0.2"
 rand = { workspace = true }
 

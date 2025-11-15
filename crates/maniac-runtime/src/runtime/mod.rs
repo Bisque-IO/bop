@@ -1,13 +1,13 @@
-//! Runtime module providing a cooperative async executor.
+//! Executor module providing a cooperative async executor.
 //!
-//! This module implements a high-performance async runtime that uses memory-mapped
+//! This module implements a high-performance async executor that uses memory-mapped
 //! task arenas and worker threads for efficient task scheduling and execution.
 //!
 //! # Architecture
 //!
-//! The runtime consists of:
-//! - `Runtime`: Public API for spawning and managing async tasks
-//! - `RuntimeInner`: Internal shared state for task spawning
+//! The executor consists of:
+//! - `Executor`: Public API for spawning and managing async tasks
+//! - `ExecutorInner`: Internal shared state for task spawning
 //! - `WorkerService`: Manages worker threads that execute tasks
 //! - `TaskArena`: Memory-mapped arena for task storage
 //! - `JoinHandle`: Future that resolves when a spawned task completes
@@ -37,9 +37,174 @@ use task::{
 };
 use worker::{WorkerService, WorkerServiceConfig};
 
-/// Cooperative executor runtime backed by `MmapExecutorArena` and worker threads.
+use crate::num_cpus;
+
+pub fn new_single_threaded() -> io::Result<DefaultRuntime> {
+    Ok(DefaultRuntime {
+        executor: DefaultExecutor::new(
+            TaskArenaConfig::new(8, 4096).unwrap(),
+            TaskArenaOptions::new(false, false),
+            1,
+            1,
+        )?,
+        blocking: DefaultBlockingExecutor::new(
+            TaskArenaConfig::new(8, 4096).unwrap(),
+            TaskArenaOptions::new(false, false),
+            1,
+            num_cpus() * 8,
+        )?,
+    })
+}
+
+pub fn new_multi_threaded(
+    worker_count: usize,
+    mut max_tasks: usize,
+    blocking_min_workers: usize,
+    blocking_max_workers: usize,
+    mut max_blocking_tasks: usize,
+) -> io::Result<DefaultRuntime> {
+    let worker_count = worker_count.max(1);
+    if max_tasks == 0 {
+        max_tasks = worker_count * 4096;
+    }
+    max_tasks = max_tasks.next_power_of_two();
+    let config = ExecutorConfig::with_max_tasks(worker_count, worker_count, max_tasks)?;
+
+    let blocking_min_workers = blocking_min_workers.max(1);
+    let blocking_max_workers = blocking_max_workers.max(blocking_min_workers);
+    if max_blocking_tasks == 0 {
+        max_blocking_tasks = blocking_max_workers * 4096;
+    }
+    let blocking_config = ExecutorConfig::with_max_tasks(
+        blocking_min_workers,
+        blocking_max_workers,
+        max_blocking_tasks,
+    )?;
+
+    Ok(DefaultRuntime {
+        executor: DefaultExecutor::new(
+            config.task_arena,
+            config.task_arena_options,
+            config.min_workers,
+            config.max_workers,
+        )?,
+        blocking: DefaultBlockingExecutor::new(
+            blocking_config.task_arena,
+            blocking_config.task_arena_options,
+            blocking_config.min_workers,
+            blocking_config.max_workers,
+        )?,
+    })
+}
+
+pub struct Runtime<
+    const P: usize = 10,
+    const NUM_SEGS_P2: usize = 8,
+    const BLOCKING_P: usize = 8,
+    const BLOCKING_NUM_SEGS_P2: usize = 5,
+> {
+    executor: Executor<P, NUM_SEGS_P2>,
+    blocking: Executor<BLOCKING_P, BLOCKING_NUM_SEGS_P2>,
+}
+
+pub type DefaultRuntime = Runtime<10, 8, 8, 5>;
+
+impl<
+    const P: usize,
+    const NUM_SEGS_P2: usize,
+    const BLOCKING_P: usize,
+    const BLOCKING_NUM_SEGS_P2: usize,
+> Runtime<P, NUM_SEGS_P2, BLOCKING_P, BLOCKING_NUM_SEGS_P2>
+{
+    /// Spawns an asynchronous task on the executor, returning an awaitable join handle.
+    ///
+    /// This is the primary method for scheduling async work on the executor.
+    /// The spawned task will be executed by one of the executor's worker threads.
+    ///
+    /// # Arguments
+    ///
+    /// * `future`: The future to execute. Can be any type that implements `IntoFuture`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(JoinHandle<T>)`: A join handle that implements `Future<Output = T>`
+    /// * `Err(SpawnError)`: Error if spawning fails
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use maniac::runtime::Executor;
+    /// let rt = manic::runtime::new_multi_threaded();
+    /// let handle = rt.spawn(async {
+    ///     // Your async code here
+    ///     42
+    /// })?;
+    ///
+    /// // Await the result
+    /// // let result = handle.await;
+    /// # Ok::<(), maniac::runtime::task::SpawnError>(())
+    /// ```
+    #[track_caller]
+    pub fn spawn<F, T>(&self, future: F) -> Result<JoinHandle<T>, SpawnError>
+    where
+        F: IntoFuture<Output = T> + Send + 'static,
+        F::IntoFuture: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let location = Location::caller();
+        let type_id = TypeId::of::<F>();
+        self.executor.inner.spawn(type_id, location, future)
+    }
+
+    /// Spawns a blocking task on the blocking executor, returning an awaitable join handle.
+    ///
+    /// This is the primary method for scheduling async work on the executor.
+    /// The spawned task will be executed by one of the executor's worker threads.
+    ///
+    /// # Arguments
+    ///
+    /// * `future`: The future to execute. Can be any type that implements `IntoFuture`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(JoinHandle<T>)`: A join handle that implements `Future<Output = T>`
+    /// * `Err(SpawnError)`: Error if spawning fails
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use maniac::runtime::Executor;
+    /// # use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+    /// # let executor = Executor::new(
+    /// #     TaskArenaConfig::new(1, 8).unwrap(),
+    /// #     TaskArenaOptions::default(),
+    /// #     1,
+    /// # ).unwrap();
+    /// let handle = executor.spawn(async {
+    ///     // Your async code here
+    ///     42
+    /// })?;
+    ///
+    /// // Await the result
+    /// // let result = handle.await;
+    /// # Ok::<(), maniac::runtime::task::SpawnError>(())
+    /// ```
+    #[track_caller]
+    pub fn spawn_blocking<F, T>(&self, future: F) -> Result<JoinHandle<T>, SpawnError>
+    where
+        F: IntoFuture<Output = T> + Send + 'static,
+        F::IntoFuture: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let location = Location::caller();
+        let type_id = TypeId::of::<F>();
+        self.blocking.inner.spawn(type_id, location, future)
+    }
+}
+
+/// Cooperative executor executor backed by `MmapExecutorArena` and worker threads.
 ///
-/// The runtime provides a high-performance async executor that uses:
+/// The executor provides a high-performance async executor that uses:
 /// - Memory-mapped task arenas for efficient task storage
 /// - Worker threads for parallel task execution
 /// - Cooperative scheduling for optimal throughput
@@ -52,16 +217,16 @@ use worker::{WorkerService, WorkerServiceConfig};
 /// # Example
 ///
 /// ```no_run
-/// use maniac::runtime::Runtime;
+/// use maniac::runtime::Executor;
 /// use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 ///
-/// let runtime = Runtime::new(
+/// let executor = Executor::new(
 ///     TaskArenaConfig::new(1, 8).unwrap(),
 ///     TaskArenaOptions::default(),
 ///     4, // worker_count
 /// ).unwrap();
 ///
-/// let handle = runtime.spawn(async {
+/// let handle = executor.spawn(async {
 ///     // Your async code here
 ///     42
 /// }).unwrap();
@@ -69,53 +234,45 @@ use worker::{WorkerService, WorkerServiceConfig};
 /// // Later, await the result
 /// // let result = handle.await;
 /// ```
-pub struct Runtime<const P: usize = 10, const NUM_SEGS_P2: usize = 6> {
-    /// Internal runtime state shared across all operations
-    inner: Arc<RuntimeInner<P, NUM_SEGS_P2>>,
+#[derive(Clone)]
+pub struct Executor<const P: usize = 10, const NUM_SEGS_P2: usize = 8> {
+    /// Internal executor state shared across all operations
+    inner: Arc<ExecutorInner<P, NUM_SEGS_P2>>,
 }
 
-impl<const P: usize, const NUM_SEGS_P2: usize> Default for Runtime<P, NUM_SEGS_P2> {
-    fn default() -> Self {
-        let workers = crate::utils::num_cpus();
+pub type DefaultExecutor = Executor<10, 8>;
+pub type DefaultBlockingExecutor = Executor<8, 5>;
 
-        Self::new(
-            TaskArenaConfig::new(workers * 8, 64).unwrap(),
-            TaskArenaOptions::new(false, false),
-            workers,
-        )
-        .unwrap()
-    }
-}
-
-impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
+impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
     pub fn new_single_threaded() -> Self {
         Self::new(
-            TaskArenaConfig::new(8, 64).unwrap(),
+            TaskArenaConfig::new(8, 4096).unwrap(),
             TaskArenaOptions::new(false, false),
+            1,
             1,
         )
         .unwrap()
     }
 }
 
-/// Internal runtime state shared between all runtime operations.
+/// Internal executor state shared between all executor operations.
 ///
 /// This structure holds the core components needed for task spawning and execution:
-/// - `shutdown`: Atomic flag indicating whether the runtime is shutting down
+/// - `shutdown`: Atomic flag indicating whether the executor is shutting down
 /// - `service`: Worker service that manages task scheduling and execution
-struct RuntimeInner<const P: usize, const NUM_SEGS_P2: usize> {
-    /// Atomic flag indicating if the runtime is shutting down.
+struct ExecutorInner<const P: usize, const NUM_SEGS_P2: usize> {
+    /// Atomic flag indicating if the executor is shutting down.
     /// Used to prevent new tasks from being spawned during shutdown.
     shutdown: Arc<AtomicBool>,
     /// Worker service that manages task scheduling, worker threads, and task execution.
     service: Arc<WorkerService<P, NUM_SEGS_P2>>,
 }
 
-impl<const P: usize, const NUM_SEGS_P2: usize> RuntimeInner<P, NUM_SEGS_P2> {
-    /// Spawns a new async task on the runtime.
+impl<const P: usize, const NUM_SEGS_P2: usize> ExecutorInner<P, NUM_SEGS_P2> {
+    /// Spawns a new async task on the executor.
     ///
     /// This method performs the following steps:
-    /// 1. Validates that the runtime is not shutting down and the arena is open
+    /// 1. Validates that the executor is not shutting down and the arena is open
     /// 2. Reserves a task slot from the worker service
     /// 3. Initializes the task in the arena with its global ID
     /// 4. Wraps the user's future in a join future that handles completion and cleanup
@@ -128,14 +285,19 @@ impl<const P: usize, const NUM_SEGS_P2: usize> RuntimeInner<P, NUM_SEGS_P2> {
     /// # Returns
     ///
     /// * `Ok(JoinHandle<T>)`: A join handle that can be awaited to get the task's result
-    /// * `Err(SpawnError)`: Error if spawning fails (closed runtime, no capacity, or attach failed)
+    /// * `Err(SpawnError)`: Error if spawning fails (closed executor, no capacity, or attach failed)
     ///
     /// # Errors
     ///
-    /// - `SpawnError::Closed`: Runtime is shutting down or arena is closed
+    /// - `SpawnError::Closed`: Executor is shutting down or arena is closed
     /// - `SpawnError::NoCapacity`: No available task slots in the arena
     /// - `SpawnError::AttachFailed`: Failed to attach the future to the task
-    fn spawn<F, T>(&self, type_id: TypeId, location: &'static Location, future: F) -> Result<JoinHandle<T>, SpawnError>
+    fn spawn<F, T>(
+        &self,
+        type_id: TypeId,
+        location: &'static Location,
+        future: F,
+    ) -> Result<JoinHandle<T>, SpawnError>
     where
         F: IntoFuture<Output = T> + Send + 'static,
         F::IntoFuture: Future<Output = T> + Send + 'static,
@@ -143,7 +305,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> RuntimeInner<P, NUM_SEGS_P2> {
     {
         let arena = self.service.arena();
 
-        // Early return if runtime is shutting down or arena is closed
+        // Early return if executor is shutting down or arena is closed
         // This prevents spawning new tasks during shutdown
         if self.shutdown.load(Ordering::Acquire) || arena.is_closed() {
             return Err(SpawnError::Closed);
@@ -204,7 +366,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> RuntimeInner<P, NUM_SEGS_P2> {
         Ok(JoinHandle::new(shared))
     }
 
-    /// Initiates shutdown of the runtime.
+    /// Initiates shutdown of the executor.
     ///
     /// This method:
     /// 1. Sets the shutdown flag atomically (idempotent - safe to call multiple times)
@@ -228,14 +390,28 @@ impl<const P: usize, const NUM_SEGS_P2: usize> RuntimeInner<P, NUM_SEGS_P2> {
     }
 }
 
-pub struct RuntimeConfig {
+pub struct ExecutorConfig {
     task_arena: TaskArenaConfig,
     task_arena_options: TaskArenaOptions,
     min_workers: usize,
     max_workers: usize,
 }
 
-impl RuntimeConfig {
+impl ExecutorConfig {
+    pub fn new(
+        task_arena: TaskArenaConfig,
+        task_arena_options: TaskArenaOptions,
+        min_workers: usize,
+        max_workers: usize,
+    ) -> ExecutorConfig {
+        Self {
+            task_arena,
+            task_arena_options,
+            min_workers,
+            max_workers,
+        }
+    }
+
     pub fn with_max_tasks(
         min_workers: usize,
         max_workers: usize,
@@ -243,17 +419,17 @@ impl RuntimeConfig {
     ) -> io::Result<Self> {
         let min_workers = min_workers.max(1);
         let max_workers = max_workers.max(min_workers);
-        let max_tasks = max_tasks.min(max_workers);
+        let max_tasks = max_tasks.max(max_workers);
         let mut tasks_per_leaf = 4096;
         let mut leaf_count = (max_tasks / tasks_per_leaf).max(1);
 
-        // TODO: Implement: compute the min tasks_per_leaf
         if leaf_count < max_workers {
             leaf_count = max_workers;
+            tasks_per_leaf = (max_tasks / leaf_count).max(1);
         }
-        let leaf_count = max_workers.max(max_tasks / 4096);
+
         Ok(Self {
-            task_arena: TaskArenaConfig::new(leaf_count, 4096)?,
+            task_arena: TaskArenaConfig::new(leaf_count, tasks_per_leaf)?,
             task_arena_options: TaskArenaOptions::new(false, false),
             min_workers,
             max_workers,
@@ -261,13 +437,13 @@ impl RuntimeConfig {
     }
 }
 
-impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
-    /// Creates a new runtime instance with the specified configuration.
+impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
+    /// Creates a new executor instance with the specified configuration.
     ///
     /// This method initializes:
     /// 1. A task arena with the given configuration and options
     /// 2. A worker service with the specified number of worker threads
-    /// 3. Internal runtime state for task management
+    /// 3. Internal executor state for task management
     ///
     /// # Arguments
     ///
@@ -277,16 +453,16 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
     ///
     /// # Returns
     ///
-    /// * `Ok(Runtime)`: Successfully created runtime instance
+    /// * `Ok(Executor)`: Successfully created executor instance
     /// * `Err(io::Error)`: Error if arena initialization fails (e.g., memory mapping issues)
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use maniac::runtime::Runtime;
+    /// use maniac::runtime::Executor;
     /// use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
     ///
-    /// let runtime = Runtime::new(
+    /// let executor = Executor::new(
     ///     TaskArenaConfig::new(1, 8).unwrap(),
     ///     TaskArenaOptions::default(),
     ///     4, // Use 4 worker threads
@@ -297,7 +473,11 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
         config: TaskArenaConfig,
         options: TaskArenaOptions,
         worker_count: usize,
+        max_worker_count: usize,
     ) -> io::Result<Self> {
+        let worker_count = worker_count.max(1);
+        let max_worker_count = max_worker_count.max(worker_count);
+
         // Initialize the memory-mapped task arena with the provided configuration
         let arena = TaskArena::with_config(config, options)?;
 
@@ -307,7 +487,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
         // This ensures workers start immediately on WorkerService::start()
         let worker_config = WorkerServiceConfig {
             min_workers: worker_count,
-            max_workers: worker_count.max(crate::utils::num_cpus()),
+            max_workers: max_worker_count,
             ..WorkerServiceConfig::default()
         };
 
@@ -315,11 +495,11 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
         // This spawns worker threads that will execute tasks
         let service = WorkerService::<P, NUM_SEGS_P2>::start(arena, worker_config);
 
-        // Initialize shutdown flag to false (runtime is active)
+        // Initialize shutdown flag to false (executor is active)
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        // Create internal runtime state shared across all operations
-        let inner = Arc::new(RuntimeInner::<P, NUM_SEGS_P2> {
+        // Create internal executor state shared across all operations
+        let inner = Arc::new(ExecutorInner::<P, NUM_SEGS_P2> {
             shutdown: Arc::clone(&shutdown),
             service: Arc::clone(&service),
         });
@@ -327,10 +507,10 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
         Ok(Self { inner })
     }
 
-    /// Spawns an asynchronous task on the runtime, returning an awaitable join handle.
+    /// Spawns an asynchronous task on the executor, returning an awaitable join handle.
     ///
-    /// This is the primary method for scheduling async work on the runtime.
-    /// The spawned task will be executed by one of the runtime's worker threads.
+    /// This is the primary method for scheduling async work on the executor.
+    /// The spawned task will be executed by one of the executor's worker threads.
     ///
     /// # Arguments
     ///
@@ -344,14 +524,14 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
     /// # Example
     ///
     /// ```no_run
-    /// # use maniac::runtime::Runtime;
+    /// # use maniac::runtime::Executor;
     /// # use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
-    /// # let runtime = Runtime::new(
+    /// # let executor = Executor::new(
     /// #     TaskArenaConfig::new(1, 8).unwrap(),
     /// #     TaskArenaOptions::default(),
     /// #     1,
     /// # ).unwrap();
-    /// let handle = runtime.spawn(async {
+    /// let handle = executor.spawn(async {
     ///     // Your async code here
     ///     42
     /// })?;
@@ -374,24 +554,24 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Runtime<P, NUM_SEGS_P2> {
 
     /// Returns current arena statistics.
     ///
-    /// This provides insight into the runtime's current state, including:
+    /// This provides insight into the executor's current state, including:
     /// - Number of active tasks
     /// - Task capacity and utilization
     /// - Other arena-specific metrics
     ///
     /// # Returns
     ///
-    /// `TaskArenaStats` containing current runtime statistics
+    /// `TaskArenaStats` containing current executor statistics
     pub fn stats(&self) -> TaskArenaStats {
         self.inner.service.arena().stats()
     }
 }
 
-impl<const P: usize, const NUM_SEGS_P2: usize> Drop for Runtime<P, NUM_SEGS_P2> {
-    /// Cleans up the runtime when it goes out of scope.
+impl<const P: usize, const NUM_SEGS_P2: usize> Drop for Executor<P, NUM_SEGS_P2> {
+    /// Cleans up the executor when it goes out of scope.
     ///
     /// This implementation:
-    /// 1. Initiates shutdown of the runtime (closes arena, signals workers)
+    /// 1. Initiates shutdown of the executor (closes arena, signals workers)
     /// 2. Unparks any worker threads that might be waiting
     /// 3. Joins all worker threads to ensure clean shutdown
     ///
@@ -536,7 +716,7 @@ impl<T> JoinShared<T> {
     }
 }
 
-/// Awaitable join handle returned from [`Runtime::spawn`].
+/// Awaitable join handle returned from [`Executor::spawn`].
 ///
 /// This handle implements `Future<Output = T>` and can be awaited to get the
 /// result of the spawned task. The handle can be cloned and shared, allowing
@@ -545,14 +725,14 @@ impl<T> JoinShared<T> {
 /// # Example
 ///
 /// ```no_run
-/// # use maniac::runtime::Runtime;
+/// # use maniac::runtime::Executor;
 /// # use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
-/// # let runtime = Runtime::new(
+/// # let executor = Executor::new(
 /// #     TaskArenaConfig::new(1, 8).unwrap(),
 /// #     TaskArenaOptions::default(),
 /// #     1,
 /// # ).unwrap();
-/// let handle = runtime.spawn(async { 42 })?;
+/// let handle = executor.spawn(async { 42 })?;
 ///
 /// // Await the result
 /// let result = handle.await;
@@ -566,7 +746,7 @@ pub struct JoinHandle<T> {
 impl<T> JoinHandle<T> {
     /// Creates a new join handle from shared state.
     ///
-    /// This is an internal constructor used by `RuntimeInner::spawn`.
+    /// This is an internal constructor used by `ExecutorInner::spawn`.
     fn new(shared: Arc<JoinShared<T>>) -> Self {
         Self { shared }
     }
@@ -579,14 +759,14 @@ impl<T> JoinHandle<T> {
     /// # Example
     ///
     /// ```no_run
-    /// # use maniac::runtime::Runtime;
+    /// # use maniac::runtime::Executor;
     /// # use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
-    /// # let runtime = Runtime::new(
+    /// # let executor = Executor::new(
     /// #     TaskArenaConfig::new(1, 8).unwrap(),
     /// #     TaskArenaOptions::default(),
     /// #     1,
     /// # ).unwrap();
-    /// let handle = runtime.spawn(async { 42 })?;
+    /// let handle = executor.spawn(async { 42 })?;
     ///
     /// // Check if task is done (non-blocking)
     /// if handle.is_finished() {
@@ -631,10 +811,14 @@ mod tests {
     use std::task::{Context, RawWaker, RawWakerVTable};
     use std::time::Duration;
 
+    fn create_executor() -> DefaultExecutor {
+        DefaultExecutor::new_single_threaded()
+    }
+
     /// Creates a no-op waker for testing purposes.
     ///
     /// This waker does nothing when woken, which is useful for testing
-    /// scenarios where we don't need actual async runtime behavior.
+    /// scenarios where we don't need actual async executor behavior.
     fn noop_waker() -> Waker {
         unsafe fn clone(_: *const ()) -> RawWaker {
             RawWaker::new(std::ptr::null(), &VTABLE)
@@ -647,27 +831,22 @@ mod tests {
     /// Tests that a spawned task completes successfully and returns the correct result.
     ///
     /// This test:
-    /// 1. Creates a runtime with a single worker thread
+    /// 1. Creates a executor with a single worker thread
     /// 2. Spawns a task that increments an atomic counter
     /// 3. Awaits the task completion
     /// 4. Verifies the result and that the counter was incremented
     /// 5. Verifies that the task was properly cleaned up (active_tasks == 0)
     #[test]
-    fn runtime_spawn_completes() {
-        // Create a runtime with minimal configuration for testing
-        let runtime = Runtime::<10, 6>::new(
-            TaskArenaConfig::new(1, 8).unwrap(),
-            TaskArenaOptions::default(),
-            1, // Single worker thread
-        )
-        .expect("runtime");
+    fn executor_spawn_completes() {
+        // Create a executor with minimal configuration for testing
+        let executor = create_executor();
 
         // Create a shared counter to verify task execution
         let counter = Arc::new(AtomicUsize::new(0));
         let cloned = counter.clone();
 
         // Spawn a task that increments the counter and returns the new value
-        let join = runtime
+        let join = executor
             .spawn(async move { cloned.fetch_add(1, Ordering::Relaxed) + 1 })
             .expect("spawn");
 
@@ -679,28 +858,23 @@ mod tests {
         // Verify the counter was actually incremented
         assert_eq!(counter.load(Ordering::Relaxed), 1);
         // Verify the task was cleaned up after completion
-        assert_eq!(runtime.stats().active_tasks, 0);
+        assert_eq!(executor.stats().active_tasks, 0);
     }
 
     /// Tests that `JoinHandle::is_finished()` correctly reports task completion status.
     ///
     /// This test:
-    /// 1. Creates a runtime and spawns a simple task
+    /// 1. Creates a executor and spawns a simple task
     /// 2. Verifies `is_finished()` returns `false` before completion
     /// 3. Awaits the task to completion
     /// 4. Verifies that the task was properly cleaned up
     #[test]
     fn join_handle_reports_completion() {
-        // Create a runtime with minimal configuration
-        let runtime = Runtime::<10, 6>::new(
-            TaskArenaConfig::new(1, 4).unwrap(),
-            TaskArenaOptions::default(),
-            1, // Single worker thread
-        )
-        .expect("runtime");
+        // Create a executor with minimal configuration
+        let executor = create_executor();
 
         // Spawn an empty task (just completes immediately)
-        let join = runtime.spawn(async {}).expect("spawn");
+        let join = executor.spawn(async {}).expect("spawn");
 
         // Verify task is not finished immediately after spawning
         // (though it may complete very quickly, this check happens before awaiting)
@@ -710,6 +884,6 @@ mod tests {
         block_on(join);
 
         // Verify the task was cleaned up after completion
-        assert_eq!(runtime.stats().active_tasks, 0);
+        assert_eq!(executor.stats().active_tasks, 0);
     }
 }
