@@ -35,7 +35,7 @@ use task::{
     FutureAllocator, SpawnError, TaskArena, TaskArenaConfig, TaskArenaOptions, TaskArenaStats,
     TaskHandle,
 };
-use worker::{WorkerService, WorkerServiceConfig};
+use worker::{TickService, WorkerService, WorkerServiceConfig};
 
 use crate::num_cpus;
 
@@ -259,11 +259,14 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
 ///
 /// This structure holds the core components needed for task spawning and execution:
 /// - `shutdown`: Atomic flag indicating whether the executor is shutting down
+/// - `tick_service`: Shared tick service for time-based operations
 /// - `service`: Worker service that manages task scheduling and execution
 struct ExecutorInner<const P: usize, const NUM_SEGS_P2: usize> {
     /// Atomic flag indicating if the executor is shutting down.
     /// Used to prevent new tasks from being spawned during shutdown.
     shutdown: Arc<AtomicBool>,
+    /// Shared tick service for time-based operations across worker services.
+    tick_service: Arc<TickService>,
     /// Worker service that manages task scheduling, worker threads, and task execution.
     service: Arc<WorkerService<P, NUM_SEGS_P2>>,
 }
@@ -491,9 +494,14 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
             ..WorkerServiceConfig::default()
         };
 
+        // Create shared tick service for time-based operations
+        // This allows multiple worker services to share a single tick thread
+        let tick_service = TickService::new(worker_config.tick_duration);
+        tick_service.start();
+
         // Start the worker service with the arena and configuration
         // This spawns worker threads that will execute tasks
-        let service = WorkerService::<P, NUM_SEGS_P2>::start(arena, worker_config);
+        let service = WorkerService::<P, NUM_SEGS_P2>::start(arena, worker_config, &tick_service);
 
         // Initialize shutdown flag to false (executor is active)
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -501,6 +509,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
         // Create internal executor state shared across all operations
         let inner = Arc::new(ExecutorInner::<P, NUM_SEGS_P2> {
             shutdown: Arc::clone(&shutdown),
+            tick_service,
             service: Arc::clone(&service),
         });
 
