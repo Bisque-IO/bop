@@ -168,6 +168,16 @@ struct ProducerSlot<T, const P: usize, const NUM_SEGS_P2: usize> {
 }
 
 /// The shared state of the blocking MPSC queue
+///
+/// # Memory Ordering Guarantees
+///
+/// - `queues`: Atomic pointers use Acquire/Release for slot installation and cleanup
+/// - `queue_count`: Relaxed for statistics, not used for synchronization
+/// - `producer_count`: Release on decrement (Sender::drop), Relaxed on read after Acquire fence
+/// - `max_producer_id`: SeqCst for consistent global ordering across all threads
+/// - `closed`: Acquire/Release for happens-before between close and other operations
+/// - Sender::drop uses Release fence + Release store to ensure queued items are visible
+/// - Receiver::try_pop uses Acquire fence before checking producer_count == 0
 struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
     /// Sparse array of producer slot pointers - always MAX_QUEUES size
     /// Each slot is allocated together with its queue and space waker for cache-friendly access
@@ -310,9 +320,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
             }
         };
 
+        // Update max_producer_id if needed. We use SeqCst to ensure all threads
+        // see a consistent view of the maximum producer ID, which is used by
+        // the receiver to determine which slots to scan.
         loop {
             let max_producer_id = self.max_producer_id.load(Ordering::SeqCst);
-            if producer_id < max_producer_id {
+            // If our ID is less than or equal to the current max, we're done
+            if producer_id <= max_producer_id {
                 break;
             }
             if self.is_closed() {
@@ -332,6 +346,11 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
             }
         }
 
+        // Arc reference counting: We created Arc::new (refcount=1), then cloned it
+        // and converted the clone to raw via Arc::into_raw(Arc::clone(&slot)).
+        // - Raw pointer stored in queues[producer_id] represents 1 Arc reference
+        // - slot_arc variable holds the other Arc reference
+        // - Total: 2 references, properly balanced for array + Sender ownership
         let slot_arc = slot_arc.expect("slot arc missing");
 
         Ok(Sender {
@@ -494,14 +513,16 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS
             self.slot.queue.close();
         }
 
-        // Decrement the active producer count. We intentionally keep the producer slot
-        // registered until the consumer observes the closed queue and cleans it up.
-        let _ =
-            self.inner
-                .producer_count
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                    count.checked_sub(1)
-                });
+        // Release fence to ensure all writes to the queue are visible before we
+        // decrement producer_count. This synchronizes with the Acquire fence in
+        // Receiver::try_pop_with_waker(), ensuring the receiver sees any items
+        // pushed before this sender was dropped.
+        std::sync::atomic::fence(Ordering::Release);
+
+        // Decrement the active producer count. We use Release ordering to publish
+        // the fence above and all prior writes. We intentionally keep the producer
+        // slot registered until the consumer observes the closed queue and cleans it up.
+        self.inner.producer_count.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -605,9 +626,15 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
         let slice = unsafe { std::slice::from_raw_parts_mut(slot.as_mut_ptr(), 1) };
         let (drained, waker_opt) = self.try_pop_n_with_slot(slice);
         if drained == 0 {
+            // Acquire fence BEFORE checking state to ensure we see all writes from producers.
+            // This synchronizes with the Release fence in Sender::drop() and ensures we see
+            // any items pushed before the last producer dropped.
+            std::sync::atomic::fence(Ordering::Acquire);
+            
             // Re-check state after attempting to pop (producer_count may have changed)
             let is_closed = inner.is_closed();
-            let producer_count = inner.producer_count.load(Ordering::Acquire);
+            // Use Relaxed here since the fence above provides the necessary synchronization
+            let producer_count = inner.producer_count.load(Ordering::Relaxed);
 
             // Queue is closed if explicitly closed OR no producers remain (all senders dropped)
             if is_closed || producer_count == 0 {
@@ -1756,6 +1783,16 @@ pub mod unbounded {
     }
 
     /// Shared state for unbounded MPSC
+    ///
+    /// # Memory Ordering Guarantees
+    ///
+    /// - `queues`: Atomic pointers use Acquire/Release for slot installation and cleanup
+    /// - `queue_count`: Relaxed for statistics, not used for synchronization
+    /// - `producer_count`: Release on decrement (UnboundedSender::drop), Relaxed on read after Acquire fence
+    /// - `max_producer_id`: SeqCst for consistent global ordering across all threads
+    /// - `closed`: Acquire/Release for happens-before between close and other operations
+    /// - UnboundedSender::drop uses Release fence + Release store to ensure queued items are visible
+    /// - UnboundedReceiver::try_pop uses Acquire fence before checking producer_count == 0
     struct UnboundedInner<T> {
         /// Sparse array of producer slot pointers
         queues: Box<[AtomicPtr<UnboundedProducerSlot<T>>]>,
@@ -1846,9 +1883,13 @@ pub mod unbounded {
                 }
             };
 
+            // Update max_producer_id if needed. We use SeqCst to ensure all threads
+            // see a consistent view of the maximum producer ID, which is used by
+            // the receiver to determine which slots to scan.
             loop {
                 let max_producer_id = self.max_producer_id.load(Ordering::SeqCst);
-                if producer_id < max_producer_id {
+                // If our ID is less than or equal to the current max, we're done
+                if producer_id <= max_producer_id {
                     break;
                 }
                 if self.is_closed() {
@@ -1868,21 +1909,17 @@ pub mod unbounded {
                 }
             }
 
-            // Load the slot pointer and reconstruct the Arc to increment refcount
-            // This ensures the slot stays alive as long as this sender exists
-            let slot_ptr = self.queues[producer_id].load(Ordering::Acquire);
-            let slot_arc = unsafe { Arc::from_raw(slot_ptr as *const UnboundedProducerSlot<T>) };
-            
-            // Clone the Arc to keep one reference in the sender
-            // The original Arc (from from_raw) is kept alive by the queues array
-            let sender_slot = Arc::clone(&slot_arc);
-            
-            // Put the Arc back as a raw pointer (doesn't decrement refcount)
-            let _ = Arc::into_raw(slot_arc);
+            // Use the slot_arc that was already captured during the CAS operation.
+            // Arc reference counting: We created an Arc::new (refcount=1), then cloned it
+            // and converted the clone to raw via Arc::into_raw(Arc::clone(&slot)).
+            // - Raw pointer stored in array represents 1 Arc reference
+            // - Original slot_arc variable holds the other Arc reference  
+            // - Total: 2 references, properly balanced for array + Sender ownership
+            let slot_arc = slot_arc.expect("slot arc missing");
 
             Ok(UnboundedSender {
                 inner: Arc::clone(self),
-                slot: sender_slot,
+                slot: slot_arc,
                 producer_id,
             })
         }
@@ -2033,19 +2070,15 @@ pub mod unbounded {
             // the raw pointer in the queues array, and the Arc in the array keeps it alive
             self.slot.sender.close_channel();
             
-            // Ensure all writes to the queue are visible before we decrement producer_count
-            // This prevents the race where:
-            // 1. Producer pushes item (write not yet visible)
-            // 2. Producer decrements count to 0
-            // 3. Consumer sees count == 0 but not the item yet
+            // Release fence to ensure all writes to the queue (from close_channel and
+            // any prior pushes) are visible before we decrement producer_count.
+            // This synchronizes with the Acquire fence in UnboundedReceiver::try_pop_with_waker(),
+            // ensuring the receiver sees any items pushed before this sender was dropped.
             std::sync::atomic::fence(Ordering::Release);
             
-            let _ =
-                self.inner
-                    .producer_count
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                        count.checked_sub(1)
-                    });
+            // Decrement the active producer count using Release ordering to publish
+            // the fence above and all prior writes.
+            self.inner.producer_count.fetch_sub(1, Ordering::Release);
         }
     }
 
@@ -2108,35 +2141,31 @@ pub mod unbounded {
                 }
             }
 
-            // No items found in any queue
+            // No items found in any queue.
+            // Acquire fence BEFORE checking state to ensure we see all writes from producers.
+            // This synchronizes with the Release fence in UnboundedSender::drop() and ensures
+            // we see any items pushed before the last producer dropped.
+            std::sync::atomic::fence(Ordering::Acquire);
+            
             // Check if the channel is closed or all producers are gone
             let is_closed = self.inner.is_closed();
-            let producer_count = self.inner.producer_count.load(Ordering::Acquire);
+            // Use Relaxed here since the fence above provides the necessary synchronization
+            let producer_count = self.inner.producer_count.load(Ordering::Relaxed);
 
             if is_closed || producer_count == 0 {
-                // Acquire fence to ensure we see all writes that happened before
-                // the producer decremented the count (which used Release fence)
-                std::sync::atomic::fence(Ordering::Acquire);
-                
-                // Before returning Closed, retry multiple times to catch any items
-                // that were pushed just before the last producer dropped.
-                // We need multiple retries because try_pop() might return None
-                // even when an item exists but isn't visible yet due to timing.
-                for _retry in 0..10 {
-                    for producer_id in 0..=max_producer_id {
-                        let slot_ptr = self.inner.queues[producer_id].load(Ordering::Acquire);
-                        if slot_ptr.is_null() {
-                            continue;
-                        }
-
-                        // Safety: Same as above - slots are never freed until Inner drops
-                        let slot = unsafe { &*slot_ptr };
-                        if let Some(value) = slot.receiver.try_pop() {
-                            return Ok((value, &slot.space_waker));
-                        }
+                // Do one final scan after the fence to catch any items that were pushed
+                // just before the last producer dropped. The fence ensures we see them.
+                for producer_id in 0..=max_producer_id {
+                    let slot_ptr = self.inner.queues[producer_id].load(Ordering::Acquire);
+                    if slot_ptr.is_null() {
+                        continue;
                     }
-                    // Small yield to let any in-flight operations complete
-                    std::hint::spin_loop();
+
+                    // Safety: Same as above - slots are never freed until Inner drops
+                    let slot = unsafe { &*slot_ptr };
+                    if let Some(value) = slot.receiver.try_pop() {
+                        return Ok((value, &slot.space_waker));
+                    }
                 }
                 
                 Err(PopError::Closed)

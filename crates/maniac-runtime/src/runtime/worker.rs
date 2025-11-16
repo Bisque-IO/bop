@@ -1,229 +1,34 @@
 use super::deque::{Stealer, Worker as YieldWorker};
 use super::summary::Summary;
-use super::task::{
-    FutureAllocator, Task,
-    TaskArena, TaskHandle, TaskSlot,
-};
+use super::task::{FutureAllocator, Task, TaskArena, TaskHandle, TaskSlot};
 use super::timer::{Timer, TimerHandle};
 use super::timer_wheel::TimerWheel;
 use super::waker::WorkerWaker;
-use crate::{utils, PushError};
-use crate::runtime::mpsc;
 use crate::PopError;
+use crate::runtime::mpsc;
+use crate::runtime::ticker::{TickHandler, TickHandlerRegistration};
+use crate::{PushError, utils};
 use std::cell::{Cell, UnsafeCell};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{
-    AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering,
-};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rand::RngCore;
 use crate::utils::bits;
+use rand::RngCore;
 
 const DEFAULT_QUEUE_SEG_SHIFT: usize = 8;
 const DEFAULT_QUEUE_NUM_SEGS_SHIFT: usize = 8;
 const MAX_WORKER_LIMIT: usize = 512;
 
-const RND_MULTIPLIER: u64 = 0x5DEECE66D;
-const RND_ADDEND: u64 = 0xB;
-const RND_MASK: u64 = (1 << 48) - 1;
 const DEFAULT_WAKE_BURST: usize = 4;
 const FULL_SUMMARY_SCAN_CADENCE_MASK: u64 = 1024 * 8 - 1;
 const DEFAULT_TICK_DURATION_NS: u64 = 1 << 20; // ~1.05ms, power of two as required by TimerWheel
 const TIMER_TICKS_PER_WHEEL: usize = 1024 * 1;
 const TIMER_EXPIRE_BUDGET: usize = 4096;
 const MESSAGE_BATCH_SIZE: usize = 4096;
-
-/// Trait for services that need to be notified on each tick.
-pub trait TickHandler: Send + Sync {
-    /// Called on each tick with the current time in nanoseconds and tick count.
-    fn on_tick(&self, tick_count: u64, now_ns: u64);
-    
-    /// Called when the tick service is shutting down.
-    fn on_shutdown(&self);
-}
-
-/// Shared tick service that can coordinate multiple WorkerServices.
-pub struct TickService {
-    tick_duration: Duration,
-    handlers: Mutex<Vec<Arc<dyn TickHandler>>>,
-    shutdown: AtomicBool,
-    tick_thread: Mutex<Option<thread::JoinHandle<()>>>,
-    tick_stats: TickStats,
-}
-
-impl TickService {
-    /// Create a new TickService with the specified tick duration.
-    pub fn new(tick_duration: Duration) -> Arc<Self> {
-        Arc::new(Self {
-            tick_duration,
-            handlers: Mutex::new(Vec::new()),
-            shutdown: AtomicBool::new(false),
-            tick_thread: Mutex::new(None),
-            tick_stats: TickStats::default(),
-        })
-    }
-
-    /// Register a handler to be called on each tick.
-    pub fn register_handler(&self, handler: Arc<dyn TickHandler>) {
-        let mut handlers = self.handlers.lock().expect("handlers lock poisoned");
-        handlers.push(handler);
-    }
-
-    /// Start the tick thread if not already started.
-    pub fn start(self: &Arc<Self>) {
-        let mut tick_thread_guard = self.tick_thread.lock().unwrap();
-        if tick_thread_guard.is_some() {
-            return; // Already started
-        }
-
-        let service = Arc::clone(self);
-        let tick_duration = service.tick_duration;
-        
-        let handle = thread::spawn(move || {
-            let start = Instant::now();
-            let mut tick_count: u64 = 0;
-
-            loop {
-                let loop_start = Instant::now();
-
-                // Calculate target time for this tick to maintain precise timing
-                let target_time = start + tick_duration * (tick_count as u32 + 1);
-
-                if service.shutdown.load(Ordering::Acquire) {
-                    // Graceful shutdown: notify all handlers
-                    let handlers = service.handlers.lock().unwrap();
-                    for handler in handlers.iter() {
-                        handler.on_shutdown();
-                    }
-                    break;
-                }
-
-                // Calculate current time
-                let now_ns = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-
-                // Notify all handlers
-                let handlers = service.handlers.lock().unwrap();
-                for handler in handlers.iter() {
-                    handler.on_tick(tick_count, now_ns);
-                }
-                drop(handlers); // Release lock before sleeping
-
-                tick_count = tick_count.wrapping_add(1);
-
-                // Measure tick loop processing duration
-                let loop_end = Instant::now();
-                let loop_duration_ns = loop_end.duration_since(loop_start).as_nanos() as u64;
-
-                // Sleep until target time, accounting for processing time
-                let now = Instant::now();
-                let actual_sleep_ns =
-                    if let Some(sleep_duration) = target_time.checked_duration_since(now) {
-                        thread::sleep(sleep_duration);
-                        sleep_duration.as_nanos() as u64
-                    } else {
-                        // We're behind schedule - yield but don't sleep to catch up
-                        thread::yield_now();
-                        0
-                    };
-
-                // Calculate drift (positive = behind schedule, negative = ahead)
-                let after_sleep = Instant::now();
-                let drift_ns = after_sleep.duration_since(target_time).as_nanos() as i64;
-
-                // Update tick stats atomically
-                let prev_total = service
-                    .tick_stats
-                    .total_ticks
-                    .fetch_add(1, Ordering::Relaxed);
-                let new_total = prev_total + 1;
-
-                // Update running averages using incremental formula
-                let new_avg_duration = if prev_total == 0 {
-                    loop_duration_ns
-                } else {
-                    let prev_avg = service
-                        .tick_stats
-                        .avg_tick_loop_duration_ns
-                        .load(Ordering::Relaxed) as i64;
-                    let new_avg =
-                        prev_avg + ((loop_duration_ns as i64 - prev_avg) / new_total as i64);
-                    new_avg as u64
-                };
-                service
-                    .tick_stats
-                    .avg_tick_loop_duration_ns
-                    .store(new_avg_duration, Ordering::Relaxed);
-
-                let new_avg_sleep = if prev_total == 0 {
-                    actual_sleep_ns
-                } else {
-                    let prev_avg = service
-                        .tick_stats
-                        .avg_tick_loop_sleep_ns
-                        .load(Ordering::Relaxed) as i64;
-                    let new_avg =
-                        prev_avg + ((actual_sleep_ns as i64 - prev_avg) / new_total as i64);
-                    new_avg as u64
-                };
-                service
-                    .tick_stats
-                    .avg_tick_loop_sleep_ns
-                    .store(new_avg_sleep, Ordering::Relaxed);
-
-                // Track max drift using compare-exchange loop
-                let mut current_max = service.tick_stats.max_drift_ns.load(Ordering::Relaxed);
-                while drift_ns.abs() > current_max.abs() {
-                    match service.tick_stats.max_drift_ns.compare_exchange_weak(
-                        current_max,
-                        drift_ns,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => break,
-                        Err(actual) => current_max = actual,
-                    }
-                }
-
-                // Accumulate total drift
-                service
-                    .tick_stats
-                    .total_drift_ns
-                    .fetch_add(drift_ns, Ordering::Relaxed);
-            }
-        });
-
-        *tick_thread_guard = Some(handle);
-    }
-
-    /// Shutdown the tick service and wait for the thread to exit.
-    pub fn shutdown(&self) {
-        if self.shutdown.swap(true, Ordering::Release) {
-            return; // Already shutting down
-        }
-
-        // Join tick thread
-        if let Some(handle) = self.tick_thread.lock().unwrap().take() {
-            let _ = handle.join();
-        }
-    }
-
-    /// Returns a snapshot of the current tick thread statistics
-    pub fn tick_stats(&self) -> TickStatsSnapshot {
-        self.tick_stats.snapshot()
-    }
-}
-
-impl Drop for TickService {
-    fn drop(&mut self) {
-        if !self.shutdown.load(Ordering::Acquire) {
-            self.shutdown();
-        }
-    }
-}
 
 // Worker status is now managed via WorkerWaker:
 // - WorkerWaker.summary: mpsc queue signals (bits 0-63)
@@ -444,6 +249,8 @@ pub struct WorkerService<
     timers: Box<[UnsafeCell<TimerWheel<TimerHandle>>]>,
     shutdown: AtomicBool,
     register_mutex: Mutex<()>,
+    // RAII guard for tick service registration - automatically unregisters on drop
+    tick_registration: Mutex<Option<TickHandlerRegistration>>,
     // Flag to request immediate partition rebalancing on next tick (when workers spawn/exit)
     rebalance_requested: AtomicBool,
     // Tick-related counters for on_tick logic
@@ -463,7 +270,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     pub fn start(
         arena: TaskArena,
         config: WorkerServiceConfig,
-        tick_service: &Arc<TickService>,
+        tick_service: &Arc<super::ticker::TickService>,
     ) -> Arc<Self> {
         let tick_duration = config.tick_duration;
         let tick_duration_ns = normalize_tick_duration_ns(config.tick_duration);
@@ -578,6 +385,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             timers: timers.into_boxed_slice(),
             shutdown: AtomicBool::new(false),
             register_mutex: Mutex::new(()),
+            tick_registration: Mutex::new(None),
             rebalance_requested: AtomicBool::new(false),
             tick_health_check_interval: 100,
             tick_partition_rebalance_interval: 1000,
@@ -604,8 +412,24 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             // SummaryTree now references worker_count directly - no need to set it separately
         }
 
-        // Register this service with the TickService
-        tick_service.register_handler(service.clone());
+        // Register this service with the TickService and get RAII guard
+        let registration = {
+            let handler: Arc<dyn TickHandler> = Arc::clone(&service) as Arc<dyn TickHandler>;
+            tick_service
+                .register(handler)
+                .expect("Failed to register with TickService")
+        };
+
+        // Store the registration in the service
+        // SAFETY: We use raw pointer manipulation because we can't get a mutable reference to an Arc.
+        // This is safe because:
+        // 1. We're still in the constructor before returning the Arc
+        // 2. No other thread has access to this service yet
+        // 3. We're only writing to _tick_registration once during construction
+        unsafe {
+            let service_ptr = Arc::as_ptr(&service) as *mut WorkerService<P, NUM_SEGS_P2>;
+            *(*service_ptr).tick_registration.lock().unwrap() = Some(registration);
+        }
 
         service
     }
@@ -672,7 +496,11 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         result
     }
 
-    fn spawn_worker_internal(&self, service: &Arc<Self>, increment_count: bool) -> Result<(), PushError<()>> {
+    fn spawn_worker_internal(
+        &self,
+        service: &Arc<Self>,
+        increment_count: bool,
+    ) -> Result<(), PushError<()>> {
         let _lock = self.register_mutex.lock().expect("register_mutex poisoned");
         let now_ns = Instant::now().elapsed().as_nanos() as u64;
 
@@ -751,7 +579,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                 timer_resolution_ns,
                 timer_output,
                 message_batch: message_batch.into_boxed_slice(),
-                seed: rand::rng().next_u64(),
+                rng: crate::utils::Random::new(),
                 current_task: std::ptr::null_mut(),
             };
             CURRENT_TIMER_WHEEL.set(w.timer_wheel as *mut TimerWheel<TimerHandle>);
@@ -778,7 +606,9 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             // SummaryTree now references worker_count directly - no need to set it separately
             service_clone.worker_actives[worker_id].store(0, Ordering::SeqCst);
             // Request immediate partition rebalancing on next tick
-            service_clone.rebalance_requested.store(true, Ordering::Release);
+            service_clone
+                .rebalance_requested
+                .store(true, Ordering::Release);
         });
 
         // Store the join handle
@@ -838,16 +668,36 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     }
 
     pub fn shutdown(&self) {
+        *self.tick_registration.lock().expect("lock poisoned") = None;
         if self.shutdown.swap(true, Ordering::Release) {
             return;
         }
 
         #[cfg(debug_assertions)]
         {
-            eprintln!("[WorkerService] Shutdown initiated, joining worker threads...");
+            eprintln!("[WorkerService] Shutdown initiated, sending shutdown messages...");
         }
 
-        // Note: TickService will call on_shutdown which will handle worker shutdown coordination
+        // Send shutdown messages to all active workers
+        let max_workers = self.worker_max_id.load(Ordering::Relaxed);
+        for worker_id in 0..=max_workers {
+            if worker_id < self.worker_actives.len()
+                && self.worker_actives[worker_id].load(Ordering::Relaxed) != 0
+            {
+                // SAFETY: unsafe_try_push only requires a shared reference
+                let _ = unsafe {
+                    self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::Shutdown)
+                };
+                // Mark work available to wake up the worker
+                self.wakers[worker_id].mark_tasks();
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[WorkerService] Joining worker threads...");
+        }
+
         // Join all worker threads
         for (idx, worker_thread) in self.worker_threads.iter().enumerate() {
             if let Some(handle) = worker_thread.lock().unwrap().take() {
@@ -887,12 +737,8 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         summary != 0 || status != 0
     }
 
-
     /// Supervisor: Health monitoring - check for stuck workers and collect metrics
-    fn supervisor_health_check(
-        &self,
-        now_ns: u64,
-    ) {
+    fn supervisor_health_check(&self, now_ns: u64) {
         let max_workers = self.worker_max_id.load(Ordering::Relaxed);
         let tick_duration_ns = self.tick_duration_ns;
         let stuck_threshold_ns = tick_duration_ns * 10; // Worker is stuck if no progress for 10 ticks
@@ -920,7 +766,9 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             // Request health report from active workers
             if worker_id < self.tick_senders.len() {
                 // SAFETY: try_push only requires a shared reference, not a mutable one
-                let _ = unsafe { self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::ReportHealth) };
+                let _ = unsafe {
+                    self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::ReportHealth)
+                };
             }
         }
     }
@@ -952,10 +800,12 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
             // Assign contiguous range of leaves [partition_start, partition_end)
             // SAFETY: unsafe_try_push only requires a shared reference
-            let _ = unsafe { self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::RebalancePartitions {
-                partition_start,
-                partition_end,
-            }) };
+            let _ = unsafe {
+                self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::RebalancePartitions {
+                    partition_start,
+                    partition_end,
+                })
+            };
         }
 
         #[cfg(debug_assertions)]
@@ -969,6 +819,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
     /// Supervisor: Graceful shutdown coordination
     fn supervisor_graceful_shutdown(&self) {
+        let _ = self.tick_registration.lock().unwrap().take();
         let max_workers = self.worker_max_id.load(Ordering::Relaxed);
 
         #[cfg(debug_assertions)]
@@ -992,7 +843,9 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                     eprintln!("[Supervisor] Sending shutdown to worker {}", worker_id);
                 }
                 // SAFETY: unsafe_try_push only requires a shared reference
-                let _ = unsafe { self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::GracefulShutdown) };
+                let _ = unsafe {
+                    self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::GracefulShutdown)
+                };
                 // Mark work available to wake up the worker
                 self.wakers[worker_id].mark_tasks();
             }
@@ -1025,7 +878,9 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                 for worker_id in 0..max_workers {
                     if self.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
                         // SAFETY: unsafe_try_push only requires a shared reference
-                        let _ = unsafe { self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::Shutdown) };
+                        let _ = unsafe {
+                            self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::Shutdown)
+                        };
                     }
                 }
                 break;
@@ -1080,9 +935,11 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                         // Notify all workers of count change
                         for sender in self.tick_senders.iter() {
                             // SAFETY: unsafe_try_push only requires a shared reference
-                            let _ = unsafe { sender.unsafe_try_push(WorkerMessage::WorkerCountChanged {
-                                new_worker_count: new_count as u16,
-                            }) };
+                            let _ = unsafe {
+                                sender.unsafe_try_push(WorkerMessage::WorkerCountChanged {
+                                    new_worker_count: new_count as u16,
+                                })
+                            };
                         }
                     }
                     Err(_) => {
@@ -1102,7 +959,10 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                 if self.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
                     // Send graceful shutdown to this worker
                     // SAFETY: unsafe_try_push only requires a shared reference
-                    let _ = unsafe { self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::GracefulShutdown) };
+                    let _ = unsafe {
+                        self.tick_senders[worker_id]
+                            .unsafe_try_push(WorkerMessage::GracefulShutdown)
+                    };
 
                     #[cfg(debug_assertions)]
                     {
@@ -1193,6 +1053,10 @@ impl<const P: usize, const NUM_SEGS_P2: usize> CrossWorkerOps for WorkerService<
 }
 
 impl<const P: usize, const NUM_SEGS_P2: usize> TickHandler for WorkerService<P, NUM_SEGS_P2> {
+    fn tick_duration(&self) -> Duration {
+        self.tick_duration
+    }
+
     fn on_tick(&self, tick_count: u64, now_ns: u64) {
         // Update clock for all workers
         self.clock_ns.store(now_ns, Ordering::Release);
@@ -1245,6 +1109,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> TickHandler for WorkerService<P, 
 
 impl<const P: usize, const NUM_SEGS_P2: usize> Drop for WorkerService<P, NUM_SEGS_P2> {
     fn drop(&mut self) {
+        *self.tick_registration.lock().expect("lock poisoned") = None;
         if !self.shutdown.load(Ordering::Acquire) {
             self.shutdown();
         }
@@ -1326,61 +1191,6 @@ pub struct WakeStats {
     pub queue_release_calls: u64,
 }
 
-/// Statistics for the tick thread to monitor timing accuracy and performance
-#[derive(Debug)]
-pub struct TickStats {
-    /// Average duration of tick loop processing (excluding sleep) in nanoseconds
-    pub avg_tick_loop_duration_ns: AtomicU64,
-    /// Average sleep duration in nanoseconds
-    pub avg_tick_loop_sleep_ns: AtomicU64,
-    /// Maximum drift observed (positive = behind schedule, negative = ahead) in nanoseconds
-    pub max_drift_ns: AtomicI64,
-    /// Total number of ticks processed
-    pub total_ticks: AtomicU64,
-    /// Total cumulative drift in nanoseconds (positive = behind schedule)
-    pub total_drift_ns: AtomicI64,
-}
-
-impl Default for TickStats {
-    fn default() -> Self {
-        Self {
-            avg_tick_loop_duration_ns: AtomicU64::new(0),
-            avg_tick_loop_sleep_ns: AtomicU64::new(0),
-            max_drift_ns: AtomicI64::new(0),
-            total_ticks: AtomicU64::new(0),
-            total_drift_ns: AtomicI64::new(0),
-        }
-    }
-}
-
-impl TickStats {
-    /// Returns a snapshot of the current statistics
-    pub fn snapshot(&self) -> TickStatsSnapshot {
-        TickStatsSnapshot {
-            avg_tick_loop_duration_ns: self.avg_tick_loop_duration_ns.load(Ordering::Relaxed),
-            avg_tick_loop_sleep_ns: self.avg_tick_loop_sleep_ns.load(Ordering::Relaxed),
-            max_drift_ns: self.max_drift_ns.load(Ordering::Relaxed),
-            total_ticks: self.total_ticks.load(Ordering::Relaxed),
-            total_drift_ns: self.total_drift_ns.load(Ordering::Relaxed),
-        }
-    }
-}
-
-/// Snapshot of tick statistics at a point in time
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TickStatsSnapshot {
-    /// Average duration of tick loop processing (excluding sleep) in nanoseconds
-    pub avg_tick_loop_duration_ns: u64,
-    /// Average sleep duration in nanoseconds
-    pub avg_tick_loop_sleep_ns: u64,
-    /// Maximum drift observed (positive = behind schedule, negative = ahead) in nanoseconds
-    pub max_drift_ns: i64,
-    /// Total number of ticks processed
-    pub total_ticks: u64,
-    /// Total cumulative drift in nanoseconds (positive = behind schedule)
-    pub total_drift_ns: i64,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct WaitStrategy {
     pub spin_before_sleep: usize,
@@ -1432,7 +1242,7 @@ pub struct Worker<
     timer_resolution_ns: u64,
     timer_output: Vec<(u64, u64, TimerHandle)>,
     message_batch: Box<[WorkerMessage]>,
-    seed: u64,
+    rng: crate::utils::Random,
     pub(crate) current_task: *mut Task,
 }
 
@@ -1937,7 +1747,12 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         }
 
         if worker_id == self.worker_id {
-            if self.timer_wheel.cancel_timer(timer_id).unwrap_or(None).is_some() {
+            if self
+                .timer_wheel
+                .cancel_timer(timer_id)
+                .unwrap_or(None)
+                .is_some()
+            {
                 timer.mark_cancelled(timer_id);
                 return true;
             }
@@ -1960,13 +1775,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
     #[inline(always)]
     pub fn next_u64(&mut self) -> u64 {
-        let old_seed = self.seed;
-        let next_seed = (old_seed
-            .wrapping_mul(RND_MULTIPLIER)
-            .wrapping_add(RND_ADDEND))
-            & RND_MASK;
-        self.seed = next_seed;
-        next_seed >> 16
+        self.rng.next()
     }
 
     #[inline(always)]
@@ -2349,7 +2158,12 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             if let Some(worker_id) = timer.worker_id() {
                 if worker_id == self.worker_id {
                     let existing_id = timer.timer_id();
-                    if self.timer_wheel.cancel_timer(existing_id).unwrap_or(None).is_some() {
+                    if self
+                        .timer_wheel
+                        .cancel_timer(existing_id)
+                        .unwrap_or(None)
+                        .is_some()
+                    {
                         timer.reset();
                     }
                 } else {
@@ -2426,7 +2240,11 @@ pub fn schedule_timer_for_current_task(
         if let Some(existing_worker_id) = timer.worker_id() {
             if existing_worker_id == worker_id {
                 let existing_id = timer.timer_id();
-                if timer_wheel.cancel_timer(existing_id).unwrap_or(None).is_some() {
+                if timer_wheel
+                    .cancel_timer(existing_id)
+                    .unwrap_or(None)
+                    .is_some()
+                {
                     timer.reset();
                 }
             } else {

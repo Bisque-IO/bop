@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
 
-use rand::RngCore;
+use rand::{RngCore, rng};
 
 const RND_MULTIPLIER: u64 = 0x5DEECE66D;
 const RND_ADDEND: u64 = 0xB;
@@ -8,6 +8,30 @@ const RND_MASK: u64 = (1 << 48) - 1;
 
 pub struct Random {
     seed: u64,
+}
+
+impl Random {
+    pub fn new() -> Self {
+        Self { seed: rng().next_u64() }
+    }
+
+    pub fn new_with_seed(seed: u64) -> Self {
+        Self { seed }
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    pub fn next(&mut self) -> u64 {
+        let old_seed = self.seed;
+        let next_seed = (old_seed
+            .wrapping_mul(RND_MULTIPLIER)
+            .wrapping_add(RND_ADDEND))
+            & RND_MASK;
+        self.seed = next_seed;
+        next_seed >> 16
+    }
 }
 
 fn now_nanos() -> u64 {
@@ -30,19 +54,5 @@ pub fn random_usize() -> usize {
     THREAD_RND.with(|r| unsafe { &mut *r.get() }.next()) as usize
 }
 
-impl Random {
-    pub fn seed(&self) -> u64 {
-        self.seed
-    }
 
-    pub fn next(&mut self) -> u64 {
-        let old_seed = self.seed;
-        let next_seed = (old_seed
-            .wrapping_mul(RND_MULTIPLIER)
-            .wrapping_add(RND_ADDEND))
-            & RND_MASK;
-        self.seed = next_seed;
-        next_seed >> 16
-    }
-}
 

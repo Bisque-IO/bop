@@ -62,7 +62,8 @@
       "Bash(then echo \"exists\")",
       "Bash(else mkdir -p crates/bop-executor/examples)",
       "Bash(fi)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test:*)"
     ],
     "deny": [],
     "ask": []

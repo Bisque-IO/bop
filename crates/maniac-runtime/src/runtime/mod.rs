@@ -17,6 +17,9 @@ pub mod mpsc;
 pub mod signal;
 pub mod summary;
 pub mod task;
+pub mod ticker;
+#[cfg(test)]
+mod ticker_tests;
 pub mod timer;
 pub mod timer_wheel;
 pub mod waker;
@@ -31,28 +34,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::thread;
+use std::time::Duration;
 use task::{
     FutureAllocator, SpawnError, TaskArena, TaskArenaConfig, TaskArenaOptions, TaskArenaStats,
     TaskHandle,
 };
-use worker::{TickService, WorkerService, WorkerServiceConfig};
+use ticker::{TickService};
+use worker::{WorkerService, WorkerServiceConfig};
 
 use crate::num_cpus;
 
 pub fn new_single_threaded() -> io::Result<DefaultRuntime> {
+    let tick_service = TickService::new(Duration::from_millis(1));
+    tick_service.start();
     Ok(DefaultRuntime {
-        executor: DefaultExecutor::new(
+        executor: DefaultExecutor::new_with_tick_service(
             TaskArenaConfig::new(8, 4096).unwrap(),
             TaskArenaOptions::new(false, false),
             1,
             1,
+            Arc::clone(&tick_service),
         )?,
-        blocking: DefaultBlockingExecutor::new(
+        blocking: DefaultBlockingExecutor::new_with_tick_service(
             TaskArenaConfig::new(8, 4096).unwrap(),
             TaskArenaOptions::new(false, false),
             1,
             num_cpus() * 8,
+            Arc::clone(&tick_service),
         )?,
+        tick_service,
     })
 }
 
@@ -80,20 +90,25 @@ pub fn new_multi_threaded(
         blocking_max_workers,
         max_blocking_tasks,
     )?;
+    let tick_service = TickService::new(Duration::from_millis(1));
+    tick_service.start();
 
     Ok(DefaultRuntime {
-        executor: DefaultExecutor::new(
+        executor: DefaultExecutor::new_with_tick_service(
             config.task_arena,
             config.task_arena_options,
             config.min_workers,
             config.max_workers,
+            Arc::clone(&tick_service),
         )?,
-        blocking: DefaultBlockingExecutor::new(
+        blocking: DefaultBlockingExecutor::new_with_tick_service(
             blocking_config.task_arena,
             blocking_config.task_arena_options,
             blocking_config.min_workers,
             blocking_config.max_workers,
+            Arc::clone(&tick_service),
         )?,
+        tick_service,
     })
 }
 
@@ -105,6 +120,7 @@ pub struct Runtime<
 > {
     executor: Executor<P, NUM_SEGS_P2>,
     blocking: Executor<BLOCKING_P, BLOCKING_NUM_SEGS_P2>,
+    tick_service: Arc<TickService>,
 }
 
 pub type DefaultRuntime = Runtime<10, 8, 8, 5>;
@@ -238,6 +254,8 @@ impl<
 pub struct Executor<const P: usize = 10, const NUM_SEGS_P2: usize = 8> {
     /// Internal executor state shared across all operations
     inner: Arc<ExecutorInner<P, NUM_SEGS_P2>>,
+    /// Optionally owned tick service - if Some, this executor is responsible for shutting it down
+    owned_tick_service: Option<Arc<TickService>>,
 }
 
 pub type DefaultExecutor = Executor<10, 8>;
@@ -478,6 +496,56 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
         worker_count: usize,
         max_worker_count: usize,
     ) -> io::Result<Self> {
+        let worker_config = WorkerServiceConfig::default();
+        // Create shared tick service for time-based operations
+        // This allows multiple worker services to share a single tick thread
+        let tick_service = TickService::new(worker_config.tick_duration);
+        tick_service.start();
+
+        let mut executor = Self::new_with_tick_service(config, options, worker_count, max_worker_count, Arc::clone(&tick_service))?;
+        // Mark that this executor owns the tick service and is responsible for shutting it down
+        executor.owned_tick_service = Some(tick_service);
+        Ok(executor)
+    }
+
+        /// Creates a new executor instance with the specified configuration.
+    ///
+    /// This method initializes:
+    /// 1. A task arena with the given configuration and options
+    /// 2. A worker service with the specified number of worker threads
+    /// 3. Internal executor state for task management
+    ///
+    /// # Arguments
+    ///
+    /// * `config`: Configuration for the task arena (capacity, layout, etc.)
+    /// * `options`: Options for arena initialization (memory mapping, etc.)
+    /// * `worker_count`: Number of worker threads to spawn for task execution
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Executor)`: Successfully created executor instance
+    /// * `Err(io::Error)`: Error if arena initialization fails (e.g., memory mapping issues)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use maniac::runtime::Executor;
+    /// use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+    ///
+    /// let executor = Executor::new(
+    ///     TaskArenaConfig::new(1, 8).unwrap(),
+    ///     TaskArenaOptions::default(),
+    ///     4, // Use 4 worker threads
+    /// )?;
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn new_with_tick_service(
+        config: TaskArenaConfig,
+        options: TaskArenaOptions,
+        worker_count: usize,
+        max_worker_count: usize,
+        tick_service: Arc<TickService>,
+    ) -> io::Result<Self> {
         let worker_count = worker_count.max(1);
         let max_worker_count = max_worker_count.max(worker_count);
 
@@ -494,11 +562,6 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
             ..WorkerServiceConfig::default()
         };
 
-        // Create shared tick service for time-based operations
-        // This allows multiple worker services to share a single tick thread
-        let tick_service = TickService::new(worker_config.tick_duration);
-        tick_service.start();
-
         // Start the worker service with the arena and configuration
         // This spawns worker threads that will execute tasks
         let service = WorkerService::<P, NUM_SEGS_P2>::start(arena, worker_config, &tick_service);
@@ -513,7 +576,10 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
             service: Arc::clone(&service),
         });
 
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            owned_tick_service: None, // Not owned when using an external tick service
+        })
     }
 
     /// Spawns an asynchronous task on the executor, returning an awaitable join handle.
@@ -581,8 +647,9 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Drop for Executor<P, NUM_SEGS_P2>
     ///
     /// This implementation:
     /// 1. Initiates shutdown of the executor (closes arena, signals workers)
-    /// 2. Unparks any worker threads that might be waiting
-    /// 3. Joins all worker threads to ensure clean shutdown
+    /// 2. If this executor owns a tick service, shuts it down as well
+    /// 3. Unparks any worker threads that might be waiting
+    /// 4. Joins all worker threads to ensure clean shutdown
     ///
     /// Note: Currently, worker threads are managed by `WorkerService`, so the
     /// `workers` vector is typically empty. This code is prepared for future
@@ -590,6 +657,12 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Drop for Executor<P, NUM_SEGS_P2>
     fn drop(&mut self) {
         // Initiate shutdown process (idempotent)
         self.inner.shutdown();
+
+        // If this executor owns the tick service, shut it down
+        // This must happen after worker shutdown to avoid issues with the tick handler
+        if let Some(tick_service) = &self.owned_tick_service {
+            tick_service.shutdown();
+        }
 
         // // Unpark any waiting worker threads to allow them to exit
         // for worker in &self.workers {
