@@ -25,6 +25,8 @@ pub mod timer;
 pub mod timer_wheel;
 pub mod waker;
 pub mod worker;
+#[cfg(test)]
+mod preemption_tests;
 
 use std::any::TypeId;
 use std::future::{Future, IntoFuture};

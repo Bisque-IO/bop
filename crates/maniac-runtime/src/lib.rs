@@ -22,6 +22,7 @@
 //! - **Memory efficient**: Zero-copy operations where possible
 
 pub mod future;
+pub mod generator;
 mod loom_exports;
 pub mod runtime;
 mod spsc;

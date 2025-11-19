@@ -807,7 +807,7 @@ mod tests {
         });
         
         assert_eq!(consumed, 10);
-        assert_eq!(*sum.lock().unwrap(), (0..10).sum());
+        assert_eq!(*sum.lock().unwrap(), (0..10).sum::<u64>());
     }
 
     #[test]
@@ -1151,7 +1151,7 @@ mod tests {
         });
         
         assert_eq!(consumed, 10);
-        assert_eq!(*sum.lock().unwrap(), (0..10).sum());
+        assert_eq!(*sum.lock().unwrap(), (0..10).sum::<u64>());
         
         // Queue should be empty now
         assert_eq!(receiver.try_pop(), None);

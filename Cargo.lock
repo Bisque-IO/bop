@@ -1921,6 +1921,7 @@ dependencies = [
 name = "maniac-runtime"
 version = "0.1.0"
 dependencies = [
+ "cfg-if",
  "core_affinity",
  "criterion",
  "crossbeam",
@@ -1929,8 +1930,8 @@ dependencies = [
  "dashmap",
  "futures",
  "futures-lite",
- "generator 0.8.7",
  "libc",
+ "log 0.4.28",
  "loom 0.7.2",
  "once_cell",
  "pin-project-lite",

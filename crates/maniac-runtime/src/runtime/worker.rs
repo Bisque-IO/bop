@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 use crate::utils::bits;
 use rand::RngCore;
 
+#[cfg(unix)]
+use libc;
+
 const DEFAULT_QUEUE_SEG_SHIFT: usize = 8;
 const DEFAULT_QUEUE_NUM_SEGS_SHIFT: usize = 8;
 const MAX_WORKER_LIMIT: usize = 512;
@@ -90,18 +93,18 @@ pub fn current_timer_wheel<'a>() -> Option<&'a mut TimerWheel<TimerHandle>> {
 }
 
 /// Request that the current generator be pinned to the current task.
-/// 
+///
 /// This MUST be called from within a task that is executing inside a Worker's generator.
 /// When called, it signals the Worker to transfer ownership of the current generator
 /// to the task, allowing the task to have its own stackful coroutine execution context.
-/// 
+///
 /// # Returns
 /// `true` if the pin request was successfully registered, `false` if not in a task context.
-/// 
+///
 /// # Example
 /// ```ignore
 /// use maniac_runtime::runtime::worker::pin_current_generator;
-/// 
+///
 /// // Inside an async task running on a worker:
 /// async {
 ///     // Request to pin the current generator
@@ -116,7 +119,7 @@ pub fn pin_current_generator() -> bool {
     if task_ptr.is_null() {
         return false;
     }
-    
+
     // Set the flag so the generator will yield with pin signal
     GENERATOR_PIN_REQUESTED.with(|cell| cell.set(true));
     true
@@ -635,23 +638,21 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             CROSS_WORKER_OPS.set(Some(ops_ref));
 
             // Initialize preemption support for this worker thread
-            let _preemption_handle = crate::runtime::preemption::init_worker_preemption()
-                .ok(); // Ignore errors - preemption is optional
-            
+            let _preemption_handle = crate::runtime::preemption::init_worker_preemption().ok(); // Ignore errors - preemption is optional
+
             // Create a handle to this worker thread so it can be interrupted
-            // On Windows, we pass the preemption flag and generator scope atomic so APC can access them
+            // On Windows, we pass the preemption flag so APC can access it
             #[cfg(unix)]
             let thread_handle_result = crate::runtime::preemption::WorkerThreadHandle::current();
-            
+
             #[cfg(windows)]
-            let thread_handle_result = crate::runtime::preemption::WorkerThreadHandle::current(
-                &w.preemption_requested,
-                &w.generator_scope_atomic,
-            );
-            
+            let thread_handle_result =
+                crate::runtime::preemption::WorkerThreadHandle::current(&w.preemption_requested);
+
             #[cfg(not(any(unix, windows)))]
-            let thread_handle_result = crate::runtime::preemption::WorkerThreadHandle::current(&w.preemption_requested);
-            
+            let thread_handle_result =
+                crate::runtime::preemption::WorkerThreadHandle::current(&w.preemption_requested);
+
             if let Ok(thread_handle) = thread_handle_result {
                 *service_clone.worker_thread_handles[worker_id]
                     .lock()
@@ -1106,35 +1107,38 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             let _ = (most_loaded_id, least_loaded_id); // Suppress unused warnings
         }
     }
-    
+
     /// Interrupt a specific worker thread to trigger preemptive generator switching.
-    /// 
+    ///
     /// **The worker thread is NOT terminated!** It is only briefly interrupted to:
     /// 1. Pin its current generator to the running task (save stack state)
     /// 2. Create a new generator for itself
     /// 3. Continue executing with the new generator
-    /// 
+    ///
     /// The interrupted task can later be resumed with its pinned generator.
     /// This allows true preemptive multitasking at the task level.
-    /// 
+    ///
     /// Can be called from any thread (e.g., a timer thread).
-    /// 
+    ///
     /// # Arguments
     /// * `worker_id` - The ID of the worker to interrupt (0-based index)
-    /// 
+    ///
     /// # Returns
     /// * `Ok(true)` - Worker was successfully interrupted
     /// * `Ok(false)` - Worker doesn't exist (invalid ID)
     /// * `Err` - Interrupt operation failed (platform error)
-    pub fn interrupt_worker(&self, worker_id: usize) -> Result<bool, crate::runtime::preemption::PreemptionError> {
+    pub fn interrupt_worker(
+        &self,
+        worker_id: usize,
+    ) -> Result<bool, crate::runtime::preemption::PreemptionError> {
         if worker_id >= self.worker_thread_handles.len() {
             return Ok(false);
         }
-        
+
         let handle_guard = self.worker_thread_handles[worker_id]
             .lock()
             .expect("worker_thread_handles lock poisoned");
-        
+
         if let Some(ref handle) = *handle_guard {
             handle.interrupt()?;
             Ok(true)
@@ -1510,159 +1514,188 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
     pub(crate) fn run(&mut self) {
         const STACK_SIZE: usize = 2 * 1024 * 1024; // 2MB stack per generator
-        
+
         // Initialize thread-local preemption for this worker
         // On Unix: Signal handler will access this via thread-local
         // On Windows: Timer thread will access via WorkerThreadHandle
         crate::runtime::preemption::init_worker_thread_preemption(&self.preemption_requested);
-        
+
         // Outer loop: manages generator lifecycle
         // Creates new generators when current one gets pinned
         while !self.shutdown.load(Ordering::Relaxed) {
             // Use raw pointer for generator closure
             let worker_ptr = self as *mut Self;
-            
+
             // EXTREMELY UNSAFE: Convert pointer to usize to completely erase type and make it Send
             // This is safe because Worker is single-threaded and we never actually send across threads
             let worker_addr = worker_ptr as usize;
-            
-            let mut generator = generator::Gn::<()>::new_scoped_opt(STACK_SIZE, move |mut scope| -> usize {
-                // SAFETY: worker_addr is the address of a valid Worker that lives for the generator's lifetime
-                let worker = unsafe { &mut *(worker_addr as *mut Worker<P, NUM_SEGS_P2>) };
-                let mut spin_count = 0;
-                let waker_id = worker.worker_id as usize;
-                
-                // Register this generator's scope for non-cooperative preemption
-                let scope_ptr = &mut scope as *mut _ as *mut ();
-                
-                // Unix: Store in thread-local for signal handler
-                #[cfg(unix)]
-                crate::runtime::preemption::set_generator_scope(scope_ptr);
-                
-                // Windows: Store in atomic for APC callback
-                #[cfg(windows)]
-                worker.generator_scope_atomic.store(scope_ptr, std::sync::atomic::Ordering::Release);
 
-                // Inner loop: runs inside generator context
-                loop {
-                    // Check for shutdown
-                    if worker.shutdown.load(Ordering::Relaxed) {
-                        #[cfg(unix)]
-                        crate::runtime::preemption::clear_generator_scope();
-                        #[cfg(windows)]
-                        worker.generator_scope_atomic.store(std::ptr::null_mut(), std::sync::atomic::Ordering::Release);
-                        return 0; // Normal completion
-                    }
-                    
-                    // Process one iteration of work
-                    let mut progress = worker.run_once();
+            let mut generator =
+                crate::generator::Gn::<()>::new_scoped_opt(STACK_SIZE, move |mut scope| -> usize {
+                    // SAFETY: worker_addr is the address of a valid Worker that lives for the generator's lifetime
+                    let worker = unsafe { &mut *(worker_addr as *mut Worker<P, NUM_SEGS_P2>) };
+                    let mut spin_count = 0;
+                    let waker_id = worker.worker_id as usize;
 
-                    // Check if a task requested to pin this generator (manual pinning)
-                    let manual_pin_requested = GENERATOR_PIN_REQUESTED.with(|cell| {
-                        let requested = cell.get();
-                        if requested {
-                            cell.set(false); // Clear flag
-                            true
-                        } else {
-                            false
+                    // Register this generator's scope for non-cooperative preemption
+                    let scope_ptr = &mut scope as *mut _ as *mut ();
+
+                    // Unix: Store in thread-local for signal handler
+                    #[cfg(unix)]
+                    crate::runtime::preemption::set_generator_scope(scope_ptr);
+
+                    // Windows: Store in atomic for APC callback
+                    #[cfg(windows)]
+                    worker
+                        .generator_scope_atomic
+                        .store(scope_ptr, std::sync::atomic::Ordering::Release);
+
+                    // Inner loop: runs inside generator context
+                    loop {
+                        // Check for shutdown
+                        if worker.shutdown.load(Ordering::Relaxed) {
+                            #[cfg(unix)]
+                            crate::runtime::preemption::clear_generator_scope();
+                            #[cfg(windows)]
+                            worker
+                                .generator_scope_atomic
+                                .store(std::ptr::null_mut(), std::sync::atomic::Ordering::Release);
+                            return crate::generator::done();
                         }
-                    });
-                    
-                    // Check if preemption was requested (timer-based / signal-based)
-                    let preemption_requested = crate::runtime::preemption::check_and_clear_preemption(&worker.preemption_requested);
-                    
-                    if manual_pin_requested || preemption_requested {
-                        // Capture the current task
-                        let task_to_pin = CURRENT_TASK.with(|cell| cell.get());
-                        
-                        if !task_to_pin.is_null() {
-                            let task = unsafe { &*task_to_pin };
-                            
-                            // Check if task already has a pinned generator
-                            if task.has_pinned_generator() {
-                                // Scenario 2: Task has pinned generator (likely Poll mode)
-                                // Change its mode to Switch (interrupted poll on stack)
-                                // Don't pin worker generator - just mark task as needing mode change
-                                unsafe {
-                                    task.set_generator_run_mode(GeneratorRunMode::Switch);
-                                }
-                                // Continue worker loop normally with worker generator
-                                scope.yield_(0);
-                                continue;
+
+                        // Process one iteration of work
+                        let mut progress = worker.run_once();
+
+                        // Check if a task requested to pin this generator (manual pinning)
+                        let manual_pin_requested = GENERATOR_PIN_REQUESTED.with(|cell| {
+                            let requested = cell.get();
+                            if requested {
+                                cell.set(false); // Clear flag
+                                true
                             } else {
-                                // Scenario 1: Task has no pinned generator
-                                // Promote worker generator to task with Switch mode
-                                GENERATOR_PIN_TASK.with(|cell| cell.set(task_to_pin));
-                                
-                                // Generator needs to be pinned - yield and we'll break out after
-                                scope.yield_(0);
-                                #[cfg(unix)]
-                                crate::runtime::preemption::clear_generator_scope();
-                                #[cfg(windows)]
-                                worker.generator_scope_atomic.store(std::ptr::null_mut(), std::sync::atomic::Ordering::Release);
-                                return 0;
+                                false
                             }
+                        });
+
+                        // Check if preemption was requested (timer-based / signal-based)
+                        let preemption_requested =
+                            crate::runtime::preemption::check_and_clear_preemption(
+                                &worker.preemption_requested,
+                            );
+
+                        if manual_pin_requested || preemption_requested {
+                            // Capture the current task
+                            let task_to_pin = CURRENT_TASK.with(|cell| cell.get());
+
+                            if !task_to_pin.is_null() {
+                                let task = unsafe { &*task_to_pin };
+
+                                // Check if task already has a pinned generator
+                                if task.has_pinned_generator() {
+                                    // Scenario 2: Task has pinned generator (likely Poll mode)
+                                    // Change its mode to Switch (interrupted poll on stack)
+                                    // Don't pin worker generator - just mark task as needing mode change
+                                    unsafe {
+                                        task.set_generator_run_mode(GeneratorRunMode::Switch);
+                                    }
+                                    // Continue worker loop normally with worker generator
+                                    scope.yield_(crate::runtime::preemption::GeneratorYieldReason::Cooperative.as_usize());
+                                    continue;
+                                } else {
+                                    // Scenario 1: Task has no pinned generator
+                                    // Promote worker generator to task with Switch mode
+                                    GENERATOR_PIN_TASK.with(|cell| cell.set(task_to_pin));
+
+                                    // Generator needs to be pinned - yield and we'll break out after
+                                    scope.yield_(crate::runtime::preemption::GeneratorYieldReason::Cooperative.as_usize());
+
+                                    // FIX: Unblock SIGVTALRM after yielding from signal handler context
+                                    // When SIGVTALRM handler calls scope.yield_(), the signal remains blocked
+                                    // in the thread's signal mask. We must explicitly unblock it to allow
+                                    // future preemptions to work correctly.
+                                    #[cfg(unix)]
+                                    unsafe {
+                                        let mut set: libc::sigset_t = std::mem::zeroed();
+                                        libc::sigemptyset(&mut set);
+                                        libc::sigaddset(&mut set, libc::SIGVTALRM);
+                                        libc::sigprocmask(
+                                            libc::SIG_UNBLOCK,
+                                            &set,
+                                            std::ptr::null_mut(),
+                                        );
+                                    }
+
+                                    #[cfg(unix)]
+                                    crate::runtime::preemption::clear_generator_scope();
+                                    #[cfg(windows)]
+                                    worker.generator_scope_atomic.store(
+                                        std::ptr::null_mut(),
+                                        std::sync::atomic::Ordering::Release,
+                                    );
+                                    return crate::generator::done();
+                                }
+                            }
+                            // If no current task, just continue (shouldn't happen during preemption)
                         }
-                        // If no current task, just continue (shouldn't happen during preemption)
-                    }
 
-                    if !progress {
-                        spin_count += 1;
+                        if !progress {
+                            spin_count += 1;
 
-                        if spin_count >= worker.wait_strategy.spin_before_sleep {
-                            core::hint::spin_loop();
-                            progress = worker.run_once_exhaustive();
+                            if spin_count >= worker.wait_strategy.spin_before_sleep {
+                                core::hint::spin_loop();
+                                progress = worker.run_once_exhaustive();
 
-                            if progress {
-                                spin_count = 0;
-                                scope.yield_(0);
+                                if progress {
+                                    spin_count = 0;
+                                    scope.yield_(crate::runtime::preemption::GeneratorYieldReason::Cooperative.as_usize());
+                                    continue;
+                                }
+                            } else if spin_count < worker.wait_strategy.spin_before_sleep {
+                                core::hint::spin_loop();
+                                if spin_count % 100 == 0 {
+                                    scope.yield_(crate::runtime::preemption::GeneratorYieldReason::Cooperative.as_usize());
+                                }
                                 continue;
                             }
-                        } else if spin_count < worker.wait_strategy.spin_before_sleep {
-                            core::hint::spin_loop();
-                            if spin_count % 100 == 0 {
-                                scope.yield_(0);
+
+                            // Calculate park duration considering timer deadlines
+                            let park_duration = worker.calculate_park_duration();
+
+                            // Sync partition summary from SummaryTree before parking
+                            worker.service.wakers[waker_id].sync_partition_summary(
+                                worker.partition_start,
+                                worker.partition_end,
+                                &worker.service.summary().leaf_words,
+                            );
+
+                            // Park on WorkerWaker with timer-aware timeout
+                            // On Windows, also use alertable wait for APC-based preemption
+                            match park_duration {
+                                Some(duration) if duration.is_zero() => {}
+                                Some(duration) => {
+                                    // On Windows, WorkerWaker uses alertable waits to allow APC execution
+                                    worker.service.wakers[waker_id].acquire_timeout(duration);
+                                }
+                                None => {
+                                    // On Windows, WorkerWaker uses alertable waits to allow APC execution
+                                    worker.service.wakers[waker_id]
+                                        .acquire_timeout(Duration::from_millis(250));
+                                }
                             }
-                            continue;
+                            spin_count = 0;
+                        } else {
+                            spin_count = 0;
+                            scope.yield_(crate::runtime::preemption::GeneratorYieldReason::Cooperative.as_usize());
                         }
-
-                        // Calculate park duration considering timer deadlines
-                        let park_duration = worker.calculate_park_duration();
-
-                        // Sync partition summary from SummaryTree before parking
-                        worker.service.wakers[waker_id].sync_partition_summary(
-                            worker.partition_start,
-                            worker.partition_end,
-                            &worker.service.summary().leaf_words,
-                        );
-
-                        // Park on WorkerWaker with timer-aware timeout
-                        // On Windows, also use alertable wait for APC-based preemption
-                        match park_duration {
-                            Some(duration) if duration.is_zero() => {}
-                            Some(duration) => {
-                                // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                                worker.service.wakers[waker_id].acquire_timeout(duration);
-                            }
-                            None => {
-                                // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                                worker.service.wakers[waker_id].acquire_timeout(Duration::from_millis(250));
-                            }
-                        }
-                        spin_count = 0;
-                    } else {
-                        spin_count = 0;
-                        scope.yield_(0);
                     }
-                }
-            });
-            
+                });
+
             // Drive the generator until completion or until a task needs to be pinned
             // The generator will yield and set GENERATOR_PIN_TASK if pinning is needed
             for _ in &mut generator {
                 // Just consume yields - the generator handles pin detection internally
             }
-            
+
             // Check if a task captured the generator for pinning
             // This is set inside the generator loop when preemption/manual pin is detected
             let task_ptr = GENERATOR_PIN_TASK.with(|cell| {
@@ -1672,40 +1705,40 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 }
                 ptr
             });
-            
+
             if !task_ptr.is_null() {
                 // A task requested to pin this generator
                 // Transfer generator ownership to the task
                 // SAFETY: task_ptr is valid - it was captured during task execution
                 let task = unsafe { &*task_ptr };
-                
+
                 // Convert generator to a boxed iterator
                 // SAFETY: The generator's lifetime is tied to the Worker which outlives the task
                 let boxed_iter: Box<dyn Iterator<Item = usize> + 'static> = unsafe {
                     std::mem::transmute(Box::new(generator) as Box<dyn Iterator<Item = usize>>)
                 };
-                
+
                 // Pin with Switch mode - this generator has interrupted poll on stack
                 unsafe {
                     task.pin_generator(boxed_iter, GeneratorRunMode::Switch);
                 }
-                
+
                 // Re-schedule the preempted task in the yield queue for work-stealing
                 // Preempted tasks are "hot" (CPU-bound) and should be treated like yields
                 if let Some(slot) = task.slot() {
                     let handle = TaskHandle::from_task(task);
-                    
+
                     // Mark as yielded so it stays in EXECUTING state
                     task.mark_yielded();
                     task.record_yield();
-                    
+
                     // Enqueue to yield queue - enables work stealing!
                     self.enqueue_yield(handle);
-                    
+
                     // Update stats
                     self.stats.yielded_count += 1;
                 }
-                
+
                 // Continue outer loop to create a new generator
             } else {
                 // Generator completed normally (shutdown)
@@ -2120,7 +2153,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                         // Park with timeout on WorkerWaker
                         // On Windows, WorkerWaker uses alertable waits to allow APC execution
                         let timed_out = !self.service.wakers[waker_id].acquire_timeout(timeout);
-                        
+
                         if timed_out {
                             // Timed out - possibly for timer deadline
                             return false;
@@ -2355,14 +2388,14 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     #[inline(always)]
     fn poll_handle(&mut self, handle: TaskHandle) {
         let task = handle.task();
-        
+
         // Check if this task has a pinned generator
         if task.has_pinned_generator() {
             // Poll the task by resuming its pinned generator
             self.poll_task_with_pinned_generator(handle, task);
             return;
         }
-        
+
         struct ActiveTaskGuard;
         impl Drop for ActiveTaskGuard {
             fn drop(&mut self) {
@@ -2383,7 +2416,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
         self.poll_task(handle, task);
     }
-    
+
     /// Poll a task that has a pinned generator
     fn poll_task_with_pinned_generator(&mut self, handle: TaskHandle, task: &Task) {
         struct ActiveTaskGuard;
@@ -2398,7 +2431,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         self.stats.tasks_polled += 1;
 
         let mode = task.generator_run_mode();
-        
+
         match mode {
             GeneratorRunMode::Switch => {
                 // Switch mode: Generator has interrupted poll on stack
@@ -2417,7 +2450,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             }
         }
     }
-    
+
     /// Handle Switch mode: resume generator once to complete interrupted poll,
     /// then transition to Poll mode or finish task
     fn poll_task_switch_mode(&mut self, handle: TaskHandle, task: &Task) {
@@ -2429,7 +2462,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                     // Generator yielded after completing poll
                     // Check if task still has a future (if not, task completed during poll)
                     let future_ptr = task.take_future();
-                    
+
                     if future_ptr.is_none() {
                         // Task completed during the interrupted poll, clean up generator
                         unsafe {
@@ -2461,7 +2494,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             self.stats.completed_count = self.stats.completed_count.saturating_add(1);
         }
     }
-    
+
     /// Handle Poll mode: generator contains poll loop, resume to continue task
     fn poll_task_poll_mode(&mut self, handle: TaskHandle, task: &Task) {
         let generator = unsafe { task.get_pinned_generator() };
@@ -2505,53 +2538,53 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             self.stats.completed_count = self.stats.completed_count.saturating_add(1);
         }
     }
-    
+
     /// Create a Poll mode generator for a task
     /// This generator wraps task.poll_future() in a loop
     fn create_poll_mode_generator(&mut self, handle: TaskHandle, task: &Task) {
         const STACK_SIZE: usize = 512 * 1024; // 512KB stack
-        
+
         // Capture task pointer as usize for Send safety
         let task_addr = task as *const Task as usize;
         let handle_copy = handle;
-        
-        let generator = generator::Gn::<()>::new_scoped_opt(STACK_SIZE, move |mut scope| -> usize {
-            let task = unsafe { &*(task_addr as *const Task) };
-            
-            loop {
-                // Create waker and context
-                let waker = unsafe { task.waker_yield() };
-                let mut cx = Context::from_waker(&waker);
-                
-                // Poll the task's future
-                let poll_result = unsafe { task.poll_future(&mut cx) };
-                
-                match poll_result {
-                    Some(Poll::Ready(())) => {
-                        // Task complete - return from generator
-                        return 1; // Status code: task complete
-                    }
-                    Some(Poll::Pending) => {
-                        // Task still pending - yield and continue loop
-                        scope.yield_(0);
-                    }
-                    None => {
-                        // Future is gone, task complete
-                        return 2; // Status code: future dropped
+
+        let generator =
+            crate::generator::Gn::<()>::new_scoped_opt(STACK_SIZE, move |mut scope| -> usize {
+                let task = unsafe { &*(task_addr as *const Task) };
+
+                loop {
+                    // Create waker and context
+                    let waker = unsafe { task.waker_yield() };
+                    let mut cx = Context::from_waker(&waker);
+
+                    // Poll the task's future
+                    let poll_result = unsafe { task.poll_future(&mut cx) };
+
+                    match poll_result {
+                        Some(Poll::Ready(())) => {
+                            // Task complete - return from generator
+                            return 1; // Status code: task complete
+                        }
+                        Some(Poll::Pending) => {
+                            // Task still pending - yield and continue loop
+                            scope.yield_(crate::runtime::preemption::GeneratorYieldReason::Cooperative.as_usize());
+                        }
+                        None => {
+                            // Future is gone, task complete
+                            return 2; // Status code: future dropped
+                        }
                     }
                 }
-            }
-        });
-        
+            });
+
         // Store generator in task with Poll mode
-        let boxed_iter: Box<dyn Iterator<Item = usize> + 'static> = unsafe {
-            std::mem::transmute(Box::new(generator) as Box<dyn Iterator<Item = usize>>)
-        };
-        
+        let boxed_iter: Box<dyn Iterator<Item = usize> + 'static> =
+            unsafe { std::mem::transmute(Box::new(generator) as Box<dyn Iterator<Item = usize>>) };
+
         unsafe {
             task.pin_generator(boxed_iter, GeneratorRunMode::Poll);
         }
-        
+
         // Re-enqueue task for next poll with the new generator
         self.enqueue_yield(handle_copy);
     }

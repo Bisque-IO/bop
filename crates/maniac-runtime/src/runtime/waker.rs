@@ -171,13 +171,8 @@ pub struct WorkerWaker {
     /// Mutex for condvar (only used in blocking paths)
     m: Mutex<()>,
 
-    /// Condvar for parking/waking threads (Unix)
-    #[cfg(not(windows))]
+    /// Condvar for parking/waking threads
     cv: Condvar,
-    
-    /// Alertable event for parking/waking threads with APC support (Windows)
-    #[cfg(windows)]
-    alertable_event: crate::runtime::preemption::alertable_wait::AlertableEvent,
 }
 
 impl WorkerWaker {
@@ -194,11 +189,7 @@ impl WorkerWaker {
             worker_count: CachePadded::new(AtomicUsize::new(0)),
             partition_summary: CachePadded::new(AtomicU64::new(0)),
             m: Mutex::new(()),
-            #[cfg(not(windows))]
             cv: Condvar::new(),
-            #[cfg(windows)]
-            alertable_event: crate::runtime::preemption::alertable_wait::AlertableEvent::new()
-                .expect("Failed to create alertable event for WorkerWaker"),
         }
     }
 
@@ -686,32 +677,13 @@ impl WorkerWaker {
         }
         let mut g = self.m.lock().expect("waker mutex poisoned");
         self.sleepers.fetch_add(1, Ordering::Relaxed);
-        
-        #[cfg(not(windows))]
-        {
-            loop {
-                if self.try_acquire() {
-                    self.sleepers.fetch_sub(1, Ordering::Relaxed);
-                    return;
-                }
-                g = self.cv.wait(g).expect("waker condvar wait poisoned");
+
+        loop {
+            if self.try_acquire() {
+                self.sleepers.fetch_sub(1, Ordering::Relaxed);
+                return;
             }
-        }
-        
-        #[cfg(windows)]
-        {
-            loop {
-                if self.try_acquire() {
-                    self.sleepers.fetch_sub(1, Ordering::Relaxed);
-                    return;
-                }
-                // Release mutex during wait
-                drop(g);
-                // Alertable wait - allows APCs to execute for preemption
-                let _ = self.alertable_event.wait_alertable(None);
-                // Reacquire mutex
-                g = self.m.lock().expect("waker mutex poisoned");
-            }
+            g = self.cv.wait(g).expect("waker condvar wait poisoned");
         }
     }
 
@@ -750,51 +722,24 @@ impl WorkerWaker {
         let start = std::time::Instant::now();
         let mut g = self.m.lock().expect("waker mutex poisoned");
         self.sleepers.fetch_add(1, Ordering::Relaxed);
-        
-        #[cfg(not(windows))]
-        {
-            while start.elapsed() < timeout {
-                if self.try_acquire() {
-                    self.sleepers.fetch_sub(1, Ordering::Relaxed);
-                    return true;
-                }
-                let left = timeout.saturating_sub(start.elapsed());
-                let (gg, res) = self
-                    .cv
-                    .wait_timeout(g, left)
-                    .expect("waker condvar wait poisoned");
-                g = gg;
-                if res.timed_out() {
-                    break;
-                }
+
+        while start.elapsed() < timeout {
+            if self.try_acquire() {
+                self.sleepers.fetch_sub(1, Ordering::Relaxed);
+                return true;
             }
-            self.sleepers.fetch_sub(1, Ordering::Relaxed);
-            false
-        }
-        
-        #[cfg(windows)]
-        {
-            while start.elapsed() < timeout {
-                if self.try_acquire() {
-                    self.sleepers.fetch_sub(1, Ordering::Relaxed);
-                    return true;
-                }
-                let left = timeout.saturating_sub(start.elapsed());
-                // Release mutex during wait
-                drop(g);
-                // Alertable wait with timeout - allows APCs to execute for preemption
-                let result = self.alertable_event.wait_alertable(Some(left));
-                // Reacquire mutex
-                g = self.m.lock().expect("waker mutex poisoned");
-                
-                use crate::runtime::preemption::alertable_wait::WaitResult;
-                if result == WaitResult::Timeout {
-                    break;
-                }
+            let left = timeout.saturating_sub(start.elapsed());
+            let (gg, res) = self
+                .cv
+                .wait_timeout(g, left)
+                .expect("waker condvar wait poisoned");
+            g = gg;
+            if res.timed_out() {
+                break;
             }
-            self.sleepers.fetch_sub(1, Ordering::Relaxed);
-            false
         }
+        self.sleepers.fetch_sub(1, Ordering::Relaxed);
+        false
     }
 
     /// Releases `n` permits and wakes up to `n` sleeping threads.
@@ -830,21 +775,9 @@ impl WorkerWaker {
         }
         self.permits.fetch_add(n as u64, Ordering::Release);
         let to_wake = n.min(self.sleepers.load(Ordering::Relaxed));
-        
-        #[cfg(not(windows))]
-        {
-            for _ in 0..to_wake {
-                self.cv.notify_one();
-            }
-        }
-        
-        #[cfg(windows)]
-        {
-            // On Windows, signal the alertable event for each thread to wake
-            // The auto-reset event will wake one thread per signal
-            for _ in 0..to_wake {
-                self.alertable_event.signal();
-            }
+
+        for _ in 0..to_wake {
+            self.cv.notify_one();
         }
     }
 
