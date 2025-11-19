@@ -14,6 +14,7 @@
 
 pub mod deque;
 pub mod mpsc;
+pub mod preemption;
 pub mod signal;
 pub mod summary;
 pub mod task;
@@ -639,6 +640,20 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
     /// `TaskArenaStats` containing current executor statistics
     pub fn stats(&self) -> TaskArenaStats {
         self.inner.service.arena().stats()
+    }
+    
+    /// Returns a reference to the underlying worker service.
+    ///
+    /// This allows direct access to worker service operations such as:
+    /// - Interrupting workers for preemptive scheduling
+    /// - Accessing worker statistics and health information
+    /// - Managing worker threads dynamically
+    ///
+    /// # Returns
+    ///
+    /// An `Arc` to the `WorkerService` managing this executor's workers
+    pub fn service(&self) -> &Arc<WorkerService<P, NUM_SEGS_P2>> {
+        &self.inner.service
     }
 }
 

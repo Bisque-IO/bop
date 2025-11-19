@@ -390,6 +390,10 @@ pub struct Task {
     slot_ptr: AtomicPtr<TaskSlot>,
     summary_tree_ptr: *const Summary,
     future_ptr: AtomicPtr<()>,
+    // Generator pinning support: when a task pins a generator, it gets dedicated execution
+    pinned_generator_ptr: AtomicPtr<()>,
+    // Generator run mode: 0 = None, 1 = Switch (preempted), 2 = Poll (explicit/loop)
+    generator_run_mode: AtomicU8,
     // Safety: stats are mutated without synchronization based on executor guarantees that
     // only the owning worker thread records updates while other threads may only clone/copy.
     stats: UnsafeCell<TaskStats>,
@@ -397,6 +401,18 @@ pub struct Task {
 
 unsafe impl Send for Task {}
 unsafe impl Sync for Task {}
+
+/// Generator run modes
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratorRunMode {
+    /// No generator pinned
+    None = 0,
+    /// Switch mode: Generator has interrupted poll on stack (one-shot resume)
+    Switch = 1,
+    /// Poll mode: Generator contains poll loop (multi-shot resume)
+    Poll = 2,
+}
 
 impl Task {
     const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
@@ -437,6 +453,8 @@ impl Task {
                     yielded: AtomicBool::new(false),
                     cpu_time_enabled: AtomicBool::new(false),
                     future_ptr: AtomicPtr::new(ptr::null_mut()),
+                    pinned_generator_ptr: AtomicPtr::new(ptr::null_mut()),
+                    generator_run_mode: AtomicU8::new(GeneratorRunMode::None as u8),
                     stats: UnsafeCell::new(TaskStats::default()),
                 },
             );
@@ -786,6 +804,12 @@ impl Task {
     pub(crate) fn clear_yielded(&self) {
         self.yielded.store(false, Ordering::Relaxed);
     }
+    
+    /// Mark this task as yielded (for preemption or cooperative yields)
+    #[inline(always)]
+    pub(crate) fn mark_yielded(&self) {
+        self.yielded.store(true, Ordering::Relaxed);
+    }
 
     #[inline(always)]
     pub fn is_yielded(&self) -> bool {
@@ -916,9 +940,68 @@ impl Task {
         self.yielded.store(false, Ordering::Relaxed);
         self.cpu_time_enabled.store(false, Ordering::Relaxed);
         self.future_ptr.store(ptr::null_mut(), Ordering::Relaxed);
+        self.pinned_generator_ptr.store(ptr::null_mut(), Ordering::Relaxed);
+        self.generator_run_mode.store(GeneratorRunMode::None as u8, Ordering::Relaxed);
         unsafe {
             let stats = &mut *self.stats.get();
             stats.reset();
+        }
+    }
+
+    /// Check if this task has a pinned generator
+    #[inline(always)]
+    pub fn has_pinned_generator(&self) -> bool {
+        !self.pinned_generator_ptr.load(Ordering::Acquire).is_null()
+    }
+
+    /// Get the pinned generator for this task (if any)
+    /// Safety: Only call from the worker thread that owns this task
+    #[inline(always)]
+    pub unsafe fn get_pinned_generator<'a>(&self) -> Option<&'a mut Box<dyn Iterator<Item = usize> + 'static>> {
+        let ptr = self.pinned_generator_ptr.load(Ordering::Acquire);
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(&mut *(ptr as *mut Box<dyn Iterator<Item = usize> + 'static>)) }
+        }
+    }
+
+    /// Pin a generator to this task
+    /// Safety: Only call from the worker thread that owns this task
+    #[inline(always)]
+    pub unsafe fn pin_generator(&self, generator_box: Box<dyn Iterator<Item = usize> + 'static>, mode: GeneratorRunMode) {
+        let ptr = Box::into_raw(Box::new(generator_box)) as *mut ();
+        self.pinned_generator_ptr.store(ptr, Ordering::Release);
+        self.generator_run_mode.store(mode as u8, Ordering::Release);
+    }
+    
+    /// Get the generator run mode
+    #[inline(always)]
+    pub fn generator_run_mode(&self) -> GeneratorRunMode {
+        let mode = self.generator_run_mode.load(Ordering::Acquire);
+        match mode {
+            1 => GeneratorRunMode::Switch,
+            2 => GeneratorRunMode::Poll,
+            _ => GeneratorRunMode::None,
+        }
+    }
+    
+    /// Set the generator run mode
+    /// Safety: Only call from the worker thread that owns this task
+    #[inline(always)]
+    pub unsafe fn set_generator_run_mode(&self, mode: GeneratorRunMode) {
+        self.generator_run_mode.store(mode as u8, Ordering::Release);
+    }
+
+    /// Take ownership of the pinned generator (for cleanup)
+    /// Safety: Only call from the worker thread that owns this task
+    #[inline(always)]
+    pub unsafe fn take_pinned_generator(&self) -> Option<Box<Box<dyn Iterator<Item = usize> + 'static>>> {
+        let ptr = self.pinned_generator_ptr.swap(ptr::null_mut(), Ordering::AcqRel);
+        if ptr.is_null() {
+            None
+        } else {
+            unsafe { Some(Box::from_raw(ptr as *mut Box<dyn Iterator<Item = usize> + 'static>)) }
         }
     }
 }

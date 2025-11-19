@@ -29,7 +29,7 @@ rand = { workspace = true }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["memoryapi", "winnt", "sysinfoapi"] }
+winapi = { version = "0.3", features = ["memoryapi", "winnt", "sysinfoapi", "processthreadsapi", "synchapi", "winbase", "handleapi"] }
 
 [dev-dependencies]
 loom = "0.7"
