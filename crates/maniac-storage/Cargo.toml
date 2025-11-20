@@ -2,6 +2,12 @@
 name = 'maniac-storage'
 edition = '2024'
 version = '0.1.0'
+authors = ["BOP Team"]
+description = "Async storage layer with AOF support for the maniac runtime"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bisque-io/bop"
+keywords = ["storage", "async", "database", "aof", "persistence"]
+categories = ["database", "asynchronous"]
 
 [features]
 default = ['aof', 'standard']

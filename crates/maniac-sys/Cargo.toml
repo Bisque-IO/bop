@@ -2,6 +2,12 @@
 name = "maniac-sys"
 version = "0.1.0"
 edition = "2024"
+authors = ["BOP Team"]
+description = "Low-level system primitives and FFI bindings for the maniac runtime"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bisque-io/bop"
+keywords = ["ffi", "system", "bindings", "async"]
+categories = ["api-bindings", "os"]
 links = "bop"
 
 [build-dependencies]

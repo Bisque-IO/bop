@@ -1,25 +1,23 @@
-# bop-sys Native Build Notes
+# maniac-sys
 
-This crate wraps the NuRaft-based C++ shim stored under lib/. The native artefacts are built with Forge (an xmake wrapper). Cargo does not invoke xmake yet, so build the C++ layer before running cargo build -p bop-sys.
+Low-level system primitives and FFI bindings for the maniac runtime.
 
-## Building libbop
+## Overview
 
-    ./forge b bop
+This crate provides the foundational system-level bindings and primitives used by the maniac async runtime. It includes platform-specific implementations for various operating systems and architectures.
 
-Forge detects the host platform/architecture, runs xmake f / xmake, and drops libbop.a beneath crates/bop-sys/libs/<platform>/<arch>/. That is now the canonical location used by build.rs.
+## Features
 
-Cross-compiling example:
+- Cross-platform system primitives
+- FFI bindings to native system APIs
+- Low-level thread and process management
+- Memory management utilities
 
-    ./forge b bop --platform linux --arch arm64
+## License
 
-The command above emits crates/bop-sys/libs/linux/arm64/libbop.a when run on the host.
+Licensed under either of:
 
-## Using the artefacts
+- Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](../../LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
-When cargo build -p bop-sys runs, build.rs scans those directories, picks the freshest archive, and links it automatically. If you need to vendor a specific build, copy or symlink it into the corresponding crates/bop-sys/libs/<platform>/<arch>/ folder.
-
-## Cleaning
-
-    ./forge c bop
-
-forge c removes the generated archives under crates/bop-sys/libs, so the next build starts clean.
+at your option.

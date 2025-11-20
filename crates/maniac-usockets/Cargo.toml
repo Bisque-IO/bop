@@ -2,6 +2,12 @@
 name = "maniac-usockets"
 version = "0.1.0"
 edition = "2024"
+authors = ["BOP Team"]
+description = "High-performance async networking layer with zero-copy operations"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bisque-io/bop"
+keywords = ["networking", "async", "sockets", "zero-copy"]
+categories = ["network-programming", "asynchronous"]
 
 [features]
 default = []

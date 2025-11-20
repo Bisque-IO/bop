@@ -2,6 +2,12 @@
 name = "maniac-allocator"
 version = "0.1.0"
 edition = "2024"
+authors = ["BOP Team"]
+description = "Custom memory allocator optimized for async workloads"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bisque-io/bop"
+keywords = ["allocator", "memory", "async", "performance"]
+categories = ["memory-management", "no-std"]
 
 [features]
 default = []
