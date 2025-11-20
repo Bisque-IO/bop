@@ -1609,21 +1609,10 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                                     // Generator needs to be pinned - yield and we'll break out after
                                     scope.yield_(crate::runtime::preemption::GeneratorYieldReason::Cooperative.as_usize());
 
-                                    // FIX: Unblock SIGVTALRM after yielding from signal handler context
-                                    // When SIGVTALRM handler calls scope.yield_(), the signal remains blocked
-                                    // in the thread's signal mask. We must explicitly unblock it to allow
-                                    // future preemptions to work correctly.
-                                    #[cfg(unix)]
-                                    unsafe {
-                                        let mut set: libc::sigset_t = std::mem::zeroed();
-                                        libc::sigemptyset(&mut set);
-                                        libc::sigaddset(&mut set, libc::SIGVTALRM);
-                                        libc::sigprocmask(
-                                            libc::SIG_UNBLOCK,
-                                            &set,
-                                            std::ptr::null_mut(),
-                                        );
-                                    }
+                                    // The signal mask is automatically restored by the kernel when
+                                    // the signal handler returns, and since we are not in the signal
+                                    // handler context here (we are in the generator context),
+                                    // we don't need to manually unblock SIGVTALRM.
 
                                     #[cfg(unix)]
                                     crate::runtime::preemption::clear_generator_scope();
