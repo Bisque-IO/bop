@@ -2,6 +2,12 @@
 name = "maniac-runtime"
 edition = "2024"
 version.workspace = true
+authors = ["BOP Team"]
+description = "High-performance async runtime with M:N threading and stackful coroutines"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bisque-io/bop"
+keywords = ["async", "runtime", "coroutines", "green-threads", "m-n"]
+categories = ["asynchronous", "concurrency"]
 
 [features]
 default = ["std", "race"]
