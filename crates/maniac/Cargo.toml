@@ -6,6 +6,8 @@ authors = ["BOP Team"]
 description = "Massively scalable Rust async runtime"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bisque-io/bop"
+keywords = ["async", "runtime", "coroutines", "m-n", "networking"]
+categories = ["asynchronous", "concurrency", "network-programming"]
 
 [dependencies]
 # Local dependencies
@@ -13,7 +15,7 @@ repository = "https://github.com/bisque-io/bop"
 # maniac-sys = { workspace = true }
 # maniac-storage = { workspace = true }
 # maniac-usockets = { workspace = true }
-maniac-runtime = { workspace = true }
+maniac-runtime = "0.1.0"
 
 # Serialization and data handling
 serde = { workspace = true, features = ["derive"] }
