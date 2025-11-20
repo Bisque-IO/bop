@@ -24,12 +24,22 @@
 pub mod future;
 pub mod generator;
 mod loom_exports;
+pub mod net;
 pub mod runtime;
 mod spsc;
 pub mod sync;
 pub mod utils;
 
 pub use crate::utils::*;
+
+// Re-export socket registration functions for async networking
+pub use crate::runtime::worker::{
+    current_worker_id,
+    register_socket_with_current_worker,
+    modify_socket_interest,
+    close_socket,
+    SocketInterest,
+};
 
 /// Error occurring when pushing into a queue is unsuccessful.
 #[derive(Debug, Eq, PartialEq)]

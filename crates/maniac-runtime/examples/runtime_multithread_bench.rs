@@ -1,8 +1,8 @@
+use futures_lite::future::{block_on, poll_fn};
+use futures_lite::pin;
 use maniac_runtime::runtime::Executor;
 use maniac_runtime::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 use maniac_runtime::runtime::timer::Timer;
-use futures_lite::future::{block_on, poll_fn};
-use futures_lite::pin;
 use std::env;
 use std::error::Error;
 use std::sync::Arc;
@@ -102,8 +102,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let arena_config = TaskArenaConfig::new(opts.leaf_count, opts.tasks_per_leaf)?;
-    let runtime: Executor<10, 6> =
-        Executor::new(arena_config, TaskArenaOptions::default(), worker_count, worker_count)?;
+    let runtime: Executor<10, 6> = Executor::new(
+        arena_config,
+        TaskArenaOptions::default(),
+        worker_count,
+        worker_count,
+    )?;
     let operations = Arc::new(AtomicUsize::new(0));
 
     let start = Instant::now();

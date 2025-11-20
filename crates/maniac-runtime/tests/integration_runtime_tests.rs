@@ -1,5 +1,9 @@
 use maniac_runtime::{
-    future::block_on, runtime::{DefaultExecutor, Executor, task::{TaskArenaConfig, TaskArenaOptions}}
+    future::block_on,
+    runtime::{
+        DefaultExecutor, Executor,
+        task::{TaskArenaConfig, TaskArenaOptions},
+    },
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,7 +16,8 @@ fn create_executor(num_workers: usize) -> DefaultExecutor {
         TaskArenaOptions::default(),
         num_workers,
         num_workers,
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 #[test]

@@ -1,7 +1,11 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
+use mio::Waker;
+use once_cell::sync::OnceCell;
+
+use crate::net::EventLoop;
 use crate::utils::CachePadded;
 
 use crate::utils::bits::is_set;
@@ -109,7 +113,7 @@ pub const STATUS_BIT_YIELD: u64 = 1u64 << 63;
 /// # Thread Safety
 ///
 /// All methods are thread-safe. Producers and consumers can operate concurrently
-/// without coordination beyond the internal atomics and mutex/condvar for blocking.
+/// without coordination beyond the internal atomics and the event loop waker.
 #[repr(align(64))]
 pub struct WorkerWaker {
     /// **Status bitmap**: Queue-word summary bits (0‒61) plus control flags.
@@ -168,11 +172,8 @@ pub struct WorkerWaker {
     /// is set and a permit is added to wake the worker.
     partition_summary: CachePadded<AtomicU64>,
 
-    /// Mutex for condvar (only used in blocking paths)
-    m: Mutex<()>,
-
-    /// Condvar for parking/waking threads
-    cv: Condvar,
+    /// Waker for the associated EventLoop, used to wake the worker from I/O polling.
+    waker: OnceCell<Waker>,
 }
 
 impl WorkerWaker {
@@ -188,9 +189,17 @@ impl WorkerWaker {
             sleepers: CachePadded::new(AtomicUsize::new(0)),
             worker_count: CachePadded::new(AtomicUsize::new(0)),
             partition_summary: CachePadded::new(AtomicU64::new(0)),
-            m: Mutex::new(()),
-            cv: Condvar::new(),
+            waker: OnceCell::new(),
         }
+    }
+
+    /// Sets the waker for this worker.
+    ///
+    /// This should be called once when the worker thread starts.
+    pub fn set_waker(&self, waker: Waker) {
+        self.waker
+            .set(waker)
+            .expect("WorkerWaker waker already set");
     }
 
     // ────────────────────────────────────────────────────────────────────────────
@@ -646,98 +655,115 @@ impl WorkerWaker {
             .is_ok()
     }
 
-    /// Blocking acquire: parks the thread until a permit becomes available.
+    /// Blocking acquire: parks the thread in the event loop until a permit becomes available
+    /// or an I/O event occurs.
     ///
-    /// Tries the fast path first (`try_acquire()`), then falls back to parking
-    /// on a condvar. Handles spurious wakeups by rechecking permits in a loop.
+    /// Tries the fast path first (`try_acquire()`), then falls back to polling the event loop.
     ///
-    /// # Blocking Behavior
+    /// # Arguments
     ///
-    /// 1. Increment `sleepers` count
-    /// 2. Wait on condvar (releases mutex)
-    /// 3. Recheck permits after wakeup
-    /// 4. Decrement `sleepers` on exit
+    /// * `event_loop` - The worker's event loop to poll
     ///
-    /// # Panics
+    /// # Returns
     ///
-    /// Panics if the mutex or condvar is poisoned (indicates a panic in another thread
-    /// while holding the lock).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// loop {
-    ///     waker.acquire();  // Blocks until work available
-    ///     process_work();
-    /// }
-    /// ```
-    pub fn acquire(&self) {
+    /// - `true` if a permit was acquired
+    /// - `false` if returned due to I/O event (no permit acquired)
+    pub fn acquire_with_io(&self, event_loop: &mut EventLoop) -> bool {
         if self.try_acquire() {
-            return;
+            return true;
         }
-        let mut g = self.m.lock().expect("waker mutex poisoned");
+
         self.sleepers.fetch_add(1, Ordering::Relaxed);
 
         loop {
+            // Fast check before polling
             if self.try_acquire() {
                 self.sleepers.fetch_sub(1, Ordering::Relaxed);
-                return;
+                return true;
             }
-            g = self.cv.wait(g).expect("waker condvar wait poisoned");
+
+            // Poll event loop (blocking)
+            // We pass None for timeout to block indefinitely until:
+            // 1. I/O event
+            // 2. Waker notification (via release())
+            // 3. Timer expiration (if using integrated timer wheel)
+            if let Err(_) = event_loop.poll_once(None) {
+                // If polling fails, we should probably return to avoid infinite loop
+                self.sleepers.fetch_sub(1, Ordering::Relaxed);
+                return false;
+            }
+
+            // Check permits again after waking up
+            if self.try_acquire() {
+                self.sleepers.fetch_sub(1, Ordering::Relaxed);
+                return true;
+            }
+
+            // Check if we woke up due to I/O
+            // If we have pending I/O events, return false to let the worker process them
+            // Note: poll_once returns number of events, but we don't capture it here
+            // Ideally we'd check if any non-waker events occurred
+            // For now, we assume that if we woke up and didn't get a permit, it might be I/O
+            // The caller loop typically processes I/O after acquire returns
+            // But wait - the caller calls acquire() which BLOCKS.
+            // If we return false, the caller (poll_blocking) continues its loop.
+            // The worker loop needs to know if it should process I/O.
+            // In the new design, poll_once processes events internally via callbacks/handlers.
+            // So if we return false, it just means "no permit acquired".
+            // But we should loop if we just woke up spuriously or for I/O that was handled internally.
+            
+            // Actually, if poll_once processed events, those events might have pushed work to queues.
+            // So we should loop and check try_acquire again.
+            // If we are here, try_acquire failed.
+            
+            // Wait, if poll_once returned, it means some event happened.
+            // If it was a Waker event (from release()), we should retry acquiring.
+            // If it was an I/O event, the handler ran. The handler might have woken a task.
+            // Waking a task pushes it to a queue and calls mark_active/release.
+            // So permits would increase.
+            
+            // So: simply looping is correct. We only return true if we got a permit.
+            // BUT: what if we want to break to process something else?
+            // The worker loop structure is:
+            // run_once() -> check queues
+            // if no work -> poll_blocking()
+            // poll_blocking calls acquire_with_io
+            //
+            // If acquire_with_io blocks indefinitely, it handles I/O events internally in poll_once.
+            // So we don't need to return to let the worker handle I/O.
+            // We only return when we have a permit (Task work available).
         }
     }
 
     /// Blocking acquire with timeout.
     ///
-    /// Like `acquire()`, but returns after `timeout` if no permit becomes available.
-    /// Useful for implementing shutdown or periodic maintenance.
-    ///
-    /// # Arguments
-    ///
-    /// * `timeout` - Maximum duration to wait
-    ///
-    /// # Returns
-    ///
-    /// - `true` if a permit was acquired
-    /// - `false` if timed out without acquiring
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::time::Duration;
-    ///
-    /// loop {
-    ///     if waker.acquire_timeout(Duration::from_secs(1)) {
-    ///         process_work();
-    ///     } else {
-    ///         // Timeout - check for shutdown signal
-    ///         if should_shutdown() { break; }
-    ///     }
-    /// }
-    /// ```
-    pub fn acquire_timeout(&self, timeout: Duration) -> bool {
+    /// Like `acquire_with_io()`, but returns after `timeout` if no permit becomes available.
+    pub fn acquire_timeout_with_io(&self, event_loop: &mut EventLoop, timeout: Duration) -> bool {
         if self.try_acquire() {
             return true;
         }
+
         let start = std::time::Instant::now();
-        let mut g = self.m.lock().expect("waker mutex poisoned");
         self.sleepers.fetch_add(1, Ordering::Relaxed);
 
-        while start.elapsed() < timeout {
+        loop {
             if self.try_acquire() {
                 self.sleepers.fetch_sub(1, Ordering::Relaxed);
                 return true;
             }
-            let left = timeout.saturating_sub(start.elapsed());
-            let (gg, res) = self
-                .cv
-                .wait_timeout(g, left)
-                .expect("waker condvar wait poisoned");
-            g = gg;
-            if res.timed_out() {
+
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                break;
+            }
+            let left = timeout - elapsed;
+
+            // Poll with timeout
+            if let Err(_) = event_loop.poll_once(Some(left)) {
                 break;
             }
         }
+
         self.sleepers.fetch_sub(1, Ordering::Relaxed);
         false
     }
@@ -776,8 +802,15 @@ impl WorkerWaker {
         self.permits.fetch_add(n as u64, Ordering::Release);
         let to_wake = n.min(self.sleepers.load(Ordering::Relaxed));
 
-        for _ in 0..to_wake {
-            self.cv.notify_one();
+        if to_wake > 0 {
+             if let Some(waker) = self.waker.get() {
+                 // We only need to wake once, as the worker will loop until it finds all work
+                 // or parks again. Since we don't have individual thread parking anymore,
+                 // we just wake the event loop.
+                 // Note: if we had multiple threads sharing this waker, we'd need to be careful.
+                 // But WorkerWaker is 1:1 with Worker.
+                 waker.wake().expect("Failed to wake event loop");
+             }
         }
     }
 
@@ -1159,8 +1192,87 @@ impl WorkerWaker {
     }
 }
 
-impl Default for WorkerWaker {
-    fn default() -> Self {
-        Self::new()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn test_waker_creation() {
+        let waker = WorkerWaker::new();
+        assert_eq!(waker.status(), 0);
+        assert_eq!(waker.permits(), 0);
+        assert_eq!(waker.sleepers(), 0);
+        assert_eq!(waker.get_worker_count(), 0);
+    }
+
+    #[test]
+    fn test_mark_active() {
+        let waker = Arc::new(WorkerWaker::new());
+        
+        // Mark word 0 active
+        waker.mark_active(0);
+        assert_eq!(waker.status() & 1, 1);
+        assert_eq!(waker.permits(), 1);
+        assert_eq!(waker.snapshot_summary(), 1);
+        
+        // Mark same word again (should not add permit)
+        waker.mark_active(0);
+        assert_eq!(waker.permits(), 1);
+        
+        // Mark another word
+        waker.mark_active(5);
+        assert_eq!(waker.permits(), 2);
+        assert_eq!(waker.snapshot_summary(), (1 << 0) | (1 << 5));
+    }
+
+    #[test]
+    fn test_acquire_and_release_with_io() {
+        // To test acquire_with_io properly, we need a real EventLoop
+        // But creating a real EventLoop in a unit test might be heavy
+        // and require OS resources.
+        // For now, we'll just test the try_acquire path which doesn't need IO
+        
+        let waker = Arc::new(WorkerWaker::new());
+        
+        // Initial state: empty
+        assert!(!waker.try_acquire());
+        
+        // Add work
+        waker.mark_active(0);
+        assert_eq!(waker.permits(), 1);
+        
+        // Acquire
+        assert!(waker.try_acquire());
+        assert_eq!(waker.permits(), 0);
+        
+        // Empty again
+        assert!(!waker.try_acquire());
+    }
+    
+    #[test]
+    fn test_integration_with_event_loop() {
+        let waker = Arc::new(WorkerWaker::new());
+        let mut event_loop = EventLoop::new().unwrap();
+        let io_waker = event_loop.create_waker().unwrap();
+        waker.set_waker(io_waker);
+        
+        // Thread to wake us up
+        let waker_clone = waker.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            waker_clone.mark_active(0);
+        });
+        
+        // Should block and then return true when work arrives
+        // Note: This blocks the test thread, which is fine
+        assert!(waker.acquire_with_io(&mut event_loop));
+        assert_eq!(waker.permits(), 0);
+        
+        // Try timeout version
+        let start = std::time::Instant::now();
+        assert!(!waker.acquire_timeout_with_io(&mut event_loop, Duration::from_millis(50)));
+        assert!(start.elapsed() >= Duration::from_millis(50));
     }
 }

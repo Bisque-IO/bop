@@ -5,7 +5,13 @@
 /// - Task: lifecycle, scheduling, state transitions
 /// - Integration: cross-component interactions
 use maniac_runtime::{
-    future::block_on, runtime::{DefaultExecutor, Executor, summary::Summary, task::{TaskArena, TaskArenaConfig, TaskArenaOptions}, worker::{WorkerService, WorkerServiceConfig}}
+    future::block_on,
+    runtime::{
+        DefaultExecutor, Executor,
+        summary::Summary,
+        task::{TaskArena, TaskArenaConfig, TaskArenaOptions},
+        worker::{WorkerService, WorkerServiceConfig},
+    },
 };
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -19,7 +25,8 @@ fn create_executor(num_workers: usize) -> DefaultExecutor {
         TaskArenaOptions::default(),
         num_workers,
         num_workers,
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 // ============================================================================

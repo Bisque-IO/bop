@@ -825,7 +825,7 @@ impl Task {
     }
 
     #[inline(always)]
-    unsafe fn waker_clone(ptr: *const ()) -> RawWaker {
+    pub unsafe fn waker_clone(ptr: *const ()) -> RawWaker {
         RawWaker::new(ptr, &Self::WAKER_VTABLE)
     }
 
@@ -852,7 +852,7 @@ impl Task {
     }
 
     #[inline(always)]
-    unsafe fn waker_wake(ptr: *const ()) {
+    pub unsafe fn waker_wake(ptr: *const ()) {
         let slot = unsafe { &*(ptr as *const TaskSlot) };
         let task_ptr = slot.task_ptr();
         if task_ptr.is_null() {
@@ -863,7 +863,7 @@ impl Task {
     }
 
     #[inline(always)]
-    unsafe fn waker_wake_by_ref(ptr: *const ()) {
+    pub unsafe fn waker_wake_by_ref(ptr: *const ()) {
         let slot = unsafe { &*(ptr as *const TaskSlot) };
         let task_ptr = slot.task_ptr();
         if task_ptr.is_null() {
@@ -874,7 +874,7 @@ impl Task {
     }
 
     #[inline(always)]
-    unsafe fn waker_drop(_: *const ()) {}
+    pub unsafe fn waker_drop(_: *const ()) {}
 
     #[inline(always)]
     pub unsafe fn poll_future(&self, cx: &mut Context<'_>) -> Option<Poll<()>> {

@@ -1,5 +1,5 @@
-use maniac_runtime::runtime::waker::WorkerWaker;
 use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use maniac_runtime::runtime::waker::WorkerWaker;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn bench_mark_active_paths(c: &mut Criterion) {

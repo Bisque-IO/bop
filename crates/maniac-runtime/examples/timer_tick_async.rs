@@ -1,6 +1,6 @@
+use futures_lite::future::block_on;
 use maniac_runtime::runtime::Executor;
 use maniac_runtime::runtime::timer::Timer;
-use futures_lite::future::block_on;
 use std::error::Error;
 use std::time::Duration;
 

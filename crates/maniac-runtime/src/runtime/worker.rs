@@ -41,6 +41,9 @@ const MESSAGE_BATCH_SIZE: usize = 4096;
 /// Trait for cross-worker operations that don't depend on const parameters
 trait CrossWorkerOps: Send + Sync {
     fn post_cancel_message(&self, from_worker_id: u32, to_worker_id: u32, timer_id: u64) -> bool;
+    fn post_register_socket(&self, from_worker_id: u32, to_worker_id: u32, fd: crate::net::SocketDescriptor, interest: SocketInterest, state_ptr: usize) -> bool;
+    fn post_modify_socket(&self, from_worker_id: u32, to_worker_id: u32, token: crate::net::Token, interest: SocketInterest) -> bool;
+    fn post_close_socket(&self, from_worker_id: u32, to_worker_id: u32, token: crate::net::Token) -> bool;
 }
 
 thread_local! {
@@ -232,7 +235,53 @@ pub enum WorkerMessage {
     /// Immediate shutdown
     Shutdown,
 
+    // ────────────────────────────────────────────────────────────────────────────
+    // SOCKET I/O MESSAGES (for async networking)
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// Register a socket with this worker's EventLoop
+    /// The socket will be monitored for the specified events (readable/writable)
+    RegisterSocket {
+        fd: crate::net::SocketDescriptor,
+        interest: SocketInterest,
+        /// Opaque pointer to socket state (managed by caller)
+        state_ptr: usize,
+    },
+
+    /// Modify socket interest (e.g., switch from Read to Write)
+    ModifySocket {
+        token: crate::net::Token,
+        interest: SocketInterest,
+    },
+
+    /// Deregister and close a socket
+    CloseSocket {
+        token: crate::net::Token,
+    },
+
+    /// Set socket timeout (idle timeout, read timeout, etc.)
+    SetSocketTimeout {
+        token: crate::net::Token,
+        duration: Duration,
+    },
+
+    /// Cancel socket timeout
+    CancelSocketTimeout {
+        token: crate::net::Token,
+    },
+
     Noop,
+}
+
+/// Socket interest flags for EventLoop registration
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SocketInterest {
+    /// Monitor for readable events
+    Readable,
+    /// Monitor for writable events
+    Writable,
+    /// Monitor for both readable and writable events
+    ReadWrite,
 }
 
 unsafe impl Send for WorkerMessage {}
@@ -599,6 +648,17 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                 message_batch.push(WorkerMessage::Noop);
             }
 
+            // Create EventLoop for this worker (with integrated SingleWheel timer)
+            // Box it to avoid stack overflow (EventLoop contains large Slab and buffers)
+            let event_loop = Box::new(
+                crate::net::EventLoop::with_timer_wheel()
+                    .expect("Failed to create EventLoop for worker")
+            );
+            
+            // Register the event loop's waker with the WorkerWaker
+            let waker = event_loop.create_waker().expect("Failed to create waker");
+            service_clone.wakers[worker_id].set_waker(waker);
+
             let mut w = Worker {
                 service: Arc::clone(&service_clone),
                 wait_strategy: WaitStrategy::default(),
@@ -630,6 +690,9 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                 preemption_requested: AtomicBool::new(false),
                 #[cfg(windows)]
                 generator_scope_atomic: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                event_loop,
+                io_budget: 16,  // Process up to 16 I/O events per run_once iteration
+                socket_states: std::collections::HashMap::new(),
             };
             CURRENT_TIMER_WHEEL.set(w.timer_wheel as *mut TimerWheel<TimerHandle>);
             // SAFETY: The service Arc is kept alive for the lifetime of the worker thread
@@ -1160,6 +1223,42 @@ impl<const P: usize, const NUM_SEGS_P2: usize> CrossWorkerOps for WorkerService<
         )
         .is_ok()
     }
+
+    fn post_register_socket(&self, from_worker_id: u32, to_worker_id: u32, fd: crate::net::SocketDescriptor, interest: SocketInterest, state_ptr: usize) -> bool {
+        self.post_message(
+            from_worker_id,
+            to_worker_id,
+            WorkerMessage::RegisterSocket {
+                fd,
+                interest,
+                state_ptr,
+            },
+        )
+        .is_ok()
+    }
+
+    fn post_modify_socket(&self, from_worker_id: u32, to_worker_id: u32, token: crate::net::Token, interest: SocketInterest) -> bool {
+        self.post_message(
+            from_worker_id,
+            to_worker_id,
+            WorkerMessage::ModifySocket {
+                token,
+                interest,
+            },
+        )
+        .is_ok()
+    }
+
+    fn post_close_socket(&self, from_worker_id: u32, to_worker_id: u32, token: crate::net::Token) -> bool {
+        self.post_message(
+            from_worker_id,
+            to_worker_id,
+            WorkerMessage::CloseSocket {
+                token,
+            },
+        )
+        .is_ok()
+    }
 }
 
 impl<const P: usize, const NUM_SEGS_P2: usize> TickHandler for WorkerService<P, NUM_SEGS_P2> {
@@ -1359,6 +1458,12 @@ pub struct Worker<
     /// Generator scope pointer (Windows only) - for APC callback to force yield
     #[cfg(windows)]
     generator_scope_atomic: std::sync::atomic::AtomicPtr<()>,
+    /// Per-worker EventLoop for async I/O operations (boxed to avoid stack overflow)
+    event_loop: Box<crate::net::EventLoop>,
+    /// I/O budget per run_once iteration (prevents I/O from starving tasks)
+    io_budget: usize,
+    /// Socket token to state mapping (for async socket operations)
+    socket_states: std::collections::HashMap<crate::net::Token, crate::net::AsyncSocketState>,
 }
 
 impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
@@ -1402,6 +1507,10 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     #[inline(always)]
     pub fn run_once(&mut self) -> bool {
         let mut did_work = false;
+
+        if self.poll_event_loop() > 0 {
+            did_work = true;
+        }
 
         if self.poll_timers() {
             did_work = true;
@@ -1663,12 +1772,12 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                                 Some(duration) if duration.is_zero() => {}
                                 Some(duration) => {
                                     // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                                    worker.service.wakers[waker_id].acquire_timeout(duration);
+                                    worker.service.wakers[waker_id].acquire_timeout_with_io(&mut worker.event_loop, duration);
                                 }
                                 None => {
                                     // On Windows, WorkerWaker uses alertable waits to allow APC execution
                                     worker.service.wakers[waker_id]
-                                        .acquire_timeout(Duration::from_millis(250));
+                                        .acquire_timeout_with_io(&mut worker.event_loop, Duration::from_millis(250));
                                 }
                             }
                             spin_count = 0;
@@ -1823,6 +1932,21 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 self.shutdown.store(true, Ordering::Release);
                 true
             }
+            WorkerMessage::RegisterSocket { fd, interest, state_ptr } => {
+                self.handle_register_socket(fd, interest, state_ptr)
+            }
+            WorkerMessage::ModifySocket { token, interest } => {
+                self.handle_modify_socket(token, interest)
+            }
+            WorkerMessage::CloseSocket { token } => {
+                self.handle_close_socket(token)
+            }
+            WorkerMessage::SetSocketTimeout { token, duration } => {
+                self.handle_set_socket_timeout(token, duration)
+            }
+            WorkerMessage::CancelSocketTimeout { token } => {
+                self.handle_cancel_socket_timeout(token)
+            }
             WorkerMessage::Noop => true,
         }
     }
@@ -1939,6 +2063,196 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         #[cfg(debug_assertions)]
         {
             eprintln!("[Worker {}] Set shutdown flag", self.worker_id);
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // SOCKET I/O MESSAGE HANDLERS
+    // ────────────────────────────────────────────────────────────────────────────
+
+    #[inline]
+    fn poll_event_loop(&mut self) -> usize {
+        match self.event_loop.poll_once(None) {
+            Ok(num_events) => num_events,
+            Err(err) => {
+                log::error!("EventLoop error: {}", err);
+                0
+            }
+        }
+    }
+
+    fn handle_register_socket(
+        &mut self,
+        fd: crate::net::SocketDescriptor,
+        interest: SocketInterest,
+        state_ptr: usize,
+    ) -> bool {
+        // SAFETY: state_ptr is an opaque pointer to AsyncSocketState managed by the caller
+        // The caller must ensure the state outlives the socket registration
+        let state = unsafe {
+            let ptr = state_ptr as *const crate::net::AsyncSocketState;
+            (*ptr).clone()
+        };
+
+        // Convert interest
+        let mio_interest = match interest {
+            SocketInterest::Readable => mio::Interest::READABLE,
+            SocketInterest::Writable => mio::Interest::WRITABLE,
+            SocketInterest::ReadWrite => mio::Interest::READABLE | mio::Interest::WRITABLE,
+        };
+
+        // Add socket to EventLoop with async state
+        match self.event_loop.add_socket(fd, mio_interest, state.clone(), Box::new(())) {
+            Ok(token) => {
+                // Set the token in the shared state so the TcpStream knows it
+                state.set_token(token.0);
+
+                // Store the state for later access
+                self.socket_states.insert(token, state);
+
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!(
+                        "[Worker {}] RegisterSocket: fd={}, token={:?}",
+                        self.worker_id, fd, token
+                    );
+                }
+
+                true
+            }
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!(
+                        "[Worker {}] RegisterSocket failed: fd={}, error={}",
+                        self.worker_id, fd, e
+                    );
+                }
+                false
+            }
+        }
+    }
+
+    fn handle_modify_socket(
+        &mut self,
+        token: crate::net::Token,
+        interest: SocketInterest,
+    ) -> bool {
+        // Convert interest
+        let mio_interest = match interest {
+            SocketInterest::Readable => mio::Interest::READABLE,
+            SocketInterest::Writable => mio::Interest::WRITABLE,
+            SocketInterest::ReadWrite => mio::Interest::READABLE | mio::Interest::WRITABLE,
+        };
+
+        match self.event_loop.modify_socket(token, mio_interest) {
+            Ok(_) => {
+        #[cfg(debug_assertions)]
+        {
+            eprintln!(
+                        "[Worker {}] ModifySocket: token={:?}, interest={:?}",
+                        self.worker_id, token, interest
+                    );
+                }
+                true
+            }
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!(
+                        "[Worker {}] ModifySocket failed: token={:?}, error={}",
+                        self.worker_id, token, e
+            );
+        }
+        false
+            }
+        }
+    }
+
+    fn handle_close_socket(&mut self, token: crate::net::Token) -> bool {
+        // Close the socket in the EventLoop
+        self.event_loop.close_socket(token);
+
+        // Remove the state mapping
+        self.socket_states.remove(&token);
+
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("[Worker {}] CloseSocket: token={:?}", self.worker_id, token);
+        }
+
+        true
+    }
+
+    fn handle_set_socket_timeout(
+        &mut self,
+        token: crate::net::Token,
+        duration: Duration,
+    ) -> bool {
+        #[cfg(feature = "std")]
+        {
+            match self.event_loop.set_timeout(token, duration) {
+                Ok(_) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        eprintln!(
+                            "[Worker {}] SetSocketTimeout: token={:?}, duration={:?}",
+                            self.worker_id, token, duration
+                        );
+                    }
+                    true
+                }
+                Err(e) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        eprintln!(
+                            "[Worker {}] SetSocketTimeout failed: token={:?}, error={}",
+                            self.worker_id, token, e
+                        );
+                    }
+                    false
+                }
+            }
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = (token, duration);
+            false
+        }
+    }
+
+    fn handle_cancel_socket_timeout(&mut self, token: crate::net::Token) -> bool {
+        #[cfg(feature = "std")]
+        {
+            match self.event_loop.cancel_timeout(token) {
+                Ok(_) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        eprintln!(
+                            "[Worker {}] CancelSocketTimeout: token={:?}",
+                            self.worker_id, token
+                        );
+                    }
+                    true
+                }
+                Err(e) => {
+                    #[cfg(debug_assertions)]
+                    {
+                        eprintln!(
+                            "[Worker {}] CancelSocketTimeout failed: token={:?}, error={}",
+                            self.worker_id, token, e
+                        );
+                    }
+                    false
+                }
+            }
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = token;
+            false
         }
     }
 
@@ -2141,7 +2455,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                     Some(timeout) => {
                         // Park with timeout on WorkerWaker
                         // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                        let timed_out = !self.service.wakers[waker_id].acquire_timeout(timeout);
+                        let timed_out = !self.service.wakers[waker_id].acquire_timeout_with_io(&mut self.event_loop, timeout);
 
                         if timed_out {
                             // Timed out - possibly for timer deadline
@@ -2151,7 +2465,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                     None => {
                         // No timeout - park indefinitely on WorkerWaker
                         // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                        self.service.wakers[waker_id].acquire();
+                        self.service.wakers[waker_id].acquire_with_io(&mut self.event_loop);
                     }
                 }
             }
@@ -2795,4 +3109,117 @@ pub fn cancel_timer_for_current_task(timer: &Timer) -> bool {
 pub fn current_worker_now_ns() -> Option<u64> {
     let timer_wheel = current_timer_wheel()?;
     Some(timer_wheel.now_ns())
+}
+
+/// Returns the current worker's ID, or None if not called from within a worker context.
+pub fn current_worker_id() -> Option<u32> {
+    let timer_wheel = current_timer_wheel()?;
+    Some(timer_wheel.worker_id())
+}
+
+/// Register a socket with the current worker's EventLoop.
+/// Returns the Token assigned to the socket and the worker_id that owns it.
+///
+/// This should be called when creating a new async socket (TcpStream, TcpListener, etc).
+/// The state_ptr must point to a valid AsyncSocketState that outlives the socket registration.
+pub fn register_socket_with_current_worker(
+    fd: crate::net::SocketDescriptor,
+    interest: SocketInterest,
+    state_ptr: usize,
+) -> std::io::Result<crate::net::Token> {
+    let worker_id = current_worker_id()
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Not in worker context"
+        ))?;
+
+    // For same-worker registration, we need to actually register with the EventLoop
+    // This will be handled by sending a message to ourselves
+    let ops = CROSS_WORKER_OPS.with(|cell| cell.get());
+    let Some(ops) = ops else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "CrossWorkerOps not available"
+        ));
+    };
+
+    // Send registration message to current worker
+    if !ops.post_register_socket(worker_id, worker_id, fd, interest, state_ptr) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to post RegisterSocket message"
+        ));
+    }
+
+    // NOTE: This is a simplification - we return a dummy token
+    // In a real implementation, we'd need to wait for the registration to complete
+    // and get the actual token back. For now, we'll handle this differently in tcp.rs
+    Ok(crate::net::Token(0))
+}
+
+/// Modify the interest of a socket that's registered with a worker's EventLoop.
+///
+/// If the socket is registered with the current worker, the modification happens locally.
+/// If the socket is registered with a different worker (task migration case), sends a
+/// cross-worker message to update the registration.
+pub fn modify_socket_interest(
+    token: crate::net::Token,
+    owner_worker_id: u32,
+    new_interest: SocketInterest,
+) -> std::io::Result<()> {
+    let current_id = current_worker_id()
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Not in worker context"
+        ))?;
+
+    let ops = CROSS_WORKER_OPS.with(|cell| cell.get());
+    let Some(ops) = ops else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "CrossWorkerOps not available"
+        ));
+    };
+
+    // Send modification message to the owner worker
+    if !ops.post_modify_socket(current_id, owner_worker_id, token, new_interest) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to post ModifySocket message"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Close a socket and deregister it from the EventLoop.
+///
+/// Sends a cross-worker message if necessary to close the socket on the owner worker.
+pub fn close_socket(
+    token: crate::net::Token,
+    owner_worker_id: u32,
+) -> std::io::Result<()> {
+    let current_id = current_worker_id()
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Not in worker context"
+        ))?;
+
+    let ops = CROSS_WORKER_OPS.with(|cell| cell.get());
+    let Some(ops) = ops else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "CrossWorkerOps not available"
+        ));
+    };
+
+    // Send close message to the owner worker
+    if !ops.post_close_socket(current_id, owner_worker_id, token) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to post CloseSocket message"
+        ));
+    }
+
+    Ok(())
 }

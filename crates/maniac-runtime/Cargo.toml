@@ -10,11 +10,13 @@ keywords = ["async", "runtime", "coroutines", "green-threads", "m-n"]
 categories = ["asynchronous", "concurrency"]
 
 [features]
-default = ["std", "race"]
+# Enable mio by default for the usockets port; we rely on it for portable polling.
+default = ["std", "race", "mio"]
 std = []
 race = []
 timers-introspection = []
 standard = []
+mio = ["dep:mio"]
 
 [dependencies]
 #congee = "0.4.1"
@@ -31,12 +33,23 @@ log = "0.4"
 once_cell = "1.21"
 pin-project-lite = "0.2"
 rand = { workspace = true }
-
-[target.'cfg(unix)'.dependencies]
+# usockets port dependencies
+aws-lc-rs = "1.15"
+# polling = "3.0"
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
+rustls-webpki = "0.103"
+socket2 = { version = "0.6", features = ["all"] }
+mio = { version = "1.1", optional = true, features = ["os-poll", "net"] }
+rustls-pemfile = "2.0"
+rustls-native-certs = "0.8"
+slab = "0.4.11"
+# Move libc to main dependencies to allow cross-platform compilation checking even if not used on Windows
 libc = "0.2"
+webpki-roots = "1.0.4"
+arc-swap.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["memoryapi", "winnt", "sysinfoapi", "processthreadsapi", "synchapi", "winbase", "handleapi", "errhandlingapi"] }
+winapi = { version = "0.3", features = ["memoryapi", "winnt", "sysinfoapi", "processthreadsapi", "synchapi", "winbase", "handleapi", "errhandlingapi", "ioapiset", "winsock2", "mswsock"] }
 
 [dev-dependencies]
 loom = "0.7"
@@ -48,6 +61,8 @@ pollster = "0.4"
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(diatomic_waker_loom)', 'cfg(multishot_loom)', 'cfg(async_event_loom)'] }
 # unexpected_cfgs = { level = "warn", check-cfg = ['cfg(diatomic_waker_loom)'] }
+unsafe_op_in_unsafe_fn = "allow"
+unused_unsafe = "allow"
 
 [[bench]]
 name = "signal_waker_perf"

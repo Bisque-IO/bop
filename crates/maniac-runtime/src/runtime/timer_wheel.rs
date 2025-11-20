@@ -49,17 +49,17 @@ struct TimerEntry<T> {
 }
 
 /// Internal single-level timing wheel
-/// 
+///
 /// A hashed timing wheel uses a circular array where each slot (spoke) represents a time interval.
 /// Timers are hashed into spokes based on their deadline, allowing O(1) insertion and cancellation.
 /// Multiple timers can hash to the same spoke, so each spoke has multiple slots.
-/// 
+///
 /// The wheel uses power-of-2 sizes for efficient bitwise operations:
 /// - Spoke index = (deadline_tick & tick_mask) - uses bitwise AND instead of modulo
 /// - Slot index within spoke uses bit shifts for fast indexing
-/// 
+///
 /// Used as a building block for the hierarchical TimerWheel
-struct SingleWheel<T> {
+pub struct SingleWheel<T> {
     /// Time resolution per tick in nanoseconds (must be power of 2)
     /// Determines the granularity of timer scheduling
     tick_resolution_ns: u64,
@@ -109,22 +109,36 @@ struct SingleWheel<T> {
     /// Tracks the last used slot index per spoke to enable fast insertion
     /// When scheduling, we first check this hint before doing a linear search
     next_free_hint: Vec<usize>,
+
+    /// Start time in nanoseconds - when the wheel was created
+    /// All deadlines are relative to this time
+    start_time_ns: u64,
+
+    /// Current time in nanoseconds (atomic for cross-thread updates)
+    /// Updated by external tick thread, read by worker threads
+    now_ns: std::sync::atomic::AtomicU64,
 }
 
 impl<T> SingleWheel<T> {
     const INITIAL_TICK_ALLOCATION: usize = 16;
     const NULL_DEADLINE: u64 = u64::MAX;
 
+    /// Null deadline sentinel value (u64::MAX)
+    /// Used to represent "no deadline" in cached values
+    pub fn null_deadline() -> u64 {
+        Self::NULL_DEADLINE
+    }
+
     /// Create a new single-level timing wheel
-    /// 
+    ///
     /// # Arguments
     /// * `tick_resolution_ns` - Duration of one tick in nanoseconds (must be power of 2)
     /// * `ticks_per_wheel` - Number of spokes/ticks in the wheel (must be power of 2)
     /// * `initial_tick_allocation` - Initial number of slots per tick (must be power of 2)
-    /// 
+    ///
     /// # Panics
     /// Panics if any parameter is not a power of 2, as this breaks bitwise optimizations
-    fn new(
+    pub fn new(
         tick_resolution_ns: u64,
         ticks_per_wheel: usize,
         initial_tick_allocation: usize,
@@ -170,6 +184,8 @@ impl<T> SingleWheel<T> {
             poll_index: 0,
             wheel,
             next_free_hint,
+            start_time_ns: 0,
+            now_ns: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -181,7 +197,7 @@ impl<T> SingleWheel<T> {
     /// 
     /// # Returns
     /// Returns `(spoke_index, slot_index)` tuple that can be encoded into a timer ID
-    fn schedule_internal(
+    pub fn schedule_internal(
         &mut self,
         deadline_ns: u64,
         start_time_ns: u64,
@@ -273,13 +289,13 @@ impl<T> SingleWheel<T> {
     }
 
     /// Cancel a timer by spoke and slot index
-    /// 
+    ///
     /// O(1) operation - directly indexes into the wheel array using the provided indices.
     /// Invalidates the cached deadline if the cancelled timer was the earliest one.
-    /// 
+    ///
     /// # Returns
     /// Returns the timer data if found, or an error if the timer doesn't exist
-    fn cancel_internal(&mut self, spoke_index: usize, slot_index: usize) -> Result<Option<T>, TimerWheelError> {
+    pub fn cancel_internal(&mut self, spoke_index: usize, slot_index: usize) -> Result<Option<T>, TimerWheelError> {
         // Validate bounds BEFORE computing wheel_index to prevent integer overflow
         // This is a safety check - overflow could cause incorrect indexing
         if spoke_index >= self.ticks_per_wheel || slot_index >= self.tick_allocation {
@@ -295,18 +311,116 @@ impl<T> SingleWheel<T> {
             let TimerEntry {
                 deadline_ns, data, ..
             } = entry;
-            
+
             // If we cancelled the earliest timer, invalidate the cache
             // The cache will be recomputed lazily on the next next_deadline() call
             if deadline_ns == self.cached_next_deadline {
                 self.cached_next_deadline = Self::NULL_DEADLINE;
             }
-            
+
             return Ok(Some(data));
         }
-        
+
         // Timer not found at this location
         Err(TimerWheelError::TimerNotFound)
+    }
+
+    /// Poll for expired timers
+    ///
+    /// Checks for timers that have expired by the given `now_ns` time. Returns timer
+    /// information as tuples of (timer_id, deadline_ns, data).
+    ///
+    /// # Arguments
+    /// * `now_ns` - Current time in nanoseconds
+    /// * `expiry_limit` - Maximum number of expired timers to return
+    /// * `output` - Buffer to write expired timer tuples: `(timer_id, deadline_ns, data)`
+    ///
+    /// # Returns
+    /// Returns the number of expired timers found (may be less than `expiry_limit`)
+    ///
+    /// # Performance
+    /// - Best case: O(expired_timers) - only scans expired ticks
+    /// - Worst case: O(ticks_per_wheel × tick_allocation) - full wheel scan
+    pub fn poll(
+        &mut self,
+        now_ns: u64,
+        expiry_limit: usize,
+        output: &mut Vec<(u64, u64, T)>,
+    ) -> usize {
+        // Update internal clock
+        self.now_ns.store(now_ns, std::sync::atomic::Ordering::Release);
+        output.clear();
+
+        // Calculate which tick we should be at given current time
+        let target_tick = (now_ns.saturating_sub(self.start_time_ns)) >> self.resolution_bits_to_shift;
+
+        // Early exit if no timers
+        if self.timer_count == 0 {
+            self.current_tick = target_tick;
+            return 0;
+        }
+
+        // Optimized incremental scan: only scan ticks from current_tick to target_tick
+        // This avoids scanning the entire wheel when only a few ticks have expired
+        let start_tick = self.current_tick;
+        let ticks_to_scan = if target_tick >= start_tick {
+            // Normal case: scan forward from current_tick to target_tick
+            // Cap at ticks_per_wheel to handle wrap-around
+            (target_tick - start_tick + 1).min(self.ticks_per_wheel as u64) as usize
+        } else {
+            // Wrapped around: need to scan entire wheel
+            // (This shouldn't happen in practice, but handle it safely)
+            self.ticks_per_wheel
+        };
+
+        // Scan ticks incrementally from current_tick forward
+        for tick_offset in 0..ticks_to_scan {
+            if output.len() >= expiry_limit {
+                break;
+            }
+
+            // Calculate spoke index with wrap-around using bitwise AND
+            let spoke = ((start_tick as usize + tick_offset) & self.tick_mask) as usize;
+            let tick_start = spoke << self.allocation_bits_to_shift;
+
+            // Check all slots in this spoke
+            for slot_idx in 0..self.tick_allocation {
+                if output.len() >= expiry_limit {
+                    break;
+                }
+
+                let wheel_index = tick_start + slot_idx;
+
+                if let Some(entry) = self.wheel[wheel_index].as_ref() {
+                    // Use deadline-based check (not tick-based) for accuracy
+                    // A timer may expire even if its tick hasn't been reached yet
+                    if now_ns >= entry.deadline_ns {
+                        // Remove expired timer
+                        let entry = self.wheel[wheel_index].take().unwrap();
+                        let TimerEntry {
+                            deadline_ns, data, ..
+                        } = entry;
+                        self.timer_count -= 1;
+
+                        // Encode timer ID: level=0 (single wheel), spoke, slot
+                        // Using same encoding as TimerWheel for compatibility
+                        let timer_id = ((spoke as u64) << 32) | (slot_idx as u64);
+                        output.push((timer_id, deadline_ns, data));
+
+                        // Invalidate cache if this was the earliest timer
+                        if deadline_ns == self.cached_next_deadline {
+                            self.cached_next_deadline = Self::NULL_DEADLINE;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Advance current_tick to target_tick since we've processed all expired timers
+        self.current_tick = target_tick;
+        self.poll_index = 0;
+
+        output.len()
     }
 
     /// Double the capacity of all spokes in the wheel
@@ -361,6 +475,136 @@ impl<T> SingleWheel<T> {
 
         // Return old allocation as the first available new slot
         Ok(old_tick_allocation)
+    }
+
+    /// Schedule a timer for an absolute deadline (public API)
+    ///
+    /// The deadline is specified as nanoseconds since wheel creation. This is a
+    /// convenience wrapper around `schedule_internal` for external use.
+    ///
+    /// # Arguments
+    /// * `deadline_ns` - Absolute deadline in nanoseconds (must be > 0 and >= now_ns)
+    /// * `data` - User data to associate with this timer
+    ///
+    /// # Returns
+    /// Returns a timer ID that can be used to cancel the timer, or an error if
+    /// the deadline is invalid or capacity is exceeded.
+    pub fn schedule_timer(
+        &mut self,
+        deadline_ns: u64,
+        data: T,
+    ) -> Result<u64, TimerWheelError> {
+        // Validate deadline: must be > 0 and >= now_ns
+        let now_ns = self.now_ns.load(std::sync::atomic::Ordering::Relaxed);
+        if deadline_ns == 0 || deadline_ns < self.start_time_ns || deadline_ns < now_ns {
+            return Err(TimerWheelError::InvalidDeadline);
+        }
+
+        // Schedule using internal method with level 0 (single wheel)
+        let (spoke, slot) = self.schedule_internal(deadline_ns, self.start_time_ns, data, 0)?;
+
+        // Encode timer ID: level=0 (single wheel), spoke, slot
+        // Using same encoding as TimerWheel for compatibility
+        Ok(((spoke as u64) << 32) | (slot as u64))
+    }
+
+    /// Cancel a previously scheduled timer (public API)
+    ///
+    /// O(1) operation - directly indexes into the wheel using the timer ID.
+    ///
+    /// # Arguments
+    /// * `timer_id` - Timer ID returned from `schedule_timer()`
+    ///
+    /// # Returns
+    /// Returns the timer data if found and cancelled, or an error if the timer
+    /// doesn't exist or the timer ID is invalid.
+    pub fn cancel_timer(&mut self, timer_id: u64) -> Result<Option<T>, TimerWheelError> {
+        // Decode timer ID: extract spoke (bits 32-61) and slot (bits 0-31)
+        let spoke = ((timer_id >> 32) & 0x3FFFFFFF) as usize;
+        let slot = (timer_id & 0xFFFFFFFF) as usize;
+
+        self.cancel_internal(spoke, slot)
+    }
+
+    /// Get the earliest deadline among all active timers
+    ///
+    /// Uses cached value when available for O(1) performance. Falls back to
+    /// full wheel scan when cache is invalidated (O(ticks_per_wheel × tick_allocation)).
+    ///
+    /// # Returns
+    /// Returns the earliest deadline in nanoseconds, or `None` if no timers are scheduled.
+    pub fn next_deadline(&mut self) -> Option<u64> {
+        if self.timer_count == 0 {
+            return None;
+        }
+
+        // Use cached value if valid
+        if self.cached_next_deadline != Self::NULL_DEADLINE {
+            return Some(self.cached_next_deadline);
+        }
+
+        // Recompute cache by scanning entire wheel
+        let mut earliest = Self::NULL_DEADLINE;
+
+        for spoke in 0..self.ticks_per_wheel {
+            for slot_idx in 0..self.tick_allocation {
+                let wheel_index = (spoke << self.allocation_bits_to_shift) + slot_idx;
+                if let Some(entry) = self.wheel[wheel_index].as_ref() {
+                    if entry.deadline_ns < earliest {
+                        earliest = entry.deadline_ns;
+                    }
+                }
+            }
+        }
+
+        self.cached_next_deadline = earliest;
+
+        if earliest != Self::NULL_DEADLINE {
+            Some(earliest)
+        } else {
+            None
+        }
+    }
+
+    /// Get the total number of active timers
+    pub fn timer_count(&self) -> u64 {
+        self.timer_count
+    }
+
+    /// Get the time corresponding to the next tick
+    ///
+    /// Returns the absolute time (in nanoseconds) when the next tick will occur.
+    pub fn current_tick_time_ns(&self) -> u64 {
+        ((self.current_tick + 1) << self.resolution_bits_to_shift) + self.start_time_ns
+    }
+
+    /// Get the current time in nanoseconds
+    #[inline]
+    pub fn now_ns(&self) -> u64 {
+        self.now_ns.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Set the current time in nanoseconds
+    #[inline]
+    pub fn set_now_ns(&mut self, now_ns: u64) {
+        self.now_ns.store(now_ns, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Clear all timers from the wheel
+    pub fn clear(&mut self) {
+        for slot in &mut self.wheel {
+            *slot = None;
+        }
+
+        self.timer_count = 0;
+        self.cached_next_deadline = Self::NULL_DEADLINE;
+        self.current_tick = 0;
+        self.poll_index = 0;
+
+        // Reset all hints
+        for hint in &mut self.next_free_hint {
+            *hint = 0;
+        }
     }
 }
 
@@ -973,6 +1217,60 @@ impl<T> TimerWheel<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_single_wheel_basic() {
+        // Test SingleWheel directly with the new public API
+        let tick_resolution_ns = 1024 * 1024; // 1.048ms
+        let mut wheel = SingleWheel::<u32>::new(tick_resolution_ns, 1024, 16);
+
+        // Schedule a timer at 100ms
+        let timer_id = wheel.schedule_timer(100_000_000, 42).unwrap();
+        assert_eq!(wheel.timer_count(), 1);
+
+        // Cancel it
+        let data = wheel.cancel_timer(timer_id).unwrap().unwrap();
+        assert_eq!(data, 42);
+        assert_eq!(wheel.timer_count(), 0);
+    }
+
+    #[test]
+    fn test_single_wheel_poll() {
+        // Test SingleWheel polling
+        let tick_resolution_ns = 1024 * 1024; // 1.048ms
+        let mut wheel = SingleWheel::<&str>::new(tick_resolution_ns, 1024, 16);
+
+        // Schedule a timer at 10ms
+        wheel.schedule_timer(10_000_000, "expired").unwrap();
+        assert_eq!(wheel.timer_count(), 1);
+
+        // Poll at 20ms - should find the expired timer
+        let mut output = Vec::new();
+        wheel.set_now_ns(20_000_000);
+        let count = wheel.poll(20_000_000, 100, &mut output);
+        assert_eq!(count, 1);
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].2, "expired");
+        assert_eq!(wheel.timer_count(), 0);
+    }
+
+    #[test]
+    fn test_single_wheel_next_deadline() {
+        // Test SingleWheel next_deadline
+        let tick_resolution_ns = 1024 * 1024;
+        let mut wheel = SingleWheel::<u32>::new(tick_resolution_ns, 1024, 16);
+
+        // No timers - should return None
+        assert_eq!(wheel.next_deadline(), None);
+
+        // Schedule a timer
+        wheel.schedule_timer(100_000_000, 1).unwrap();
+        assert_eq!(wheel.next_deadline(), Some(100_000_000));
+
+        // Schedule an earlier timer
+        wheel.schedule_timer(50_000_000, 2).unwrap();
+        assert_eq!(wheel.next_deadline(), Some(50_000_000));
+    }
 
     #[test]
     fn test_basic_scheduling() {

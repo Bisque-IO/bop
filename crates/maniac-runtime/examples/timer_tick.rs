@@ -1,7 +1,7 @@
-use maniac_runtime::runtime::{DefaultExecutor, Executor};
+use futures_lite::future::block_on;
 use maniac_runtime::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 use maniac_runtime::runtime::timer::Timer;
-use futures_lite::future::block_on;
+use maniac_runtime::runtime::{DefaultExecutor, Executor};
 use std::error::Error;
 use std::time::Duration;
 
