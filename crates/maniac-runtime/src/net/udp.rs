@@ -181,11 +181,10 @@ impl<'a> Future for RecvFromFuture<'a> {
 
             if self.socket.worker_id.is_none() {
                 if let Some(socket_interest) = new_interest.to_socket_interest() {
-                    let state_ptr = &self.socket.state as *const _ as usize;
                     if let Ok(_) = crate::runtime::worker::register_socket_with_current_worker(
                         self.socket.fd,
                         socket_interest,
-                        state_ptr,
+                        self.socket.state.clone(),
                     ) {
                         if let Some(worker_id) = crate::runtime::worker::current_worker_id() {
                             self.socket.worker_id = Some(worker_id as usize);
@@ -291,11 +290,10 @@ impl<'a> Future for SendToFuture<'a> {
 
             if self.socket.worker_id.is_none() {
                 if let Some(socket_interest) = new_interest.to_socket_interest() {
-                    let state_ptr = &self.socket.state as *const _ as usize;
                     if let Ok(_) = crate::runtime::worker::register_socket_with_current_worker(
                         self.socket.fd,
                         socket_interest,
-                        state_ptr,
+                        self.socket.state.clone(),
                     ) {
                         if let Some(worker_id) = crate::runtime::worker::current_worker_id() {
                             self.socket.worker_id = Some(worker_id as usize);
@@ -327,7 +325,7 @@ impl<'a> Future for SendToFuture<'a> {
                 self.buf.len(),
                 0,
                 self.addr.as_ptr(),
-                self.addr.len_ptr(),
+                self.addr.len() as u32,
             )
         };
         #[cfg(windows)]

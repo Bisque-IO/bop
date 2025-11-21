@@ -1,0 +1,67 @@
+warning: type `WindowsSource` is more private than the item `Socket::source`
+   --> crates\maniac-runtime\src\net\event_loop.rs:143:5
+    |
+143 |     pub source: Option<WindowsSource>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `Socket::source` is reachable at visibility `pub`
+    |
+note: but type `WindowsSource` is only usable at visibility `pub(self)`
+   --> crates\maniac-runtime\src\net\event_loop.rs:45:1
+    |
+ 45 | enum WindowsSource {
+    | ^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `sync::mpsc::Inner<T, P, NUM_SEGS_P2>` is more private than the item `sync::mpsc::Receiver::<T, P, NUM_SEGS_P2>::inner`
+   --> crates\maniac-runtime\src\sync\mpsc.rs:547:5
+    |
+547 |     pub(crate) fn inner(&self) -> &Arc<Inner<T, P, NUM_SEGS_P2>> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `sync::mpsc::Receiver::<T, P, NUM_SEGS_P2>::inner` is reachable at visibility `pub(crate)`
+    |
+note: but type `sync::mpsc::Inner<T, P, NUM_SEGS_P2>` is only usable at visibility `pub(self)`
+   --> crates\maniac-runtime\src\sync\mpsc.rs:181:1
+    |
+181 | struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `maniac-runtime` (lib) generated 2 warnings
+warning: unused import: `Executor`
+ --> crates\maniac-runtime\tests\socket_opt.rs:5:48
+  |
+5 | ...tExecutor, Executor};
+  |               ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::io`
+ --> crates\maniac-runtime\tests\socket_opt.rs:6:5
+  |
+6 | use std::io;
+  |     ^^^^^^^
+
+warning: unused import: `AsyncReadExt`
+ --> crates\maniac-runtime\tests\socket_opt.rs:1:19
+  |
+1 | use futures::io::{AsyncReadExt, A...
+  |                   ^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+ --> crates\maniac-runtime\tests\socket_opt.rs:1:33
+  |
+1 | ...eadExt, AsyncWriteExt};
+  |            ^^^^^^^^^^^^^
+
+warning: `maniac-runtime` (test "socket_opt") generated 4 warnings (run `cargo fix --test "socket_opt" -p maniac-runtime` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running tests\socket_opt.rs (C:\Users\info\repos\bisque-io\bop\target\debug\deps\socket_opt-10adc3072485261d.exe)
+
+running 1 test
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+DuplicateHandle succeeded, handle: 0x100
+[Worker 1] Health: tasks_polled=0, yield_queue=0, mpsc_queue=0, partitions=[1], has_work=true
+DuplicateHandle succeeded, handle: 0x104
+[Worker 0] Health: tasks_polled=0, yield_queue=0, mpsc_queue=0, partitions=[0], has_work=true
+error: test failed, to rerun pass `--test socket_opt`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\info\repos\bisque-io\bop\target\debug\deps\socket_opt-10adc3072485261d.exe --nocapture` (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)

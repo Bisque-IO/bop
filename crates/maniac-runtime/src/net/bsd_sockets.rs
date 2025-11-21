@@ -625,7 +625,7 @@ pub fn peer_addr(fd: SocketDescriptor) -> io::Result<BsdAddr> {
 /// Check if socket has an error
 pub fn socket_error(fd: SocketDescriptor) -> io::Result<Option<i32>> {
     let mut error: i32 = 0;
-    let len = mem::size_of::<i32>() as socklen_t;
+    let mut len = mem::size_of::<i32>() as socklen_t;
 
     #[cfg(unix)]
     {

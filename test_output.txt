@@ -1,111 +1,153 @@
-   Compiling maniac-runtime v0.1.0 (C:\Users\info\repos\bisque-io\bop\crates\maniac-runtime)
-warning: unexpected `cfg` condition value: `disabled_tests`
-    --> crates\maniac-runtime\src\runtime\task.rs:1455:11
-     |
-1455 |     #[cfg(feature = "disabled_tests")]
-     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-     |
-     = note: expected values for `feature` are: `default`, `race`, `standard`, `std`, and `timers-introspection`
-     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
-     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
-     = note: requested on the command line with `-W unexpected-cfgs`
-
-warning: unexpected `cfg` condition value: `disabled_tests`
-    --> crates\maniac-runtime\src\runtime\task.rs:1494:11
-     |
-1494 |     #[cfg(feature = "disabled_tests")]
-     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-     |
-     = note: expected values for `feature` are: `default`, `race`, `standard`, `std`, and `timers-introspection`
-     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
-     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
-
-warning: unexpected `cfg` condition value: `disabled_tests`
-    --> crates\maniac-runtime\src\runtime\task.rs:1566:11
-     |
-1566 |     #[cfg(feature = "disabled_tests")] // References old Task fields (slot_idx)
-     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-     |
-     = note: expected values for `feature` are: `default`, `race`, `standard`, `std`, and `timers-introspection`
-     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
-     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
-
-warning: unexpected `cfg` condition value: `disabled_tests`
-    --> crates\maniac-runtime\src\runtime\task.rs:1600:11
-     |
-1600 |     #[cfg(feature = "disabled_tests")] // References old Task fields (arena_ptr, bind_arena)
-     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-     |
-     = note: expected values for `feature` are: `default`, `race`, `standard`, `std`, and `timers-introspection`
-     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
-     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
-
-warning: unexpected `cfg` condition value: `disabled_tests`
-    --> crates\maniac-runtime\src\runtime\task.rs:1635:11
-     |
-1635 |     #[cfg(feature = "disabled_tests")]
-     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-     |
-     = note: expected values for `feature` are: `default`, `race`, `standard`, `std`, and `timers-introspection`
-     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
-     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
-
-warning: variable does not need to be mutable
-    --> crates\maniac-runtime\src\runtime\mpsc.rs:1088:19
-     |
-1088 |         let (tx1, mut rx) = new_with_sender::<u64, 6, 8>();
-     |                   ----^^
-     |                   |
-     |                   help: remove this `mut`
-     |
-     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-warning: variable does not need to be mutable
-   --> crates\maniac-runtime\src\runtime\mod.rs:247:13
+warning: type `WindowsSource` is more private than the item `Socket::source`
+   --> crates\maniac-runtime\src\net\event_loop.rs:143:5
     |
-247 |         let mut tasks_per_leaf = 4096;
-    |             ----^^^^^^^^^^^^^^
-    |             |
-    |             help: remove this `mut`
-
-warning: value assigned to `leaf_count` is never read
-   --> crates\maniac-runtime\src\runtime\mod.rs:252:13
+143 |     pub source: Option<WindowsSource>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `Socket::source` is reachable at visibility `pub`
     |
-252 |             leaf_count = max_workers;
-    |             ^^^^^^^^^^^^^^^^^^^^^^^^
+note: but type `WindowsSource` is only usable at visibility `pub(self)`
+   --> crates\maniac-runtime\src\net\event_loop.rs:45:1
     |
-    = help: maybe it is overwritten before being read?
-    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+ 45 | enum WindowsSource {
+    | ^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
 
-error[E0004]: non-exhaustive patterns: `Err(PopError::Empty)` and `Err(PopError::Timeout)` not covered
-    --> crates\maniac-runtime\src\sync\mpsc.rs:3262:23
-     |
-3262 |                 match receiver.recv().await {
-     |                       ^^^^^^^^^^^^^^^^^^^^^ patterns `Err(PopError::Empty)` and `Err(PopError::Timeout)` not covered
-     |
-note: `Result<u64, PopError>` defined here
-    --> C:\Users\info\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\result.rs:557:1
-     |
- 557 | pub enum Result<T, E> {
-     | ^^^^^^^^^^^^^^^^^^^^^
-...
- 566 |     Err(#[stable(feature = "rust1", since = "1.0.0")] E),
-     |     --- not covered
-     = note: the matched value is of type `Result<u64, PopError>`
-help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern, a match arm with multiple or-patterns as shown, or multiple match arms
-     |
-3264 ~                     Err(PopError::Closed) => break,
-3265 ~                     Err(PopError::Empty) | Err(PopError::Timeout) => todo!(),
-     |
+warning: type `sync::mpsc::Inner<T, P, NUM_SEGS_P2>` is more private than the item `sync::mpsc::Receiver::<T, P, NUM_SEGS_P2>::inner`
+   --> crates\maniac-runtime\src\sync\mpsc.rs:547:5
+    |
+547 |     pub(crate) fn inner(&self) -> &Arc<Inner<T, P, NUM_SEGS_P2>> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `sync::mpsc::Receiver::<T, P, NUM_SEGS_P2>::inner` is reachable at visibility `pub(crate)`
+    |
+note: but type `sync::mpsc::Inner<T, P, NUM_SEGS_P2>` is only usable at visibility `pub(self)`
+   --> crates\maniac-runtime\src\sync\mpsc.rs:181:1
+    |
+181 | struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-warning: variable does not need to be mutable
-    --> crates\maniac-runtime\src\sync\mpsc.rs:3243:22
-     |
-3243 |         let (sender, mut receiver) = unbounded::async_unbounded_mpsc::<u64>();
-     |                      ----^^^^^^^^
-     |                      |
-     |                      help: remove this `mut`
+warning: `maniac-runtime` (lib) generated 2 warnings
+warning: unused import: `Executor`
+ --> crates\maniac-runtime\tests\socket_opt_v2.rs:5:48
+  |
+5 | ...tExecutor, Executor};
+  |               ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-For more information about this error, try `rustc --explain E0004`.
-warning: `maniac-runtime` (lib test) generated 9 warnings
-error: could not compile `maniac-runtime` (lib test) due to 1 previous error; 9 warnings emitted
+warning: unused import: `std::io`
+ --> crates\maniac-runtime\tests\socket_opt_v2.rs:6:5
+  |
+6 | use std::io;
+  |     ^^^^^^^
+
+warning: unused import: `AsyncReadExt`
+ --> crates\maniac-runtime\tests\socket_opt_v2.rs:1:19
+  |
+1 | use futures::io::{AsyncReadExt, A...
+  |                   ^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+ --> crates\maniac-runtime\tests\socket_opt_v2.rs:1:33
+  |
+1 | ...eadExt, AsyncWriteExt};
+  |            ^^^^^^^^^^^^^
+
+warning: `maniac-runtime` (test "socket_opt_v2") generated 4 warnings (run `cargo fix --test "socket_opt_v2" -p maniac-runtime` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.69s
+     Running tests\socket_opt_v2.rs (target\debug\deps\socket_opt_v2-d44511f454e30f9b.exe)
+
+running 1 test
+Blocking on main task...
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+DuplicateHandle succeeded, handle: 0xb4
+DuplicateHandle succeeded, handle: 0x10c
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+test test_socket_optimization_flow has been running for over 60 seconds
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers
+[Supervisor] Rebalanced 2 leaves across 2 active workers

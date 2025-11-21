@@ -1,6 +1,6 @@
 use super::task::TaskSlot;
 use super::worker::{
-    cancel_timer_for_current_task, current_worker_now_ns, schedule_timer_for_current_task,
+    cancel_timer_for_current_task, current_worker_now_ns, schedule_timer_for_task,
 };
 use std::cell::Cell;
 use std::future::Future;
@@ -207,7 +207,7 @@ impl<'a> Future for TimerDelay<'a> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if !self.scheduled {
-            if schedule_timer_for_current_task(cx, self.timer, self.delay).is_some() {
+            if schedule_timer_for_task(cx, self.timer, self.delay).is_some() {
                 self.scheduled = true;
             }
             return Poll::Pending;

@@ -1,3 +1,7 @@
+use mio::event::Source;
+use mio::{Events, Interest, Poll, Registry, Token, Waker};
+use slab::Slab;
+use std::any::Any;
 /// Event Loop - Hybrid implementation combining Mio with usockets optimizations
 ///
 /// This loop uses:
@@ -5,30 +9,25 @@
 /// - Optional integration with maniac-runtime's SingleWheel for efficient timeouts
 /// - usockets' low-priority queue to prevent SSL starvation
 /// - usockets' shared receive buffer to reduce allocations
-
 use std::io;
-use std::any::Any;
 use std::time::Duration;
-use mio::{Poll, Events, Interest, Token, Registry};
-use mio::event::Source;
-use slab::Slab;
 
 /// Token used for waking the event loop from other threads
 pub const WAKE_TOKEN: Token = Token(usize::MAX);
 
 #[cfg(windows)]
-use winapi::um::winsock2::{
-    getsockopt, SOL_SOCKET, SO_TYPE, SO_ACCEPTCONN, SOCK_STREAM, SOCK_DGRAM, SOCKET_ERROR
-};
+use std::mem::ManuallyDrop;
 #[cfg(windows)]
 use std::os::windows::io::{FromRawSocket, RawSocket};
 #[cfg(windows)]
-use std::mem::ManuallyDrop;
+use winapi::um::winsock2::{
+    SO_ACCEPTCONN, SO_TYPE, SOCK_DGRAM, SOCK_STREAM, SOCKET_ERROR, SOL_SOCKET, getsockopt,
+};
 
 use crate::net::{
+    bsd_sockets::SocketDescriptor,
     constants::{RECV_BUFFER_LENGTH, RECV_BUFFER_PADDING},
     low_prio_queue::LowPriorityQueue,
-    bsd_sockets::SocketDescriptor,
 };
 
 #[cfg(feature = "std")]
@@ -41,39 +40,6 @@ struct SocketTimeout {
     token: usize,
 }
 
-#[cfg(windows)]
-enum WindowsSource {
-    TcpStream(ManuallyDrop<mio::net::TcpStream>),
-    TcpListener(ManuallyDrop<mio::net::TcpListener>),
-    UdpSocket(ManuallyDrop<mio::net::UdpSocket>),
-}
-
-#[cfg(windows)]
-impl Source for WindowsSource {
-    fn register(&mut self, registry: &Registry, token: Token, interest: Interest) -> io::Result<()> {
-        match self {
-            WindowsSource::TcpStream(s) => s.register(registry, token, interest),
-            WindowsSource::TcpListener(s) => s.register(registry, token, interest),
-            WindowsSource::UdpSocket(s) => s.register(registry, token, interest),
-        }
-    }
-
-    fn reregister(&mut self, registry: &Registry, token: Token, interest: Interest) -> io::Result<()> {
-        match self {
-            WindowsSource::TcpStream(s) => s.reregister(registry, token, interest),
-            WindowsSource::TcpListener(s) => s.reregister(registry, token, interest),
-            WindowsSource::UdpSocket(s) => s.reregister(registry, token, interest),
-        }
-    }
-
-    fn deregister(&mut self, registry: &Registry) -> io::Result<()> {
-        match self {
-            WindowsSource::TcpStream(s) => s.deregister(registry),
-            WindowsSource::TcpListener(s) => s.deregister(registry),
-            WindowsSource::UdpSocket(s) => s.deregister(registry),
-        }
-    }
-}
 
 /// The main event loop
 pub struct EventLoop {
@@ -113,6 +79,10 @@ pub struct EventLoop {
 
     /// Default poll timeout when no timer wheel is available
     default_timeout: Option<Duration>,
+    
+    /// Waker for this event loop (created from poll registry)
+    /// Stored here to ensure it drops before Poll
+    waker: Option<Waker>,
 }
 
 /// A socket in the event loop
@@ -138,9 +108,6 @@ pub struct Socket {
 
     /// Extension data
     pub ext: Box<dyn Any>,
-
-    #[cfg(windows)]
-    pub source: Option<WindowsSource>,
 }
 
 impl EventLoop {
@@ -157,7 +124,7 @@ impl EventLoop {
         let buffer_size = RECV_BUFFER_LENGTH + (RECV_BUFFER_PADDING * 2);
         let recv_buffer = vec![0u8; buffer_size];
 
-        Ok(Self {
+        let mut event_loop = Self {
             poll,
             events: Events::with_capacity(1024),
             #[cfg(feature = "std")]
@@ -171,7 +138,13 @@ impl EventLoop {
             pre_cb: None,
             post_cb: None,
             default_timeout,
-        })
+            waker: None,
+        };
+        
+        // Create and store the waker
+        event_loop.waker = Some(mio::Waker::new(event_loop.poll.registry(), WAKE_TOKEN)?);
+        
+        Ok(event_loop)
     }
 
     /// Create event loop with owned SingleWheel for timeout management
@@ -193,7 +166,7 @@ impl EventLoop {
         let ticks_per_wheel = 1024;
         let timer_wheel = SingleWheel::new(tick_resolution_ns, ticks_per_wheel, 16);
 
-        Ok(Self {
+        let mut event_loop = Self {
             poll,
             events: Events::with_capacity(1024),
             timer_wheel: Some(timer_wheel),
@@ -206,7 +179,13 @@ impl EventLoop {
             pre_cb: None,
             post_cb: None,
             default_timeout: None,
-        })
+            waker: None,
+        };
+        
+        // Create and store the waker
+        event_loop.waker = Some(mio::Waker::new(event_loop.poll.registry(), WAKE_TOKEN)?);
+        
+        Ok(event_loop)
     }
 
     /// Set pre-iteration callback
@@ -229,9 +208,18 @@ impl EventLoop {
         self.poll.registry()
     }
 
-    /// Create a new waker for this event loop
-    pub fn create_waker(&self) -> io::Result<mio::Waker> {
-        mio::Waker::new(self.poll.registry(), WAKE_TOKEN)
+    /// Get the waker for this event loop
+    pub fn waker(&self) -> Option<&mio::Waker> {
+        self.waker.as_ref()
+    }
+    
+    /// Wake the event loop from another thread
+    pub fn wake(&self) -> io::Result<()> {
+        if let Some(waker) = &self.waker {
+            waker.wake()
+        } else {
+            Err(io::Error::new(io::ErrorKind::Other, "Waker not initialized"))
+        }
     }
 
     /// Add a socket to the loop
@@ -249,71 +237,16 @@ impl EventLoop {
         {
             use mio::unix::SourceFd;
             let mut source = SourceFd(&fd);
-            self.poll.registry().register(&mut source, token, interest)?;
+            self.poll
+                .registry()
+                .register(&mut source, token, interest)?;
         }
 
         #[cfg(windows)]
-        let mut source = {
-            // Detect socket type
-            let mut sock_type: i32 = 0;
-            let mut type_len = std::mem::size_of::<i32>() as i32;
-            
-            let type_res = unsafe {
-                getsockopt(
-                    fd as usize,
-                    SOL_SOCKET,
-                    SO_TYPE,
-                    &mut sock_type as *mut _ as *mut i8,
-                    &mut type_len,
-                )
-            };
-
-            if type_res == SOCKET_ERROR {
-                return Err(io::Error::last_os_error());
-            }
-
-            let source = if sock_type == SOCK_DGRAM {
-                let std_socket = unsafe { std::net::UdpSocket::from_raw_socket(fd as RawSocket) };
-                let mio_socket = mio::net::UdpSocket::from_std(std_socket);
-                WindowsSource::UdpSocket(ManuallyDrop::new(mio_socket))
-            } else if sock_type == SOCK_STREAM {
-                // Check if it's a listener
-                let mut accept_conn: i32 = 0;
-                let mut accept_len = std::mem::size_of::<i32>() as i32;
-                
-                let accept_res = unsafe {
-                    getsockopt(
-                        fd as usize,
-                        SOL_SOCKET,
-                        SO_ACCEPTCONN,
-                        &mut accept_conn as *mut _ as *mut i8,
-                        &mut accept_len,
-                    )
-                };
-
-                if accept_res == SOCKET_ERROR {
-                    return Err(io::Error::last_os_error());
-                }
-
-                if accept_conn != 0 {
-                    let std_listener = unsafe { std::net::TcpListener::from_raw_socket(fd as RawSocket) };
-                    let mio_listener = mio::net::TcpListener::from_std(std_listener);
-                    WindowsSource::TcpListener(ManuallyDrop::new(mio_listener))
-                } else {
-                    let std_stream = unsafe { std::net::TcpStream::from_raw_socket(fd as RawSocket) };
-                    let mio_stream = mio::net::TcpStream::from_std(std_stream);
-                    WindowsSource::TcpStream(ManuallyDrop::new(mio_stream))
-                }
-            } else {
-                return Err(io::Error::new(io::ErrorKind::Other, "Unsupported socket type"));
-            };
-
-            source
-        };
-
-        #[cfg(windows)]
         {
-            self.poll.registry().register(&mut source, token, interest)?;
+            // TODO: Implement proper Windows socket registration
+            // For now, just create the socket entry without Mio registration
+            // This avoids double-ownership issues with socket handles
         }
 
         let socket = Socket {
@@ -325,8 +258,6 @@ impl EventLoop {
             is_closed: false,
             async_state: Some(async_state),
             ext,
-            #[cfg(windows)]
-            source: Some(source),
         };
 
         entry.insert(socket);
@@ -335,11 +266,7 @@ impl EventLoop {
     }
 
     /// Modify socket interest
-    pub fn modify_socket(
-        &mut self,
-        token: Token,
-        interest: Interest,
-    ) -> io::Result<()> {
+    pub fn modify_socket(&mut self, token: Token, interest: Interest) -> io::Result<()> {
         if let Some(socket) = self.sockets.get_mut(token.0) {
             if socket.is_closed {
                 return Err(io::Error::new(io::ErrorKind::Other, "Socket is closed"));
@@ -349,16 +276,14 @@ impl EventLoop {
             {
                 use mio::unix::SourceFd;
                 let mut source = SourceFd(&socket.fd);
-                self.poll.registry().reregister(&mut source, token, interest)?;
+                self.poll
+                    .registry()
+                    .reregister(&mut source, token, interest)?;
             }
 
             #[cfg(windows)]
             {
-                if let Some(source) = &mut socket.source {
-                    self.poll.registry().reregister(source, token, interest)?;
-                } else {
-                    return Err(io::Error::new(io::ErrorKind::Other, "Socket source not available"));
-                }
+                // TODO: Implement proper Windows socket reregistration
             }
         } else {
             return Err(io::Error::new(io::ErrorKind::NotFound, "Socket not found"));
@@ -399,7 +324,10 @@ impl EventLoop {
                         socket.timer_id = Some(timer_id);
                     }
                     Err(_) => {
-                        return Err(io::Error::new(io::ErrorKind::Other, "Failed to schedule timer"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "Failed to schedule timer",
+                        ));
                     }
                 }
             }
@@ -450,12 +378,8 @@ impl EventLoop {
                         let _ = timer_wheel.cancel_timer(timer_id);
                     }
                 }
-                
-                #[cfg(windows)]
-                if let Some(mut source) = socket.source.take() {
-                     let _ = self.poll.registry().deregister(&mut source);
-                     // Source dropped here, but ManuallyDrop prevents closing FD
-                }
+
+                // No Windows-specific cleanup needed
 
                 // Remove from low-priority queue
                 self.low_prio_queue.remove(token);
@@ -473,6 +397,7 @@ impl EventLoop {
     fn process_low_priority(&mut self) {
         self.low_prio_queue.reset_budget();
 
+        // TODO: Remove allocation!
         let tokens: Vec<Token> = std::iter::from_fn(|| self.low_prio_queue.pop()).collect();
 
         for token in tokens {
@@ -617,7 +542,12 @@ impl EventLoop {
     }
 
     /// Handle a socket event
-    fn handle_socket_event(&mut self, token: Token, is_readable: bool, is_writable: bool) -> io::Result<()> {
+    fn handle_socket_event(
+        &mut self,
+        token: Token,
+        is_readable: bool,
+        is_writable: bool,
+    ) -> io::Result<()> {
         if is_readable {
             if let Some(socket) = self.sockets.get_mut(token.0) {
                 // Wake read task when socket becomes readable
@@ -688,7 +618,7 @@ mod tests {
 
         // Create event loop with owned SingleWheel
         let mut event_loop = EventLoop::with_timer_wheel().unwrap();
-        
+
         // We need to provide a valid AsyncSocketState here, not a DummyHandler if that doesn't exist/match
         let state = crate::net::AsyncSocketState::new();
 

@@ -1,0 +1,62 @@
+warning: type `WindowsSource` is more private than the item `Socket::source`
+   --> crates\maniac-runtime\src\net\event_loop.rs:143:5
+    |
+143 |     pub source: Option<WindowsSource>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `Socket::source` is reachable at visibility `pub`
+    |
+note: but type `WindowsSource` is only usable at visibility `pub(self)`
+   --> crates\maniac-runtime\src\net\event_loop.rs:45:1
+    |
+ 45 | enum WindowsSource {
+    | ^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `sync::mpsc::Inner<T, P, NUM_SEGS_P2>` is more private than the item `sync::mpsc::Receiver::<T, P, NUM_SEGS_P2>::inner`
+   --> crates\maniac-runtime\src\sync\mpsc.rs:547:5
+    |
+547 |     pub(crate) fn inner(&self) -> &Arc<Inner<T, P, NUM_SEGS_P2>> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `sync::mpsc::Receiver::<T, P, NUM_SEGS_P2>::inner` is reachable at visibility `pub(crate)`
+    |
+note: but type `sync::mpsc::Inner<T, P, NUM_SEGS_P2>` is only usable at visibility `pub(self)`
+   --> crates\maniac-runtime\src\sync\mpsc.rs:181:1
+    |
+181 | struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `maniac-runtime` (lib) generated 2 warnings
+   Compiling maniac-runtime v0.1.0 (C:\Users\info\repos\bisque-io\bop\crates\maniac-runtime)
+warning: unused import: `Executor`
+ --> crates\maniac-runtime\tests\socket_opt.rs:5:48
+  |
+5 | use maniac_runtime::runtime::{DefaultExecutor, Executor};
+  |                                                ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::io`
+ --> crates\maniac-runtime\tests\socket_opt.rs:6:5
+  |
+6 | use std::io;
+  |     ^^^^^^^
+
+warning: unused import: `AsyncReadExt`
+ --> crates\maniac-runtime\tests\socket_opt.rs:1:19
+  |
+1 | use futures::io::{AsyncReadExt, AsyncWriteExt};
+  |                   ^^^^^^^^^^^^
+
+warning: unused import: `AsyncWriteExt`
+ --> crates\maniac-runtime\tests\socket_opt.rs:1:33
+  |
+1 | use futures::io::{AsyncReadExt, AsyncWriteExt};
+  |                                 ^^^^^^^^^^^^^
+
+error: linking with `link.exe` failed: exit code: 1104
+  |
+  = note: "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "C:\\Users\\info\\AppData\\Local\\Temp\\rustcUijVg7\\symbols.o" "<43 object files omitted>" "<sysroot>\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib/{libtest-*,libgetopts-*,librustc_std_workspace_std-*}.rlib" "C:\\Users\\info\\repos\\bisque-io\\bop\\target\\debug\\deps/{libmaniac_runtime-eeeb9ecf7891f5d6,libcore_affinity-6176ef7085ca40f0,libnum_cpus-1fe70a8bc64b3e0b,libonce_cell-ecc86b59685e8d56,librand-9a75c5e7a16ce6f4,librand_chacha-7c69aae6efc490a7,libppv_lite86-695173afc5273f05,libzerocopy-3a1a8d049a445049,librand_core-9879cdb858ba2b1c,libgetrandom-99fa082cdb092539,libcfg_if-c6c59aeea06f958d,libcrossbeam_epoch-cdae11a1e863c122,libcrossbeam_utils-96db4feb57c79985,librustls-35b97aa6dcb67943,libsubtle-7a62713adcbc7e72,libwebpki-9f19ca9aa96f67a6,libuntrusted-1def58ec6b7b2f4e,libaws_lc_rs-5029a75a37f7db60,libuntrusted-c25bf2311f1ff702,libaws_lc_sys-8177ad8fb21fc8df,librustls_pki_types-76fa8308103b93e6,libzeroize-335b4290be5a0296,libmio-046fbe6705cbcf45,libwindows_sys-51ee45f2b5fa4cf6,libwindows_link-f745fbe2a98ebd03,liblog-5e5e83d7bb18664b,libwinapi-8a56f4263dda1ce1,libfutures_lite-693a4c33dfa2be4a,libparking-e21cf289b9587a33,libfastrand-9bedf595bf0fc5c3,libfutures-208a7042a6b1fcb0,libfutures_executor-7fe5932ffd63e68f,libfutures_util-d5b1f3e85c981cdd,libmemchr-dde8fc53f847c8bc,libfutures_io-b16ac9f488b8d9f8,libslab-904bd3b0567530cc,libfutures_channel-36bd337d8e32d659,libpin_project_lite-efc1287e85ca2a83,libfutures_sink-898462ce73aca438,libfutures_task-1c3fa5431198fd55,libpin_utils-8ff768994ab1a462,libfutures_core-b17e2c2a87306059}.rlib" "<sysroot>\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib/{libstd-*,libpanic_unwind-*,libcfg_if-*,libwindows_targets-*,librustc_demangle-*,libstd_detect-*,libhashbrown-*,librustc_std_workspace_alloc-*,libunwind-*,librustc_std_workspace_core-*,liballoc-*,libcore-*,libcompiler_builtins-*}.rlib" "kernel32.lib" "advapi32.lib" "cfgmgr32.lib" "gdi32.lib" "kernel32.lib" "msimg32.lib" "mswsock.lib" "opengl32.lib" "synchronization.lib" "user32.lib" "winspool.lib" "ws2_32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/LIBPATH:C:\\Users\\info\\repos\\bisque-io\\bop\\target\\debug\\build\\aws-lc-sys-49ed46825fa3a276\\out\\build\\artifacts" "/LIBPATH:C:\\Users\\info\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib" "/OUT:C:\\Users\\info\\repos\\bisque-io\\bop\\target\\debug\\deps\\socket_opt-7b0033bc70d3ef99.exe" "/OPT:REF,NOICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libstd.natvis"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: LINK : fatal error LNK1104: cannot open file 'C:\Users\info\repos\bisque-io\bop\target\debug\deps\socket_opt-7b0033bc70d3ef99.exe'ΓÉì
+          
+
+warning: `maniac-runtime` (test "socket_opt") generated 4 warnings
+error: could not compile `maniac-runtime` (test "socket_opt") due to 1 previous error; 4 warnings emitted

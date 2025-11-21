@@ -2,8 +2,6 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use mio::Waker;
-use once_cell::sync::OnceCell;
 
 use crate::net::EventLoop;
 use crate::utils::CachePadded;
@@ -172,8 +170,6 @@ pub struct WorkerWaker {
     /// is set and a permit is added to wake the worker.
     partition_summary: CachePadded<AtomicU64>,
 
-    /// Waker for the associated EventLoop, used to wake the worker from I/O polling.
-    waker: OnceCell<Waker>,
 }
 
 impl WorkerWaker {
@@ -189,17 +185,7 @@ impl WorkerWaker {
             sleepers: CachePadded::new(AtomicUsize::new(0)),
             worker_count: CachePadded::new(AtomicUsize::new(0)),
             partition_summary: CachePadded::new(AtomicU64::new(0)),
-            waker: OnceCell::new(),
         }
-    }
-
-    /// Sets the waker for this worker.
-    ///
-    /// This should be called once when the worker thread starts.
-    pub fn set_waker(&self, waker: Waker) {
-        self.waker
-            .set(waker)
-            .expect("WorkerWaker waker already set");
     }
 
     // ────────────────────────────────────────────────────────────────────────────
@@ -802,16 +788,8 @@ impl WorkerWaker {
         self.permits.fetch_add(n as u64, Ordering::Release);
         let to_wake = n.min(self.sleepers.load(Ordering::Relaxed));
 
-        if to_wake > 0 {
-             if let Some(waker) = self.waker.get() {
-                 // We only need to wake once, as the worker will loop until it finds all work
-                 // or parks again. Since we don't have individual thread parking anymore,
-                 // we just wake the event loop.
-                 // Note: if we had multiple threads sharing this waker, we'd need to be careful.
-                 // But WorkerWaker is 1:1 with Worker.
-                 waker.wake().expect("Failed to wake event loop");
-             }
-        }
+        // No event loop waker needed anymore - the waker is stored in EventLoop itself
+        // and will be called directly when needed
     }
 
     // ────────────────────────────────────────────────────────────────────────────
@@ -1192,6 +1170,7 @@ impl WorkerWaker {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1255,8 +1234,7 @@ mod tests {
     fn test_integration_with_event_loop() {
         let waker = Arc::new(WorkerWaker::new());
         let mut event_loop = EventLoop::new().unwrap();
-        let io_waker = event_loop.create_waker().unwrap();
-        waker.set_waker(io_waker);
+        let io_waker = event_loop.waker().unwrap();
         
         // Thread to wake us up
         let waker_clone = waker.clone();

@@ -3,13 +3,13 @@
 //! This module provides ergonomic async/await APIs for TCP networking that integrate
 //! with maniac-runtime's task system and EventLoop.
 
+use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker, RawWaker, RawWakerVTable};
-use std::future::Future;
-use std::sync::atomic::{AtomicU8, AtomicBool, AtomicPtr, Ordering};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use crate::net::{SocketDescriptor, Token};
 
@@ -37,12 +37,18 @@ impl RegisteredInterest {
 
     /// Check if readable interest is registered
     pub fn is_readable(self) -> bool {
-        matches!(self, RegisteredInterest::Readable | RegisteredInterest::ReadWrite)
+        matches!(
+            self,
+            RegisteredInterest::Readable | RegisteredInterest::ReadWrite
+        )
     }
 
     /// Check if writable interest is registered
     pub fn is_writable(self) -> bool {
-        matches!(self, RegisteredInterest::Writable | RegisteredInterest::ReadWrite)
+        matches!(
+            self,
+            RegisteredInterest::Writable | RegisteredInterest::ReadWrite
+        )
     }
 
     /// Add readable interest
@@ -69,7 +75,9 @@ impl RegisteredInterest {
             RegisteredInterest::None => None,
             RegisteredInterest::Readable => Some(crate::runtime::worker::SocketInterest::Readable),
             RegisteredInterest::Writable => Some(crate::runtime::worker::SocketInterest::Writable),
-            RegisteredInterest::ReadWrite => Some(crate::runtime::worker::SocketInterest::ReadWrite),
+            RegisteredInterest::ReadWrite => {
+                Some(crate::runtime::worker::SocketInterest::ReadWrite)
+            }
         }
     }
 }
@@ -192,7 +200,8 @@ impl TcpStream {
 
     /// Set the registered interest
     pub fn set_registered_interest(&self, interest: RegisteredInterest) {
-        self.registered_interest.store(interest as u8, Ordering::Release);
+        self.registered_interest
+            .store(interest as u8, Ordering::Release);
     }
 
     /// Check if timeout occurred
@@ -234,16 +243,11 @@ impl TcpStream {
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawSocket;
-            use winapi::um::winsock2::{ioctlsocket, FIONBIO};
+            use winapi::um::winsock2::{FIONBIO, ioctlsocket};
             let raw_socket = self.fd as u64;
             let mut nonblocking: u32 = 1;
-            let result = unsafe {
-                ioctlsocket(
-                    raw_socket as usize,
-                    FIONBIO,
-                    &mut nonblocking as *mut u32,
-                )
-            };
+            let result =
+                unsafe { ioctlsocket(raw_socket as usize, FIONBIO, &mut nonblocking as *mut u32) };
             if result != 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -290,13 +294,12 @@ struct ConnectFuture {
 
 impl ConnectFuture {
     fn new<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
-        let addr = addr.to_socket_addrs()?.next().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "no socket addresses")
-        })?;
+        let addr = addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no socket addresses"))?;
 
-        Ok(Self {
-            addr: Some(addr),
-        })
+        Ok(Self { addr: Some(addr) })
     }
 }
 
@@ -306,54 +309,70 @@ impl Future for ConnectFuture {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let addr = self.addr.take().unwrap();
 
-            // Create socket
-            let stream = match std::net::TcpStream::connect(addr) {
-                Ok(s) => s,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // Connection in progress - we need to register with EventLoop
-                    // TODO: Actually initiate non-blocking connect
-                    // For now, return error
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "async connect not yet fully implemented",
-                    )));
-                }
-                Err(e) => return Poll::Ready(Err(e)),
-            };
+        // Create socket
+        let stream = match std::net::TcpStream::connect(addr) {
+            Ok(s) => s,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Connection in progress - we need to register with EventLoop
+                // TODO: Actually initiate non-blocking connect
+                // For now, return error
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "async connect not yet fully implemented",
+                )));
+            }
+            Err(e) => return Poll::Ready(Err(e)),
+        };
 
-            // Get addresses
-            let local_addr = stream.local_addr()?;
-            let peer_addr = stream.peer_addr()?;
+        // Get addresses
+        let local_addr = stream.local_addr()?;
+        let peer_addr = stream.peer_addr()?;
 
-            // Get FD
-            #[cfg(unix)]
-            let fd = {
-                use std::os::unix::io::AsRawFd;
-                stream.as_raw_fd() as SocketDescriptor
-            };
+        // Get FD
+        #[cfg(unix)]
+        let fd = {
+            use std::os::unix::io::AsRawFd;
+            stream.as_raw_fd() as SocketDescriptor
+        };
 
-            #[cfg(windows)]
-            let fd = {
-                use std::os::windows::io::AsRawSocket;
-                stream.as_raw_socket() as SocketDescriptor
-            };
+        #[cfg(windows)]
+        let fd = {
+            use std::os::windows::io::AsRawSocket;
+            stream.as_raw_socket() as SocketDescriptor
+        };
 
-            let tcp_stream = TcpStream {
-                fd,
-                worker_id: None,
-                state: crate::net::AsyncSocketState::new(),
-                registered_interest: AtomicU8::new(RegisteredInterest::None as u8),
-                local_addr,
-                peer_addr,
-            };
+        let mut tcp_stream = TcpStream {
+            fd,
+            worker_id: None,
+            state: crate::net::AsyncSocketState::new(),
+            registered_interest: AtomicU8::new(RegisteredInterest::None as u8),
+            local_addr,
+            peer_addr,
+        };
 
-            // Set socket to non-blocking mode
-            tcp_stream.set_nonblocking()?;
+        // Set socket to non-blocking mode
+        tcp_stream.set_nonblocking()?;
 
-            // Forget the std stream so FD stays open
-            std::mem::forget(stream);
+        // Register eagerly with current worker
+        let interest = crate::runtime::worker::SocketInterest::Readable;
+        if let Ok(_token) = crate::runtime::worker::register_socket_with_current_worker(
+            tcp_stream.fd,
+            interest,
+            tcp_stream.state.clone(),
+        ) {
+            if let Some(worker_id) = crate::runtime::worker::current_worker_id() {
+                tcp_stream.worker_id = Some(worker_id as usize);
+                tcp_stream.set_registered_interest(RegisteredInterest::Readable);
+            }
+        } else {
+            #[cfg(debug_assertions)]
+            eprintln!("ConnectFuture: Eager registration failed");
+        }
 
-            return Poll::Ready(Ok(tcp_stream));
+        // Forget the std stream so FD stays open
+        std::mem::forget(stream);
+
+        return Poll::Ready(Ok(tcp_stream));
     }
 }
 
@@ -398,19 +417,11 @@ impl<'a> Future for ReadFuture<'a> {
             if this.stream.worker_id.is_none() {
                 // First registration - send RegisterSocket message
                 if let Some(socket_interest) = new_interest.to_socket_interest() {
-                    // Get pointer to state for EventHandler
-                    // We clone the state (Arc increment) to ensure it lives as long as the worker needs it
-                    // The raw pointer is passed, but we must ensure the Arc is valid.
-                    let state_ptr = &this.stream.state as *const _ as usize;
-
-                    // Attempt to register with current worker
                     if let Ok(_token) = crate::runtime::worker::register_socket_with_current_worker(
                         this.stream.fd,
                         socket_interest,
-                        state_ptr,
+                        this.stream.state.clone(),
                     ) {
-                        // Registration message sent successfully
-                        // Store current worker_id (will be set when message is processed)
                         if let Some(worker_id) = crate::runtime::worker::current_worker_id() {
                             this.stream.worker_id = Some(worker_id as usize);
                         }
@@ -419,7 +430,8 @@ impl<'a> Future for ReadFuture<'a> {
             } else if let Some(token) = this.stream.state.token() {
                 // Socket already registered - send ModifySocket message
                 if let (Some(socket_interest), Some(worker_id)) =
-                    (new_interest.to_socket_interest(), this.stream.worker_id) {
+                    (new_interest.to_socket_interest(), this.stream.worker_id)
+                {
                     let _ = crate::runtime::worker::modify_socket_interest(
                         Token(token),
                         worker_id as u32,
@@ -529,12 +541,10 @@ impl<'a> Future for WriteFuture<'a> {
             if self.stream.worker_id.is_none() {
                 // First registration - send RegisterSocket message
                 if let Some(socket_interest) = new_interest.to_socket_interest() {
-                    let state_ptr = &self.stream.state as *const _ as usize;
-
                     if let Ok(_token) = crate::runtime::worker::register_socket_with_current_worker(
                         self.stream.fd,
                         socket_interest,
-                        state_ptr,
+                        self.stream.state.clone(),
                     ) {
                         if let Some(worker_id) = crate::runtime::worker::current_worker_id() {
                             self.stream.worker_id = Some(worker_id as usize);
@@ -544,7 +554,8 @@ impl<'a> Future for WriteFuture<'a> {
             } else if let Some(token) = self.stream.state.token() {
                 // Socket already registered - send ModifySocket message
                 if let (Some(socket_interest), Some(worker_id)) =
-                    (new_interest.to_socket_interest(), self.stream.worker_id) {
+                    (new_interest.to_socket_interest(), self.stream.worker_id)
+                {
                     let _ = crate::runtime::worker::modify_socket_interest(
                         Token(token),
                         worker_id as u32,
@@ -562,11 +573,7 @@ impl<'a> Future for WriteFuture<'a> {
         #[cfg(unix)]
         let result = unsafe {
             let fd = self.stream.fd as i32;
-            let n = libc::write(
-                fd,
-                self.buf.as_ptr() as *const libc::c_void,
-                self.buf.len(),
-            );
+            let n = libc::write(fd, self.buf.as_ptr() as *const libc::c_void, self.buf.len());
 
             if n < 0 {
                 Err(io::Error::last_os_error())
@@ -657,12 +664,10 @@ impl<'a> Future for WriteAllFuture<'a> {
             if this.stream.worker_id.is_none() {
                 // First registration - send RegisterSocket message
                 if let Some(socket_interest) = new_interest.to_socket_interest() {
-                    let state_ptr = &this.stream.state as *const _ as usize;
-
                     if let Ok(_token) = crate::runtime::worker::register_socket_with_current_worker(
                         this.stream.fd,
                         socket_interest,
-                        state_ptr,
+                        this.stream.state.clone(),
                     ) {
                         if let Some(worker_id) = crate::runtime::worker::current_worker_id() {
                             this.stream.worker_id = Some(worker_id as usize);
@@ -672,7 +677,8 @@ impl<'a> Future for WriteAllFuture<'a> {
             } else if let Some(token) = this.stream.state.token() {
                 // Socket already registered - send ModifySocket message
                 if let (Some(socket_interest), Some(worker_id)) =
-                    (new_interest.to_socket_interest(), this.stream.worker_id) {
+                    (new_interest.to_socket_interest(), this.stream.worker_id)
+                {
                     let _ = crate::runtime::worker::modify_socket_interest(
                         Token(token),
                         worker_id as u32,
@@ -833,7 +839,8 @@ impl TcpListener {
 
     /// Set the registered interest
     pub fn set_registered_interest(&self, interest: RegisteredInterest) {
-        self.registered_interest.store(interest as u8, Ordering::Release);
+        self.registered_interest
+            .store(interest as u8, Ordering::Release);
     }
 
     /// Store accept waker data pointer
@@ -875,16 +882,11 @@ impl TcpListener {
 
         #[cfg(windows)]
         {
-            use winapi::um::winsock2::{ioctlsocket, FIONBIO};
+            use winapi::um::winsock2::{FIONBIO, ioctlsocket};
             let raw_socket = self.fd as u64;
             let mut nonblocking: u32 = 1;
-            let result = unsafe {
-                ioctlsocket(
-                    raw_socket as usize,
-                    FIONBIO,
-                    &mut nonblocking as *mut u32,
-                )
-            };
+            let result =
+                unsafe { ioctlsocket(raw_socket as usize, FIONBIO, &mut nonblocking as *mut u32) };
             if result != 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -931,13 +933,12 @@ struct BindFuture {
 
 impl BindFuture {
     fn new<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
-        let addr = addr.to_socket_addrs()?.next().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "no socket addresses")
-        })?;
+        let addr = addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no socket addresses"))?;
 
-        Ok(Self {
-            addr: Some(addr),
-        })
+        Ok(Self { addr: Some(addr) })
     }
 }
 
@@ -969,7 +970,7 @@ impl Future for BindFuture {
             listener.as_raw_socket() as SocketDescriptor
         };
 
-        let tcp_listener = TcpListener {
+        let mut tcp_listener = TcpListener {
             fd,
             worker_id: None,
             state: crate::net::AsyncSocketState::new(),
@@ -979,6 +980,22 @@ impl Future for BindFuture {
 
         // Set non-blocking mode
         tcp_listener.set_nonblocking()?;
+
+        // Register eagerly with current worker
+        let interest = crate::runtime::worker::SocketInterest::Readable;
+        if let Ok(_token) = crate::runtime::worker::register_socket_with_current_worker(
+            tcp_listener.fd,
+            interest,
+            tcp_listener.state.clone(),
+        ) {
+            if let Some(worker_id) = crate::runtime::worker::current_worker_id() {
+                tcp_listener.worker_id = Some(worker_id as usize);
+                tcp_listener.set_registered_interest(RegisteredInterest::Readable);
+            }
+        } else {
+            #[cfg(debug_assertions)]
+            eprintln!("BindFuture: Eager registration failed");
+        }
 
         // Forget the std listener so FD stays open
         std::mem::forget(listener);
@@ -1011,12 +1028,10 @@ impl<'a> Future for AcceptFuture<'a> {
             if self.listener.worker_id.is_none() {
                 // First registration - send RegisterSocket message
                 if let Some(socket_interest) = new_interest.to_socket_interest() {
-                    let state_ptr = &self.listener.state as *const _ as usize;
-
                     if let Ok(_token) = crate::runtime::worker::register_socket_with_current_worker(
                         self.listener.fd,
                         socket_interest,
-                        state_ptr,
+                        self.listener.state.clone(),
                     ) {
                         if let Some(worker_id) = crate::runtime::worker::current_worker_id() {
                             self.listener.worker_id = Some(worker_id as usize);
@@ -1026,7 +1041,8 @@ impl<'a> Future for AcceptFuture<'a> {
             } else if let Some(token) = self.listener.state.token() {
                 // Socket already registered - send ModifySocket message
                 if let (Some(socket_interest), Some(worker_id)) =
-                    (new_interest.to_socket_interest(), self.listener.worker_id) {
+                    (new_interest.to_socket_interest(), self.listener.worker_id)
+                {
                     let _ = crate::runtime::worker::modify_socket_interest(
                         Token(token),
                         worker_id as u32,
@@ -1078,18 +1094,14 @@ impl<'a> Future for AcceptFuture<'a> {
 
         #[cfg(windows)]
         let result = unsafe {
-            use winapi::um::winsock2::{accept, SOCKET_ERROR};
             use winapi::shared::ws2def::{SOCKADDR, SOCKADDR_IN};
+            use winapi::um::winsock2::{SOCKET_ERROR, accept};
 
             let socket = self.listener.fd as usize;
             let mut addr: SOCKADDR_IN = std::mem::zeroed();
             let mut addr_len = std::mem::size_of::<SOCKADDR_IN>() as i32;
 
-            let client_socket = accept(
-                socket,
-                &mut addr as *mut _ as *mut SOCKADDR,
-                &mut addr_len,
-            );
+            let client_socket = accept(socket, &mut addr as *mut _ as *mut SOCKADDR, &mut addr_len);
 
             if client_socket == SOCKET_ERROR as usize {
                 Err(io::Error::last_os_error())
@@ -1110,13 +1122,15 @@ impl<'a> Future for AcceptFuture<'a> {
                 #[cfg(unix)]
                 let local_addr = unsafe {
                     let mut addr: libc::sockaddr_storage = std::mem::zeroed();
-                    let mut addr_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+                    let mut addr_len =
+                        std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
 
                     if libc::getsockname(
                         client_fd as i32,
                         &mut addr as *mut _ as *mut libc::sockaddr,
                         &mut addr_len,
-                    ) < 0 {
+                    ) < 0
+                    {
                         return Poll::Ready(Err(io::Error::last_os_error()));
                     }
 
@@ -1130,8 +1144,8 @@ impl<'a> Future for AcceptFuture<'a> {
 
                 #[cfg(windows)]
                 let local_addr = unsafe {
-                    use winapi::um::winsock2::getsockname;
                     use winapi::shared::ws2def::{SOCKADDR, SOCKADDR_IN};
+                    use winapi::um::winsock2::getsockname;
 
                     let mut addr: SOCKADDR_IN = std::mem::zeroed();
                     let mut addr_len = std::mem::size_of::<SOCKADDR_IN>() as i32;
@@ -1140,7 +1154,8 @@ impl<'a> Future for AcceptFuture<'a> {
                         client_fd as usize,
                         &mut addr as *mut _ as *mut SOCKADDR,
                         &mut addr_len,
-                    ) != 0 {
+                    ) != 0
+                    {
                         return Poll::Ready(Err(io::Error::last_os_error()));
                     }
 
@@ -1151,7 +1166,7 @@ impl<'a> Future for AcceptFuture<'a> {
                 };
 
                 // Create TcpStream
-                let stream = TcpStream {
+                let mut stream = TcpStream {
                     fd: client_fd,
                     worker_id: None,
                     state: crate::net::AsyncSocketState::new(),
@@ -1162,6 +1177,22 @@ impl<'a> Future for AcceptFuture<'a> {
 
                 // Set client socket to non-blocking
                 stream.set_nonblocking()?;
+
+                // Register eagerly with current worker
+                let interest = crate::runtime::worker::SocketInterest::Readable;
+                if let Ok(_token) = crate::runtime::worker::register_socket_with_current_worker(
+                    stream.fd,
+                    interest,
+                    stream.state.clone(),
+                ) {
+                    if let Some(worker_id) = crate::runtime::worker::current_worker_id() {
+                        stream.worker_id = Some(worker_id as usize);
+                        stream.set_registered_interest(RegisteredInterest::Readable);
+                    }
+                } else {
+                    #[cfg(debug_assertions)]
+                    eprintln!("AcceptFuture: Eager registration failed");
+                }
 
                 Poll::Ready(Ok((stream, peer_addr)))
             }

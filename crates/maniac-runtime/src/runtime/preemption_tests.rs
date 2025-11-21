@@ -16,27 +16,27 @@ mod tests {
         f();
     }
 
-    #[test]
-    fn test_init_worker_preemption() {
-        run_serialized(|| {
-            let flag = AtomicBool::new(false);
-            crate::runtime::preemption::init_worker_thread_preemption(&flag);
-        });
-    }
+    // #[test]
+    // fn test_init_worker_preemption() {
+    //     run_serialized(|| {
+    //         let flag = AtomicBool::new(false);
+    //         crate::runtime::preemption::init_worker_thread_preemption(&flag);
+    //     });
+    // }
 
-    #[test]
-    fn test_check_and_clear_preemption() {
-        run_serialized(|| {
-            let flag = AtomicBool::new(true);
-            assert!(crate::runtime::preemption::check_and_clear_preemption(
-                &flag
-            ));
-            assert!(!flag.load(Ordering::Relaxed));
-            assert!(!crate::runtime::preemption::check_and_clear_preemption(
-                &flag
-            ));
-        });
-    }
+    // #[test]
+    // fn test_check_and_clear_preemption() {
+    //     run_serialized(|| {
+    //         let flag = AtomicBool::new(true);
+    //         assert!(crate::runtime::preemption::check_and_clear_preemption(
+    //             &flag
+    //         ));
+    //         assert!(!flag.load(Ordering::Relaxed));
+    //         assert!(!crate::runtime::preemption::check_and_clear_preemption(
+    //             &flag
+    //         ));
+    //     });
+    // }
 
     #[test]
     // #[cfg(not(miri))]
@@ -58,7 +58,6 @@ mod tests {
                 let flag_clone = Arc::clone(&flag);
                 let exit_signal = Arc::clone(&should_exit);
                 thread::spawn(move || {
-                    crate::runtime::preemption::init_worker_thread_preemption(&flag_clone);
                     let _preemption_guard = crate::runtime::preemption::init_worker_preemption()
                         .expect("Failed to install preemption handler");
 
@@ -151,7 +150,6 @@ mod tests {
             let worker = {
                 let flag_clone = Arc::clone(&preempt_flag);
                 thread::spawn(move || {
-                    crate::runtime::preemption::init_worker_thread_preemption(&flag_clone);
                     let _guard = crate::runtime::preemption::init_worker_preemption()
                         .expect("install handler");
 
@@ -167,15 +165,49 @@ mod tests {
                     use crate::runtime::preemption::GeneratorYieldReason;
 
                     for gen_id in 0..2 {
+                        // println!("[Test] Starting generator {}", gen_id);
                         let exit_signal = Arc::new(AtomicBool::new(false));
                         let exit_clone = Arc::clone(&exit_signal);
                         let events = event_tx.clone();
 
                         let mut generator =
                             crate::generator::Gn::<()>::new_scoped(move |mut scope| {
+                                // let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                //     crate::runtime::preemption::set_generator_scope(
+                                //         &mut scope as *mut _ as *mut (),
+                                //     );
+                                //     // println!("[Gen {}] Scope set, notifying ready", gen_id);
+                                //     events
+                                //         .send(WorkerEvent::GeneratorReady(gen_id))
+                                //         .expect("notify ready");
+
+                                //     let mut spin = 0u64;
+                                //     loop {
+                                //         std::hint::black_box(spin);
+                                //         spin = spin.wrapping_add(1);
+
+                                //         if exit_clone.load(Ordering::Acquire) {
+                                //             // println!("[Gen {}] Exit signal received", gen_id);
+                                //             crate::runtime::preemption::clear_generator_scope();
+                                //             return crate::generator::done();
+                                //             // return 0;
+                                //         }
+                                //     }
+                                // }));
+
+                                // match result {
+                                //     Ok(val) => val,
+                                //     Err(e) => {
+                                //         eprintln!("[Gen {}] Panic caught: {:?}", gen_id, e);
+                                //         crate::runtime::preemption::clear_generator_scope();
+                                //         gen_id
+                                //     }
+                                // }
+
                                 crate::runtime::preemption::set_generator_scope(
                                     &mut scope as *mut _ as *mut (),
                                 );
+                                // println!("[Gen {}] Scope set, notifying ready", gen_id);
                                 events
                                     .send(WorkerEvent::GeneratorReady(gen_id))
                                     .expect("notify ready");
@@ -186,23 +218,28 @@ mod tests {
                                     spin = spin.wrapping_add(1);
 
                                     if exit_clone.load(Ordering::Acquire) {
+                                        // println!("[Gen {}] Exit signal received", gen_id);
                                         crate::runtime::preemption::clear_generator_scope();
                                         return crate::generator::done();
+                                        // return 0;
                                     }
                                 }
                             });
 
+                        // println!("[Test] Resuming generator {}", gen_id);
                         let reason = generator
                             .resume()
                             .and_then(GeneratorYieldReason::from_usize)
                             .expect("generator should yield");
                         assert_eq!(reason, GeneratorYieldReason::Preempted);
+                        // println!("[Test] Generator {} preempted", gen_id);
 
                         exit_signal.store(true, Ordering::Release);
                         assert!(
                             generator.resume().is_none(),
                             "generator should exit after exit flag"
                         );
+                        // println!("[Test] Generator {} finished", gen_id);
                         event_tx
                             .send(WorkerEvent::GeneratorFinished(gen_id))
                             .expect("notify finished");

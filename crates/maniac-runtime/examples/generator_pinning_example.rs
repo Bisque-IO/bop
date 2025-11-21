@@ -6,7 +6,7 @@
 use futures_lite::future::{block_on, poll_fn};
 use maniac_runtime::runtime::Executor;
 use maniac_runtime::runtime::task::{TaskArenaConfig, TaskArenaOptions};
-use maniac_runtime::runtime::worker::pin_current_generator;
+use maniac_runtime::runtime::worker::pin_stack;
 use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("[Task] Task started inside Worker's generator");
 
         // Pin the current generator (the one Worker is running in)
-        if pin_current_generator() {
+        if pin_stack() {
             println!("[Task] Generator pin requested!");
             println!("[Task] Worker will transfer this generator to us");
         } else {
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("[Task {}] Starting", task_id);
 
             // Request to pin the current generator
-            if pin_current_generator() {
+            if pin_stack() {
                 println!("[Task {}] Generator pinned!", task_id);
                 counter_clone.fetch_add(1, Ordering::Relaxed);
             }

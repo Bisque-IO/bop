@@ -7,12 +7,13 @@
 //! NOTE: This is designed for a work-stealing runtime where tasks can migrate between
 //! workers. The EventLoop wakes tasks cross-worker when sockets become ready.
 
-use std::task::Waker;
 use std::sync::Arc;
+use std::task::Waker;
 
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
-/// Inner state shared between async socket Futures and the Worker EventLoop
+/// Internal state for AsyncSocketState (to allow Arc-based cloning)
+#[derive(Debug)]
 struct AsyncSocketStateInner {
     /// Read task waker (stored as RawWaker data pointer)
     read_waker_data: AtomicPtr<()>,
@@ -38,7 +39,7 @@ struct AsyncSocketStateInner {
 ///
 /// Waker storage is lock-free using AtomicPtr - we only store the data pointer from
 /// RawWaker and reconstruct using Task::waker_clone when waking.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AsyncSocketState {
     inner: Arc<AsyncSocketStateInner>,
 }
@@ -65,7 +66,9 @@ impl AsyncSocketState {
             let waker_ptr = waker as *const Waker;
             *(waker_ptr as *const *const ())
         };
-        self.inner.read_waker_data.store(data as *mut (), Ordering::Release);
+        self.inner
+            .read_waker_data
+            .store(data as *mut (), Ordering::Release);
     }
 
     /// Store the write task waker for cross-worker wakeup
@@ -76,7 +79,9 @@ impl AsyncSocketState {
             let waker_ptr = waker as *const Waker;
             *(waker_ptr as *const *const ())
         };
-        self.inner.write_waker_data.store(data as *mut (), Ordering::Release);
+        self.inner
+            .write_waker_data
+            .store(data as *mut (), Ordering::Release);
     }
 
     /// Wake the read task (called by Worker EventLoop when socket becomes readable)
@@ -130,11 +135,7 @@ impl AsyncSocketState {
     /// Get the token
     pub fn token(&self) -> Option<usize> {
         let val = self.inner.token.load(Ordering::Acquire);
-        if val == usize::MAX {
-            None
-        } else {
-            Some(val)
-        }
+        if val == usize::MAX { None } else { Some(val) }
     }
 
     /// Set the token
