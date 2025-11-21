@@ -172,38 +172,6 @@ mod tests {
 
                         let mut generator =
                             crate::generator::Gn::<()>::new_scoped(move |mut scope| {
-                                // let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                //     crate::runtime::preemption::set_generator_scope(
-                                //         &mut scope as *mut _ as *mut (),
-                                //     );
-                                //     // println!("[Gen {}] Scope set, notifying ready", gen_id);
-                                //     events
-                                //         .send(WorkerEvent::GeneratorReady(gen_id))
-                                //         .expect("notify ready");
-
-                                //     let mut spin = 0u64;
-                                //     loop {
-                                //         std::hint::black_box(spin);
-                                //         spin = spin.wrapping_add(1);
-
-                                //         if exit_clone.load(Ordering::Acquire) {
-                                //             // println!("[Gen {}] Exit signal received", gen_id);
-                                //             crate::runtime::preemption::clear_generator_scope();
-                                //             return crate::generator::done();
-                                //             // return 0;
-                                //         }
-                                //     }
-                                // }));
-
-                                // match result {
-                                //     Ok(val) => val,
-                                //     Err(e) => {
-                                //         eprintln!("[Gen {}] Panic caught: {:?}", gen_id, e);
-                                //         crate::runtime::preemption::clear_generator_scope();
-                                //         gen_id
-                                //     }
-                                // }
-
                                 crate::runtime::preemption::set_generator_scope(
                                     &mut scope as *mut _ as *mut (),
                                 );
