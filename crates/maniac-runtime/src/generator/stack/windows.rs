@@ -5,12 +5,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::SysStack;
-use winapi::shared::minwindef::DWORD;
-use winapi::um::memoryapi::{VirtualAlloc, VirtualFree, VirtualProtect};
-use winapi::um::sysinfoapi::{GetSystemInfo, SYSTEM_INFO};
-use winapi::um::winnt::{
-    MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_GUARD, PAGE_READONLY, PAGE_READWRITE,
-};
+use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_GUARD, PAGE_READONLY, PAGE_READWRITE};
+use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 
 #[path = "overflow_windows.rs"]
 pub mod overflow;
@@ -35,7 +31,7 @@ pub unsafe fn allocate_stack(size: usize) -> io::Result<SysStack> {
 
 pub unsafe fn protect_stack(stack: &SysStack) -> io::Result<SysStack> {
     let page_size = page_size();
-    let mut old_prot: DWORD = 0;
+    let mut old_prot: u32 = 0;
 
     debug_assert!(stack.len() % page_size == 0 && stack.len() != 0);
 

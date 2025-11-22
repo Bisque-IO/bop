@@ -551,8 +551,25 @@ mod impl_x64 {
     #[cfg(windows)]
     mod windows_impl {
         use super::super::*;
-        use winapi::shared::minwindef::DWORD;
-        use winapi::um::winnt::HANDLE;
+        use windows_sys::Win32::Foundation::{HANDLE, CloseHandle, DuplicateHandle};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentThread,
+            SuspendThread, ResumeThread,
+            THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT,
+            THREAD_SUSPEND_RESUME,
+        };
+        use windows_sys::Win32::System::Diagnostics::Debug::{CONTEXT, GetThreadContext, SetThreadContext};
+
+        // Windows CONTEXT flags (architecture-independent values)
+        #[cfg(target_arch = "x86_64")]
+        const CONTEXT_CONTROL: u32 = 0x00100001;
+        #[cfg(target_arch = "x86_64")]
+        const CONTEXT_INTEGER: u32 = 0x00100002;
+        
+        #[cfg(target_arch = "aarch64")]
+        const CONTEXT_CONTROL: u32 = 0x00400001;
+        #[cfg(target_arch = "aarch64")]
+        const CONTEXT_INTEGER: u32 = 0x00400002;
 
         unsafe extern "C" {
             fn preemption_trampoline();
@@ -567,12 +584,6 @@ mod impl_x64 {
 
         impl WorkerThreadHandle {
             pub fn current(preemption_flag: &AtomicBool) -> Result<Self, PreemptionError> {
-                use winapi::um::handleapi::DuplicateHandle;
-                use winapi::um::processthreadsapi::{GetCurrentProcess, GetCurrentThread};
-                use winapi::um::winnt::{
-                    THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT,
-                    THREAD_SUSPEND_RESUME,
-                };
                 unsafe {
                     let mut real_handle: HANDLE = std::ptr::null_mut();
                     let pseudo_handle = GetCurrentThread();
@@ -607,10 +618,6 @@ mod impl_x64 {
             }
 
             pub fn interrupt(&self) -> Result<(), PreemptionError> {
-                use winapi::um::processthreadsapi::{
-                    GetThreadContext, ResumeThread, SetThreadContext, SuspendThread,
-                };
-                use winapi::um::winnt::{CONTEXT, CONTEXT_CONTROL, CONTEXT_INTEGER};
                 unsafe {
                     if SuspendThread(self.thread_handle) == u32::MAX {
                         println!("SuspendThread failed: {}", std::io::Error::last_os_error());
@@ -663,7 +670,7 @@ mod impl_x64 {
         impl Drop for WorkerThreadHandle {
             fn drop(&mut self) {
                 unsafe {
-                    winapi::um::handleapi::CloseHandle(self.thread_handle);
+                    CloseHandle(self.thread_handle);
                 }
             }
         }
@@ -1030,8 +1037,26 @@ mod impl_aarch64 {
     #[cfg(windows)]
     mod windows_impl {
         use super::super::*;
-        use winapi::shared::minwindef::DWORD;
-        use winapi::um::winnt::HANDLE;
+        use windows_sys::Win32::Foundation::{HANDLE, CloseHandle, DuplicateHandle};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentThread,
+            SuspendThread, ResumeThread,
+            THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT,
+            THREAD_SUSPEND_RESUME,
+        };
+        use windows_sys::Win32::System::Diagnostics::Debug::{CONTEXT, GetThreadContext, SetThreadContext};
+        use windows_sys::Win32::System::Memory::WriteProcessMemory;
+
+        // Windows CONTEXT flags (architecture-independent values)
+        #[cfg(target_arch = "x86_64")]
+        const CONTEXT_CONTROL: u32 = 0x00100001;
+        #[cfg(target_arch = "x86_64")]
+        const CONTEXT_INTEGER: u32 = 0x00100002;
+        
+        #[cfg(target_arch = "aarch64")]
+        const CONTEXT_CONTROL: u32 = 0x00400001;
+        #[cfg(target_arch = "aarch64")]
+        const CONTEXT_INTEGER: u32 = 0x00400002;
 
         unsafe extern "C" {
             fn preemption_trampoline();
@@ -1046,12 +1071,6 @@ mod impl_aarch64 {
 
         impl WorkerThreadHandle {
             pub fn current(preemption_flag: &AtomicBool) -> Result<Self, PreemptionError> {
-                use winapi::um::handleapi::DuplicateHandle;
-                use winapi::um::processthreadsapi::{GetCurrentProcess, GetCurrentThread};
-                use winapi::um::winnt::{
-                    THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT,
-                    THREAD_SUSPEND_RESUME,
-                };
                 unsafe {
                     let mut real_handle: HANDLE = std::ptr::null_mut();
                     let pseudo_handle = GetCurrentThread();
@@ -1086,13 +1105,8 @@ mod impl_aarch64 {
             }
 
             pub fn interrupt(&self) -> Result<(), PreemptionError> {
-                use winapi::um::processthreadsapi::{
-                    GetThreadContext, ResumeThread, SetThreadContext, SuspendThread,
-                };
-                use winapi::um::winnt::{CONTEXT, CONTEXT_CONTROL, CONTEXT_INTEGER};
-
-                // Note: winapi's CONTEXT structure for ARM64 is different.
-                // We need to check what winapi provides for ARM64.
+                // Note: CONTEXT structure for ARM64 is different from x86_64.
+                // We need to check what windows-sys provides for ARM64.
                 // Typically CONTEXT_ARM64 (if configured) or just CONTEXT.
                 // Fields: Pc, Sp, Lr.
 
@@ -1131,14 +1145,14 @@ mod impl_aarch64 {
                         context.Rsp -= 8;
                         
                         // Use WriteProcessMemory to safely write to the target stack
-                        let stack_ptr = context.Rsp as winapi::shared::minwindef::LPVOID;
+                        let stack_ptr = context.Rsp as *mut std::ffi::c_void;
                         let mut written: usize = 0;
-                        let process = winapi::um::processthreadsapi::GetCurrentProcess();
+                        let process = GetCurrentProcess();
                         
-                        if winapi::um::memoryapi::WriteProcessMemory(
+                        if WriteProcessMemory(
                             process,
                             stack_ptr,
-                            &original_rip as *const _ as winapi::shared::minwindef::LPCVOID,
+                            &original_rip as *const _ as *const std::ffi::c_void,
                             8,
                             &mut written
                         ) == 0 {
@@ -1176,7 +1190,7 @@ mod impl_aarch64 {
         impl Drop for WorkerThreadHandle {
             fn drop(&mut self) {
                 unsafe {
-                    winapi::um::handleapi::CloseHandle(self.thread_handle);
+                    CloseHandle(self.thread_handle);
                 }
             }
         }

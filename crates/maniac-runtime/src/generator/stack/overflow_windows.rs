@@ -1,9 +1,8 @@
 use crate::generator::rt::{guard, Context, ContextStack};
 use std::sync::Once;
-use winapi::um::errhandlingapi::AddVectoredExceptionHandler;
-use winapi::um::winnt::{CONTEXT, EXCEPTION_POINTERS};
+use windows_sys::Win32::System::Diagnostics::Debug::{AddVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS};
 
-const EXCEPTION_STACK_OVERFLOW: u32 = 0xC00000FD;
+const EXCEPTION_STACK_OVERFLOW: i32 = 0xC00000FD_u32 as i32;
 
 unsafe extern "system" fn vectored_handler(exception_info: *mut EXCEPTION_POINTERS) -> i32 {
     const EXCEPTION_CONTINUE_SEARCH: i32 = 0;

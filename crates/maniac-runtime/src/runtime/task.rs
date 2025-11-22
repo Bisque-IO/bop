@@ -20,9 +20,7 @@ use libc::{MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, mmap, 
 use libc::{MAP_HUGE_2MB, MAP_HUGETLB};
 
 #[cfg(windows)]
-use winapi::um::memoryapi::{VirtualAlloc, VirtualFree};
-#[cfg(windows)]
-use winapi::um::winnt::{MEM_COMMIT, MEM_LARGE_PAGES, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
+use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_LARGE_PAGES, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
 
 pub type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 

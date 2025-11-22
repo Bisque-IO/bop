@@ -137,7 +137,7 @@ impl Buf {
 
 #[cfg(test)]
 mod tests {
-    use monoio::buf::IoBufMut;
+    use crate::monoio::buf::IoBufMut;
 
     use super::Buf;
 

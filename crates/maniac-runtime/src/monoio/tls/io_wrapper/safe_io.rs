@@ -54,7 +54,7 @@ impl Buffer {
     }
 }
 
-unsafe impl monoio::buf::IoBuf for Buffer {
+unsafe impl crate::monoio::buf::IoBuf for Buffer {
     fn read_ptr(&self) -> *const u8 {
         unsafe { self.buf.as_ptr().add(self.read) }
     }
@@ -64,7 +64,7 @@ unsafe impl monoio::buf::IoBuf for Buffer {
     }
 }
 
-unsafe impl monoio::buf::IoBufMut for Buffer {
+unsafe impl crate::monoio::buf::IoBufMut for Buffer {
     fn write_ptr(&mut self) -> *mut u8 {
         unsafe { self.buf.as_mut_ptr().add(self.write) }
     }

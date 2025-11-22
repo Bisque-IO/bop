@@ -102,7 +102,7 @@ pub(crate) fn new_socket(
     let _: i32 = crate::syscall!(
         WSAStartup@RAW(MAKEWORD(2, 2), std::ptr::null_mut()),
         PartialEq::eq,
-        NO_ERROR as _
+        NO_ERROR as i32
     )?;
     let socket = crate::syscall!(
         socket@RAW(domain as _, socket_type, 0),

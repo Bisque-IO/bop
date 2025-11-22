@@ -95,7 +95,7 @@ impl OpAble for Open {
                 self.opts.security_attributes as *const _,
                 self.opts.creation_mode()?,
                 self.opts.get_flags_and_attributes(),
-                0,
+                std::ptr::null_mut(),
             ),
             PartialEq::eq,
             INVALID_HANDLE_VALUE

@@ -162,9 +162,9 @@ impl SockState {
         unsafe {
             if self.delete_pending {
                 return None;
-            } else if self.iosb.Anonymous.Status == STATUS_CANCELLED {
+            } else if self.iosb.anonymous.status == STATUS_CANCELLED {
                 // The poll request was cancelled by CancelIoEx.
-            } else if self.iosb.Anonymous.Status < 0 {
+            } else if self.iosb.anonymous.status < 0 {
                 // The overlapped request itself failed in an unexpected way.
                 afd_events = afd::POLL_CONNECT_FAIL;
             } else if self.poll_info.number_of_handles < 1 {

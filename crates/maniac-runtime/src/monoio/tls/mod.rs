@@ -2,10 +2,10 @@
 //!
 //! This module provides TLS/SSL support through both rustls and native-tls backends.
 
-#[cfg(any(test, feature = "tls-rustls"))]
+#[cfg(feature = "tls-rustls")]
 pub mod rustls;
 
-#[cfg(any(test, feature = "tls-native"))]
+#[cfg(feature = "tls-native")]
 pub mod native_tls;
 
 pub mod io_wrapper;

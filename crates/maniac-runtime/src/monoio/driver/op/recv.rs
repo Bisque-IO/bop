@@ -245,7 +245,7 @@ impl<T: IoBufMut> OpAble for RecvMsg<T> {
         let fd = self.fd.as_raw_socket() as _;
         let func_ptr = WSA_RECV_MSG.get_or_init(|| unsafe {
             let mut wsa_recv_msg: LPFN_WSARECVMSG = None;
-            let mut dw_bytes = 0;
+            let mut dw_bytes: u32 = 0;
             let r = WSAIoctl(
                 fd,
                 SIO_GET_EXTENSION_FUNCTION_POINTER,

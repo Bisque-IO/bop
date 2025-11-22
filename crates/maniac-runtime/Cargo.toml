@@ -12,7 +12,7 @@ categories = ["asynchronous", "concurrency"]
 [features]
 # Enable mio by default for the usockets port; we rely on it for portable polling.
 # Added monoio features for compatibility with vendored code
-default = ["std", "race", "mio", "iouring", "legacy", "bytes", "utils", "async-cancel"]
+default = ["std", "race", "mio", "iouring", "legacy", "bytes", "utils", "async-cancel", "tls-rustls"]
 std = []
 race = []
 timers-introspection = []
@@ -33,14 +33,15 @@ renameat = []
 symlinkat = []
 signal = []
 utils = ["nix"]
+unsafe_io = []
 async-cancel = []
 debug = ["dep:tracing"] # enable debug tracing
 nix = ["dep:nix"]
 unstable = [] # enable unstable Rust features from monoio
 tokio-compat = ["dep:tokio-io", "dep:reusable-box-future"] # enable tokio AsyncRead/AsyncWrite compatibility  
 hyper-compat = ["dep:hyper", "poll-io", "tokio-compat"] # enable hyper compatibility
-tls-rustls = ["dep:rustls-tls", "dep:thiserror"] # enable rustls TLS support
-tls-native = ["dep:native-tls", "dep:thiserror"] # enable native-tls support
+tls-rustls = ["dep:rustls"] # enable rustls TLS support
+tls-native = ["dep:native-tls"] # enable native-tls support
 tls-unsafe-io = [] # enable unsafe zero-copy I/O for TLS (requires careful lifetime management)
 
 [dependencies]
@@ -58,13 +59,11 @@ log = "0.4"
 once_cell = "1.21"
 pin-project-lite = "0.2"
 rand = { workspace = true }
-# usockets port dependencies
 aws-lc-rs = "1.15"
-# polling = "3.0"
-rustls = { version = "0.23", features = ["aws_lc_rs"] }
-rustls-webpki = "0.103"
 socket2 = { version = "0.6", features = ["all"] }
 mio = { version = "1.1", optional = true, features = ["os-poll", "net"] }
+rustls = { package = "rustls", version = "0.23", features = ["std", "aws_lc_rs"], optional = true }
+rustls-webpki = "0.103"
 rustls-pemfile = "2.0"
 rustls-native-certs = "0.8"
 slab = "0.4.11"
@@ -84,7 +83,7 @@ nix = { version = "0.30.1", features = ["sched"], optional = true }
 flume = "0.11.1"
 reusable-box-future = { version = "0.2", optional = true }
 hyper = { version = "1.1", optional = true }
-rustls-tls = { package = "rustls", version = "~0.23.4", default-features = false, features = ["std"], optional = true }
+
 native-tls = { version = "0.2", optional = true }
 tokio-io = { package = "tokio", version = "1.0", default-features = false, features = ["io-util"], optional = true }
 
@@ -92,14 +91,18 @@ tokio-io = { package = "tokio", version = "1.0", default-features = false, featu
 io-uring = { version = "0.7", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["memoryapi", "winnt", "sysinfoapi", "processthreadsapi", "synchapi", "winbase", "handleapi", "errhandlingapi", "ioapiset", "winsock2", "mswsock"] }
-windows-sys = { version = "0.52.0", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",
     "Win32_System_IO",
     "Win32_Storage_FileSystem",
     "Win32_Security",
     "Win32_System_WindowsProgramming",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Kernel",
 ] }
 
 [dev-dependencies]

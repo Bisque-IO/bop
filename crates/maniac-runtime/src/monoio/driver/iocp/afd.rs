@@ -24,24 +24,24 @@ const FILE_OPEN: u32 = 0x00000001;
 
 #[repr(C)]
 pub struct IO_STATUS_BLOCK {
-    pub Anonymous: IO_STATUS_BLOCK_0,
-    pub Information: usize,
+    pub anonymous: IO_STATUS_BLOCK_0,
+    pub information: usize,
 }
 
 #[repr(C)]
 pub union IO_STATUS_BLOCK_0 {
-    pub Status: NTSTATUS,
-    pub Pointer: *mut std::ffi::c_void,
+    pub status: NTSTATUS,
+    pub pointer: *mut std::ffi::c_void,
 }
 
 #[repr(C)]
 pub struct OBJECT_ATTRIBUTES {
-    pub Length: u32,
-    pub RootDirectory: HANDLE,
-    pub ObjectName: *mut UNICODE_STRING,
-    pub Attributes: u32,
-    pub SecurityDescriptor: *mut std::ffi::c_void,
-    pub SecurityQualityOfService: *mut std::ffi::c_void,
+    pub length: u32,
+    pub root_directory: HANDLE,
+    pub object_name: *mut UNICODE_STRING,
+    pub attributes: u32,
+    pub security_descriptor: *mut std::ffi::c_void,
+    pub security_quality_of_service: *mut std::ffi::c_void,
 }
 
 // NtCreateFile and NtDeviceIoControlFile are not in windows-sys
@@ -161,12 +161,12 @@ impl Afd {
             Buffer: AFD_NAME.as_ptr() as *mut u16,
         };
         let mut device_attributes = OBJECT_ATTRIBUTES {
-            Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
-            RootDirectory: 0 as _, // Null pointer for RootDirectory
-            ObjectName: &mut device_name,
-            Attributes: 0,
-            SecurityDescriptor: std::ptr::null_mut(),
-            SecurityQualityOfService: std::ptr::null_mut(),
+            length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+            root_directory: 0 as _, // Null pointer for RootDirectory
+            object_name: &mut device_name,
+            attributes: 0,
+            security_descriptor: std::ptr::null_mut(),
+            security_quality_of_service: std::ptr::null_mut(),
         };
         let mut handle = INVALID_HANDLE_VALUE;
         let mut iosb = unsafe { std::mem::zeroed::<IO_STATUS_BLOCK>() };
@@ -220,7 +220,7 @@ impl Afd {
     ) -> std::io::Result<bool> {
         const IOCTL_AFD_POLL: u32 = 0x00012024;
         let info_ptr = info as *mut _ as *mut c_void;
-        (*iosb).Anonymous.Status = STATUS_PENDING;
+        (*iosb).anonymous.status = STATUS_PENDING;
 
         let result = NtDeviceIoControlFile(
             self.file.as_raw_handle() as HANDLE,
@@ -246,12 +246,12 @@ impl Afd {
     }
 
     pub unsafe fn cancel(&self, iosb: *mut IO_STATUS_BLOCK) -> std::io::Result<()> {
-        if (*iosb).Anonymous.Status != STATUS_PENDING {
+        if (*iosb).anonymous.status != STATUS_PENDING {
             return Ok(());
         }
         let mut cancel_iosb = IO_STATUS_BLOCK {
-            Anonymous: IO_STATUS_BLOCK_0 { Status: 0 },
-            Information: 0,
+            anonymous: IO_STATUS_BLOCK_0 { status: 0 },
+            information: 0,
         };
         let status = NtCancelIoFileEx(self.file.as_raw_handle() as HANDLE, iosb, &mut cancel_iosb);
 

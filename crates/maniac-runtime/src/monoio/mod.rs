@@ -22,13 +22,13 @@ extern crate alloc;
 pub mod blocking;
 
 pub mod buf;
-#[cfg(any(test, feature = "tokio-compat"))]
+#[cfg(feature = "tokio-compat")]
 pub mod compat;
 pub mod fs;
 pub mod io;
 pub mod net;
 // pub mod task;
-#[cfg(any(test, feature = "tls-rustls", feature = "tls-native"))]
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub mod tls;
 pub mod utils;
 
