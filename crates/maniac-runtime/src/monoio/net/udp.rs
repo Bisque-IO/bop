@@ -27,6 +27,9 @@ use crate::monoio::{
 #[derive(Debug)]
 pub struct UdpSocket {
     fd: SharedFd,
+    // Track the worker that owns this socket (where it was created/accepted)
+    // Used for cross-worker IO dispatch on platforms that don't support direct access
+    owner_worker_id: u32,
 }
 
 /// UdpSocket is safe to split to two parts
@@ -34,7 +37,14 @@ unsafe impl Split for UdpSocket {}
 
 impl UdpSocket {
     pub(crate) fn from_shared_fd(fd: SharedFd) -> Self {
-        Self { fd }
+        // Default to 0 if not in worker context (e.g. unit tests), otherwise current worker
+        let owner_worker_id = crate::runtime::worker::current_worker_id().unwrap_or(0);
+        Self { fd, owner_worker_id }
+    }
+
+    /// Returns the ID of the worker that owns this socket.
+    pub fn owner_worker_id(&self) -> u32 {
+        self.owner_worker_id
     }
 
     #[cfg(feature = "legacy")]

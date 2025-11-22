@@ -11,10 +11,12 @@
 //! - `WorkerService`: Manages worker threads that execute tasks
 //! - `TaskArena`: Memory-mapped arena for task storage
 //! - `JoinHandle`: Future that resolves when a spawned task completes
-
+//!
 pub mod deque;
 pub mod mpsc;
 pub mod preemption;
+#[cfg(test)]
+mod preemption_tests;
 pub mod signal;
 pub mod summary;
 pub mod task;
@@ -25,8 +27,6 @@ pub mod timer;
 pub mod timer_wheel;
 pub mod waker;
 pub mod worker;
-#[cfg(test)]
-mod preemption_tests;
 
 use std::any::TypeId;
 use std::future::{Future, IntoFuture};
@@ -42,10 +42,12 @@ use task::{
     FutureAllocator, SpawnError, TaskArena, TaskArenaConfig, TaskArenaOptions, TaskArenaStats,
     TaskHandle,
 };
-use ticker::{TickService};
+use ticker::TickService;
 use worker::{WorkerService, WorkerServiceConfig};
 
 use crate::num_cpus;
+
+pub use crate::monoio::blocking::unblock;
 
 pub fn new_single_threaded() -> io::Result<DefaultRuntime> {
     let tick_service = TickService::new(Duration::from_millis(1));
@@ -55,14 +57,6 @@ pub fn new_single_threaded() -> io::Result<DefaultRuntime> {
             TaskArenaConfig::new(8, 4096).unwrap(),
             TaskArenaOptions::new(false, false),
             1,
-            1,
-            Arc::clone(&tick_service),
-        )?,
-        blocking: DefaultBlockingExecutor::new_with_tick_service(
-            TaskArenaConfig::new(8, 4096).unwrap(),
-            TaskArenaOptions::new(false, false),
-            1,
-            num_cpus() * 8,
             Arc::clone(&tick_service),
         )?,
         tick_service,
@@ -72,8 +66,7 @@ pub fn new_single_threaded() -> io::Result<DefaultRuntime> {
 pub fn new_multi_threaded(
     worker_count: usize,
     mut max_tasks: usize,
-    blocking_min_workers: usize,
-    blocking_max_workers: usize,
+    blocking_worker_count: usize,
     mut max_blocking_tasks: usize,
 ) -> io::Result<DefaultRuntime> {
     let worker_count = worker_count.max(1);
@@ -81,18 +74,14 @@ pub fn new_multi_threaded(
         max_tasks = worker_count * 4096;
     }
     max_tasks = max_tasks.next_power_of_two();
-    let config = ExecutorConfig::with_max_tasks(worker_count, worker_count, max_tasks)?;
+    let config = ExecutorConfig::with_max_tasks(worker_count, max_tasks)?;
 
-    let blocking_min_workers = blocking_min_workers.max(1);
-    let blocking_max_workers = blocking_max_workers.max(blocking_min_workers);
+    let blocking_worker_count = blocking_worker_count.max(1);
     if max_blocking_tasks == 0 {
-        max_blocking_tasks = blocking_max_workers * 4096;
+        max_blocking_tasks = blocking_worker_count * 4096;
     }
-    let blocking_config = ExecutorConfig::with_max_tasks(
-        blocking_min_workers,
-        blocking_max_workers,
-        max_blocking_tasks,
-    )?;
+    let blocking_config =
+        ExecutorConfig::with_max_tasks(blocking_worker_count, max_blocking_tasks)?;
     let tick_service = TickService::new(Duration::from_millis(1));
     tick_service.start();
 
@@ -100,15 +89,7 @@ pub fn new_multi_threaded(
         executor: DefaultExecutor::new_with_tick_service(
             config.task_arena,
             config.task_arena_options,
-            config.min_workers,
-            config.max_workers,
-            Arc::clone(&tick_service),
-        )?,
-        blocking: DefaultBlockingExecutor::new_with_tick_service(
-            blocking_config.task_arena,
-            blocking_config.task_arena_options,
-            blocking_config.min_workers,
-            blocking_config.max_workers,
+            config.worker_count,
             Arc::clone(&tick_service),
         )?,
         tick_service,
@@ -122,7 +103,6 @@ pub struct Runtime<
     const BLOCKING_NUM_SEGS_P2: usize = 5,
 > {
     executor: Executor<P, NUM_SEGS_P2>,
-    blocking: Executor<BLOCKING_P, BLOCKING_NUM_SEGS_P2>,
     tick_service: Arc<TickService>,
 }
 
@@ -209,7 +189,7 @@ impl<
     /// # Ok::<(), maniac::runtime::task::SpawnError>(())
     /// ```
     #[track_caller]
-    pub fn spawn_blocking<F, T>(&self, future: F) -> Result<JoinHandle<T>, SpawnError>
+    pub fn spawn_blocking<F, T>(&self, future: F) -> Result<crate::monoio::blocking::Task<T>, SpawnError>
     where
         F: IntoFuture<Output = T> + Send + 'static,
         F::IntoFuture: Future<Output = T> + Send + 'static,
@@ -217,7 +197,10 @@ impl<
     {
         let location = Location::caller();
         let type_id = TypeId::of::<F>();
-        self.blocking.inner.spawn(type_id, location, future)
+        Ok(unblock(move || {
+            // Block on the future using a simple executor
+            pollster::block_on(future.into_future())
+        }))
     }
 }
 
@@ -262,14 +245,12 @@ pub struct Executor<const P: usize = 10, const NUM_SEGS_P2: usize = 8> {
 }
 
 pub type DefaultExecutor = Executor<10, 8>;
-pub type DefaultBlockingExecutor = Executor<8, 5>;
 
 impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
     pub fn new_single_threaded() -> Self {
         Self::new(
             TaskArenaConfig::new(8, 4096).unwrap(),
             TaskArenaOptions::new(false, false),
-            1,
             1,
         )
         .unwrap()
@@ -417,46 +398,37 @@ impl<const P: usize, const NUM_SEGS_P2: usize> ExecutorInner<P, NUM_SEGS_P2> {
 pub struct ExecutorConfig {
     task_arena: TaskArenaConfig,
     task_arena_options: TaskArenaOptions,
-    min_workers: usize,
-    max_workers: usize,
+    worker_count: usize,
 }
 
 impl ExecutorConfig {
     pub fn new(
         task_arena: TaskArenaConfig,
         task_arena_options: TaskArenaOptions,
-        min_workers: usize,
-        max_workers: usize,
+        worker_count: usize,
     ) -> ExecutorConfig {
         Self {
             task_arena,
             task_arena_options,
-            min_workers,
-            max_workers,
+            worker_count,
         }
     }
 
-    pub fn with_max_tasks(
-        min_workers: usize,
-        max_workers: usize,
-        max_tasks: usize,
-    ) -> io::Result<Self> {
-        let min_workers = min_workers.max(1);
-        let max_workers = max_workers.max(min_workers);
-        let max_tasks = max_tasks.max(max_workers);
+    pub fn with_max_tasks(worker_count: usize, max_tasks: usize) -> io::Result<Self> {
+        let worker_count = worker_count.max(1);
+        let max_tasks = max_tasks.max(worker_count);
         let mut tasks_per_leaf = 4096;
         let mut leaf_count = (max_tasks / tasks_per_leaf).max(1);
 
-        if leaf_count < max_workers {
-            leaf_count = max_workers;
+        if leaf_count < worker_count {
+            leaf_count = worker_count;
             tasks_per_leaf = (max_tasks / leaf_count).max(1);
         }
 
         Ok(Self {
             task_arena: TaskArenaConfig::new(leaf_count, tasks_per_leaf)?,
             task_arena_options: TaskArenaOptions::new(false, false),
-            min_workers,
-            max_workers,
+            worker_count,
         })
     }
 }
@@ -497,7 +469,6 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
         config: TaskArenaConfig,
         options: TaskArenaOptions,
         worker_count: usize,
-        max_worker_count: usize,
     ) -> io::Result<Self> {
         let worker_config = WorkerServiceConfig::default();
         // Create shared tick service for time-based operations
@@ -505,13 +476,14 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
         let tick_service = TickService::new(worker_config.tick_duration);
         tick_service.start();
 
-        let mut executor = Self::new_with_tick_service(config, options, worker_count, max_worker_count, Arc::clone(&tick_service))?;
+        let mut executor =
+            Self::new_with_tick_service(config, options, worker_count, Arc::clone(&tick_service))?;
         // Mark that this executor owns the tick service and is responsible for shutting it down
         executor.owned_tick_service = Some(tick_service);
         Ok(executor)
     }
 
-        /// Creates a new executor instance with the specified configuration.
+    /// Creates a new executor instance with the specified configuration.
     ///
     /// This method initializes:
     /// 1. A task arena with the given configuration and options
@@ -546,11 +518,9 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
         config: TaskArenaConfig,
         options: TaskArenaOptions,
         worker_count: usize,
-        max_worker_count: usize,
         tick_service: Arc<TickService>,
     ) -> io::Result<Self> {
         let worker_count = worker_count.max(1);
-        let max_worker_count = max_worker_count.max(worker_count);
 
         // Initialize the memory-mapped task arena with the provided configuration
         let arena = TaskArena::with_config(config, options)?;
@@ -560,8 +530,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
         // Set max_workers to at least the desired count (or CPU count, whichever is higher)
         // This ensures workers start immediately on WorkerService::start()
         let worker_config = WorkerServiceConfig {
-            min_workers: worker_count,
-            max_workers: max_worker_count,
+            worker_count,
             ..WorkerServiceConfig::default()
         };
 
@@ -643,7 +612,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> Executor<P, NUM_SEGS_P2> {
     pub fn stats(&self) -> TaskArenaStats {
         self.inner.service.arena().stats()
     }
-    
+
     /// Returns a reference to the underlying worker service.
     ///
     /// This allows direct access to worker service operations such as:

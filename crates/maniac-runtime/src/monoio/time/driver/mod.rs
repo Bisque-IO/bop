@@ -19,7 +19,7 @@ use std::{cell::RefCell, fmt, io, num::NonZeroU64, ptr::NonNull, rc::Rc};
 
 use crate::monoio::{
     driver::Driver,
-    time::{error::Error, Clock, Duration, Instant},
+    time::{Clock, Duration, Instant, error::Error},
 };
 
 /// Time implementation that drives [`Sleep`][sleep], [`Interval`][interval],
@@ -170,6 +170,14 @@ where
             handle: Handle::new(Rc::new(inner)),
             park,
         }
+    }
+
+    pub(crate) fn handle(&self) -> Handle {
+        self.handle.clone()
+    }
+
+    pub fn inner(&self) -> &D {
+        &self.park
     }
 
     fn park_internal(&self, limit: Option<Duration>) -> io::Result<()> {

@@ -35,13 +35,7 @@ pub mod monoio;
 pub use crate::utils::*;
 
 // Re-export socket registration functions for async networking
-pub use crate::runtime::worker::{
-    current_worker_id,
-    register_socket_with_current_worker,
-    modify_socket_interest,
-    close_socket,
-    SocketInterest,
-};
+pub use crate::runtime::worker::current_worker_id;
 
 /// Error occurring when pushing into a queue is unsuccessful.
 #[derive(Debug, Eq, PartialEq)]

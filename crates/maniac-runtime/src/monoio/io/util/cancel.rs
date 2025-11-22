@@ -1,30 +1,35 @@
-use std::{cell::RefCell, collections::HashSet, rc::Rc};
+use std::{
+    collections::HashSet,
+    sync::{atomic::AtomicBool, Arc, Mutex},
+};
 
 use crate::monoio::driver::op::OpCanceller;
 
 /// CancelHandle is used to pass to io actions with CancelableAsyncReadRent.
 /// Create a CancelHandle with Canceller::handle.
+/// Thread-safe and can be sent across threads.
 #[derive(Clone)]
 pub struct CancelHandle {
-    shared: Rc<RefCell<Shared>>,
+    shared: Arc<Shared>,
 }
 
 /// Canceller is a user-hold struct to cancel io operations.
 /// A canceller can associate with multiple io operations.
+/// Thread-safe and can be sent across threads.
 #[derive(Default)]
 pub struct Canceller {
-    shared: Rc<RefCell<Shared>>,
+    shared: Arc<Shared>,
 }
 
 pub(crate) struct AssociateGuard {
     op_canceller: OpCanceller,
-    shared: Rc<RefCell<Shared>>,
+    shared: Arc<Shared>,
 }
 
 #[derive(Default)]
 struct Shared {
-    canceled: bool,
-    slot_ref: HashSet<OpCanceller>,
+    canceled: AtomicBool,
+    slot_ref: Mutex<HashSet<OpCanceller>>,
 }
 
 impl Canceller {
@@ -36,22 +41,30 @@ impl Canceller {
 
     /// Cancel all related operations.
     pub fn cancel(self) -> Self {
+        // Set the canceled flag atomically
+        self.shared
+            .canceled
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        // Take all pending operations
         let mut slot = HashSet::new();
         {
-            let mut shared = self.shared.borrow_mut();
-            shared.canceled = true;
-            std::mem::swap(&mut slot, &mut shared.slot_ref);
+            let mut guard = self.shared.slot_ref.lock().unwrap();
+            std::mem::swap(&mut slot, &mut *guard);
         }
 
+        // Cancel all operations
         for op_canceller in slot.iter() {
             unsafe { op_canceller.cancel() };
         }
         slot.clear();
+
+        // Create a new canceller with fresh state
         Canceller {
-            shared: Rc::new(RefCell::new(Shared {
-                canceled: false,
-                slot_ref: slot,
-            })),
+            shared: Arc::new(Shared {
+                canceled: AtomicBool::new(false),
+                slot_ref: Mutex::new(slot),
+            }),
         }
     }
 
@@ -66,13 +79,15 @@ impl Canceller {
 
 impl CancelHandle {
     pub(crate) fn canceled(&self) -> bool {
-        self.shared.borrow().canceled
+        self.shared
+            .canceled
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn associate_op(self, op_canceller: OpCanceller) -> AssociateGuard {
         {
-            let mut shared = self.shared.borrow_mut();
-            shared.slot_ref.insert(op_canceller.clone());
+            let mut guard = self.shared.slot_ref.lock().unwrap();
+            guard.insert(op_canceller.clone());
         }
         AssociateGuard {
             op_canceller,
@@ -83,8 +98,8 @@ impl CancelHandle {
 
 impl Drop for AssociateGuard {
     fn drop(&mut self) {
-        let mut shared = self.shared.borrow_mut();
-        shared.slot_ref.remove(&self.op_canceller);
+        let mut guard = self.shared.slot_ref.lock().unwrap();
+        guard.remove(&self.op_canceller);
     }
 }
 

@@ -9,23 +9,23 @@ use std::{
 };
 
 use super::{
+    CURRENT, Driver, Inner,
     op::{CompletionMeta, Op, OpAble},
     ready::{self, Ready},
     scheduled_io::ScheduledIo,
-    Driver, Inner, CURRENT,
 };
 use crate::monoio::utils::slab::Slab;
 
-// #[cfg(feature = "sync")]
 mod waker;
-// #[cfg(feature = "sync")]
 pub(crate) use waker::UnparkHandle;
 
-// #[cfg(feature = "sync")]
 const TOKEN_WAKEUP: mio::Token = mio::Token(1 << 31);
 
 pub(crate) struct LegacyInner {
-    pub(crate) io_dispatch: Slab<ScheduledIo>,
+    // Maps token -> Arc reference to ScheduledIo
+    // This allows epoll events to find the correct ScheduledIo to wake
+    // Shared ownership between slab and SharedFd
+    pub(crate) io_dispatch: Slab<std::sync::Arc<ScheduledIo>>,
     #[cfg(unix)]
     events: mio::Events,
     #[cfg(unix)]
@@ -35,26 +35,14 @@ pub(crate) struct LegacyInner {
     #[cfg(windows)]
     poll: crate::monoio::driver::iocp::Poller,
 
-    // #[cfg(feature = "sync")]
     shared_waker: std::sync::Arc<waker::EventWaker>,
-
-    // Waker receiver
-    #[cfg(feature = "sync")]
-    waker_receiver: flume::Receiver<std::task::Waker>,
 }
 
 /// Driver with Poll-like syscall.
 #[allow(unreachable_pub)]
 pub struct LegacyDriver {
-    inner: Arc<UnsafeCell<LegacyInner>>,
-
-    // Used for drop
-    #[cfg(feature = "sync")]
-    thread_id: usize,
+    pub(crate) inner: Arc<UnsafeCell<LegacyInner>>,
 }
-
-#[cfg(feature = "sync")]
-const TOKEN_WAKEUP: mio::Token = mio::Token(1 << 31);
 
 #[allow(dead_code)]
 impl LegacyDriver {
@@ -70,19 +58,15 @@ impl LegacyDriver {
         #[cfg(windows)]
         let poll = crate::monoio::driver::iocp::Poller::new()?;
 
-        #[cfg(all(unix))] // , feature = "sync"))]
+        #[cfg(all(unix))]
         let shared_waker = std::sync::Arc::new(waker::EventWaker::new(mio::Waker::new(
             poll.registry(),
             TOKEN_WAKEUP,
         )?));
-        #[cfg(all(windows))] // , feature = "sync"))]
+        #[cfg(all(windows))]
         let shared_waker = std::sync::Arc::new(waker::EventWaker::new(
             crate::monoio::driver::iocp::Waker::new(&poll, TOKEN_WAKEUP)?,
         ));
-        #[cfg(feature = "sync")]
-        let (waker_sender, waker_receiver) = flume::unbounded::<std::task::Waker>();
-        #[cfg(feature = "sync")]
-        let thread_id = crate::monoio::builder::BUILD_THREAD_ID.with(|id| *id);
 
         let inner = LegacyInner {
             io_dispatch: Slab::new(),
@@ -94,59 +78,17 @@ impl LegacyDriver {
             events: crate::monoio::driver::iocp::Events::with_capacity(entries as usize),
             #[cfg(windows)]
             poll,
-            // #[cfg(feature = "sync")]
             shared_waker,
-            #[cfg(feature = "sync")]
-            waker_receiver,
         };
         let driver = Self {
             inner: Arc::new(UnsafeCell::new(inner)),
-            #[cfg(feature = "sync")]
-            thread_id,
         };
-
-        // Register unpark handle
-        #[cfg(feature = "sync")]
-        {
-            let unpark = driver.unpark();
-            super::thread::register_unpark_handle(thread_id, unpark.into());
-            super::thread::register_waker_sender(thread_id, waker_sender);
-        }
 
         Ok(driver)
     }
 
-    fn inner_park(&self, mut timeout: Option<Duration>) -> io::Result<()> {
+    fn inner_park(&self, timeout: Option<Duration>) -> io::Result<()> {
         let inner = unsafe { &mut *self.inner.get() };
-
-        #[allow(unused_mut)]
-        let mut need_wait = true;
-        #[cfg(feature = "sync")]
-        {
-            // Process foreign wakers
-            while let Ok(w) = inner.waker_receiver.try_recv() {
-                w.wake();
-                need_wait = false;
-            }
-
-            // Set status as not awake if we are going to sleep
-            if need_wait {
-                inner
-                    .shared_waker
-                    .awake
-                    .store(false, std::sync::atomic::Ordering::Release);
-            }
-
-            // Process foreign wakers left
-            while let Ok(w) = inner.waker_receiver.try_recv() {
-                w.wake();
-                need_wait = false;
-            }
-        }
-
-        if !need_wait {
-            timeout = Some(Duration::ZERO);
-        }
 
         // here we borrow 2 mut self, but its safe.
         let events = unsafe { &mut (*self.inner.get()).events };
@@ -162,12 +104,6 @@ impl LegacyDriver {
         for event in iter {
             let token = event.token();
 
-            #[cfg(feature = "sync")]
-            if token != TOKEN_WAKEUP {
-                inner.dispatch(token, Ready::from_mio(event));
-            }
-
-            #[cfg(not(feature = "sync"))]
             inner.dispatch(token, Ready::from_mio(event));
         }
         Ok(())
@@ -178,10 +114,10 @@ impl LegacyDriver {
         this: &Arc<UnsafeCell<LegacyInner>>,
         state: &mut crate::monoio::driver::iocp::SocketState,
         interest: mio::Interest,
+        scheduled_io: &std::sync::Arc<ScheduledIo>,
     ) -> io::Result<usize> {
         let inner = unsafe { &mut *this.get() };
-        let io = ScheduledIo::default();
-        let token = inner.io_dispatch.insert(io);
+        let token = inner.io_dispatch.insert(scheduled_io.clone());
 
         match inner.poll.register(state, mio::Token(token), interest) {
             Ok(_) => Ok(token),
@@ -215,9 +151,10 @@ impl LegacyDriver {
         this: &Arc<UnsafeCell<LegacyInner>>,
         source: &mut impl mio::event::Source,
         interest: mio::Interest,
+        scheduled_io: &std::sync::Arc<ScheduledIo>,
     ) -> io::Result<usize> {
         let inner = unsafe { &mut *this.get() };
-        let token = inner.io_dispatch.insert(ScheduledIo::new());
+        let token = inner.io_dispatch.insert(scheduled_io.clone());
 
         let registry = inner.poll.registry();
         match registry.register(source, mio::Token(token), interest) {
@@ -250,15 +187,19 @@ impl LegacyDriver {
 
 impl LegacyInner {
     fn dispatch(&mut self, token: mio::Token, ready: Ready) {
-        let mut sio = match self.io_dispatch.get(token.0) {
-            Some(io) => io,
+        let sio_ref = match self.io_dispatch.get(token.0) {
+            Some(sio_ref) => sio_ref,
             None => {
                 return;
             }
         };
-        let ref_mut = sio.as_mut();
-        ref_mut.set_readiness(|curr| curr | ready);
-        ref_mut.wake(ready);
+        // sio_ref is Ref<'_, Arc<ScheduledIo>>, dereference once to get &Arc<ScheduledIo>
+        let sio: &std::sync::Arc<ScheduledIo> = &*sio_ref;
+        // Now we have &Arc<ScheduledIo>, we need mutable access
+        // SAFETY: We're the only one who can mutate ScheduledIo (we own the epoll/kqueue thread)
+        let sio_mut = unsafe { &mut *(std::sync::Arc::as_ptr(sio) as *mut ScheduledIo) };
+        sio_mut.set_readiness(|curr| curr | ready);
+        sio_mut.wake(ready);
     }
 
     pub(crate) fn poll_op<T: OpAble>(
@@ -280,15 +221,17 @@ impl LegacyInner {
         };
 
         // wait io ready and do syscall
-        let mut scheduled_io = inner.io_dispatch.get(index).expect("scheduled_io lost");
-        let ref_mut = scheduled_io.as_mut();
+        let sio_ref = inner.io_dispatch.get(index).expect("scheduled_io lost");
+        let sio: &std::sync::Arc<ScheduledIo> = &*sio_ref; // Deref Ref<Arc<ScheduledIo>> to &Arc<ScheduledIo>
+        // SAFETY: We're polling from the owning thread
+        let sio_mut = unsafe { &mut *(std::sync::Arc::as_ptr(sio) as *mut ScheduledIo) };
 
-        let readiness = ready!(ref_mut.poll_readiness(cx, direction));
+        let readiness = ready!(sio_mut.poll_readiness(cx, direction));
 
         // check if canceled
         if readiness.is_canceled() {
             // clear CANCELED part only
-            ref_mut.clear_readiness(readiness & Ready::CANCELED);
+            sio_mut.clear_readiness(readiness & Ready::CANCELED);
             return Poll::Ready(CompletionMeta {
                 result: Err(io::Error::from_raw_os_error(125)),
                 flags: 0,
@@ -301,8 +244,8 @@ impl LegacyInner {
                 flags: 0,
             }),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                ref_mut.clear_readiness(direction.mask());
-                ref_mut.set_waker(cx, direction);
+                sio_mut.clear_readiness(direction.mask());
+                sio_mut.set_waker(cx, direction);
                 Poll::Pending
             }
             Err(e) => Poll::Ready(CompletionMeta {
@@ -340,7 +283,7 @@ impl LegacyInner {
         })
     }
 
-    // #[cfg(feature = "sync")]
+
     pub(crate) fn unpark(this: &Arc<UnsafeCell<LegacyInner>>) -> waker::UnparkHandle {
         let inner = unsafe { &*this.get() };
         let weak = std::sync::Arc::downgrade(&inner.shared_waker);
@@ -367,10 +310,8 @@ impl Driver for LegacyDriver {
         self.inner_park(Some(duration))
     }
 
-    // #[cfg(feature = "sync")]
     type Unpark = waker::UnparkHandle;
 
-    // #[cfg(feature = "sync")]
     fn unpark(&self) -> Self::Unpark {
         LegacyInner::unpark(&self.inner)
     }
@@ -378,12 +319,7 @@ impl Driver for LegacyDriver {
 
 impl Drop for LegacyDriver {
     fn drop(&mut self) {
-        // Deregister thread id
-        #[cfg(feature = "sync")]
-        {
-            use crate::monoio::driver::thread::{unregister_unpark_handle, unregister_waker_sender};
-            unregister_unpark_handle(self.thread_id);
-            unregister_waker_sender(self.thread_id);
-        }
+        // Clean up any resources if necessary
     }
 }
+

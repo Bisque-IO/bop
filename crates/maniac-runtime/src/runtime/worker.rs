@@ -6,10 +6,10 @@ use super::timer_wheel::TimerWheel;
 use super::waker::WorkerWaker;
 use crate::PopError;
 use crate::net::EventLoop;
-use crate::runtime::{mpsc, preemption};
 use crate::runtime::preemption::GeneratorYieldReason;
 use crate::runtime::task::GeneratorOwnership;
 use crate::runtime::ticker::{TickHandler, TickHandlerRegistration};
+use crate::runtime::{mpsc, preemption};
 use crate::{PushError, utils};
 use std::cell::{Cell, UnsafeCell};
 use std::ptr::{self, NonNull};
@@ -25,7 +25,7 @@ use rand::RngCore;
 #[cfg(unix)]
 use libc;
 
-const DEFAULT_QUEUE_SEG_SHIFT: usize = 8;
+const DEFAULT_QUEUE_SEG_SHIFT: usize = 10;
 const DEFAULT_QUEUE_NUM_SEGS_SHIFT: usize = 8;
 const MAX_WORKER_LIMIT: usize = 512;
 
@@ -42,37 +42,24 @@ const MESSAGE_BATCH_SIZE: usize = 4096;
 // - WorkerWaker.status bit 62: partition cache has work
 
 /// Trait for cross-worker operations that don't depend on const parameters
-trait CrossWorkerOps: Send + Sync {
+pub(crate) trait CrossWorkerOps: Send + Sync {
     fn post_cancel_message(&self, from_worker_id: u32, to_worker_id: u32, timer_id: u64) -> bool;
 
-    fn post_register_socket(
+    fn post_remote_read(
         &self,
         from_worker_id: u32,
         to_worker_id: u32,
-        fd: crate::net::SocketDescriptor,
-        interest: SocketInterest,
-        state: crate::net::AsyncSocketState,
-        socket_type: crate::net::SocketType,
+        token: usize,
+        waker: Waker,
     ) -> bool;
 
-    fn post_modify_socket(
+    fn post_remote_write(
         &self,
         from_worker_id: u32,
         to_worker_id: u32,
-        token: crate::net::Token,
-        interest: SocketInterest,
+        token: usize,
+        waker: Waker,
     ) -> bool;
-
-    fn post_close_socket(
-        &self,
-        from_worker_id: u32,
-        to_worker_id: u32,
-        token: crate::net::Token,
-    ) -> bool;
-}
-
-thread_local! {
-    static CURRENT_WORKER: Cell<*mut WorkerInner<'static>> = Cell::new(ptr::null_mut());
 }
 
 pub struct WorkerTLS {}
@@ -90,40 +77,34 @@ pub fn is_worker_thread() -> bool {
 
 #[inline]
 pub fn current_worker<'a>() -> Option<&'a mut WorkerInner<'a>> {
-    let worker = CURRENT_WORKER.with(|cell| cell.get());
-    if worker.is_null() {
-        return None;
+    if crate::monoio::runtime::CURRENT.is_set() {
+        crate::monoio::runtime::CURRENT.with(|ctx| {
+            let ptr = ctx.user_data.get();
+            if ptr.is_null() {
+                None
+            } else {
+                unsafe { Some(&mut *(ptr as *mut WorkerInner<'a>)) }
+            }
+        })
     } else {
-        unsafe { Some(&mut *(worker as *mut WorkerInner<'a>)) }
+        None
     }
 }
 
 #[inline]
 pub fn current_task<'a>() -> Option<&'a mut Task> {
-    let worker = CURRENT_WORKER.with(|cell| cell.get());
-    if worker.is_null() {
-        return None;
-    } else {
-        unsafe { Some(&mut *(*(worker as *mut WorkerInner<'a>)).current_task) }
-    }
+    let worker = current_worker()?;
+    unsafe { Some(&mut *worker.current_task) }
 }
 
 pub fn current_timer_wheel<'a>() -> Option<&'a mut TimerWheel<TimerHandle>> {
-    let worker = CURRENT_WORKER.with(|cell| cell.get());
-    if worker.is_null() {
-        return None;
-    } else {
-        unsafe { Some(&mut *(*(worker as *mut WorkerInner<'a>)).timer_wheel) }
-    }
+    let worker = current_worker()?;
+    unsafe { Some(&mut *worker.timer_wheel) }
 }
 
 pub fn current_event_loop<'a>() -> Option<&'a mut EventLoop> {
-    let worker = CURRENT_WORKER.with(|cell| cell.get());
-    if worker.is_null() {
-        return None;
-    } else {
-        unsafe { Some(&mut *(*(worker as *mut WorkerInner<'a>)).event_loop) }
-    }
+    let worker = current_worker()?;
+    unsafe { Some(&mut *worker.event_loop) }
 }
 
 /// Returns the most recent `now_ns` observed by the active worker.
@@ -309,7 +290,7 @@ impl TimerBatch {
 }
 
 /// Worker control-plane messages.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum WorkerMessage {
     ScheduleTimer {
         timer: TimerSchedule,
@@ -320,20 +301,6 @@ pub enum WorkerMessage {
     CancelTimer {
         worker_id: u32,
         timer_id: u64,
-    },
-    WorkerCountChanged {
-        new_worker_count: u16,
-    },
-
-    /// Rebalance task partitions (reassign which leaves this worker processes)
-    RebalancePartitions {
-        partition_start: usize,
-        partition_end: usize,
-    },
-
-    /// Migrate specific tasks to another worker
-    MigrateTasks {
-        task_handles: Vec<TaskHandle>,
     },
 
     /// Request worker to report its current health metrics
@@ -348,50 +315,20 @@ pub enum WorkerMessage {
     // ────────────────────────────────────────────────────────────────────────────
     // SOCKET I/O MESSAGES (for async networking)
     // ────────────────────────────────────────────────────────────────────────────
-    /// Register a socket with this worker's EventLoop
-    /// The socket will be monitored for the specified events (readable/writable)
-    RegisterSocket {
-        fd: crate::net::SocketDescriptor,
-        interest: SocketInterest,
-        state: crate::net::AsyncSocketState,
-        socket_type: crate::net::SocketType,
+    // Remote I/O operations for stolen tasks
+    RemoteRead {
+        token: usize, // Using token/fd index to identify socket on remote worker
+        waker: Waker,
+    },
+    RemoteWrite {
+        token: usize,
+        waker: Waker,
     },
 
-    /// Modify socket interest (e.g., switch from Read to Write)
-    ModifySocket {
-        token: crate::net::Token,
-        interest: SocketInterest,
-    },
-
-    /// Deregister and close a socket
-    CloseSocket {
-        token: crate::net::Token,
-    },
-
-    /// Set socket timeout (idle timeout, read timeout, etc.)
-    SetSocketTimeout {
-        token: crate::net::Token,
-        duration: Duration,
-    },
-
-    /// Cancel socket timeout
-    CancelSocketTimeout {
-        token: crate::net::Token,
-    },
 
     Noop,
 }
 
-/// Socket interest flags for EventLoop registration
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SocketInterest {
-    /// Monitor for readable events
-    Readable,
-    /// Monitor for writable events
-    Writable,
-    /// Monitor for both readable and writable events
-    ReadWrite,
-}
 
 unsafe impl Send for WorkerMessage {}
 unsafe impl Sync for WorkerMessage {}
@@ -399,16 +336,14 @@ unsafe impl Sync for WorkerMessage {}
 #[derive(Clone, Copy, Debug)]
 pub struct WorkerServiceConfig {
     pub tick_duration: Duration,
-    pub min_workers: usize,
-    pub max_workers: usize,
+    pub worker_count: usize,
 }
 
 impl Default for WorkerServiceConfig {
     fn default() -> Self {
         Self {
             tick_duration: Duration::from_nanos(DEFAULT_TICK_DURATION_NS),
-            min_workers: utils::num_cpus(),
-            max_workers: utils::num_cpus(),
+            worker_count: utils::num_cpus(),
         }
     }
 }
@@ -439,7 +374,6 @@ pub struct WorkerService<
     worker_thread_handles: Box<[Mutex<Option<crate::runtime::preemption::WorkerThreadHandle>>]>,
     worker_stats: Box<[WorkerStats]>,
     worker_count: Arc<AtomicUsize>,
-    worker_max_id: AtomicUsize,
     receivers: Box<[UnsafeCell<mpsc::Receiver<WorkerMessage, P, NUM_SEGS_P2>>]>,
     senders: Box<[mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>]>,
     tick_senders: Box<[mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>]>,
@@ -450,12 +384,8 @@ pub struct WorkerService<
     register_mutex: Mutex<()>,
     // RAII guard for tick service registration - automatically unregisters on drop
     tick_registration: Mutex<Option<TickHandlerRegistration>>,
-    // Flag to request immediate partition rebalancing on next tick (when workers spawn/exit)
-    rebalance_requested: AtomicBool,
     // Tick-related counters for on_tick logic
     tick_health_check_interval: u64,
-    tick_partition_rebalance_interval: u64,
-    tick_scaling_check_interval: u64,
 }
 
 unsafe impl<const P: usize, const NUM_SEGS_P2: usize> Send for WorkerService<P, NUM_SEGS_P2> {}
@@ -473,18 +403,17 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     ) -> Arc<Self> {
         let tick_duration = config.tick_duration;
         let tick_duration_ns = normalize_tick_duration_ns(config.tick_duration);
-        let min_workers = config.min_workers.max(1);
-        let max_workers = config.max_workers.max(min_workers).min(MAX_WORKER_LIMIT);
+        let worker_count_val = config.worker_count.max(1).min(MAX_WORKER_LIMIT);
 
         // Create per-worker WorkerWakers
-        let mut wakers = Vec::with_capacity(max_workers);
-        for _ in 0..max_workers {
+        let mut wakers = Vec::with_capacity(worker_count_val);
+        for _ in 0..worker_count_val {
             wakers.push(Arc::new(WorkerWaker::new()));
         }
         let wakers = wakers.into_boxed_slice();
 
         // Create worker_count early so we can pass it to SummaryTree (single source of truth)
-        let worker_count = Arc::new(AtomicUsize::new(0));
+        let worker_count = Arc::new(AtomicUsize::new(worker_count_val));
 
         // Create SummaryTree with reference to wakers and worker_count
         let summary_tree = Summary::new(
@@ -494,42 +423,42 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             &worker_count,
         );
 
-        let mut worker_actives = Vec::with_capacity(max_workers);
-        for _ in 0..max_workers {
+        let mut worker_actives = Vec::with_capacity(worker_count_val);
+        for _ in 0..worker_count_val {
             worker_actives.push(AtomicU64::new(0));
         }
-        let mut worker_now_ns = Vec::with_capacity(max_workers);
-        for _ in 0..max_workers {
+        let mut worker_now_ns = Vec::with_capacity(worker_count_val);
+        for _ in 0..worker_count_val {
             worker_now_ns.push(AtomicU64::new(0));
         }
-        let mut worker_shutdowns = Vec::with_capacity(max_workers);
-        for _ in 0..max_workers {
+        let mut worker_shutdowns = Vec::with_capacity(worker_count_val);
+        for _ in 0..worker_count_val {
             worker_shutdowns.push(AtomicBool::new(false));
         }
-        let mut worker_threads = Vec::with_capacity(max_workers);
-        for _ in 0..max_workers {
+        let mut worker_threads = Vec::with_capacity(worker_count_val);
+        for _ in 0..worker_count_val {
             worker_threads.push(Mutex::new(None));
         }
-        let mut worker_thread_handles = Vec::with_capacity(max_workers);
-        for _ in 0..max_workers {
+        let mut worker_thread_handles = Vec::with_capacity(worker_count_val);
+        for _ in 0..worker_count_val {
             worker_thread_handles.push(Mutex::new(None));
         }
-        let mut worker_stats = Vec::with_capacity(max_workers);
-        for _ in 0..max_workers {
+        let mut worker_stats = Vec::with_capacity(worker_count_val);
+        for _ in 0..worker_count_val {
             worker_stats.push(WorkerStats::default());
         }
 
-        let mut receivers = Vec::with_capacity(max_workers);
+        let mut receivers = Vec::with_capacity(worker_count_val);
         let mut senders = Vec::<mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>>::with_capacity(
-            max_workers * max_workers,
+            worker_count_val * worker_count_val,
         );
-        for worker_id in 0..max_workers {
+        for worker_id in 0..worker_count_val {
             // Use the worker's WorkerWaker for mpsc queue
             let rx = mpsc::new_with_waker(Arc::clone(&wakers[worker_id]));
             receivers.push(UnsafeCell::new(rx));
         }
-        for worker_id in 0..max_workers {
-            for other_worker_id in 0..max_workers {
+        for worker_id in 0..worker_count_val {
+            for other_worker_id in 0..worker_count_val {
                 senders.push(
                     unsafe { &*receivers[worker_id].get() }
                         .create_sender_with_config(0)
@@ -539,8 +468,8 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         }
 
         // Create tick_senders for on_tick communication
-        let mut tick_senders = Vec::with_capacity(max_workers);
-        for worker_id in 0..max_workers {
+        let mut tick_senders = Vec::with_capacity(worker_count_val);
+        for worker_id in 0..worker_count_val {
             tick_senders.push(
                 unsafe { &*receivers[worker_id].get() }
                     .create_sender_with_config(0)
@@ -548,16 +477,16 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             );
         }
 
-        let mut yield_queues = Vec::with_capacity(max_workers);
-        for _ in 0..max_workers {
+        let mut yield_queues = Vec::with_capacity(worker_count_val);
+        for _ in 0..worker_count_val {
             yield_queues.push(YieldWorker::new_fifo());
         }
-        let mut yield_stealers = Vec::with_capacity(max_workers);
-        for worker_id in 0..max_workers {
+        let mut yield_stealers = Vec::with_capacity(worker_count_val);
+        for worker_id in 0..worker_count_val {
             yield_stealers.push(yield_queues[worker_id].stealer());
         }
-        let mut timers = Vec::with_capacity(max_workers);
-        for worker_id in 0..max_workers {
+        let mut timers = Vec::with_capacity(worker_count_val);
+        for worker_id in 0..worker_count_val {
             timers.push(UnsafeCell::new(TimerWheel::new(
                 tick_duration,
                 TIMER_TICKS_PER_WHEEL,
@@ -579,8 +508,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             worker_threads: worker_threads.into_boxed_slice(),
             worker_thread_handles: worker_thread_handles.into_boxed_slice(),
             worker_stats: worker_stats.into_boxed_slice(),
-            worker_count, // Use the worker_count we created earlier and passed to SummaryTree
-            worker_max_id: AtomicUsize::new(0),
+            worker_count,
             receivers: receivers.into_boxed_slice(),
             senders: senders.into_boxed_slice(),
             tick_senders: tick_senders.into_boxed_slice(),
@@ -590,30 +518,25 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             shutdown: AtomicBool::new(false),
             register_mutex: Mutex::new(()),
             tick_registration: Mutex::new(None),
-            rebalance_requested: AtomicBool::new(false),
             tick_health_check_interval: 100,
-            tick_partition_rebalance_interval: 1000,
-            tick_scaling_check_interval: 500,
         });
 
-        // Spawn min_workers on startup with pre-set count to avoid rebalancing
-        // Each worker recalculates partitions when worker_count changes, so we
-        // pre-set it to the final value before spawning any workers
-        service.worker_count.store(min_workers, Ordering::SeqCst);
-        // SummaryTree now references worker_count directly - no need to set it separately
+        // Statically partition the arena leaves among workers
+        let total_leaves = service.arena.leaf_count();
+        let leaves_per_worker = (total_leaves + worker_count_val - 1) / worker_count_val;
 
-        let mut spawned = 0;
-        for _ in 0..min_workers {
-            if service.spawn_worker_internal(&service, false).is_err() {
-                break;
+        // Spawn all workers
+        for worker_id in 0..worker_count_val {
+            let partition_start = worker_id * leaves_per_worker;
+            let partition_end = ((worker_id + 1) * leaves_per_worker).min(total_leaves);
+
+            if service
+                .spawn_worker_fixed(&service, worker_id, partition_start, partition_end)
+                .is_err()
+            {
+                // Log error but continue spawning others
+                eprintln!("Failed to spawn worker {}", worker_id);
             }
-            spawned += 1;
-        }
-
-        // Adjust worker_count if we failed to spawn all min_workers
-        if spawned < min_workers {
-            service.worker_count.store(spawned, Ordering::SeqCst);
-            // SummaryTree now references worker_count directly - no need to set it separately
         }
 
         // Register this service with the TickService and get RAII guard
@@ -681,66 +604,31 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         self.arena.decrement_total_tasks();
     }
 
-    pub fn spawn_worker(&self) -> Result<(), PushError<()>>
-    where
-        Self: Sized,
-    {
-        // This method requires an Arc<Self> context to spawn threads safely
-        // In the context of TickHandler, this will be called via Arc<WorkerService>
-        // We need to use unsafe here to get the Arc from &self
-        let service_arc = unsafe {
-            // SAFETY: WorkerService is always stored in an Arc when spawn_worker is called
-            // This is guaranteed by the API design where start() returns Arc<Self>
-            // and TickHandler is only implemented for Arc-wrapped services
-            Arc::from_raw(self as *const Self)
-        };
-        let result = self.spawn_worker_internal(&service_arc, true);
-        // Prevent Arc from being dropped (we only borrowed it)
-        std::mem::forget(service_arc);
-        result
-    }
-
-    fn spawn_worker_internal(
+    fn spawn_worker_fixed(
         &self,
         service: &Arc<Self>,
-        increment_count: bool,
+        worker_id: usize,
+        partition_start: usize,
+        partition_end: usize,
     ) -> Result<(), PushError<()>> {
         let _lock = self.register_mutex.lock().expect("register_mutex poisoned");
         let now_ns = Instant::now().elapsed().as_nanos() as u64;
 
-        // Find first empty slot.
-        let mut worker_id: Option<usize> = None;
-        for id in 0..self.worker_actives.len() {
-            if self.worker_actives[id]
-                .compare_exchange(0, now_ns, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                worker_id = Some(id);
-                break;
-            }
-        }
-        if worker_id.is_none() {
-            return Err(PushError::Full(()));
-        }
-        let worker_id = worker_id.unwrap();
-        // Update worker_max_id to be the highest worker ID + 1 (used as range upper bound)
-        if worker_id >= self.worker_max_id.load(Ordering::SeqCst) {
-            self.worker_max_id.store(worker_id + 1, Ordering::SeqCst);
-        }
-
-        if increment_count {
-            self.worker_count.fetch_add(1, Ordering::SeqCst);
-            // SummaryTree now references worker_count directly - no need to set it separately
-            // Request immediate partition rebalancing on next tick
-            self.rebalance_requested.store(true, Ordering::Release);
-        }
-
         // Mark worker as active
         self.worker_actives[worker_id].store(1, Ordering::SeqCst);
+        self.worker_now_ns[worker_id].store(now_ns, Ordering::SeqCst);
+
+        // Initialize partition cache in summary tree for this worker
+        self.wakers[worker_id].sync_partition_summary(
+            partition_start,
+            partition_end,
+            &self.summary_tree.leaf_words,
+        );
 
         let service_clone = Arc::clone(service);
-        let shutdown = Arc::new(AtomicBool::new(false));
         let timer_resolution_ns = self.tick_duration().as_nanos().max(1) as u64;
+        let partition_len = partition_end.saturating_sub(partition_start);
+
         let join = std::thread::spawn(move || {
             let task_slot = TaskSlot::new(std::ptr::null_mut());
             let task_slot_ptr = &task_slot as *const _ as *mut TaskSlot;
@@ -783,10 +671,10 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                     cross_worker_ops: unsafe { &*(&*service_clone as *const dyn CrossWorkerOps) },
                     wake_stats: WakeStats::default(),
                     stats: WorkerStats::default(),
-                    partition_start: 0,
-                    partition_end: 0,
-                    partition_len: 0,
-                    cached_worker_count: 0,
+                    partition_start,
+                    partition_end,
+                    partition_len,
+                    cached_worker_count: service_clone.worker_count.load(Ordering::Relaxed),
                     wake_burst_limit: DEFAULT_WAKE_BURST,
                     worker_id: worker_id as u32,
                     timer_resolution_ns,
@@ -801,52 +689,60 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                 },
             };
 
-            CURRENT_WORKER.set(unsafe { &w.inner as *const _ as *mut WorkerInner<'static> });
+            // CURRENT_WORKER.set(unsafe { &w.inner as *const _ as *mut WorkerInner<'static> });
 
-            // Initialize preemption support for this worker thread
-            let _preemption_handle = crate::runtime::preemption::init_worker_preemption().ok(); // Ignore errors - preemption is optional
+            // Wrap execution in monoio context and set user_data
+            let w_ptr = std::ptr::addr_of_mut!(w);
+            // Wrap execution in monoio context and set user_data
+            unsafe { &(*w_ptr).inner.event_loop }.with_context(|| {
+                crate::monoio::runtime::CURRENT.with(|ctx| {
+                    ctx.user_data
+                        .set(unsafe { &(*w_ptr).inner as *const _ as *mut () });
+                });
 
-            // Create a handle to this worker thread so it can be interrupted
-            // On Windows, we pass the preemption flag so APC can access it
-            #[cfg(unix)]
-            let thread_handle_result = crate::runtime::preemption::WorkerThreadHandle::current();
+                // Initialize preemption support for this worker thread
+                let _preemption_handle = crate::runtime::preemption::init_worker_preemption().ok(); // Ignore errors - preemption is optional
 
-            #[cfg(windows)]
-            let thread_handle_result = crate::runtime::preemption::WorkerThreadHandle::current(
-                &w.inner.preemption_requested,
-            );
+                // Create a handle to this worker thread so it can be interrupted
+                // On Windows, we pass the preemption flag so APC can access it
+                #[cfg(unix)]
+                let thread_handle_result =
+                    crate::runtime::preemption::WorkerThreadHandle::current();
 
-            #[cfg(not(any(unix, windows)))]
-            let thread_handle_result =
-                crate::runtime::preemption::WorkerThreadHandle::current(&w.preemption_requested);
+                #[cfg(windows)]
+                let thread_handle_result =
+                    crate::runtime::preemption::WorkerThreadHandle::current(unsafe {
+                        &(*w_ptr).inner.preemption_requested
+                    });
 
-            if let Ok(thread_handle) = thread_handle_result {
-                *service_clone.worker_thread_handles[worker_id]
-                    .lock()
-                    .expect("worker_thread_handles lock poisoned") = Some(thread_handle);
-            }
+                #[cfg(not(any(unix, windows)))]
+                let thread_handle_result =
+                    crate::runtime::preemption::WorkerThreadHandle::current(unsafe {
+                        &(*w_ptr).preemption_requested
+                    });
 
-            // Catch panics to prevent thread termination from propagating
-            // SAFETY: Worker cleanup code (service counter updates) will still execute after a panic
-            // We use a raw pointer wrapped in AssertUnwindSafe because Worker contains mutable
-            // references that don't implement UnwindSafe, but the cleanup code will still execute.
-            let w_ptr = &mut w as *mut Worker<'_, P, NUM_SEGS_P2>;
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                unsafe { (*w_ptr).run() };
-            }));
-            if let Err(e) = result {
-                eprintln!("[Worker {}] Panicked: {:?}", worker_id, e);
-            }
+                if let Ok(thread_handle) = thread_handle_result {
+                    *service_clone.worker_thread_handles[worker_id]
+                        .lock()
+                        .expect("worker_thread_handles lock poisoned") = Some(thread_handle);
+                }
+
+                // Catch panics to prevent thread termination from propagating
+                // SAFETY: Worker cleanup code (service counter updates) will still execute after a panic
+                // We use a raw pointer wrapped in AssertUnwindSafe because Worker contains mutable
+                // references that don't implement UnwindSafe, but the cleanup code will still execute.
+                // let w_ptr = &mut w as *mut Worker<'_, P, NUM_SEGS_P2>; // Already defined outside
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    unsafe { (*w_ptr).run() };
+                }));
+                if let Err(e) = result {
+                    eprintln!("[Worker {}] Panicked: {:?}", worker_id, e);
+                }
+            });
             // w.run();
 
             // Worker exited - clean up counters
-            service_clone.worker_count.fetch_sub(1, Ordering::SeqCst);
-            // SummaryTree now references worker_count directly - no need to set it separately
             service_clone.worker_actives[worker_id].store(0, Ordering::SeqCst);
-            // Request immediate partition rebalancing on next tick
-            service_clone
-                .rebalance_requested
-                .store(true, Ordering::Release);
         });
 
         // Store the join handle
@@ -866,7 +762,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         // mpsc will automatically set bits in the target worker's WorkerWaker.summary
         unsafe {
             self.senders
-                [((from_worker_id as usize) * self.config.max_workers) + (to_worker_id as usize)]
+                [((from_worker_id as usize) * self.config.worker_count) + (to_worker_id as usize)]
                 .unsafe_try_push(message)
         }
     }
@@ -879,7 +775,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     ) -> (u64, bool) {
         let queue = &self.yield_queues[from_worker_id];
         let stealer = &self.yield_stealers[from_worker_id];
-        let max_workers = self.worker_max_id.load(Ordering::Relaxed);
+        let max_workers = self.config.worker_count;
         let mut index = next_rand;
         let mut attempts = 0;
         for _ in 0..max_workers {
@@ -917,11 +813,9 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         }
 
         // Send shutdown messages to all active workers
-        let max_workers = self.worker_max_id.load(Ordering::Relaxed);
-        for worker_id in 0..=max_workers {
-            if worker_id < self.worker_actives.len()
-                && self.worker_actives[worker_id].load(Ordering::Relaxed) != 0
-            {
+        let worker_count = self.config.worker_count;
+        for worker_id in 0..worker_count {
+            if self.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
                 // SAFETY: unsafe_try_push only requires a shared reference
                 let _ = unsafe {
                     self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::Shutdown)
@@ -970,7 +864,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     /// Returns the current worker count
     #[inline]
     pub fn worker_count(&self) -> usize {
-        self.worker_count.load(Ordering::Relaxed)
+        self.config.worker_count
     }
 
     /// Checks if a specific worker has any work to do
@@ -987,11 +881,11 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
     /// Supervisor: Health monitoring - check for stuck workers and collect metrics
     fn supervisor_health_check(&self, now_ns: u64) {
-        let max_workers = self.worker_max_id.load(Ordering::Relaxed);
+        let worker_count = self.config.worker_count;
         let tick_duration_ns = self.tick_duration_ns;
         let stuck_threshold_ns = tick_duration_ns * 10; // Worker is stuck if no progress for 10 ticks
 
-        for worker_id in 0..max_workers {
+        for worker_id in 0..worker_count {
             let is_active = self.worker_actives[worker_id].load(Ordering::Relaxed);
             if is_active == 0 {
                 continue; // Worker slot not active
@@ -1021,71 +915,24 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         }
     }
 
-    /// Supervisor: Rebalance task partitions across workers
-    fn supervisor_rebalance_partitions(&self) {
-        let active_workers = self.worker_count.load(Ordering::Relaxed);
-        if active_workers == 0 {
-            return;
-        }
-
-        let total_leaves = self.arena.leaf_count();
-        let leaves_per_worker = (total_leaves + active_workers - 1) / active_workers;
-
-        let max_workers = self.worker_max_id.load(Ordering::Relaxed);
-        let mut active_worker_ids = Vec::with_capacity(max_workers);
-
-        // Collect active worker IDs
-        for worker_id in 0..max_workers {
-            if self.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
-                active_worker_ids.push(worker_id);
-            }
-        }
-
-        // Assign partitions to active workers
-        for (idx, &worker_id) in active_worker_ids.iter().enumerate() {
-            let partition_start = idx * leaves_per_worker;
-            let partition_end = ((idx + 1) * leaves_per_worker).min(total_leaves);
-
-            // Assign contiguous range of leaves [partition_start, partition_end)
-            // SAFETY: unsafe_try_push only requires a shared reference
-            let _ = unsafe {
-                self.tick_senders[worker_id].unsafe_try_push(WorkerMessage::RebalancePartitions {
-                    partition_start,
-                    partition_end,
-                })
-            };
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            eprintln!(
-                "[Supervisor] Rebalanced {} leaves across {} active workers",
-                total_leaves, active_workers
-            );
-        }
-    }
-
     /// Supervisor: Graceful shutdown coordination
     fn supervisor_graceful_shutdown(&self) {
         let _ = self.tick_registration.lock().unwrap().take();
-        let max_workers = self.worker_max_id.load(Ordering::Relaxed);
+        let worker_count = self.config.worker_count;
 
         #[cfg(debug_assertions)]
         {
-            eprintln!("[Supervisor] Shutting down, max_workers={}", max_workers);
+            eprintln!("[Supervisor] Shutting down, worker_count={}", worker_count);
         }
 
         // Send graceful shutdown to all active workers
-        for worker_id in 0..=max_workers {
+        for worker_id in 0..worker_count {
             #[cfg(debug_assertions)]
             {
-                let is_active = worker_id < self.worker_actives.len()
-                    && self.worker_actives[worker_id].load(Ordering::Relaxed) != 0;
+                let is_active = self.worker_actives[worker_id].load(Ordering::Relaxed) != 0;
                 eprintln!("[Supervisor] Worker {} active={}", worker_id, is_active);
             }
-            if worker_id < self.worker_actives.len()
-                && self.worker_actives[worker_id].load(Ordering::Relaxed) != 0
-            {
+            if self.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
                 #[cfg(debug_assertions)]
                 {
                     eprintln!("[Supervisor] Sending shutdown to worker {}", worker_id);
@@ -1109,7 +956,14 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         let shutdown_start = std::time::Instant::now();
 
         loop {
-            let active_count = self.worker_count.load(Ordering::Relaxed);
+            // Count active workers by checking worker_actives
+            let mut active_count = 0;
+            for i in 0..worker_count {
+                if self.worker_actives[i].load(Ordering::Relaxed) != 0 {
+                    active_count += 1;
+                }
+            }
+
             if active_count == 0 {
                 break;
             }
@@ -1123,7 +977,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                     );
                 }
                 // Force shutdown remaining workers
-                for worker_id in 0..max_workers {
+                for worker_id in 0..worker_count {
                     if self.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
                         // SAFETY: unsafe_try_push only requires a shared reference
                         let _ = unsafe {
@@ -1135,153 +989,6 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             }
 
             std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
-
-    /// Supervisor: Dynamic worker scaling based on load
-    fn supervisor_dynamic_scaling(&self) {
-        let active_workers = self.worker_count.load(Ordering::Relaxed);
-        let min_workers = self.config.min_workers;
-        let max_workers_config = self.config.max_workers;
-
-        // Calculate total work pressure by checking WorkerWakers
-        let mut total_work_signals = 0u64;
-        let max_worker_id = self.worker_max_id.load(Ordering::Relaxed);
-
-        for worker_id in 0..max_worker_id {
-            if self.worker_actives[worker_id].load(Ordering::Relaxed) == 0 {
-                continue;
-            }
-
-            let waker = &self.wakers[worker_id];
-            let summary = waker.snapshot_summary();
-            let status = waker.status();
-
-            // Count work signals: summary bits + status bits
-            total_work_signals += summary.count_ones() as u64 + status.count_ones() as u64;
-        }
-
-        // Scale up: if average work per worker > threshold, add workers
-        if active_workers > 0 {
-            let avg_work_per_worker = total_work_signals / active_workers as u64;
-            let scale_up_threshold = 4; // If avg work signals > 4 per worker, scale up
-
-            if avg_work_per_worker > scale_up_threshold && active_workers < max_workers_config {
-                // Try to spawn a new worker
-                match self.spawn_worker() {
-                    Ok(()) => {
-                        let new_count = self.worker_count.load(Ordering::Relaxed);
-
-                        #[cfg(debug_assertions)]
-                        {
-                            eprintln!(
-                                "[Supervisor] Scaled UP: {} -> {} workers (avg_work={})",
-                                active_workers, new_count, avg_work_per_worker
-                            );
-                        }
-
-                        // Notify all workers of count change
-                        for sender in self.tick_senders.iter() {
-                            // SAFETY: unsafe_try_push only requires a shared reference
-                            let _ = unsafe {
-                                sender.unsafe_try_push(WorkerMessage::WorkerCountChanged {
-                                    new_worker_count: new_count as u16,
-                                })
-                            };
-                        }
-                    }
-                    Err(_) => {
-                        #[cfg(debug_assertions)]
-                        {
-                            eprintln!("[Supervisor] Failed to scale up: no available worker slots");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Scale down: if work pressure is very low and we have more than min_workers
-        if active_workers > min_workers && total_work_signals == 0 {
-            // Find a worker to shut down (prefer higher worker IDs)
-            for worker_id in (0..max_worker_id).rev() {
-                if self.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
-                    // Send graceful shutdown to this worker
-                    // SAFETY: unsafe_try_push only requires a shared reference
-                    let _ = unsafe {
-                        self.tick_senders[worker_id]
-                            .unsafe_try_push(WorkerMessage::GracefulShutdown)
-                    };
-
-                    #[cfg(debug_assertions)]
-                    {
-                        eprintln!(
-                            "[Supervisor] Scaled DOWN: removed worker {} (no work detected)",
-                            worker_id
-                        );
-                    }
-                    break; // Only remove one worker at a time
-                }
-            }
-        }
-    }
-
-    /// Supervisor: Task migration for load balancing
-    /// Migrates tasks from overloaded workers to underloaded workers
-    #[allow(dead_code)]
-    fn supervisor_task_migration(&self) {
-        let max_worker_id = self.worker_max_id.load(Ordering::Relaxed);
-
-        // Collect load information for each worker
-        let mut worker_loads: Vec<(usize, u64)> = Vec::new();
-
-        for worker_id in 0..max_worker_id {
-            if self.worker_actives[worker_id].load(Ordering::Relaxed) == 0 {
-                continue;
-            }
-
-            let waker = &self.wakers[worker_id];
-            let summary = waker.snapshot_summary();
-            let status = waker.status();
-            let load = summary.count_ones() as u64 + status.count_ones() as u64;
-
-            worker_loads.push((worker_id, load));
-        }
-
-        if worker_loads.len() < 2 {
-            return; // Need at least 2 workers for migration
-        }
-
-        // Sort by load
-        worker_loads.sort_by_key(|&(_, load)| load);
-
-        // Find most loaded and least loaded workers
-        let (most_loaded_id, most_loaded_load) = worker_loads[worker_loads.len() - 1];
-        let (least_loaded_id, least_loaded_load) = worker_loads[0];
-
-        // Migration threshold: only migrate if imbalance is significant
-        let imbalance = most_loaded_load.saturating_sub(least_loaded_load);
-        let migration_threshold = 3;
-
-        if imbalance >= migration_threshold {
-            // In a real implementation, we would:
-            // 1. Steal tasks from the overloaded worker's yield queue
-            // 2. Send MigrateTasks message to the underloaded worker
-            //
-            // For now, we just log the decision
-            // TODO: Implement actual task stealing from yield queues
-
-            #[cfg(debug_assertions)]
-            {
-                eprintln!(
-                    "[Supervisor] Task migration opportunity: worker {} (load={}) -> worker {} (load={})",
-                    most_loaded_id, most_loaded_load, least_loaded_id, least_loaded_load
-                );
-            }
-
-            // We can't easily steal from another worker's yield queue from the supervisor
-            // This would require exposing the yield_stealers or implementing a different mechanism
-            // For now, leave this as a placeholder for future implementation
-            let _ = (most_loaded_id, least_loaded_id); // Suppress unused warnings
         }
     }
 
@@ -1338,53 +1045,56 @@ impl<const P: usize, const NUM_SEGS_P2: usize> CrossWorkerOps for WorkerService<
         .is_ok()
     }
 
-    fn post_register_socket(
+    fn post_remote_read(
         &self,
         from_worker_id: u32,
         to_worker_id: u32,
-        fd: crate::net::SocketDescriptor,
-        interest: SocketInterest,
-        state: crate::net::AsyncSocketState,
-        socket_type: crate::net::SocketType,
+        token: usize,
+        waker: Waker,
+    ) -> bool {
+        self.post_remote_read_impl(from_worker_id, to_worker_id, token, waker)
+    }
+
+    fn post_remote_write(
+        &self,
+        from_worker_id: u32,
+        to_worker_id: u32,
+        token: usize,
+        waker: Waker,
+    ) -> bool {
+        self.post_remote_write_impl(from_worker_id, to_worker_id, token, waker)
+    }
+}
+
+impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
+
+    // Helper method for CrossWorkerOps implementation
+    fn post_remote_read_impl(
+        &self,
+        from_worker_id: u32,
+        to_worker_id: u32,
+        token: usize,
+        waker: Waker,
     ) -> bool {
         self.post_message(
             from_worker_id,
             to_worker_id,
-            WorkerMessage::RegisterSocket {
-                fd,
-                interest,
-                state,
-                socket_type,
-            },
+            WorkerMessage::RemoteRead { token, waker },
         )
         .is_ok()
     }
 
-    fn post_modify_socket(
+    fn post_remote_write_impl(
         &self,
         from_worker_id: u32,
         to_worker_id: u32,
-        token: crate::net::Token,
-        interest: SocketInterest,
+        token: usize,
+        waker: Waker,
     ) -> bool {
         self.post_message(
             from_worker_id,
             to_worker_id,
-            WorkerMessage::ModifySocket { token, interest },
-        )
-        .is_ok()
-    }
-
-    fn post_close_socket(
-        &self,
-        from_worker_id: u32,
-        to_worker_id: u32,
-        token: crate::net::Token,
-    ) -> bool {
-        self.post_message(
-            from_worker_id,
-            to_worker_id,
-            WorkerMessage::CloseSocket { token },
+            WorkerMessage::RemoteWrite { token, waker },
         )
         .is_ok()
     }
@@ -1398,8 +1108,8 @@ impl<const P: usize, const NUM_SEGS_P2: usize> TickHandler for WorkerService<P, 
     fn on_tick(&self, tick_count: u64, now_ns: u64) {
         // Update clock for all workers
         self.clock_ns.store(now_ns, Ordering::Release);
-        let max_workers = self.worker_max_id.load(Ordering::Relaxed);
-        for i in 0..=max_workers {
+        let worker_count = self.config.worker_count;
+        for i in 0..worker_count {
             if i >= self.worker_now_ns.len() {
                 break;
             }
@@ -1413,29 +1123,9 @@ impl<const P: usize, const NUM_SEGS_P2: usize> TickHandler for WorkerService<P, 
             }
         }
 
-        // Perform initial partition rebalance on first tick
-        if tick_count == 0 {
-            self.supervisor_rebalance_partitions();
-        }
-
-        // Immediate rebalancing if requested (worker spawned/exited)
-        if self.rebalance_requested.swap(false, Ordering::AcqRel) {
-            self.supervisor_rebalance_partitions();
-        }
-
         // Periodic health monitoring
         if tick_count % self.tick_health_check_interval == 0 {
             self.supervisor_health_check(now_ns);
-        }
-
-        // Periodic dynamic worker scaling
-        if tick_count % self.tick_scaling_check_interval == 0 {
-            self.supervisor_dynamic_scaling();
-        }
-
-        // Periodic partition rebalancing (backup in case flag mechanism fails)
-        if tick_count % self.tick_partition_rebalance_interval == 0 {
-            self.supervisor_rebalance_partitions();
         }
     }
 
@@ -1563,7 +1253,7 @@ pub struct WorkerInner<'a> {
     shutdown: &'a AtomicBool,
     yield_queue: &'a YieldWorker<TaskHandle>,
     timer_wheel: &'a mut TimerWheel<TimerHandle>,
-    cross_worker_ops: &'static dyn CrossWorkerOps,
+    pub(crate) cross_worker_ops: &'static dyn CrossWorkerOps,
     wake_stats: WakeStats,
     stats: WorkerStats,
     partition_start: usize,
@@ -1814,99 +1504,107 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
             let mut generator =
                 crate::generator::Gn::<()>::new_scoped_opt(STACK_SIZE, move |mut scope| -> usize {
-                    // SAFETY: worker_addr is the address of a valid Worker that lives for the generator's lifetime
-                    let worker = unsafe { &mut *(worker_addr as *mut Worker<P, NUM_SEGS_P2>) };
-                    let mut spin_count = 0;
-                    let waker_id = worker.inner.worker_id as usize;
+                    // Wrap in catch_unwind to ensure clean stack behavior
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // SAFETY: worker_addr is the address of a valid Worker that lives for the generator's lifetime
+                        let worker = unsafe { &mut *(worker_addr as *mut Worker<P, NUM_SEGS_P2>) };
+                        let mut spin_count = 0;
+                        let waker_id = worker.inner.worker_id as usize;
 
-                    // Register this generator's scope for non-cooperative preemption
-                    let scope_ptr = &mut scope as *mut _ as *mut ();
+                        // Register this generator's scope for non-cooperative preemption
+                        let scope_ptr = &mut scope as *mut _ as *mut ();
 
-                    // Store in thread-local for signal handler
-                    worker.inner.current_scope = scope_ptr;
+                        // Store in thread-local for signal handler
+                        worker.inner.current_scope = scope_ptr;
 
-                    let mut run_ctx = RunContext {
-                        pinned: false,
-                        done: false,
-                    };
+                        let mut run_ctx = RunContext {
+                            pinned: false,
+                            done: false,
+                        };
 
-                    // Inner loop: runs inside generator context
-                    loop {
-                        // Check for shutdown
-                        if worker.inner.shutdown.load(Ordering::Relaxed) {
-                            // eprintln!("Worker {} received shutdown flag", self.inner.worker_id);
-                            worker.inner.current_scope = core::ptr::null_mut();
-                            return 0;
-                        }
+                        // Inner loop: runs inside generator context
+                        loop {
+                            // Check for shutdown
+                            if worker.inner.shutdown.load(Ordering::Relaxed) {
+                                // eprintln!("Worker {} received shutdown flag", self.inner.worker_id);
+                                worker.inner.current_scope = core::ptr::null_mut();
+                                return 0;
+                            }
 
-                        // Process one iteration of work
-                        let mut progress = worker.run_once(&mut run_ctx);
+                            // Process one iteration of work
+                            let mut progress = worker.run_once(&mut run_ctx);
 
-                        if run_ctx.pinned {
-                            worker.inner.current_scope = core::ptr::null_mut();
-                            scope.yield_(
-                                crate::runtime::preemption::GeneratorYieldReason::Cooperative
-                                    .as_usize(),
-                            );
-                            return 0;
-                        }
+                            if run_ctx.pinned {
+                                worker.inner.current_scope = core::ptr::null_mut();
+                                scope.yield_(
+                                    crate::runtime::preemption::GeneratorYieldReason::Cooperative
+                                        .as_usize(),
+                                );
+                                return 0;
+                            }
 
-                        if !progress {
-                            spin_count += 1;
+                            if !progress {
+                                spin_count += 1;
 
-                            if spin_count >= worker.inner.wait_strategy.spin_before_sleep {
-                                core::hint::spin_loop();
-                                progress = worker.run_once_exhaustive(&mut run_ctx);
+                                if spin_count >= worker.inner.wait_strategy.spin_before_sleep {
+                                    core::hint::spin_loop();
+                                    progress = worker.run_once_exhaustive(&mut run_ctx);
 
-                                if progress {
-                                    spin_count = 0;
+                                    if progress {
+                                        spin_count = 0;
+                                        continue;
+                                    }
+                                } else if spin_count < worker.inner.wait_strategy.spin_before_sleep
+                                {
+                                    core::hint::spin_loop();
                                     continue;
                                 }
-                            } else if spin_count < worker.inner.wait_strategy.spin_before_sleep {
-                                core::hint::spin_loop();
-                                continue;
-                            }
 
-                            // Calculate park duration considering timer deadlines
-                            let park_duration = worker.calculate_park_duration();
+                                // Calculate park duration considering timer deadlines
+                                let park_duration = worker.calculate_park_duration();
 
-                            // Sync partition summary from SummaryTree before parking
-                            worker.service.wakers[waker_id].sync_partition_summary(
-                                worker.inner.partition_start,
-                                worker.inner.partition_end,
-                                &worker.service.summary().leaf_words,
-                            );
+                                // Sync partition summary from SummaryTree before parking
+                                worker.service.wakers[waker_id].sync_partition_summary(
+                                    worker.inner.partition_start,
+                                    worker.inner.partition_end,
+                                    &worker.service.summary().leaf_words,
+                                );
 
-                            // Park on WorkerWaker with timer-aware timeout
-                            // On Windows, also use alertable wait for APC-based preemption
-                            match park_duration {
-                                Some(duration) if duration.is_zero() => {}
-                                Some(duration) => {
-                                    // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                                    worker.service.wakers[waker_id].acquire_timeout_with_io(
-                                        &mut worker.inner.event_loop,
-                                        duration,
-                                    );
+                                // Park on WorkerWaker with timer-aware timeout
+                                // On Windows, also use alertable wait for APC-based preemption
+                                match park_duration {
+                                    Some(duration) if duration.is_zero() => {}
+                                    Some(duration) => {
+                                        // On Windows, WorkerWaker uses alertable waits to allow APC execution
+                                        worker.service.wakers[waker_id].acquire_timeout_with_io(
+                                            &mut worker.inner.event_loop,
+                                            duration,
+                                        );
+                                    }
+                                    None => {
+                                        // On Windows, WorkerWaker uses alertable waits to allow APC execution
+                                        worker.service.wakers[waker_id].acquire_timeout_with_io(
+                                            &mut worker.inner.event_loop,
+                                            Duration::from_millis(250),
+                                        );
+                                    }
                                 }
-                                None => {
-                                    // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                                    worker.service.wakers[waker_id].acquire_timeout_with_io(
-                                        &mut worker.inner.event_loop,
-                                        Duration::from_millis(250),
-                                    );
-                                }
+                                spin_count = 0;
+                            } else {
+                                spin_count = 0;
                             }
-                            spin_count = 0;
-                        } else {
-                            spin_count = 0;
                         }
+                    }));
+
+                    match result {
+                        Ok(r) => r,
+                        Err(_) => 0,
                     }
                 });
 
             // Drive the generator with monoio context
-            self.inner.event_loop.runtime.with_context(|| {
-                generator.resume();
-            });
+            // Drive the generator with monoio context (already set by outer wrapper)
+            generator.resume();
 
             // Drive the generator until completion or until a task needs to be pinned
             // The generator will yield and set GENERATOR_PIN_TASK if pinning is needed
@@ -1934,35 +1632,35 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             //     // // SAFETY: The generator's lifetime is tied to the Worker which outlives the task
             //     // let boxed_iter: Box<dyn Iterator<Item = usize> + 'static> = unsafe {
             //     //     std::mem::transmute(Box::new(generator) as Box<dyn Iterator<Item = usize>>)
-            //     // };
+            //     //     // };
 
-            //     // Pin with Switch mode - this generator has interrupted poll on stack
-            //     unsafe {
-            //         task.pin_generator(
-            //             generator.into_raw(),
-            //             GeneratorOwnership::Worker,
-            //             GeneratorRunMode::Switch,
-            //         );
-            //     }
-
-            //     // Re-schedule the preempted task in the yield queue for work-stealing
-            //     // Preempted tasks are "hot" (CPU-bound) and should be treated like yields
-            //     if let Some(slot) = task.slot() {
-            //         let handle = TaskHandle::from_task(task);
-
-            //         // Mark as yielded so it stays in EXECUTING state
-            //         task.mark_yielded();
-            //         task.record_yield();
-
-            //         // Enqueue to yield queue - enables work stealing!
-            //         self.enqueue_yield(handle);
-
-            //         // Update stats
-            //         self.inner.stats.yielded_count += 1;
-            //     }
-
-            //     // Continue outer loop to create a new generator
-            // }
+            //     //     // Pin with Switch mode - this generator has interrupted poll on stack
+            //     //     unsafe {
+            //     //         task.pin_generator(
+            //     //             generator.into_raw(),
+            //     //             GeneratorOwnership::Worker,
+            //     //             GeneratorRunMode::Switch,
+            //     //         );
+            //     //     }
+            //
+            //     //     // Re-schedule the preempted task in the yield queue for work-stealing
+            //     //     // Preempted tasks are "hot" (CPU-bound) and should be treated like yields
+            //     //     if let Some(slot) = task.slot() {
+            //     //         let handle = TaskHandle::from_task(task);
+            //
+            //     //         // Mark as yielded so it stays in EXECUTING state
+            //     //         task.mark_yielded();
+            //     //         task.record_yield();
+            //
+            //     //         // Enqueue to yield queue - enables work stealing!
+            //     //         self.enqueue_yield(handle);
+            //
+            //     //         // Update stats
+            //     //         self.inner.stats.yielded_count += 1;
+            //     //     }
+            //
+            //     //     // Continue outer loop to create a new generator
+            //     // }
         }
 
         eprintln!("Worker is done running: {}", self.inner.worker_id);
@@ -2034,15 +1732,6 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 worker_id,
                 timer_id,
             } => self.cancel_remote_timer(worker_id, timer_id),
-            WorkerMessage::WorkerCountChanged { new_worker_count } => {
-                self.inner.cached_worker_count = new_worker_count as usize;
-                true
-            }
-            WorkerMessage::RebalancePartitions {
-                partition_start,
-                partition_end,
-            } => self.handle_rebalance_partitions(partition_start, partition_end),
-            WorkerMessage::MigrateTasks { task_handles } => self.handle_migrate_tasks(task_handles),
             WorkerMessage::ReportHealth => {
                 self.handle_report_health();
                 true
@@ -2055,21 +1744,11 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 self.inner.shutdown.store(true, Ordering::Release);
                 true
             }
-            WorkerMessage::RegisterSocket {
-                fd,
-                interest,
-                state,
-                socket_type,
-            } => self.handle_register_socket(fd, interest, state, socket_type),
-            WorkerMessage::ModifySocket { token, interest } => {
-                self.handle_modify_socket(token, interest)
+            WorkerMessage::RemoteRead { token, waker } => {
+                self.handle_remote_read(token, waker)
             }
-            WorkerMessage::CloseSocket { token } => self.handle_close_socket(token),
-            WorkerMessage::SetSocketTimeout { token, duration } => {
-                self.handle_set_socket_timeout(token, duration)
-            }
-            WorkerMessage::CancelSocketTimeout { token } => {
-                self.handle_cancel_socket_timeout(token)
+            WorkerMessage::RemoteWrite { token, waker } => {
+                self.handle_remote_write(token, waker)
             }
             WorkerMessage::Noop => true,
         }
@@ -2081,50 +1760,6 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             return false;
         }
         self.enqueue_timer_entry(deadline_ns, handle).is_some()
-    }
-
-    fn handle_rebalance_partitions(
-        &mut self,
-        partition_start: usize,
-        partition_end: usize,
-    ) -> bool {
-        self.inner.partition_start = partition_start;
-        self.inner.partition_end = partition_end;
-        self.inner.partition_len = partition_end.saturating_sub(partition_start);
-
-        // Sync partition summary to reflect new partition boundaries.
-        // This will also update the tasks-available bit based on actual partition state.
-        let waker_id = self.inner.worker_id as usize;
-        self.service.wakers[waker_id].sync_partition_summary(
-            partition_start,
-            partition_end,
-            &self.service.summary().leaf_words,
-        );
-
-        true
-    }
-
-    fn handle_migrate_tasks(&mut self, task_handles: Vec<TaskHandle>) -> bool {
-        // Receive migrated tasks from another worker
-        // Add them to our yield queue for processing
-        if task_handles.is_empty() {
-            return false;
-        }
-
-        let count = task_handles.len();
-        for handle in task_handles {
-            self.enqueue_yield(handle);
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            eprintln!(
-                "[Worker {}] Received {} migrated tasks",
-                self.inner.worker_id, count
-            );
-        }
-
-        true
     }
 
     fn handle_report_health(&mut self) {
@@ -2196,12 +1831,39 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     // ────────────────────────────────────────────────────────────────────────────
 
     #[inline]
+    fn handle_remote_read(&mut self, _token: usize, waker: Waker) -> bool {
+        // DEPRECATED: Remote ops now register wakers directly via SharedFd::reader_waker()
+        // This handler is dead code but kept for compatibility with existing WorkerMessage enum
+        waker.wake();
+        true
+    }
+
+    #[inline]
+    fn handle_remote_write(&mut self, _token: usize, waker: Waker) -> bool {
+        // DEPRECATED: Remote ops now register wakers directly via SharedFd::writer_waker()
+        // This handler is dead code but kept for compatibility with existing WorkerMessage enum
+        waker.wake();
+        true
+    }
+
+    #[inline]
     fn poll_event_loop(&mut self) -> usize {
-        eprintln!("[Worker {}] Polling event loop. Sockets: {}", self.inner.worker_id, self.inner.event_loop.socket_count());
-        match self.inner.event_loop.poll_once(Some(std::time::Duration::ZERO)) {
+        eprintln!(
+            "[Worker {}] Polling event loop. Sockets: {}",
+            self.inner.worker_id,
+            self.inner.event_loop.socket_count()
+        );
+        match self
+            .inner
+            .event_loop
+            .poll_once(Some(std::time::Duration::ZERO))
+        {
             Ok(num_events) => {
                 if num_events > 0 {
-                    eprintln!("[Worker {}] Poll got {} events", self.inner.worker_id, num_events);
+                    eprintln!(
+                        "[Worker {}] Poll got {} events",
+                        self.inner.worker_id, num_events
+                    );
                 }
                 num_events
             }
@@ -2212,170 +1874,6 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         }
     }
 
-    fn handle_register_socket(
-        &mut self,
-        fd: crate::net::SocketDescriptor,
-        interest: SocketInterest,
-        state: crate::net::AsyncSocketState,
-        socket_type: crate::net::SocketType,
-    ) -> bool {
-        // Convert interest
-        let mio_interest = match interest {
-            SocketInterest::Readable => mio::Interest::READABLE,
-            SocketInterest::Writable => mio::Interest::WRITABLE,
-            SocketInterest::ReadWrite => mio::Interest::READABLE | mio::Interest::WRITABLE,
-        };
-
-        // Add socket to EventLoop with async state
-        /*
-        match self
-            .inner
-            .event_loop
-            .add_socket(fd, mio_interest, state.clone(), Box::new(()), socket_type)
-        {
-            Ok(token) => {
-                // Set the token in the shared state so the TcpStream knows it
-                state.set_token(token.0);
-
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!(
-                        "[Worker {}] RegisterSocket: fd={}, token={:?}",
-                        self.inner.worker_id, fd, token
-                    );
-                }
-
-                true
-            }
-            Err(e) => {
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!(
-                        "[Worker {}] RegisterSocket failed: fd={}, error={}",
-                        self.inner.worker_id, fd, e
-                    );
-                }
-                false
-            }
-        }
-        */
-        true
-    }
-
-    fn handle_modify_socket(&mut self, token: crate::net::Token, interest: SocketInterest) -> bool {
-        // Convert interest
-        let mio_interest = match interest {
-            SocketInterest::Readable => mio::Interest::READABLE,
-            SocketInterest::Writable => mio::Interest::WRITABLE,
-            SocketInterest::ReadWrite => mio::Interest::READABLE | mio::Interest::WRITABLE,
-        };
-
-        match self.inner.event_loop.modify_socket(token, mio_interest) {
-            Ok(_) => {
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!(
-                        "[Worker {}] ModifySocket: token={:?}, interest={:?}",
-                        self.inner.worker_id, token, interest
-                    );
-                }
-                true
-            }
-            Err(e) => {
-                #[cfg(debug_assertions)]
-                {
-                    eprintln!(
-                        "[Worker {}] ModifySocket failed: token={:?}, error={}",
-                        self.inner.worker_id, token, e
-                    );
-                }
-                false
-            }
-        }
-    }
-
-    fn handle_close_socket(&mut self, token: crate::net::Token) -> bool {
-        // Close the socket in the EventLoop
-        self.inner.event_loop.close_socket(token);
-
-        #[cfg(debug_assertions)]
-        {
-            eprintln!(
-                "[Worker {}] CloseSocket: token={:?}",
-                self.inner.worker_id, token
-            );
-        }
-
-        true
-    }
-
-    fn handle_set_socket_timeout(&mut self, token: crate::net::Token, duration: Duration) -> bool {
-        #[cfg(feature = "std")]
-        {
-            match self.inner.event_loop.set_timeout(token, duration) {
-                Ok(_) => {
-                    #[cfg(debug_assertions)]
-                    {
-                        eprintln!(
-                            "[Worker {}] SetSocketTimeout: token={:?}, duration={:?}",
-                            self.inner.worker_id, token, duration
-                        );
-                    }
-                    true
-                }
-                Err(e) => {
-                    #[cfg(debug_assertions)]
-                    {
-                        eprintln!(
-                            "[Worker {}] SetSocketTimeout failed: token={:?}, error={}",
-                            self.inner.worker_id, token, e
-                        );
-                    }
-                    false
-                }
-            }
-        }
-
-        #[cfg(not(feature = "std"))]
-        {
-            let _ = (token, duration);
-            false
-        }
-    }
-
-    fn handle_cancel_socket_timeout(&mut self, token: crate::net::Token) -> bool {
-        #[cfg(feature = "std")]
-        {
-            match self.inner.event_loop.cancel_timeout(token) {
-                Ok(_) => {
-                    #[cfg(debug_assertions)]
-                    {
-                        eprintln!(
-                            "[Worker {}] CancelSocketTimeout: token={:?}",
-                            self.inner.worker_id, token
-                        );
-                    }
-                    true
-                }
-                Err(e) => {
-                    #[cfg(debug_assertions)]
-                    {
-                        eprintln!(
-                            "[Worker {}] CancelSocketTimeout failed: token={:?}, error={}",
-                            self.inner.worker_id, token, e
-                        );
-                    }
-                    false
-                }
-            }
-        }
-
-        #[cfg(not(feature = "std"))]
-        {
-            let _ = token;
-            false
-        }
-    }
 
     fn enqueue_timer_entry(&mut self, deadline_ns: u64, handle: TimerHandle) -> Option<u64> {
         match self.inner.timer_wheel.schedule_timer(deadline_ns, handle) {
@@ -3080,7 +2578,8 @@ pub fn schedule_timer_for_task(_cx: &Context<'_>, timer: &Timer, delay: Duration
         if let Some(existing_worker_id) = timer.worker_id() {
             if existing_worker_id == worker_id {
                 let existing_id = timer.timer_id();
-                if worker.timer_wheel
+                if worker
+                    .timer_wheel
                     .cancel_timer(existing_id)
                     .unwrap_or(None)
                     .is_some()
@@ -3090,7 +2589,11 @@ pub fn schedule_timer_for_task(_cx: &Context<'_>, timer: &Timer, delay: Duration
             } else {
                 // Cross-worker cancellation: send message to the worker that owns the timer
                 let existing_id = timer.timer_id();
-                if worker.cross_worker_ops.post_cancel_message(worker_id, existing_worker_id, existing_id) {
+                if worker.cross_worker_ops.post_cancel_message(
+                    worker_id,
+                    existing_worker_id,
+                    existing_id,
+                ) {
                     timer.reset();
                 }
             }
@@ -3143,7 +2646,12 @@ pub fn cancel_timer_for_current_task(timer: &Timer) -> bool {
     let task = unsafe { &mut *task };
 
     if timer_worker_id == worker_id {
-        if worker.timer_wheel.cancel_timer(timer_id).unwrap_or(None).is_some() {
+        if worker
+            .timer_wheel
+            .cancel_timer(timer_id)
+            .unwrap_or(None)
+            .is_some()
+        {
             timer.mark_cancelled(timer_id);
             return true;
         }
@@ -3151,7 +2659,10 @@ pub fn cancel_timer_for_current_task(timer: &Timer) -> bool {
     }
 
     // Cross-worker cancellation: send message to the worker that owns the timer
-    if worker.cross_worker_ops.post_cancel_message(worker_id, timer_worker_id, timer_id) {
+    if worker
+        .cross_worker_ops
+        .post_cancel_message(worker_id, timer_worker_id, timer_id)
+    {
         timer.mark_cancelled(timer_id);
         true
     } else {
@@ -3159,97 +2670,3 @@ pub fn cancel_timer_for_current_task(timer: &Timer) -> bool {
     }
 }
 
-/// Register a socket with the current worker's EventLoop.
-/// Returns the Token assigned to the socket and the worker_id that owns it.
-///
-/// This should be called when creating a new async socket (TcpStream, TcpListener, etc).
-/// The state_ptr must point to a valid AsyncSocketState that outlives the socket registration.
-pub fn register_socket_with_current_worker(
-    _fd: crate::net::SocketDescriptor,
-    _interest: SocketInterest,
-    _state: crate::net::AsyncSocketState,
-    _socket_type: crate::net::SocketType,
-) -> std::io::Result<crate::net::Token> {
-    // Legacy stub
-    Ok(crate::net::Token(0))
-}
-
-/// Modify the interest of a socket that's registered with a worker's EventLoop.
-///
-/// If the socket is registered with the current worker, the modification happens locally.
-/// If the socket is registered with a different worker (task migration case), sends a
-/// cross-worker message to update the registration.
-pub fn modify_socket_interest(
-    token: crate::net::Token,
-    owner_worker_id: u32,
-    new_interest: SocketInterest,
-) -> std::io::Result<()> {
-    let worker = current_worker();
-    if worker.is_none() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "not in worker context",
-        ));
-    }
-    let worker = worker.unwrap();
-    let worker_id = worker.worker_id;
-
-    // Optimization: If we are on the owner worker, modify directly
-    if worker_id == owner_worker_id {
-        // Convert interest
-        let mio_interest = match new_interest {
-            SocketInterest::Readable => mio::Interest::READABLE,
-            SocketInterest::Writable => mio::Interest::WRITABLE,
-            SocketInterest::ReadWrite => mio::Interest::READABLE | mio::Interest::WRITABLE,
-        };
-
-        return worker.event_loop.modify_socket(token, mio_interest);
-    }
-
-    // Send modification message to the owner worker
-    if !worker
-        .cross_worker_ops
-        .post_modify_socket(worker_id, owner_worker_id, token, new_interest)
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Failed to post ModifySocket message",
-        ));
-    }
-
-    Ok(())
-}
-
-/// Close a socket and deregister it from the EventLoop.
-///
-/// Sends a cross-worker message if necessary to close the socket on the owner worker.
-pub fn close_socket(token: crate::net::Token, owner_worker_id: u32) -> std::io::Result<()> {
-    let worker = current_worker();
-    if worker.is_none() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "not in worker context",
-        ));
-    }
-    let worker = worker.unwrap();
-    let worker_id = worker.worker_id;
-
-    // Optimization: If we are on the owner worker, close directly
-    if worker_id == owner_worker_id {
-        worker.event_loop.close_socket(token);
-        return Ok(());
-    }
-
-    // Send close message to the owner worker
-    if !worker
-        .cross_worker_ops
-        .post_close_socket(worker_id, owner_worker_id, token)
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "Failed to post CloseSocket message",
-        ));
-    }
-
-    Ok(())
-}

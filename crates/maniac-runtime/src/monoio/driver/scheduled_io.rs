@@ -1,14 +1,15 @@
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 use super::ready::{Direction, Ready};
+use crate::future::waker::DiatomicWaker;
 
 pub(crate) struct ScheduledIo {
     readiness: Ready,
 
-    /// Waker used for AsyncRead.
-    reader: Option<Waker>,
-    /// Waker used for AsyncWrite.
-    writer: Option<Waker>,
+    /// Waker used for AsyncRead (thread-safe, supports concurrent updates).
+    pub(crate) reader: DiatomicWaker,
+    /// Waker used for AsyncWrite (thread-safe, supports concurrent updates).
+    pub(crate) writer: DiatomicWaker,
 }
 
 impl Default for ScheduledIo {
@@ -19,11 +20,11 @@ impl Default for ScheduledIo {
 }
 
 impl ScheduledIo {
-    pub(crate) const fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             readiness: Ready::EMPTY,
-            reader: None,
-            writer: None,
+            reader: DiatomicWaker::new(),
+            writer: DiatomicWaker::new(),
         }
     }
 
@@ -41,14 +42,10 @@ impl ScheduledIo {
     #[inline]
     pub(crate) fn wake(&mut self, ready: Ready) {
         if ready.is_readable() {
-            if let Some(waker) = self.reader.take() {
-                waker.wake();
-            }
+            self.reader.notify();
         }
         if ready.is_writable() {
-            if let Some(waker) = self.writer.take() {
-                waker.wake();
-            }
+            self.writer.notify();
         }
     }
 
@@ -74,19 +71,14 @@ impl ScheduledIo {
 
     #[inline]
     pub(crate) fn set_waker(&mut self, cx: &mut Context<'_>, direction: Direction) {
-        let slot = match direction {
-            Direction::Read => &mut self.reader,
-            Direction::Write => &mut self.writer,
+        let waker = match direction {
+            Direction::Read => &self.reader,
+            Direction::Write => &self.writer,
         };
-        match slot {
-            Some(existing) => {
-                if !existing.will_wake(cx.waker()) {
-                    existing.clone_from(cx.waker());
-                }
-            }
-            None => {
-                *slot = Some(cx.waker().clone());
-            }
+        // SAFETY: set_waker is only called from the polling context and there is no
+        // concurrent access to register/unregister from multiple threads.
+        unsafe {
+            waker.register(cx.waker());
         }
     }
 }

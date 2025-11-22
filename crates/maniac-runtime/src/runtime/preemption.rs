@@ -30,10 +30,10 @@
 //! as normal thread code, not in an interrupt context.
 
 use crate::generator;
+use crate::runtime::worker::rust_preemption_helper;
 use std::cell::Cell;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::runtime::worker::rust_preemption_helper;
 
 thread_local! {
     static CURRENT_GENERATOR_SCOPE: Cell<*mut ()> = Cell::new(ptr::null_mut());
@@ -68,11 +68,7 @@ impl PreemptionSignalGuard {
             libc::sigaddset(set.as_mut_ptr(), libc::SIGVTALRM);
 
             let mut old = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
-            let rc = libc::pthread_sigmask(
-                libc::SIG_BLOCK,
-                set.as_ptr(),
-                old.as_mut_ptr(),
-            );
+            let rc = libc::pthread_sigmask(libc::SIG_BLOCK, set.as_ptr(), old.as_mut_ptr());
             if rc == 0 {
                 Self {
                     old_mask: old.assume_init(),
@@ -160,8 +156,6 @@ impl std::fmt::Display for PreemptionError {
     }
 }
 impl std::error::Error for PreemptionError {}
-
-
 
 // ============================================================================
 // Platform Implementations
@@ -283,34 +277,28 @@ mod impl_x64 {
                 "popfq",
                 // At this point, all registers restored to pre-signal values
                 // Stack layout: [RSP+0] = original_rsp, [RSP+8] = original_rip
-                // We need to switch to original_rsp and jump to original_rip 
+                // We need to switch to original_rsp and jump to original_rip
                 // WITHOUT clobbering any registers (including RAX and RBX).
-                
+
                 // 1. Load original_rsp into RAX, save RAX to stack
-                "xchg rax, [rsp]",      // RAX = original_rsp, [RSP] = saved_rax
-                
+                "xchg rax, [rsp]", // RAX = original_rsp, [RSP] = saved_rax
                 // 2. Load original_rip into RBX, save RBX to stack
-                "xchg rbx, [rsp + 8]",  // RBX = original_rip, [RSP+8] = saved_rbx
-                
+                "xchg rbx, [rsp + 8]", // RBX = original_rip, [RSP+8] = saved_rbx
                 // 3. Build return frame on ORIGINAL stack (using RAX as base)
                 // [original_rsp - 8] = original_rip (Return Address)
                 "mov [rax - 8], rbx",
-                
                 // 4. Move saved_rax to original stack
-                "mov rbx, [rsp]",       // RBX = saved_rax
-                "mov [rax - 16], rbx",  // [original_rsp - 16] = saved_rax
-                
+                "mov rbx, [rsp]",      // RBX = saved_rax
+                "mov [rax - 16], rbx", // [original_rsp - 16] = saved_rax
                 // 5. Move saved_rbx to original stack
-                "mov rbx, [rsp + 8]",   // RBX = saved_rbx
-                "mov [rax - 24], rbx",  // [original_rsp - 24] = saved_rbx
-                
+                "mov rbx, [rsp + 8]",  // RBX = saved_rbx
+                "mov [rax - 24], rbx", // [original_rsp - 24] = saved_rbx
                 // 6. Switch to original stack
-                "lea rsp, [rax - 24]",  // RSP = original_rsp - 24
-                
+                "lea rsp, [rax - 24]", // RSP = original_rsp - 24
                 // 7. Restore registers and return
-                "pop rbx",              // Restore RBX
-                "pop rax",              // Restore RAX
-                "ret"                   // Pop original_rip and jump, RSP becomes original_rsp
+                "pop rbx", // Restore RBX
+                "pop rax", // Restore RAX
+                "ret"      // Pop original_rip and jump, RSP becomes original_rsp
             );
         };
     }
@@ -468,12 +456,15 @@ mod impl_x64 {
         }
         fn init_preemption() -> Result<PreemptionHandle, PreemptionError> {
             unsafe {
-                let mut sa: libc::sigaction = MaybeUninit::zeroed().assume_init();
-                sa.sa_sigaction = sigalrm_handler as usize;
-                libc::sigemptyset(&mut sa.sa_mask);
+                let mut sa = MaybeUninit::<libc::sigaction>::uninit();
+                let sa_ptr = sa.as_mut_ptr();
+                (*sa_ptr).sa_sigaction = sigalrm_handler as usize;
+                libc::sigemptyset(&mut (*sa_ptr).sa_mask);
                 // Block SIGVTALRM during handler execution to prevent reentrancy
-                libc::sigaddset(&mut sa.sa_mask, libc::SIGVTALRM);
-                sa.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
+                libc::sigaddset(&mut (*sa_ptr).sa_mask, libc::SIGVTALRM);
+                (*sa_ptr).sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
+                let sa = sa.assume_init();
+
                 let mut old_sa: libc::sigaction = MaybeUninit::zeroed().assume_init();
                 if libc::sigaction(libc::SIGVTALRM, &sa, &mut old_sa) != 0 {
                     return Err(PreemptionError::SignalSetupFailed);
@@ -526,15 +517,15 @@ mod impl_x64 {
                 let original_rsp = *rsp_ptr;
                 let mut sp = original_rsp;
                 // x86_64 System V ABI: Reserve red zone and ensure proper alignment
-                sp -= 512; // Expanded Red Zone (safety margin)
+                sp -= 128; // Red Zone (System V ABI)
                 // Align to 16-byte boundary, then subtract 16 for two values we'll push
                 sp = (sp & !15) - 16;
                 // Push original RSP and original RIP onto the new stack
-                *(sp as *mut u64) = original_rsp;  // Original RSP
-                *((sp + 8) as *mut u64) = original_rip;  // Original RIP
+                *(sp as *mut u64) = original_rsp; // Original RSP
+                *((sp + 8) as *mut u64) = original_rip; // Original RIP
                 *rsp_ptr = sp;
                 *rip_ptr = preemption_trampoline as u64;
-                
+
                 // Memory barrier: Ensure all context modifications are visible before
                 // returning from the handler. This prevents reordering that could cause
                 // the trampoline to execute with stale register values.
@@ -551,21 +542,21 @@ mod impl_x64 {
     #[cfg(windows)]
     mod windows_impl {
         use super::super::*;
-        use windows_sys::Win32::Foundation::{HANDLE, CloseHandle, DuplicateHandle};
-        use windows_sys::Win32::System::Threading::{
-            GetCurrentProcess, GetCurrentThread,
-            SuspendThread, ResumeThread,
-            THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT,
-            THREAD_SUSPEND_RESUME,
+        use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE};
+        use windows_sys::Win32::System::Diagnostics::Debug::{
+            CONTEXT, GetThreadContext, SetThreadContext, WriteProcessMemory,
         };
-        use windows_sys::Win32::System::Diagnostics::Debug::{CONTEXT, GetThreadContext, SetThreadContext};
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentThread, ResumeThread, SuspendThread, THREAD_GET_CONTEXT,
+            THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT, THREAD_SUSPEND_RESUME,
+        };
 
         // Windows CONTEXT flags (architecture-independent values)
         #[cfg(target_arch = "x86_64")]
         const CONTEXT_CONTROL: u32 = 0x00100001;
         #[cfg(target_arch = "x86_64")]
         const CONTEXT_INTEGER: u32 = 0x00100002;
-        
+
         #[cfg(target_arch = "aarch64")]
         const CONTEXT_CONTROL: u32 = 0x00400001;
         #[cfg(target_arch = "aarch64")]
@@ -651,7 +642,28 @@ mod impl_x64 {
                     let original_rip = context.Rip;
                     let mut rsp = context.Rsp;
                     rsp -= 8;
-                    *(rsp as *mut u64) = original_rip;
+
+                    // Use WriteProcessMemory to safely write to the target stack
+                    let stack_ptr = rsp as *mut std::ffi::c_void;
+                    let mut written: usize = 0;
+                    let process = GetCurrentProcess();
+
+                    if WriteProcessMemory(
+                        process,
+                        stack_ptr,
+                        &original_rip as *const _ as *const std::ffi::c_void,
+                        8,
+                        &mut written,
+                    ) == 0
+                    {
+                        println!(
+                            "WriteProcessMemory failed: {}",
+                            std::io::Error::last_os_error()
+                        );
+                        ResumeThread(self.thread_handle);
+                        return Err(PreemptionError::InterruptFailed);
+                    }
+
                     context.Rsp = rsp;
                     context.Rip = preemption_trampoline as u64;
                     if SetThreadContext(self.thread_handle, context) == 0 {
@@ -727,7 +739,6 @@ mod impl_aarch64 {
                 "stp x1, x2, [sp, #-16]!",
                 // Save x0 and padding (xzr) to maintain 16-byte alignment
                 "stp x0, xzr, [sp, #-16]!",
-                
                 // Save all FP/SIMD registers (v0-v31)
                 "stp q0, q1, [sp, #-32]!",
                 "stp q2, q3, [sp, #-32]!",
@@ -745,10 +756,8 @@ mod impl_aarch64 {
                 "stp q26, q27, [sp, #-32]!",
                 "stp q28, q29, [sp, #-32]!",
                 "stp q30, q31, [sp, #-32]!",
-                
                 // Call helper
                 "bl rust_preemption_helper",
-                
                 // Restore FP/SIMD
                 "ldp q30, q31, [sp], #32",
                 "ldp q28, q29, [sp], #32",
@@ -766,7 +775,6 @@ mod impl_aarch64 {
                 "ldp q4, q5, [sp], #32",
                 "ldp q2, q3, [sp], #32",
                 "ldp q0, q1, [sp], #32",
-                
                 // Restore GPR
                 "ldp x0, xzr, [sp], #16",
                 "ldp x1, x2, [sp], #16",
@@ -784,7 +792,6 @@ mod impl_aarch64 {
                 "ldp x25, x26, [sp], #16",
                 "ldp x27, x28, [sp], #16",
                 "ldp x29, x30, [sp], #16",
-                
                 // Return
                 "ret"
             );
@@ -822,7 +829,6 @@ mod impl_aarch64 {
         "stp x3, x4, [sp, #-16]!",
         "stp x1, x2, [sp, #-16]!",
         "stp x0, xzr, [sp, #-16]!",
-        
         // Save all FP/SIMD (v0-v31)
         "stp q0, q1, [sp, #-32]!",
         "stp q2, q3, [sp, #-32]!",
@@ -840,12 +846,10 @@ mod impl_aarch64 {
         "stp q26, q27, [sp, #-32]!",
         "stp q28, q29, [sp, #-32]!",
         "stp q30, q31, [sp, #-32]!",
-        
         // Call helper
         "sub sp, sp, #32", // shadow space for Windows/ARM64
         "bl rust_preemption_helper",
         "add sp, sp, #32",
-        
         // Restore FP/SIMD
         "ldp q30, q31, [sp], #32",
         "ldp q28, q29, [sp], #32",
@@ -863,7 +867,6 @@ mod impl_aarch64 {
         "ldp q4, q5, [sp], #32",
         "ldp q2, q3, [sp], #32",
         "ldp q0, q1, [sp], #32",
-        
         // Restore GPR
         "ldp x0, xzr, [sp], #16",
         "ldp x1, x2, [sp], #16",
@@ -881,7 +884,6 @@ mod impl_aarch64 {
         "ldp x25, x26, [sp], #16",
         "ldp x27, x28, [sp], #16",
         "ldp x29, x30, [sp], #16",
-        
         "ret"
     );
 
@@ -1017,7 +1019,7 @@ mod impl_aarch64 {
                 // interfaces. Since we're not modifying SP (return address is in LR, not
                 // on stack), the existing alignment is preserved. The trampoline uses
                 // "stp" instructions which maintain 16-byte alignment.
-                
+
                 // CRITICAL: Keep SIGVTALRM blocked in the resumed context to prevent
                 // reentrant signals during trampoline execution.
                 libc::sigaddset(&mut (*ctx).uc_sigmask, libc::SIGVTALRM);
@@ -1037,22 +1039,22 @@ mod impl_aarch64 {
     #[cfg(windows)]
     mod windows_impl {
         use super::super::*;
-        use windows_sys::Win32::Foundation::{HANDLE, CloseHandle, DuplicateHandle};
-        use windows_sys::Win32::System::Threading::{
-            GetCurrentProcess, GetCurrentThread,
-            SuspendThread, ResumeThread,
-            THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT,
-            THREAD_SUSPEND_RESUME,
+        use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, HANDLE};
+        use windows_sys::Win32::System::Diagnostics::Debug::{
+            CONTEXT, GetThreadContext, SetThreadContext,
         };
-        use windows_sys::Win32::System::Diagnostics::Debug::{CONTEXT, GetThreadContext, SetThreadContext};
         use windows_sys::Win32::System::Memory::WriteProcessMemory;
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentThread, ResumeThread, SuspendThread, THREAD_GET_CONTEXT,
+            THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT, THREAD_SUSPEND_RESUME,
+        };
 
         // Windows CONTEXT flags (architecture-independent values)
         #[cfg(target_arch = "x86_64")]
         const CONTEXT_CONTROL: u32 = 0x00100001;
         #[cfg(target_arch = "x86_64")]
         const CONTEXT_INTEGER: u32 = 0x00100002;
-        
+
         #[cfg(target_arch = "aarch64")]
         const CONTEXT_CONTROL: u32 = 0x00400001;
         #[cfg(target_arch = "aarch64")]
@@ -1119,7 +1121,7 @@ mod impl_aarch64 {
                         println!("SuspendThread failed: {}", std::io::Error::last_os_error());
                         return Err(PreemptionError::InterruptFailed);
                     }
-                    
+
                     // Double-check after suspend to avoid race where flag was cleared just before suspend
                     if (*self.preemption_flag).load(Ordering::Acquire) {
                         ResumeThread(self.thread_handle);
@@ -1139,31 +1141,7 @@ mod impl_aarch64 {
                     }
 
                     // Handle architecture-specific context manipulation
-                    #[cfg(target_arch = "x86_64")]
-                    {
-                        let original_rip = context.Rip;
-                        context.Rsp -= 8;
-                        
-                        // Use WriteProcessMemory to safely write to the target stack
-                        let stack_ptr = context.Rsp as *mut std::ffi::c_void;
-                        let mut written: usize = 0;
-                        let process = GetCurrentProcess();
-                        
-                        if WriteProcessMemory(
-                            process,
-                            stack_ptr,
-                            &original_rip as *const _ as *const std::ffi::c_void,
-                            8,
-                            &mut written
-                        ) == 0 {
-                             println!("WriteProcessMemory failed: {}", std::io::Error::last_os_error());
-                             ResumeThread(self.thread_handle);
-                             return Err(PreemptionError::InterruptFailed);
-                        }
-
-                        context.Rip = preemption_trampoline as u64;
-                    }
-
+                    // Handle architecture-specific context manipulation
                     #[cfg(target_arch = "aarch64")]
                     {
                         // Simulate Call: Set LR to PC
@@ -1231,7 +1209,6 @@ mod impl_riscv64 {
                 // Total: 60 registers * 8 bytes = 480 bytes.
                 // Stack must be 16-byte aligned. 480 is a multiple of 16.
                 "addi sp, sp, -480",
-                
                 // Save GPRs
                 "sd ra, 0(sp)",
                 "sd t0, 8(sp)",
@@ -1261,7 +1238,6 @@ mod impl_riscv64 {
                 "sd s9, 200(sp)",
                 "sd s10, 208(sp)",
                 "sd s11, 216(sp)",
-
                 // Save FPRs
                 "fsd ft0, 224(sp)",
                 "fsd ft1, 232(sp)",
@@ -1295,9 +1271,7 @@ mod impl_riscv64 {
                 "fsd fs9, 456(sp)",
                 "fsd fs10, 464(sp)",
                 "fsd fs11, 472(sp)",
-
                 "call rust_preemption_helper",
-
                 // Restore FPRs
                 "fld fs11, 472(sp)",
                 "fld fs10, 464(sp)",
@@ -1331,7 +1305,6 @@ mod impl_riscv64 {
                 "fld ft2, 240(sp)",
                 "fld ft1, 232(sp)",
                 "fld ft0, 224(sp)",
-
                 // Restore GPRs
                 "ld s11, 216(sp)",
                 "ld s10, 208(sp)",
@@ -1361,7 +1334,6 @@ mod impl_riscv64 {
                 "ld t1, 16(sp)",
                 "ld t0, 8(sp)",
                 "ld ra, 0(sp)",
-                
                 "addi sp, sp, 480",
                 "ret"
             );
@@ -1423,12 +1395,15 @@ mod impl_riscv64 {
         }
         fn init_preemption() -> Result<PreemptionHandle, PreemptionError> {
             unsafe {
-                let mut sa: libc::sigaction = MaybeUninit::zeroed().assume_init();
-                sa.sa_sigaction = sigalrm_handler as usize;
-                libc::sigemptyset(&mut sa.sa_mask);
+                let mut sa = MaybeUninit::<libc::sigaction>::uninit();
+                let sa_ptr = sa.as_mut_ptr();
+                (*sa_ptr).sa_sigaction = sigalrm_handler as usize;
+                libc::sigemptyset(&mut (*sa_ptr).sa_mask);
                 // Block SIGVTALRM during handler execution to prevent reentrancy
-                libc::sigaddset(&mut sa.sa_mask, libc::SIGVTALRM);
-                sa.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
+                libc::sigaddset(&mut (*sa_ptr).sa_mask, libc::SIGVTALRM);
+                (*sa_ptr).sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
+                let sa = sa.assume_init();
+
                 let mut old_sa: libc::sigaction = MaybeUninit::zeroed().assume_init();
                 if libc::sigaction(libc::SIGVTALRM, &sa, &mut old_sa) != 0 {
                     return Err(PreemptionError::SignalSetupFailed);
@@ -1481,12 +1456,12 @@ mod impl_riscv64 {
 
                 // Jump to Trampoline
                 *pc_ptr = preemption_trampoline as u64;
-                
+
                 // Stack alignment: RISC-V calling convention requires 16-byte alignment.
                 // Since we're not modifying SP (return address is in RA register, not on
                 // stack), the existing alignment is preserved. The trampoline adjusts SP
                 // by 320 bytes (multiple of 16) to maintain alignment.
-                
+
                 // CRITICAL: Keep SIGVTALRM blocked in the resumed context to prevent
                 // reentrant signals during trampoline execution.
                 libc::sigaddset(&mut (*ctx).uc_sigmask, libc::SIGVTALRM);
@@ -1699,12 +1674,15 @@ mod impl_loongarch64 {
         }
         fn init_preemption() -> Result<PreemptionHandle, PreemptionError> {
             unsafe {
-                let mut sa: libc::sigaction = MaybeUninit::zeroed().assume_init();
-                sa.sa_sigaction = sigalrm_handler as usize;
-                libc::sigemptyset(&mut sa.sa_mask);
+                let mut sa = MaybeUninit::<libc::sigaction>::uninit();
+                let sa_ptr = sa.as_mut_ptr();
+                (*sa_ptr).sa_sigaction = sigalrm_handler as usize;
+                libc::sigemptyset(&mut (*sa_ptr).sa_mask);
                 // Block SIGVTALRM during handler execution to prevent reentrancy
-                libc::sigaddset(&mut sa.sa_mask, libc::SIGVTALRM);
-                sa.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
+                libc::sigaddset(&mut (*sa_ptr).sa_mask, libc::SIGVTALRM);
+                (*sa_ptr).sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
+                let sa = sa.assume_init();
+
                 let mut old_sa: libc::sigaction = MaybeUninit::zeroed().assume_init();
                 if libc::sigaction(libc::SIGVTALRM, &sa, &mut old_sa) != 0 {
                     return Err(PreemptionError::SignalSetupFailed);
@@ -1730,11 +1708,11 @@ mod impl_loongarch64 {
                 let original_pc = *pc_ptr;
                 *ra_ptr = original_pc;
                 *pc_ptr = preemption_trampoline as u64;
-                
+
                 // Stack alignment: LoongArch64 requires 16-byte alignment. Since we're not
                 // modifying SP (return address is in $ra register), the existing alignment
                 // is preserved. The trampoline adjusts SP by 496 bytes (multiple of 16).
-                
+
                 // CRITICAL: Keep SIGVTALRM blocked in the resumed context to prevent
                 // reentrant signals during trampoline execution.
                 libc::sigaddset(&mut (*ctx).uc_sigmask, libc::SIGVTALRM);
@@ -1749,10 +1727,10 @@ mod impl_loongarch64 {
 
 #[cfg(target_arch = "aarch64")]
 pub use impl_aarch64::*;
-#[cfg(target_arch = "riscv64")]
-pub use impl_riscv64::*;
 #[cfg(target_arch = "loongarch64")]
 pub use impl_loongarch64::*;
+#[cfg(target_arch = "riscv64")]
+pub use impl_riscv64::*;
 #[cfg(target_arch = "x86_64")]
 pub use impl_x64::*;
 #[cfg(not(any(

@@ -1,7 +1,9 @@
-use crate::monoio::{FusionRuntime, LegacyDriver, RuntimeBuilder, FusionDriver};
-use crate::monoio::time::driver::TimeDriver;
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use crate::monoio::IoUringDriver;
+use crate::monoio::time::driver::TimeDriver;
+use crate::monoio::{
+    FusionDriver, FusionRuntime, LegacyDriver, RuntimeBuilder, builder::Buildable,
+};
 use std::io;
 use std::time::Duration;
 
@@ -23,10 +25,14 @@ pub struct EventLoop {
 impl EventLoop {
     pub fn new() -> io::Result<Self> {
         // Build monoio runtime
-        let runtime = RuntimeBuilder::<FusionDriver>::new()
-            .enable_all()
-            .build()?;
-            
+        let runtime = RuntimeBuilder::<FusionDriver>::new().enable_all().build()?;
+
+        #[cfg(all(target_os = "linux", feature = "iouring"))]
+        let runtime = FusionRuntime::Uring(runtime);
+
+        #[cfg(not(all(target_os = "linux", feature = "iouring")))]
+        let runtime = FusionRuntime::Legacy(runtime);
+
         Ok(Self { runtime })
     }
 
@@ -35,15 +41,41 @@ impl EventLoop {
     /// # Arguments
     /// * `timeout` - Optional timeout. If None, blocks indefinitely.
     pub fn poll_once(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
-        self.runtime.poll_once(timeout)?;
+        // Since we removed poll_once from Runtime due to borrow issues,
+        // we use park/park_timeout which doesn't set the context.
+        // This assumes the context is managed elsewhere or not needed for this poll.
+        if let Some(t) = timeout {
+            self.runtime.park_timeout(t)?;
+        } else {
+            self.runtime.park()?;
+        }
         Ok(1)
     }
-    
+
+    /// Poll the event loop once, assuming context is already set.
+    ///
+    /// # Safety
+    /// This assumes the runtime context is already set up via `with_context()`.
+    /// Only use this when calling from within a `with_context()` block.
+    #[inline]
+    pub unsafe fn poll_once_unchecked(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
+        self.runtime.poll_once_unchecked(timeout)?;
+        Ok(1)
+    }
+
+    /// Execute a closure within the context of the inner runtime
+    pub fn with_context<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        self.runtime.with_context(f)
+    }
+
     /// Wake the event loop from another thread
     pub fn waker(&self) -> io::Result<crate::monoio::driver::UnparkHandle> {
-         Ok(self.runtime.unpark())
+        Ok(self.runtime.unpark())
     }
-    
+
     pub fn with_timer_wheel() -> io::Result<Self> {
         Self::new()
     }
@@ -52,8 +84,7 @@ impl EventLoop {
         Ok(())
     }
 
-    pub fn close_socket(&self, _token: mio::Token) {
-    }
+    pub fn close_socket(&self, _token: mio::Token) {}
 
     pub fn set_timeout(&self, _token: mio::Token, _delay: Duration) -> io::Result<()> {
         Ok(())
@@ -64,14 +95,15 @@ impl EventLoop {
     }
 
     // Legacy methods to support existing tests/code temporarily
-    
+
     pub fn iteration_number(&self) -> i64 {
         0
     }
-    
+
     pub fn socket_count(&self) -> usize {
         0
     }
+
 }
 
 // Re-export UnparkHandle as it's used by waker()

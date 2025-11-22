@@ -29,6 +29,9 @@ pub struct TcpListener {
     fd: SharedFd,
     sys_listener: Option<std::net::TcpListener>,
     meta: UnsafeCell<ListenerMeta>,
+    // Track the worker that owns this socket (where it was created/accepted)
+    // Used for cross-worker IO dispatch on platforms that don't support direct access
+    owner_worker_id: u32,
 }
 
 unsafe impl Send for TcpListener {}
@@ -41,10 +44,15 @@ impl TcpListener {
         let sys_listener = unsafe { std::net::TcpListener::from_raw_fd(fd.raw_fd()) };
         #[cfg(windows)]
         let sys_listener = unsafe { std::net::TcpListener::from_raw_socket(fd.raw_socket()) };
+
+        // Default to 0 if not in worker context (e.g. unit tests), otherwise current worker
+        let owner_worker_id = crate::runtime::worker::current_worker_id().unwrap_or(0);
+
         Self {
             fd,
             sys_listener: Some(sys_listener),
             meta: UnsafeCell::new(ListenerMeta::default()),
+            owner_worker_id,
         }
     }
 
@@ -273,6 +281,10 @@ impl TcpListener {
             }
             Err(e) => Err(e),
         }
+    }
+    /// Returns the ID of the worker that owns this listener.
+    pub fn owner_worker_id(&self) -> u32 {
+        self.owner_worker_id
     }
 }
 

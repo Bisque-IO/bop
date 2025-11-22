@@ -8,6 +8,10 @@
 #[macro_use]
 pub mod macros;
 
+pub mod blocking;
+
+pub use crate::{join, select, try_join};
+
 #[macro_use]
 pub mod driver;
 pub(crate) mod builder;
@@ -18,8 +22,6 @@ pub mod time;
 
 extern crate alloc;
 
-#[cfg(feature = "sync")]
-pub mod blocking;
 
 pub mod buf;
 #[cfg(feature = "tokio-compat")]
@@ -27,15 +29,12 @@ pub mod compat;
 pub mod fs;
 pub mod io;
 pub mod net;
-// pub mod task;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub mod tls;
 pub mod utils;
 
 use std::future::Future;
 
-#[cfg(feature = "sync")]
-pub use blocking::spawn_blocking;
 pub use builder::{Buildable, RuntimeBuilder};
 pub use driver::Driver;
 #[cfg(all(target_os = "linux", feature = "iouring"))]

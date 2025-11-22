@@ -244,6 +244,12 @@ impl TcpStream {
     /// If you want to do io by your own, you must maintain io readiness and wait
     /// for io ready with relaxed=false.
     pub async fn readable(&self, relaxed: bool) -> io::Result<()> {
+        #[cfg(feature = "legacy")]
+        {
+            if self.fd.is_remote() {
+                return RemotePollReadOp::new(self.fd.clone(), relaxed).await;
+            }
+        }
         let op = Op::poll_read(&self.fd, relaxed).unwrap();
         op.wait().await
     }
@@ -259,6 +265,12 @@ impl TcpStream {
     /// If you want to do io by your own, you must maintain io readiness and wait
     /// for io ready with relaxed=false.
     pub async fn writable(&self, relaxed: bool) -> io::Result<()> {
+        #[cfg(feature = "legacy")]
+        {
+            if self.fd.is_remote() {
+                return RemotePollWriteOp::new(self.fd.clone(), relaxed).await;
+            }
+        }
         let op = Op::poll_write(&self.fd, relaxed).unwrap();
         op.wait().await
     }
@@ -322,15 +334,30 @@ impl std::fmt::Debug for TcpStream {
 impl AsyncWriteRent for TcpStream {
     #[inline]
     fn write<T: IoBuf>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
-        // Submit the write operation
-        let op = Op::send(self.fd.clone(), buf).unwrap();
-        op.result()
+        #[cfg(feature = "legacy")]
+        {
+            if self.fd.is_remote() {
+                return futures::future::Either::Left(RemoteWriteOp::new(self.fd.clone(), buf));
+            }
+        }
+        #[cfg(feature = "legacy")]
+        return futures::future::Either::Right(Op::send(self.fd.clone(), buf).unwrap().result());
+        #[cfg(not(feature = "legacy"))]
+        Op::send(self.fd.clone(), buf).unwrap().result()
     }
 
     #[inline]
     fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> impl Future<Output = BufResult<usize, T>> {
-        let op = Op::writev(self.fd.clone(), buf_vec).unwrap();
-        op.result()
+        #[cfg(feature = "legacy")]
+        {
+            if self.fd.is_remote() {
+                return futures::future::Either::Left(RemoteWritevOp::new(self.fd.clone(), buf_vec));
+            }
+        }
+        #[cfg(feature = "legacy")]
+        return futures::future::Either::Right(Op::writev(self.fd.clone(), buf_vec).unwrap().result());
+        #[cfg(not(feature = "legacy"))]
+        Op::writev(self.fd.clone(), buf_vec).unwrap().result()
     }
 
     #[inline]
@@ -361,12 +388,19 @@ impl CancelableAsyncWriteRent for TcpStream {
         buf: T,
         c: CancelHandle,
     ) -> crate::monoio::BufResult<usize, T> {
-        let fd = self.fd.clone();
-
         if c.canceled() {
             return (Err(operation_canceled()), buf);
         }
 
+        #[cfg(feature = "legacy")]
+        {
+            if self.fd.is_remote() {
+                // Remote operations now support cancellation!
+                return RemoteWriteOp::new_cancelable(self.fd.clone(), buf, c).await;
+            }
+        }
+
+        let fd = self.fd.clone();
         let op = Op::send(fd, buf).unwrap();
         let _guard = c.associate_op(op.op_canceller());
         op.result().await
@@ -378,12 +412,19 @@ impl CancelableAsyncWriteRent for TcpStream {
         buf_vec: T,
         c: CancelHandle,
     ) -> crate::monoio::BufResult<usize, T> {
-        let fd = self.fd.clone();
-
         if c.canceled() {
             return (Err(operation_canceled()), buf_vec);
         }
 
+        #[cfg(feature = "legacy")]
+        {
+            if self.fd.is_remote() {
+                // Remote operations now support cancellation!
+                return RemoteWritevOp::new_cancelable(self.fd.clone(), buf_vec, c).await;
+            }
+        }
+
+        let fd = self.fd.clone();
         let op = Op::writev(fd.clone(), buf_vec).unwrap();
         let _guard = c.associate_op(op.op_canceller());
         op.result().await
@@ -413,16 +454,471 @@ impl CancelableAsyncWriteRent for TcpStream {
 impl AsyncReadRent for TcpStream {
     #[inline]
     fn read<T: IoBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
-        // Submit the read operation
-        let op = Op::recv(self.fd.clone(), buf).unwrap();
-        op.result()
+        #[cfg(feature = "legacy")]
+        {
+            if self.fd.is_remote() {
+                return futures::future::Either::Left(RemoteReadOp::new(self.fd.clone(), buf));
+            }
+        }
+        #[cfg(feature = "legacy")]
+        return futures::future::Either::Right(Op::recv(self.fd.clone(), buf).unwrap().result());
+        #[cfg(not(feature = "legacy"))]
+        Op::recv(self.fd.clone(), buf).unwrap().result()
     }
 
     #[inline]
     fn readv<T: IoVecBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
-        // Submit the read operation
-        let op = Op::readv(self.fd.clone(), buf).unwrap();
-        op.result()
+        #[cfg(feature = "legacy")]
+        {
+            if self.fd.is_remote() {
+                return futures::future::Either::Left(RemoteReadvOp::new(self.fd.clone(), buf));
+            }
+        }
+        #[cfg(feature = "legacy")]
+        return futures::future::Either::Right(Op::readv(self.fd.clone(), buf).unwrap().result());
+        #[cfg(not(feature = "legacy"))]
+        Op::readv(self.fd.clone(), buf).unwrap().result()
+    }
+}
+
+#[cfg(feature = "legacy")]
+struct RemoteReadOp<T> {
+    fd: SharedFd,
+    buf: Option<T>,
+    cancel: Option<CancelHandle>,
+}
+
+impl<T> RemoteReadOp<T> {
+    fn new(fd: SharedFd, buf: T) -> Self {
+        Self { fd, buf: Some(buf), cancel: None }
+    }
+    
+    fn new_cancelable(fd: SharedFd, buf: T, cancel: CancelHandle) -> Self {
+        Self { fd, buf: Some(buf), cancel: Some(cancel) }
+    }
+}
+
+
+#[cfg(feature = "legacy")]
+impl<T: IoBufMut> Future for RemoteReadOp<T> {
+    type Output = BufResult<usize, T>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        // Check for cancellation first
+        if let Some(ref cancel) = self.cancel {
+            if cancel.canceled() {
+                return std::task::Poll::Ready((Err(operation_canceled()), self.buf.take().unwrap()));
+            }
+        }
+        
+        // Register waker FIRST to avoid lost wakeup race
+        // If data arrives between registration and syscall, we'll just get it on the syscall
+        unsafe {
+            self.fd.reader_waker().register(cx.waker());
+        }
+        
+        // Extract fd info before borrowing buf
+        #[cfg(unix)]
+        let fd = self.fd.raw_fd();
+        #[cfg(windows)]
+        let socket = self.fd.raw_socket();
+        
+        let buf = self.buf.as_mut().unwrap();
+        let ptr = buf.write_ptr();
+        let len = buf.bytes_total();
+        
+        // Try direct syscall
+        #[cfg(unix)]
+        let res = unsafe { libc::read(fd, ptr as *mut _, len) };
+        #[cfg(windows)]
+        let res = {
+            let mut received = 0;
+            let mut flags = 0;
+            let mut wsabuf = windows_sys::Win32::Networking::WinSock::WSABUF {
+                len: len as u32,
+                buf: ptr as *mut _,
+            };
+            // WSARecv returns 0 on success, SOCKET_ERROR (-1) on failure
+            unsafe {
+                if windows_sys::Win32::Networking::WinSock::WSARecv(
+                    socket as _,
+                    &mut wsabuf,
+                    1,
+                    &mut received,
+                    &mut flags,
+                    std::ptr::null_mut(),
+                    None,
+                ) == 0
+                {
+                    received as isize
+                } else {
+                    -1isize
+                }
+            }
+        };
+
+        match res {
+            -1 => {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    // Already registered waker above
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready((Err(err), self.buf.take().unwrap()))
+                }
+            }
+            n => {
+                let n = n as usize;
+                unsafe { buf.set_init(n) };
+                std::task::Poll::Ready((Ok(n), self.buf.take().unwrap()))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "legacy")]
+struct RemoteReadvOp<T> {
+    fd: SharedFd,
+    buf: Option<T>,
+    cancel: Option<CancelHandle>,
+}
+
+impl<T> RemoteReadvOp<T> {
+    fn new(fd: SharedFd, buf: T) -> Self {
+        Self { fd, buf: Some(buf), cancel: None }
+    }
+    
+    fn new_cancelable(fd: SharedFd, buf: T, cancel: CancelHandle) -> Self {
+        Self { fd, buf: Some(buf), cancel: Some(cancel) }
+    }
+}
+
+
+#[cfg(feature = "legacy")]
+impl<T: IoVecBufMut> Future for RemoteReadvOp<T> {
+    type Output = BufResult<usize, T>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        // Check for cancellation first
+        if let Some(ref cancel) = self.cancel {
+            if cancel.canceled() {
+                return std::task::Poll::Ready((Err(operation_canceled()), self.buf.take().unwrap()));
+            }
+        }
+        
+        // Register waker FIRST to avoid lost wakeup race
+        unsafe {
+            self.fd.reader_waker().register(cx.waker());
+        }
+        
+        // Extract fd info before borrowing buf
+        #[cfg(unix)]
+        let fd = self.fd.raw_fd();
+        #[cfg(windows)]
+        let socket = self.fd.raw_socket();
+        
+        let buf = self.buf.as_mut().unwrap();
+        
+        // Try direct syscall
+        #[cfg(unix)]
+        let res = {
+            // Use IoVecBufMut's methods to get iovec pointer
+            let iovec_ptr = buf.write_iovec_ptr();
+            let iovec_len = buf.write_iovec_len();
+            
+            unsafe { libc::readv(fd, iovec_ptr, iovec_len as i32) }
+        };
+        
+        #[cfg(windows)]
+        let res = {
+            let mut received = 0;
+            let mut flags = 0;
+            
+            // Use IoVecBufMut's methods to get WSABUF pointer
+            let wsabuf_ptr = buf.write_wsabuf_ptr();
+            let wsabuf_len = buf.write_wsabuf_len();
+            
+            unsafe {
+                if windows_sys::Win32::Networking::WinSock::WSARecv(
+                    socket as _,
+                    wsabuf_ptr as *mut _,
+                    wsabuf_len as u32,
+                    &mut received,
+                    &mut flags,
+                    std::ptr::null_mut(),
+                    None,
+                ) == 0
+                {
+                    received as isize
+                } else {
+                    -1isize
+                }
+            }
+        };
+
+        match res {
+            -1 => {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    // Already registered waker at the start of poll
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready((Err(err), self.buf.take().unwrap()))
+                }
+            }
+            n => {
+                let n = n as usize;
+                unsafe { self.buf.as_mut().unwrap().set_init(n) };
+                std::task::Poll::Ready((Ok(n), self.buf.take().unwrap()))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "legacy")]
+struct RemoteWriteOp<T> {
+    fd: SharedFd,
+    buf: Option<T>,
+    cancel: Option<CancelHandle>,
+}
+
+impl<T> RemoteWriteOp<T> {
+    fn new(fd: SharedFd, buf: T) -> Self {
+        Self { fd, buf: Some(buf), cancel: None }
+    }
+    
+    fn new_cancelable(fd: SharedFd, buf: T, cancel: CancelHandle) -> Self {
+        Self { fd, buf: Some(buf), cancel: Some(cancel) }
+    }
+}
+
+
+#[cfg(feature = "legacy")]
+impl<T: IoBuf> Future for RemoteWriteOp<T> {
+    type Output = BufResult<usize, T>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        // Check for cancellation first
+        if let Some(ref cancel) = self.cancel {
+            if cancel.canceled() {
+                return std::task::Poll::Ready((Err(operation_canceled()), self.buf.take().unwrap()));
+            }
+        }
+        
+        // Register waker FIRST to avoid lost wakeup race
+        unsafe {
+            self.fd.writer_waker().register(cx.waker());
+        }
+        
+        // Extract fd info before borrowing buf
+        #[cfg(unix)]
+        let fd = self.fd.raw_fd();
+        #[cfg(windows)]
+        let socket = self.fd.raw_socket();
+        
+        let buf = self.buf.as_ref().unwrap();
+        let ptr = buf.read_ptr();
+        let len = buf.bytes_init();
+        
+        // Try direct syscall
+        #[cfg(unix)]
+        let res = unsafe { libc::write(fd, ptr as *const _, len) };
+        #[cfg(windows)]
+        let res = {
+            let mut sent = 0;
+            let wsabuf = windows_sys::Win32::Networking::WinSock::WSABUF {
+                len: len as u32,
+                buf: ptr as *mut _,
+            };
+            // WSASend returns 0 on success, SOCKET_ERROR (-1) on failure
+            unsafe {
+                if windows_sys::Win32::Networking::WinSock::WSASend(
+                    socket as _,
+                    &wsabuf,
+                    1,
+                    &mut sent,
+                    0,
+                    std::ptr::null_mut(),
+                    None,
+                ) == 0
+                {
+                    sent as isize
+                } else {
+                    -1isize
+                }
+            }
+        };
+
+        match res {
+            -1 => {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    // Register waker directly via SharedFd
+                    unsafe {
+                        self.fd.writer_waker().register(cx.waker());
+                    }
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready((Err(err), self.buf.take().unwrap()))
+                }
+            }
+            n => {
+                let n = n as usize;
+                std::task::Poll::Ready((Ok(n), self.buf.take().unwrap()))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "legacy")]
+struct RemoteWritevOp<T> {
+    fd: SharedFd,
+    buf: Option<T>,
+    cancel: Option<CancelHandle>,
+}
+
+impl<T> RemoteWritevOp<T> {
+    fn new(fd: SharedFd, buf: T) -> Self {
+        Self { fd, buf: Some(buf), cancel: None }
+    }
+    
+    fn new_cancelable(fd: SharedFd, buf: T, cancel: CancelHandle) -> Self {
+        Self { fd, buf: Some(buf), cancel: Some(cancel) }
+    }
+}
+
+
+#[cfg(feature = "legacy")]
+impl<T: IoVecBuf> Future for RemoteWritevOp<T> {
+    type Output = BufResult<usize, T>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        // Check for cancellation first
+        if let Some(ref cancel) = self.cancel {
+            if cancel.canceled() {
+                return std::task::Poll::Ready((Err(operation_canceled()), self.buf.take().unwrap()));
+            }
+        }
+        
+        // Register waker FIRST to avoid lost wakeup race
+        unsafe {
+            self.fd.writer_waker().register(cx.waker());
+        }
+        
+        // Extract fd info before borrowing buf
+        #[cfg(unix)]
+        let fd = self.fd.raw_fd();
+        #[cfg(windows)]
+        let socket = self.fd.raw_socket();
+        
+        let buf = self.buf.as_ref().unwrap();
+        
+        // Try direct syscall
+        #[cfg(unix)]
+        let res = {
+            // Use IoVecBuf's methods to get iovec pointer
+            let iovec_ptr = buf.read_iovec_ptr();
+            let iovec_len = buf.read_iovec_len();
+            
+            unsafe { libc::writev(fd, iovec_ptr, iovec_len as i32) }
+        };
+        
+        #[cfg(windows)]
+        let res = {
+            let mut sent = 0;
+            
+            // Use IoVecBuf's methods to get WSABUF pointer
+            let wsabuf_ptr = buf.read_wsabuf_ptr();
+            let wsabuf_len = buf.read_wsabuf_len();
+            
+            unsafe {
+                if windows_sys::Win32::Networking::WinSock::WSASend(
+                    socket as _,
+                    wsabuf_ptr,
+                    wsabuf_len as u32,
+                    &mut sent,
+                    0,
+                    std::ptr::null_mut(),
+                    None,
+                ) == 0
+                {
+                    sent as isize
+                } else {
+                    -1isize
+                }
+            }
+        };
+
+        match res {
+            -1 => {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    // Register waker directly via SharedFd
+                    unsafe {
+                        self.fd.writer_waker().register(cx.waker());
+                    }
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready((Err(err), self.buf.take().unwrap()))
+                }
+            }
+            n => {
+                let n = n as usize;
+                std::task::Poll::Ready((Ok(n), self.buf.take().unwrap()))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "legacy")]
+struct RemotePollReadOp {
+    fd: SharedFd,
+    relaxed: bool,
+}
+
+impl RemotePollReadOp {
+    fn new(fd: SharedFd, relaxed: bool) -> Self {
+        Self { fd, relaxed }
+    }
+}
+
+
+#[cfg(feature = "legacy")]
+impl Future for RemotePollReadOp {
+    type Output = io::Result<()>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        // For remote poll operations, we just register the waker directly via SharedFd
+        unsafe {
+            self.fd.reader_waker().register(cx.waker());
+        }
+        std::task::Poll::Pending
+    }
+}
+
+#[cfg(feature = "legacy")]
+struct RemotePollWriteOp {
+    fd: SharedFd,
+    relaxed: bool,
+}
+
+impl RemotePollWriteOp {
+    fn new(fd: SharedFd, relaxed: bool) -> Self {
+        Self { fd, relaxed }
+    }
+}
+
+
+#[cfg(feature = "legacy")]
+impl Future for RemotePollWriteOp {
+    type Output = io::Result<()>;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        // For remote poll operations, we just register the waker directly via SharedFd
+        unsafe {
+            self.fd.writer_waker().register(cx.waker());
+        }
+        std::task::Poll::Pending
     }
 }
 
@@ -433,12 +929,19 @@ impl CancelableAsyncReadRent for TcpStream {
         buf: T,
         c: CancelHandle,
     ) -> crate::monoio::BufResult<usize, T> {
-        let fd = self.fd.clone();
-
         if c.canceled() {
             return (Err(operation_canceled()), buf);
         }
 
+        #[cfg(feature = "legacy")]
+        {
+            if self.fd.is_remote() {
+                // Remote operations now support cancellation!
+                return RemoteReadOp::new_cancelable(self.fd.clone(), buf, c).await;
+            }
+        }
+
+        let fd = self.fd.clone();
         let op = Op::recv(fd, buf).unwrap();
         let _guard = c.associate_op(op.op_canceller());
         op.result().await
@@ -450,53 +953,181 @@ impl CancelableAsyncReadRent for TcpStream {
         buf: T,
         c: CancelHandle,
     ) -> crate::monoio::BufResult<usize, T> {
-        let fd = self.fd.clone();
-
         if c.canceled() {
             return (Err(operation_canceled()), buf);
         }
 
+        #[cfg(feature = "legacy")]
+        {
+            if self.fd.is_remote() {
+                // Remote operations now support cancellation!
+                return RemoteReadvOp::new_cancelable(self.fd.clone(), buf, c).await;
+            }
+        }
+
+        let fd = self.fd.clone();
         let op = Op::readv(fd, buf).unwrap();
         let _guard = c.associate_op(op.op_canceller());
         op.result().await
     }
 }
 
-#[cfg(all(unix, feature = "legacy", feature = "tokio-compat"))]
+#[cfg(all(feature = "legacy", feature = "tokio-compat"))]
 impl tokio::io::AsyncRead for TcpStream {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<io::Result<()>> {
-        unsafe {
+        let is_remote = self.fd.is_remote();
+        
+        if is_remote {
+            // Register waker FIRST to avoid lost wakeup race
+            unsafe {
+                self.fd.reader_waker().register(cx.waker());
+            }
+            
+            // Remote read: use direct syscall
             let slice = buf.unfilled_mut();
-            let raw_buf = crate::monoio::buf::RawBuf::new(slice.as_ptr() as *const u8, slice.len());
-            let mut recv = Op::recv_raw(&self.fd, raw_buf);
-            let ret = ready!(crate::monoio::driver::op::PollLegacy::poll_legacy(&mut recv, cx));
+            let ptr = slice.as_mut_ptr();
+            let len = slice.len();
+            
+            #[cfg(unix)]
+            let res = unsafe { libc::read(self.fd.raw_fd(), ptr as *mut _, len) };
+            
+            #[cfg(windows)]
+            let res = {
+                let mut received = 0;
+                let mut flags = 0;
+                let mut wsabuf = windows_sys::Win32::Networking::WinSock::WSABUF {
+                    len: len as u32,
+                    buf: ptr as *mut _,
+                };
+                unsafe {
+                    if windows_sys::Win32::Networking::WinSock::WSARecv(
+                        self.fd.raw_socket() as _,
+                        &mut wsabuf,
+                        1,
+                        &mut received,
+                        &mut flags,
+                        std::ptr::null_mut(),
+                        None,
+                    ) == 0
+                    {
+                        received as isize
+                    } else {
+                        -1isize
+                    }
+                }
+            };
+            
+            match res {
+                -1 => {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        // Already registered waker above
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(Err(err))
+                    }
+                }
+                n => {
+                    let n = n as usize;
+                    unsafe {
+                        buf.assume_init(n);
+                        buf.advance(n);
+                    }
+                    std::task::Poll::Ready(Ok(()))
+                }
+            }
+        } else {
+            // Local read: use standard Op
+            unsafe {
+                let slice = buf.unfilled_mut();
+                let raw_buf = crate::monoio::buf::RawBuf::new(slice.as_ptr() as *const u8, slice.len());
+                let mut recv = Op::recv_raw(&self.fd, raw_buf);
+                let ret = ready!(crate::monoio::driver::op::PollLegacy::poll_legacy(&mut recv, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| {
-                let n = n.into_inner();
-                buf.assume_init(n as usize);
-                buf.advance(n as usize);
-            }))
+                std::task::Poll::Ready(ret.result.map(|n| {
+                    let n = n.into_inner();
+                    buf.assume_init(n as usize);
+                    buf.advance(n as usize);
+                }))
+            }
         }
     }
 }
 
-#[cfg(all(unix, feature = "legacy", feature = "tokio-compat"))]
+#[cfg(all(feature = "legacy", feature = "tokio-compat"))]
 impl tokio::io::AsyncWrite for TcpStream {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<Result<usize, io::Error>> {
-        unsafe {
-            let raw_buf = crate::monoio::buf::RawBuf::new(buf.as_ptr(), buf.len());
-            let mut send = Op::send_raw(&self.fd, raw_buf);
-            let ret = ready!(crate::monoio::driver::op::PollLegacy::poll_legacy(&mut send, cx));
+        let is_remote = self.fd.is_remote();
+        
+        if is_remote {
+            // Register waker FIRST to avoid lost wakeup race
+            unsafe {
+                self.fd.writer_waker().register(cx.waker());
+            }
+            
+            // Remote write: use direct syscall
+            let ptr = buf.as_ptr();
+            let len = buf.len();
+            
+            #[cfg(unix)]
+            let res = unsafe { libc::write(self.fd.raw_fd(), ptr as *const _, len) };
+            
+            #[cfg(windows)]
+            let res = {
+                let mut sent = 0;
+                let wsabuf = windows_sys::Win32::Networking::WinSock::WSABUF {
+                    len: len as u32,
+                    buf: ptr as *mut _,
+                };
+                unsafe {
+                    if windows_sys::Win32::Networking::WinSock::WSASend(
+                        self.fd.raw_socket() as _,
+                        &wsabuf,
+                        1,
+                        &mut sent,
+                        0,
+                        std::ptr::null_mut(),
+                        None,
+                    ) == 0
+                    {
+                        sent as isize
+                    } else {
+                        -1isize
+                    }
+                }
+            };
+            
+            match res {
+                -1 => {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        // Already registered waker above
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(Err(err))
+                    }
+                }
+                n => {
+                    std::task::Poll::Ready(Ok(n as usize))
+                }
+            }
+        } else {
+            // Local write: use standard Op
+            unsafe {
+                let raw_buf = crate::monoio::buf::RawBuf::new(buf.as_ptr(), buf.len());
+                let mut send = Op::send_raw(&self.fd, raw_buf);
+                let ret = ready!(crate::monoio::driver::op::PollLegacy::poll_legacy(&mut send, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+                std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+            }
         }
     }
 
@@ -524,13 +1155,84 @@ impl tokio::io::AsyncWrite for TcpStream {
         cx: &mut std::task::Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> std::task::Poll<Result<usize, io::Error>> {
-        unsafe {
-            let raw_buf =
-                crate::monoio::buf::RawBufVectored::new(bufs.as_ptr() as *const libc::iovec, bufs.len());
-            let mut writev = Op::writev_raw(&self.fd, raw_buf);
-            let ret = ready!(crate::monoio::driver::op::PollLegacy::poll_legacy(&mut writev, cx));
+        let is_remote = self.fd.is_remote();
+        
+        if is_remote {
+            // Register waker FIRST to avoid lost wakeup race
+            unsafe {
+                self.fd.writer_waker().register(cx.waker());
+            }
+            
+            // Remote writev: use direct syscall
+            #[cfg(unix)]
+            let res = {
+                // Build iovec array
+                let mut iovecs: Vec<libc::iovec> = Vec::new();
+                for slice in bufs {
+                    iovecs.push(libc::iovec {
+                        iov_base: slice.as_ptr() as *mut _,
+                        iov_len: slice.len(),
+                    });
+                }
+                
+                unsafe { libc::writev(self.fd.raw_fd(), iovecs.as_ptr(), iovecs.len() as i32) }
+            };
+            
+            #[cfg(windows)]
+            let res = {
+                let mut sent = 0;
+                
+                // Build WSABUF array
+                let mut wsabufs: Vec<windows_sys::Win32::Networking::WinSock::WSABUF> = Vec::new();
+                for slice in bufs {
+                    wsabufs.push(windows_sys::Win32::Networking::WinSock::WSABUF {
+                        len: slice.len() as u32,
+                        buf: slice.as_ptr() as *mut _,
+                    });
+                }
+                
+                unsafe {
+                    if windows_sys::Win32::Networking::WinSock::WSASend(
+                        self.fd.raw_socket() as _,
+                        wsabufs.as_ptr(),
+                        wsabufs.len() as u32,
+                        &mut sent,
+                        0,
+                        std::ptr::null_mut(),
+                        None,
+                    ) == 0
+                    {
+                        sent as isize
+                    } else {
+                        -1isize
+                    }
+                }
+            };
+            
+            match res {
+                -1 => {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        // Already registered waker above
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(Err(err))
+                    }
+                }
+                n => {
+                    std::task::Poll::Ready(Ok(n as usize))
+                }
+            }
+        } else {
+            // Local writev: use standard Op
+            unsafe {
+                let raw_buf =
+                    crate::monoio::buf::RawBufVectored::new(bufs.as_ptr() as *const libc::iovec, bufs.len());
+                let mut writev = Op::writev_raw(&self.fd, raw_buf);
+                let ret = ready!(crate::monoio::driver::op::PollLegacy::poll_legacy(&mut writev, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+                std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+            }
         }
     }
 

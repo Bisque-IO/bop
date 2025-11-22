@@ -1,153 +1,234 @@
-warning: type `WindowsSource` is more private than the item `Socket::source`
-   --> crates\maniac-runtime\src\net\event_loop.rs:143:5
+   Compiling maniac-runtime v0.1.0 (C:\Users\info\repos\bisque-io\bop\crates\maniac-runtime)
+error[E0428]: the name `TOKEN_WAKEUP` is defined multiple times
+  --> crates\maniac-runtime\src\monoio\driver\legacy\mod.rs:57:1
+   |
+25 | const TOKEN_WAKEUP: mio::Token = mio::Token(1 << 31);
+   | ----------------------------------------------------- previous definition of the value `TOKEN_WAKEUP` here
+...
+57 | const TOKEN_WAKEUP: mio::Token = mio::Token(1 << 31);
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TOKEN_WAKEUP` redefined here
+   |
+   = note: `TOKEN_WAKEUP` must be defined only once in the value namespace of this module
+
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\maniac-runtime\src\runtime\task.rs:1599:11
+     |
+1599 |     #[cfg(feature = "disabled_tests")]
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `async-cancel`, `bytes`, `debug`, `default`, `hyper-compat`, `iouring`, `legacy`, `mio`, `mkdirat`, `nix`, `poll-io`, `race`, `renameat`, `signal`, `splice`, `standard`, `std`, `symlinkat`, `sync`, `timers-introspection`, `tls-native`, `tls-rustls`, `tls-unsafe-io`, `tokio-compat`, `tracing`, `unlinkat`, `unsafe_io`, `unstable`, `utils`, and `zero-copy`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+     = note: requested on the command line with `-W unexpected-cfgs`
+
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\maniac-runtime\src\runtime\task.rs:1638:11
+     |
+1638 |     #[cfg(feature = "disabled_tests")]
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `async-cancel`, `bytes`, `debug`, `default`, `hyper-compat`, `iouring`, `legacy`, `mio`, `mkdirat`, `nix`, `poll-io`, `race`, `renameat`, `signal`, `splice`, `standard`, `std`, `symlinkat`, `sync`, `timers-introspection`, `tls-native`, `tls-rustls`, `tls-unsafe-io`, `tokio-compat`, `tracing`, `unlinkat`, `unsafe_io`, `unstable`, `utils`, and `zero-copy`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\maniac-runtime\src\runtime\task.rs:1710:11
+     |
+1710 |     #[cfg(feature = "disabled_tests")] // References old Task fields (slot_idx)
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `async-cancel`, `bytes`, `debug`, `default`, `hyper-compat`, `iouring`, `legacy`, `mio`, `mkdirat`, `nix`, `poll-io`, `race`, `renameat`, `signal`, `splice`, `standard`, `std`, `symlinkat`, `sync`, `timers-introspection`, `tls-native`, `tls-rustls`, `tls-unsafe-io`, `tokio-compat`, `tracing`, `unlinkat`, `unsafe_io`, `unstable`, `utils`, and `zero-copy`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\maniac-runtime\src\runtime\task.rs:1744:11
+     |
+1744 |     #[cfg(feature = "disabled_tests")] // References old Task fields (arena_ptr, bind_arena)
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `async-cancel`, `bytes`, `debug`, `default`, `hyper-compat`, `iouring`, `legacy`, `mio`, `mkdirat`, `nix`, `poll-io`, `race`, `renameat`, `signal`, `splice`, `standard`, `std`, `symlinkat`, `sync`, `timers-introspection`, `tls-native`, `tls-rustls`, `tls-unsafe-io`, `tokio-compat`, `tracing`, `unlinkat`, `unsafe_io`, `unstable`, `utils`, and `zero-copy`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `disabled_tests`
+    --> crates\maniac-runtime\src\runtime\task.rs:1779:11
+     |
+1779 |     #[cfg(feature = "disabled_tests")]
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: expected values for `feature` are: `async-cancel`, `bytes`, `debug`, `default`, `hyper-compat`, `iouring`, `legacy`, `mio`, `mkdirat`, `nix`, `poll-io`, `race`, `renameat`, `signal`, `splice`, `standard`, `std`, `symlinkat`, `sync`, `timers-introspection`, `tls-native`, `tls-rustls`, `tls-unsafe-io`, `tokio-compat`, `tracing`, `unlinkat`, `unsafe_io`, `unstable`, `utils`, and `zero-copy`
+     = help: consider adding `disabled_tests` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+error[E0277]: expected a `FnOnce()` closure, found `F`
+   --> crates\maniac-runtime\src\runtime\mod.rs:201:20
     |
-143 |     pub source: Option<WindowsSource>,
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `Socket::source` is reachable at visibility `pub`
+201 |         Ok(unblock(future))
+    |            ------- ^^^^^^ expected an `FnOnce()` closure, found `F`
+    |            |
+    |            required by a bound introduced by this call
     |
-note: but type `WindowsSource` is only usable at visibility `pub(self)`
-   --> crates\maniac-runtime\src\net\event_loop.rs:45:1
+    = note: wrap the `F` in a closure with no arguments: `|| { /* code */ }`
+note: required by a bound in `unblock`
+   --> crates\maniac-runtime\src\runtime\blocking.rs:410:8
     |
- 45 | enum WindowsSource {
-    | ^^^^^^^^^^^^^^^^^^
-    = note: `#[warn(private_interfaces)]` on by default
-
-warning: type `sync::mpsc::Inner<T, P, NUM_SEGS_P2>` is more private than the item `sync::mpsc::Receiver::<T, P, NUM_SEGS_P2>::inner`
-   --> crates\maniac-runtime\src\sync\mpsc.rs:547:5
+408 | pub fn unblock<T, F>(f: F) -> Task<T>
+    |        ------- required by a bound in this function
+409 | where
+410 |     F: FnOnce() -> T + Send + 'static,
+    |        ^^^^^^^^^^^^^ required by this bound in `unblock`
+help: consider further restricting type parameter `F` with trait `FnOnce`
     |
-547 |     pub(crate) fn inner(&self) -> &Arc<Inner<T, P, NUM_SEGS_P2>> {
-    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `sync::mpsc::Receiver::<T, P, NUM_SEGS_P2>::inner` is reachable at visibility `pub(crate)`
+195 |         F: IntoFuture<Output = T> + Send + 'static + FnOnce(),
+    |                                                    ++++++++++
+
+error[E0609]: no field `blocking_handle` on type `&monoio::runtime::Context`
+   --> crates\maniac-runtime\src\monoio\blocking.rs:102:29
     |
-note: but type `sync::mpsc::Inner<T, P, NUM_SEGS_P2>` is only usable at visibility `pub(self)`
-   --> crates\maniac-runtime\src\sync\mpsc.rs:181:1
+102 |         let handle = &inner.blocking_handle;
+    |                             ^^^^^^^^^^^^^^^ unknown field
     |
-181 | struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
-    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: available fields are: `thread_id`, `unpark_cache`, `waker_sender_cache`, `time_handle`, `user_data`
 
-warning: `maniac-runtime` (lib) generated 2 warnings
-warning: unused import: `Executor`
- --> crates\maniac-runtime\tests\socket_opt_v2.rs:5:48
-  |
-5 | ...tExecutor, Executor};
-  |               ^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+error[E0599]: no method named `attach_thread_pool` found for struct `RuntimeBuilder<D>` in the current scope
+   --> crates\maniac-runtime\src\monoio\blocking.rs:218:14
+    |
+217 |           let mut rt = crate::monoio::RuntimeBuilder::<crate::monoio::FusionDriver>::new()
+    |  ______________________-
+218 | |             .attach_thread_pool(shared_pool)
+    | |             -^^^^^^^^^^^^^^^^^^ method not found in `RuntimeBuilder<FusionDriver>`
+    | |_____________|
+    |
+    |
+   ::: crates\maniac-runtime\src\monoio\builder.rs:18:1
+    |
+ 18 |   pub struct RuntimeBuilder<D> {
+    |   ---------------------------- method `attach_thread_pool` not found for this struct
 
-warning: unused import: `std::io`
- --> crates\maniac-runtime\tests\socket_opt_v2.rs:6:5
-  |
-6 | use std::io;
-  |     ^^^^^^^
+error[E0599]: no method named `with_blocking_strategy` found for struct `RuntimeBuilder<D>` in the current scope
+   --> crates\maniac-runtime\src\monoio\blocking.rs:242:14
+    |
+241 |           let mut rt = crate::monoio::RuntimeBuilder::<crate::monoio::FusionDriver>::new()
+    |  ______________________-
+242 | |             .with_blocking_strategy(crate::monoio::blocking::BlockingStrategy::Panic)
+    | |             -^^^^^^^^^^^^^^^^^^^^^^ method not found in `RuntimeBuilder<FusionDriver>`
+    | |_____________|
+    |
+    |
+   ::: crates\maniac-runtime\src\monoio\builder.rs:18:1
+    |
+ 18 |   pub struct RuntimeBuilder<D> {
+    |   ---------------------------- method `with_blocking_strategy` not found for this struct
 
-warning: unused import: `AsyncReadExt`
- --> crates\maniac-runtime\tests\socket_opt_v2.rs:1:19
-  |
-1 | use futures::io::{AsyncReadExt, A...
-  |                   ^^^^^^^^^^^^
+error[E0599]: no method named `with_blocking_strategy` found for struct `RuntimeBuilder<D>` in the current scope
+   --> crates\maniac-runtime\src\monoio\blocking.rs:255:14
+    |
+254 |           let mut rt = crate::monoio::RuntimeBuilder::<crate::monoio::FusionDriver>::new()
+    |  ______________________-
+255 | |             .with_blocking_strategy(crate::monoio::blocking::BlockingStrategy::ExecuteLocal)
+    | |             -^^^^^^^^^^^^^^^^^^^^^^ method not found in `RuntimeBuilder<FusionDriver>`
+    | |_____________|
+    |
+    |
+   ::: crates\maniac-runtime\src\monoio\builder.rs:18:1
+    |
+ 18 |   pub struct RuntimeBuilder<D> {
+    |   ---------------------------- method `with_blocking_strategy` not found for this struct
 
-warning: unused import: `AsyncWriteExt`
- --> crates\maniac-runtime\tests\socket_opt_v2.rs:1:33
-  |
-1 | ...eadExt, AsyncWriteExt};
-  |            ^^^^^^^^^^^^^
+error[E0599]: no method named `attach_thread_pool` found for struct `RuntimeBuilder<D>` in the current scope
+   --> crates\maniac-runtime\src\monoio\blocking.rs:278:14
+    |
+277 |           let mut rt = crate::monoio::RuntimeBuilder::<crate::monoio::FusionDriver>::new()
+    |  ______________________-
+278 | |             .attach_thread_pool(shared_pool)
+    | |             -^^^^^^^^^^^^^^^^^^ method not found in `RuntimeBuilder<FusionDriver>`
+    | |_____________|
+    |
+    |
+   ::: crates\maniac-runtime\src\monoio\builder.rs:18:1
+    |
+ 18 |   pub struct RuntimeBuilder<D> {
+    |   ---------------------------- method `attach_thread_pool` not found for this struct
 
-warning: `maniac-runtime` (test "socket_opt_v2") generated 4 warnings (run `cargo fix --test "socket_opt_v2" -p maniac-runtime` to apply 2 suggestions)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.69s
-     Running tests\socket_opt_v2.rs (target\debug\deps\socket_opt_v2-d44511f454e30f9b.exe)
+error[E0599]: no method named `attach_thread_pool` found for struct `RuntimeBuilder<D>` in the current scope
+   --> crates\maniac-runtime\src\monoio\blocking.rs:292:14
+    |
+291 |           let mut rt = crate::monoio::RuntimeBuilder::<crate::monoio::FusionDriver>::new()
+    |  ______________________-
+292 | |             .attach_thread_pool(shared_pool)
+    | |             -^^^^^^^^^^^^^^^^^^ method not found in `RuntimeBuilder<FusionDriver>`
+    | |_____________|
+    |
+    |
+   ::: crates\maniac-runtime\src\monoio\builder.rs:18:1
+    |
+ 18 |   pub struct RuntimeBuilder<D> {
+    |   ---------------------------- method `attach_thread_pool` not found for this struct
 
-running 1 test
-Blocking on main task...
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-DuplicateHandle succeeded, handle: 0xb4
-DuplicateHandle succeeded, handle: 0x10c
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-test test_socket_optimization_flow has been running for over 60 seconds
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
-[Supervisor] Rebalanced 2 leaves across 2 active workers
+error[E0133]: call to unsafe function `set_var` is unsafe and requires unsafe function or block
+    --> crates\maniac-runtime\src\runtime\blocking.rs:1034:9
+     |
+1034 |         env::set_var(MAX_THREADS_ENV, "100");
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+     |
+     = note: consult the function's documentation for information on how to avoid undefined behavior
+
+error[E0133]: call to unsafe function `set_var` is unsafe and requires unsafe function or block
+    --> crates\maniac-runtime\src\runtime\blocking.rs:1038:9
+     |
+1038 |         env::set_var(MAX_THREADS_ENV, "0");
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+     |
+     = note: consult the function's documentation for information on how to avoid undefined behavior
+
+error[E0133]: call to unsafe function `set_var` is unsafe and requires unsafe function or block
+    --> crates\maniac-runtime\src\runtime\blocking.rs:1042:9
+     |
+1042 |         env::set_var(MAX_THREADS_ENV, "50000");
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+     |
+     = note: consult the function's documentation for information on how to avoid undefined behavior
+
+error[E0133]: call to unsafe function `set_var` is unsafe and requires unsafe function or block
+    --> crates\maniac-runtime\src\runtime\blocking.rs:1046:9
+     |
+1046 |         env::set_var(MAX_THREADS_ENV, "");
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+     |
+     = note: consult the function's documentation for information on how to avoid undefined behavior
+
+error[E0133]: call to unsafe function `set_var` is unsafe and requires unsafe function or block
+    --> crates\maniac-runtime\src\runtime\blocking.rs:1050:9
+     |
+1050 |         env::set_var(MAX_THREADS_ENV, "NOTINT");
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+     |
+     = note: consult the function's documentation for information on how to avoid undefined behavior
+
+warning: variable does not need to be mutable
+    --> crates\maniac-runtime\src\runtime\mpsc.rs:1088:19
+     |
+1088 |         let (tx1, mut rx) = new_with_sender::<u64, 6, 8>();
+     |                   ----^^
+     |                   |
+     |                   help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+error[E0502]: cannot borrow `w` as mutable because it is also borrowed as immutable
+   --> crates\maniac-runtime\src\runtime\worker.rs:734:45
+    |
+734 |             w.inner.event_loop.with_context(|| {
+    |             ------------------ ------------ ^^ mutable borrow occurs here
+    |             |                  |
+    |             |                  immutable borrow later used by call
+    |             immutable borrow occurs here
+...
+769 |                 let w_ptr = &mut w as *mut Worker<'_, P, NUM_SEGS_P2>;
+    |                                  - second borrow occurs due to use of `w` in closure
+
+Some errors have detailed explanations: E0133, E0277, E0428, E0502, E0599, E0609.
+For more information about an error, try `rustc --explain E0133`.
+warning: `maniac-runtime` (lib test) generated 6 warnings
+error: could not compile `maniac-runtime` (lib test) due to 14 previous errors; 6 warnings emitted

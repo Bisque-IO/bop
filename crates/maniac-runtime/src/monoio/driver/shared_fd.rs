@@ -6,7 +6,7 @@ use std::os::windows::io::{
 };
 use std::{cell::UnsafeCell, io, sync::Arc};
 
-use super::CURRENT;
+use super::{scheduled_io::ScheduledIo, CURRENT};
 #[cfg(windows)]
 use crate::monoio::driver::iocp::SocketState as RawFd;
 
@@ -27,6 +27,13 @@ struct Inner {
 
     // Waker to notify when the close operation completes.
     state: UnsafeCell<State>,
+
+    worker_id: u32,
+    
+    // Readiness state and wakers (legacy only)
+    // On legacy platforms, this contains the ScheduledIo (Arc so it can be weakly referenced by the slab)
+    #[cfg(feature = "legacy")]
+    pub(crate) scheduled_io: std::sync::Arc<crate::monoio::driver::scheduled_io::ScheduledIo>,
 }
 
 enum State {
@@ -164,8 +171,13 @@ impl SharedFd {
             Uring,
             #[cfg(feature = "poll-io")]
             UringLegacy(io::Result<usize>),
+            #[cfg(feature = "legacy")]
             Legacy(io::Result<usize>),
         }
+        
+        // Create ScheduledIo first (for legacy platforms)
+        #[cfg(feature = "legacy")]
+        let scheduled_io = std::sync::Arc::new(crate::monoio::driver::scheduled_io::ScheduledIo::new());
 
         #[cfg(all(target_os = "linux", feature = "iouring", feature = "legacy"))]
         let state = match CURRENT.with(|inner| match inner {
@@ -191,17 +203,26 @@ impl SharedFd {
                     inner,
                     &mut source,
                     super::ready::RW_INTERESTS,
+                    &scheduled_io,
                 ))
             }
         }) {
             Reg::Uring => State::Uring(UringState::Init),
             #[cfg(feature = "poll-io")]
             Reg::UringLegacy(idx) => State::Uring(UringState::Legacy(Some(idx?))),
+            #[cfg(feature = "legacy")]
             Reg::Legacy(idx) => State::Legacy(Some(idx?)),
         };
 
         #[cfg(all(not(feature = "legacy"), target_os = "linux", feature = "iouring"))]
         let state = State::Uring(UringState::Init);
+
+        #[cfg(all(
+            unix,
+            feature = "legacy",
+            not(all(target_os = "linux", feature = "iouring"))
+        ))]
+        let scheduled_io = std::sync::Arc::new(crate::monoio::driver::scheduled_io::ScheduledIo::new());
 
         #[cfg(all(
             unix,
@@ -216,6 +237,7 @@ impl SharedFd {
                         inner,
                         &mut source,
                         super::ready::RW_INTERESTS,
+                        &scheduled_io,
                     )
                 }
             });
@@ -235,20 +257,26 @@ impl SharedFd {
             inner: Arc::new(Inner {
                 fd,
                 state: UnsafeCell::new(state),
+                worker_id: current_worker_id().expect("not on worker"),
+                #[cfg(feature = "legacy")]
+                scheduled_io,
             }),
         })
     }
 
     #[cfg(windows)]
     pub(crate) fn new<const FORCE_LEGACY: bool>(fd: RawSocket) -> io::Result<SharedFd> {
+        use crate::current_worker_id;
+
         const RW_INTERESTS: mio::Interest = mio::Interest::READABLE.add(mio::Interest::WRITABLE);
 
+        let scheduled_io = std::sync::Arc::new(crate::monoio::driver::scheduled_io::ScheduledIo::new());
         let mut fd = RawFd::new(fd);
 
         let state = {
             let reg = CURRENT.with(|inner| match inner {
                 super::Inner::Legacy(inner) => {
-                    super::legacy::LegacyDriver::register(inner, &mut fd, RW_INTERESTS)
+                    super::legacy::LegacyDriver::register(inner, &mut fd, RW_INTERESTS, &scheduled_io)
                 }
             });
 
@@ -260,6 +288,8 @@ impl SharedFd {
             inner: Arc::new(Inner {
                 fd,
                 state: UnsafeCell::new(state),
+                worker_id: current_worker_id().expect("not on worker"),
+                scheduled_io,
             }),
         })
     }
@@ -285,6 +315,9 @@ impl SharedFd {
             inner: Arc::new(Inner {
                 fd,
                 state: UnsafeCell::new(state),
+                worker_id: current_worker_id().expect("not on worker"),
+                #[cfg(feature = "legacy")]
+                scheduled_io: std::sync::Arc::new(crate::monoio::driver::scheduled_io::ScheduledIo::new()),
             }),
         }
     }
@@ -292,6 +325,8 @@ impl SharedFd {
     #[cfg(windows)]
     #[allow(unreachable_code, unused)]
     pub(crate) fn new_without_register(fd: RawSocket) -> SharedFd {
+        use crate::current_worker_id;
+
         let state = CURRENT.with(|inner| match inner {
             super::Inner::Legacy(_) => State::Legacy(None),
         });
@@ -300,24 +335,57 @@ impl SharedFd {
             inner: Arc::new(Inner {
                 fd: RawFd::new(fd),
                 state: UnsafeCell::new(state),
+                worker_id: current_worker_id().expect("not on worker"),
+                scheduled_io: std::sync::Arc::new(crate::monoio::driver::scheduled_io::ScheduledIo::new()),
             }),
         }
     }
 
     #[cfg(unix)]
     /// Returns the RawFd
-    pub(crate) fn raw_fd(&self) -> RawFd {
+    pub fn raw_fd(&self) -> RawFd {
         self.inner.fd
     }
 
     #[cfg(windows)]
     /// Returns the RawSocket
-    pub(crate) fn raw_socket(&self) -> RawSocket {
+    pub fn raw_socket(&self) -> RawSocket {
         self.inner.fd.socket
     }
 
+    /// Get the reader waker for this fd
+    #[cfg(feature = "legacy")]
+    #[inline]
+    pub(crate) fn reader_waker(&self) -> &crate::future::waker::DiatomicWaker {
+        &self.inner.scheduled_io.reader
+    }
+
+    /// Get the writer waker for this fd
+    #[cfg(feature = "legacy")]
+    #[inline]
+    pub(crate) fn writer_waker(&self) -> &crate::future::waker::DiatomicWaker {
+        &self.inner.scheduled_io.writer
+    }
+    
+    /// Get the scheduled_io for this fd (for ops that need readiness)
+    #[cfg(feature = "legacy")]
+    #[inline]
+    pub(crate) fn scheduled_io(&self) -> &std::sync::Arc<crate::monoio::driver::scheduled_io::ScheduledIo> {
+        &self.inner.scheduled_io
+    }
+
+    /// Check if this fd is remote (owned by a different worker)
+    /// On legacy platforms, we need to check if the fd is registered with a different worker's epoll
+    #[cfg(feature = "legacy")]
+    #[inline]
+    pub(crate) fn is_remote(&self) -> bool {
+        // Check if the fd's worker_id differs from the current worker
+        use crate::current_worker_id;
+        self.inner.worker_id != current_worker_id().unwrap_or(u32::MAX)
+    }
+
     #[cfg(windows)]
-    pub(crate) fn raw_handle(&self) -> RawHandle {
+    pub fn raw_handle(&self) -> RawHandle {
         self.inner.fd.socket as _
     }
 
@@ -404,7 +472,7 @@ impl SharedFd {
     }
 
     #[allow(unused)]
-    pub(crate) fn registered_index(&self) -> Option<usize> {
+    pub fn registered_index(&self) -> Option<usize> {
         let state = unsafe { &*self.inner.state.get() };
         match state {
             #[cfg(all(target_os = "linux", feature = "iouring", feature = "poll-io"))]

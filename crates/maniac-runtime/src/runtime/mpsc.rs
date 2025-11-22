@@ -1,7 +1,7 @@
 use super::signal::{SIGNAL_MASK, Signal, SignalGate};
 use super::waker::{STATUS_SUMMARY_WORDS, WorkerWaker};
-use crate::utils::bits::find_nearest;
 use crate::utils::CachePadded;
+use crate::utils::bits::find_nearest;
 use crate::{PopError, PushError};
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::thread;
 
-use crate::spsc::{UnboundedSpsc, UnboundedSender};
+use crate::spsc::{UnboundedSender, UnboundedSpsc};
 use rand::RngCore;
 
 /// Create a new blocking MPSC queue
@@ -219,12 +219,16 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
                     Arc::clone(&self.waker),
                 ));
 
-                let (tx, _rx) = UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<SignalGate>>::new_with_signal(signal_gate);
-                
+                let (tx, _rx) =
+                    UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<SignalGate>>::new_with_signal(
+                        signal_gate,
+                    );
+
                 // Get the Arc pointer to the UnboundedSpsc from the sender
                 let unbounded_arc = tx.unbounded_arc();
-                let raw = Arc::into_raw(unbounded_arc) as *mut UnboundedSpsc<T, P, NUM_SEGS_P2, Arc<SignalGate>>;
-                
+                let raw = Arc::into_raw(unbounded_arc)
+                    as *mut UnboundedSpsc<T, P, NUM_SEGS_P2, Arc<SignalGate>>;
+
                 match self.queues[queue_index].compare_exchange(
                     ptr::null_mut(),
                     raw,
@@ -712,7 +716,12 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
         (0, None)
     }
 
-    fn acquire(&mut self) -> Option<(usize, crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<SignalGate>>)> {
+    fn acquire(
+        &mut self,
+    ) -> Option<(
+        usize,
+        crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<SignalGate>>,
+    )> {
         let random = self.next() as usize;
         // Try selecting signal index from summary hint
         let random_word = random % SIGNAL_WORDS;
@@ -770,12 +779,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
         }
 
         // SAFETY: The pointer is valid and we have exclusive consumer access
-        let unbounded_arc = unsafe { Arc::from_raw(queue_ptr) };
+        let unbounded_arc: std::sync::Arc<UnboundedSpsc<T, P, NUM_SEGS_P2, Arc<SignalGate>>> =
+            unsafe { Arc::from_raw(queue_ptr) };
         let receiver = unbounded_arc.create_receiver();
-        
+
         // Mark as EXECUTING
         receiver.mark();
-        
+
         // Don't drop the Arc - we're just borrowing it
         let _ = Arc::into_raw(unbounded_arc);
 
@@ -837,7 +847,8 @@ mod tests {
 
         // Push multiple items
         for i in 0..100 {
-            tx.try_push(i).expect("push should not fail for unbounded queue");
+            tx.try_push(i)
+                .expect("push should not fail for unbounded queue");
         }
 
         // Pop and verify
@@ -899,7 +910,9 @@ mod tests {
 
         // Push many items, causing growth
         let mut items_to_push: Vec<u64> = (0..1000).collect();
-        let pushed = tx.try_push_n(&mut items_to_push).expect("bulk push should succeed");
+        let pushed = tx
+            .try_push_n(&mut items_to_push)
+            .expect("bulk push should succeed");
         assert_eq!(pushed, 1000, "should push all items");
         assert!(items_to_push.is_empty(), "Vec should be drained");
 
@@ -951,7 +964,7 @@ mod tests {
                 items.push(val);
             }
         }
-        
+
         items.sort();
         assert_eq!(items, vec![1, 2]);
     }
@@ -1008,10 +1021,10 @@ mod tests {
 
     #[test]
     fn concurrent_push_pop() {
-        use std::thread;
         use std::sync::Arc;
-        use std::sync::{Mutex};
+        use std::sync::Mutex;
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::thread;
 
         let (tx, rx) = new_with_sender::<u64, 6, 8>();
         let counter = Arc::new(AtomicUsize::new(0));
@@ -1096,7 +1109,7 @@ mod tests {
 
         drop(tx1);
         rx.close(); // Trigger cleanup
-        
+
         // After closing, all producers should be cleaned up
         assert_eq!(rx.producer_count(), 0);
     }

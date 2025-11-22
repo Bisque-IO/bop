@@ -1,24 +1,18 @@
 use std::future::Future;
 
-#[cfg(any(all(target_os = "linux", feature = "iouring"), feature = "legacy"))]
-use crate::monoio::time::TimeDriver;
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use crate::monoio::IoUringDriver;
 #[cfg(feature = "legacy")]
 use crate::monoio::LegacyDriver;
-use crate::monoio::{
-    driver::Driver,
-    time::driver::Handle as TimeHandle,
-};
+#[cfg(any(all(target_os = "linux", feature = "iouring"), feature = "legacy"))]
+use crate::monoio::time::TimeDriver;
+use crate::monoio::{driver::Driver, time::driver::Handle as TimeHandle};
 
-// #[cfg(feature = "sync")]
 thread_local! {
     pub(crate) static DEFAULT_CTX: Context = Context {
         thread_id: crate::monoio::utils::thread_id::DEFAULT_THREAD_ID,
-        unpark_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
-        // waker_sender_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
         time_handle: None,
-        // blocking_handle: crate::monoio::blocking::BlockingHandle::Empty(crate::monoio::blocking::BlockingStrategy::Panic),
+        user_data: std::cell::Cell::new(std::ptr::null_mut()),
     };
 }
 
@@ -28,85 +22,23 @@ pub struct Context {
     /// Thread id(not the kernel thread id but a generated unique number)
     pub thread_id: usize,
 
-    /// Thread unpark handles
-    // #[cfg(feature = "sync")]
-    pub unpark_cache:
-        std::cell::RefCell<rustc_hash::FxHashMap<usize, crate::monoio::driver::UnparkHandle>>,
-
-    /// Waker sender cache
-    // #[cfg(feature = "sync")]
-    // pub waker_sender_cache:
-    //     std::cell::RefCell<rustc_hash::FxHashMap<usize, flume::Sender<std::task::Waker>>>,
-
     /// Time Handle
     pub time_handle: Option<TimeHandle>,
 
-    // Blocking Handle
-    // #[cfg(feature = "sync")]
-    // pub blocking_handle: crate::monoio::blocking::BlockingHandle,
+    /// User data (e.g. for storing Worker reference)
+    pub user_data: std::cell::Cell<*mut ()>,
 }
 
 impl Context {
-    // #[cfg(feature = "sync")]
-    // pub(crate) fn new(blocking_handle: crate::monoio::blocking::BlockingHandle) -> Self {
-    //     let thread_id = crate::monoio::builder::BUILD_THREAD_ID.with(|id| *id);
-    //
-    //     Self {
-    //         thread_id,
-    //         unpark_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
-    //         waker_sender_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
-    //         time_handle: None,
-    //         blocking_handle,
-    //     }
-    // }
-
-    // #[cfg(not(feature = "sync"))]
     pub(crate) fn new() -> Self {
         let thread_id = crate::monoio::builder::BUILD_THREAD_ID.with(|id| *id);
 
         Self {
             thread_id,
-            unpark_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             time_handle: None,
+            user_data: std::cell::Cell::new(std::ptr::null_mut()),
         }
     }
-
-    /*
-    #[allow(unused)]
-    // #[cfg(feature = "sync")]
-    pub(crate) fn unpark_thread(&self, id: usize) {
-        use crate::monoio::driver::{thread::get_unpark_handle, unpark::Unpark};
-        if let Some(handle) = self.unpark_cache.borrow().get(&id) {
-            handle.unpark();
-            return;
-        }
-
-        if let Some(v) = get_unpark_handle(id) {
-            // Write back to local cache
-            let w = v.clone();
-            self.unpark_cache.borrow_mut().insert(id, w);
-            v.unpark();
-        }
-    }
-    */
-
-    /*
-    #[allow(unused)]
-    #[cfg(feature = "sync")]
-    pub(crate) fn send_waker(&self, id: usize, w: std::task::Waker) {
-        use crate::monoio::driver::thread::get_waker_sender;
-        if let Some(sender) = self.waker_sender_cache.borrow().get(&id) {
-            let _ = sender.send(w);
-            return;
-        }
-
-        if let Some(s) = get_waker_sender(id) {
-            // Write back to local cache
-            let _ = s.send(w);
-            self.waker_sender_cache.borrow_mut().insert(id, s);
-        }
-    }
-    */
 }
 
 /// Monoio runtime
@@ -153,21 +85,29 @@ impl<D> Runtime<D> {
         })
     }
 
-    /// Poll the runtime once
-    pub fn poll_once(&mut self, timeout: Option<std::time::Duration>) -> std::io::Result<()>
+    /// Poll the runtime once, assuming context is already set up.
+    ///
+    /// # Safety
+    /// This method assumes that the driver and CURRENT contexts are already set up
+    /// via a prior call to `with_context()` or similar. Calling this without proper
+    /// context setup will lead to undefined behavior.
+    ///
+    /// This is used internally by the worker integration where context is set once
+    /// at the worker level, avoiding redundant setup on every poll.
+    #[inline]
+    pub unsafe fn poll_once_unchecked(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+    ) -> std::io::Result<()>
     where
         D: Driver,
     {
-        self.driver.with(|| {
-            CURRENT.set(&self.context, || {
-                if let Some(t) = timeout {
-                    self.driver.park_timeout(t)?;
-                } else {
-                    self.driver.park()?;
-                }
-                Ok(())
-            })
-        })
+        if let Some(t) = timeout {
+            self.driver.park_timeout(t)?;
+        } else {
+            self.driver.park()?;
+        }
+        Ok(())
     }
 }
 
@@ -175,7 +115,6 @@ struct DummyWaker;
 impl std::task::Wake for DummyWaker {
     fn wake(self: std::sync::Arc<Self>) {}
 }
-
 
 /// Fusion Runtime is a wrapper of io_uring driver or legacy driver based
 /// runtime.
@@ -222,10 +161,10 @@ where
         }
     }
 
-    pub fn poll_once(&mut self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
+    pub unsafe fn poll_once_unchecked(&mut self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
         match self {
-            FusionRuntime::Uring(inner) => inner.poll_once(timeout),
-            FusionRuntime::Legacy(inner) => inner.poll_once(timeout),
+            FusionRuntime::Uring(inner) => inner.poll_once_unchecked(timeout),
+            FusionRuntime::Legacy(inner) => inner.poll_once_unchecked(timeout),
         }
     }
 
@@ -284,9 +223,9 @@ where
         }
     }
 
-    pub fn poll_once(&mut self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
+    pub unsafe fn poll_once_unchecked(&mut self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
         match self {
-            FusionRuntime::Legacy(inner) => inner.poll_once(timeout),
+            FusionRuntime::Legacy(inner) => inner.poll_once_unchecked(timeout),
         }
     }
 
@@ -340,9 +279,9 @@ where
         }
     }
 
-    pub fn poll_once(&mut self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
+    pub unsafe fn poll_once_unchecked(&mut self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
         match self {
-            FusionRuntime::Uring(inner) => inner.poll_once(timeout),
+            FusionRuntime::Uring(inner) => inner.poll_once_unchecked(timeout),
         }
     }
 

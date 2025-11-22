@@ -25,9 +25,7 @@ use super::{
 use crate::monoio::utils::slab::Slab;
 
 mod lifecycle;
-// #[cfg(feature = "sync")]
 mod waker;
-// #[cfg(feature = "sync")]
 pub(crate) use waker::UnparkHandle;
 
 #[allow(unused)]
@@ -48,12 +46,7 @@ pub struct IoUringDriver {
     timespec: *mut Timespec,
 
     // Used as read eventfd buffer
-    // #[cfg(feature = "sync")]
     eventfd_read_dst: *mut u8,
-
-    // Used for drop
-    // #[cfg(feature = "sync")]
-    thread_id: usize,
 }
 
 pub(crate) struct UringInner {
@@ -69,16 +62,10 @@ pub(crate) struct UringInner {
     uring: ManuallyDrop<IoUring>,
 
     /// Shared waker
-    // #[cfg(feature = "sync")]
     shared_waker: std::sync::Arc<waker::EventWaker>,
 
     // Mark if eventfd is in the ring
-    // #[cfg(feature = "sync")]
     eventfd_installed: bool,
-
-    // Waker receiver
-    // #[cfg(feature = "sync")]
-    waker_receiver: flume::Receiver<std::task::Waker>,
 
     // Uring support ext_arg
     ext_arg: bool,
@@ -97,30 +84,6 @@ impl IoUringDriver {
         Self::new_with_entries(b, Self::DEFAULT_ENTRIES)
     }
 
-    // #[cfg(not(feature = "sync"))]
-    // pub(crate) fn new_with_entries(
-    //     urb: &io_uring::Builder,
-    //     entries: u32,
-    // ) -> io::Result<IoUringDriver> {
-    //     let uring = ManuallyDrop::new(urb.build(entries)?);
-
-    //     let inner = Arc::new(UnsafeCell::new(UringInner {
-    //         #[cfg(feature = "poll-io")]
-    //         poll: super::poll::Poll::with_capacity(entries as usize)?,
-    //         #[cfg(feature = "poll-io")]
-    //         poller_installed: false,
-    //         ops: Ops::new(),
-    //         ext_arg: uring.params().is_feature_ext_arg(),
-    //         uring,
-    //     }));
-
-    //     Ok(IoUringDriver {
-    //         inner,
-    //         timespec: Box::leak(Box::new(Timespec::new())) as *mut Timespec,
-    //     })
-    // }
-
-    // #[cfg(feature = "sync")]
     pub(crate) fn new_with_entries(
         urb: &io_uring::Builder,
         entries: u32,
@@ -136,8 +99,6 @@ impl IoUringDriver {
             }
         };
 
-        let (waker_sender, waker_receiver) = flume::unbounded::<std::task::Waker>();
-
         let inner = Arc::new(UnsafeCell::new(UringInner {
             #[cfg(feature = "poll-io")]
             poller_installed: false,
@@ -148,20 +109,14 @@ impl IoUringDriver {
             uring,
             shared_waker: std::sync::Arc::new(waker::EventWaker::new(waker)),
             eventfd_installed: false,
-            waker_receiver,
         }));
 
-        let thread_id = crate::monoio::builder::BUILD_THREAD_ID.with(|id| *id);
         let driver = IoUringDriver {
             inner,
             timespec: Box::leak(Box::new(Timespec::new())) as *mut Timespec,
             eventfd_read_dst: Box::leak(Box::new([0_u8; 8])) as *mut u8,
-            thread_id,
         };
 
-        // Register unpark handle
-        super::thread::register_unpark_handle(thread_id, driver.unpark().into());
-        super::thread::register_waker_sender(thread_id, waker_sender);
         Ok(driver)
     }
 
@@ -182,7 +137,6 @@ impl IoUringDriver {
         Ok(())
     }
 
-    // #[cfg(feature = "sync")]
     fn install_eventfd(&self, inner: &mut UringInner, fd: RawFd) {
         let entry = opcode::Read::new(io_uring::types::Fd(fd), self.eventfd_read_dst, 8)
             .build()
@@ -220,96 +174,62 @@ impl IoUringDriver {
     fn inner_park(&self, timeout: Option<Duration>) -> io::Result<()> {
         let inner = unsafe { &mut *self.inner.get() };
 
-        #[allow(unused_mut)]
-        let mut need_wait = true;
+        // Install timeout and eventfd for unpark
 
-        #[cfg(feature = "sync")]
-        {
-            // Process foreign wakers
-            while let Ok(w) = inner.waker_receiver.try_recv() {
-                w.wake();
-                need_wait = false;
-            }
-
-            // Set status as not awake if we are going to sleep
-            if need_wait {
-                inner
-                    .shared_waker
-                    .awake
-                    .store(false, std::sync::atomic::Ordering::Release);
-            }
-
-            // Process foreign wakers left
-            while let Ok(w) = inner.waker_receiver.try_recv() {
-                w.wake();
-                need_wait = false;
-            }
+        // 1. alloc spaces
+        let mut space = 0;
+        if !inner.eventfd_installed {
+            space += 1;
+        }
+        #[cfg(feature = "poll-io")]
+        if !inner.poller_installed {
+            space += 1;
+        }
+        if timeout.is_some() {
+            space += 1;
+        }
+        if space != 0 {
+            Self::flush_space(inner, space)?;
         }
 
-        if need_wait {
-            // Install timeout and eventfd for unpark if sync is enabled
+        // 2.1 install poller
+        #[cfg(feature = "poll-io")]
+        if !inner.poller_installed {
+            self.install_poller(inner, inner.poll.as_raw_fd());
+        }
 
-            // 1. alloc spaces
-            let mut space = 0;
-            #[cfg(feature = "sync")]
-            if !inner.eventfd_installed {
-                space += 1;
-            }
-            #[cfg(feature = "poll-io")]
-            if !inner.poller_installed {
-                space += 1;
-            }
-            if timeout.is_some() {
-                space += 1;
-            }
-            if space != 0 {
-                Self::flush_space(inner, space)?;
-            }
+        // 2.2 install eventfd
+        if !inner.eventfd_installed {
+            self.install_eventfd(inner, inner.shared_waker.as_raw_fd());
+        }
 
-            // 2.1 install poller
-            #[cfg(feature = "poll-io")]
-            if !inner.poller_installed {
-                self.install_poller(inner, inner.poll.as_raw_fd());
-            }
-
-            // 2.2 install eventfd and timeout
-            #[cfg(feature = "sync")]
-            if !inner.eventfd_installed {
-                self.install_eventfd(inner, inner.shared_waker.as_raw_fd());
-            }
-
-            // 2.3 install timeout and submit_and_wait with timeout
-            if let Some(duration) = timeout {
-                match inner.ext_arg {
-                    // Submit and Wait with timeout in an TimeoutOp way.
-                    // Better compatibility(5.4+).
-                    false => {
-                        self.install_timeout(inner, duration);
-                        inner.uring.submit_and_wait(1)?;
-                    }
-                    // Submit and Wait with enter args.
-                    // Better performance(5.11+).
-                    true => {
-                        let timespec = timespec(duration);
-                        let args = io_uring::types::SubmitArgs::new().timespec(&timespec);
-                        if let Err(e) = inner.uring.submitter().submit_with_args(1, &args) {
-                            if e.raw_os_error() != Some(libc::ETIME) {
-                                return Err(e);
-                            }
+        // 2.3 install timeout and submit_and_wait with timeout
+        if let Some(duration) = timeout {
+            match inner.ext_arg {
+                // Submit and Wait with timeout in an TimeoutOp way.
+                // Better compatibility(5.4+).
+                false => {
+                    self.install_timeout(inner, duration);
+                    inner.uring.submit_and_wait(1)?;
+                }
+                // Submit and Wait with enter args.
+                // Better performance(5.11+).
+                true => {
+                    let timespec = timespec(duration);
+                    let args = io_uring::types::SubmitArgs::new().timespec(&timespec);
+                    if let Err(e) = inner.uring.submitter().submit_with_args(1, &args) {
+                        if e.raw_os_error() != Some(libc::ETIME) {
+                            return Err(e);
                         }
                     }
                 }
-            } else {
-                // Submit and Wait without timeout
-                inner.uring.submit_and_wait(1)?;
             }
         } else {
-            // Submit only
-            inner.uring.submit()?;
+            // Submit and Wait without timeout
+            inner.uring.submit_and_wait(1)?;
         }
 
         // Set status as awake
-        #[cfg(feature = "sync")]
         inner
             .shared_waker
             .awake
@@ -367,10 +287,8 @@ impl Driver for IoUringDriver {
         self.inner_park(Some(duration))
     }
 
-    // #[cfg(feature = "sync")]
     type Unpark = waker::UnparkHandle;
 
-    // #[cfg(feature = "sync")]
     fn unpark(&self) -> Self::Unpark {
         UringInner::unpark(&self.inner)
     }
@@ -383,7 +301,6 @@ impl UringInner {
         for cqe in cq {
             let index = cqe.user_data();
             match index {
-                #[cfg(feature = "sync")]
                 EVENTFD_USERDATA => self.eventfd_installed = false,
                 #[cfg(feature = "poll-io")]
                 POLLER_USERDATA => {
@@ -548,7 +465,6 @@ impl UringInner {
         }
     }
 
-    // #[cfg(feature = "sync")]
     pub(crate) fn unpark(this: &Arc<UnsafeCell<UringInner>>) -> waker::UnparkHandle {
         let inner = unsafe { &*this.get() };
         let weak = std::sync::Arc::downgrade(&inner.shared_waker);
@@ -564,23 +480,12 @@ impl AsRawFd for IoUringDriver {
 
 impl Drop for IoUringDriver {
     fn drop(&mut self) {
-        trace!("MONOIO DEBUG[IoUringDriver]: drop");
-
         // Dealloc leaked memory
         unsafe { std::ptr::drop_in_place(self.timespec) };
 
-        #[cfg(feature = "sync")]
         unsafe {
             std::ptr::drop_in_place(self.eventfd_read_dst)
         };
-
-        // Deregister thread id
-        #[cfg(feature = "sync")]
-        {
-            use crate::monoio::driver::thread::{unregister_unpark_handle, unregister_waker_sender};
-            unregister_unpark_handle(self.thread_id);
-            unregister_waker_sender(self.thread_id);
-        }
     }
 }
 

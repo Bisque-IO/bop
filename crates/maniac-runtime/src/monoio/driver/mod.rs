@@ -9,11 +9,9 @@ pub(crate) mod ready;
 pub(crate) mod scheduled_io;
 #[allow(dead_code)]
 pub(crate) mod shared_fd;
-// #[cfg(feature = "sync")]
-pub(crate) mod thread;
 
 #[cfg(feature = "legacy")]
-mod legacy;
+pub(crate) mod legacy;
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 mod uring;
 

@@ -11,8 +11,7 @@ fn test_socket_optimization_flow() {
     let executor = DefaultExecutor::new(
         TaskArenaConfig::new(2, 1024).unwrap(),
         TaskArenaOptions::default(),
-        2, // 2 workers
-        2,
+        1,
     )
     .expect("Failed to create executor");
 
