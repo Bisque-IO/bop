@@ -13,6 +13,7 @@ use std::io::{self, Read as StdRead, Write as StdWrite};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::monoio::io::{AsyncReadRent, AsyncWriteRentExt};
 use rustls::{ServerConfig, ClientConfig, ServerConnection, ClientConnection};
 use rustls::pki_types::ServerName;
 
@@ -191,7 +192,15 @@ impl TlsStream {
         }
 
         // Read encrypted data from socket
-        let n = self.stream.read(&mut self.read_buffer).await?;
+        let mut buffer = std::mem::take(&mut self.read_buffer);
+        // Ensure buffer has space
+        if buffer.len() < 16384 {
+            buffer.resize(16384, 0);
+        }
+
+        let (res, buffer) = self.stream.read(buffer).await;
+        self.read_buffer = buffer;
+        let n = res?;
 
         if n == 0 {
             return Ok(0);
@@ -225,8 +234,11 @@ impl TlsStream {
 
         // Write encrypted data to socket
         if !self.write_buffer.is_empty() {
-            self.stream.write_all(&self.write_buffer).await?;
-            self.write_buffer.clear();
+            let buffer = std::mem::take(&mut self.write_buffer);
+            let (res, mut buffer) = self.stream.write_all(buffer).await;
+            buffer.clear();
+            self.write_buffer = buffer;
+            res?;
         }
 
         Ok(n)
@@ -253,7 +265,12 @@ impl TlsStream {
         while self.tls.is_handshaking() {
             // Read encrypted data from socket if rustls wants it
             if self.tls.wants_read() {
-                let n = self.stream.read(&mut self.read_buffer).await?;
+                let mut buffer = std::mem::take(&mut self.read_buffer);
+                if buffer.len() < 16384 { buffer.resize(16384, 0); }
+                
+                let (res, buffer) = self.stream.read(buffer).await;
+                self.read_buffer = buffer;
+                let n = res?;
 
                 if n == 0 {
                     return Err(io::Error::new(
@@ -275,8 +292,11 @@ impl TlsStream {
                 self.tls.write_tls(&mut self.write_buffer)?;
 
                 if !self.write_buffer.is_empty() {
-                    self.stream.write_all(&self.write_buffer).await?;
-                    self.write_buffer.clear();
+                    let buffer = std::mem::take(&mut self.write_buffer);
+                    let (res, mut buffer) = self.stream.write_all(buffer).await;
+                    buffer.clear();
+                    self.write_buffer = buffer;
+                    res?;
                 }
             }
         }

@@ -52,6 +52,7 @@ trait CrossWorkerOps: Send + Sync {
         fd: crate::net::SocketDescriptor,
         interest: SocketInterest,
         state: crate::net::AsyncSocketState,
+        socket_type: crate::net::SocketType,
     ) -> bool;
 
     fn post_modify_socket(
@@ -353,6 +354,7 @@ pub enum WorkerMessage {
         fd: crate::net::SocketDescriptor,
         interest: SocketInterest,
         state: crate::net::AsyncSocketState,
+        socket_type: crate::net::SocketType,
     },
 
     /// Modify socket interest (e.g., switch from Read to Write)
@@ -796,7 +798,6 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                     preemption_requested: AtomicBool::new(false),
                     event_loop,
                     io_budget: 16, // Process up to 16 I/O events per run_once iteration
-                    socket_states: std::collections::HashMap::new(),
                 },
             };
 
@@ -1344,6 +1345,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> CrossWorkerOps for WorkerService<
         fd: crate::net::SocketDescriptor,
         interest: SocketInterest,
         state: crate::net::AsyncSocketState,
+        socket_type: crate::net::SocketType,
     ) -> bool {
         self.post_message(
             from_worker_id,
@@ -1352,6 +1354,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> CrossWorkerOps for WorkerService<
                 fd,
                 interest,
                 state,
+                socket_type,
             },
         )
         .is_ok()
@@ -1581,8 +1584,6 @@ pub struct WorkerInner<'a> {
     event_loop: Box<crate::net::EventLoop>,
     /// I/O budget per run_once iteration (prevents I/O from starving tasks)
     io_budget: usize,
-    /// Socket token to state mapping (for async socket operations)
-    socket_states: std::collections::HashMap<crate::net::Token, crate::net::AsyncSocketState>,
 }
 
 pub struct Worker<
@@ -1655,9 +1656,9 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     fn run_once(&mut self, run_ctx: &mut RunContext) -> bool {
         let mut did_work = false;
 
-        // if self.poll_event_loop() > 0 {
-        //     did_work = true;
-        // }
+        if self.poll_event_loop() > 0 {
+            did_work = true;
+        }
 
         if self.poll_timers() {
             did_work = true;
@@ -1902,7 +1903,10 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                     }
                 });
 
-            generator.resume();
+            // Drive the generator with monoio context
+            self.inner.event_loop.runtime.with_context(|| {
+                generator.resume();
+            });
 
             // Drive the generator until completion or until a task needs to be pinned
             // The generator will yield and set GENERATOR_PIN_TASK if pinning is needed
@@ -2055,7 +2059,8 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 fd,
                 interest,
                 state,
-            } => self.handle_register_socket(fd, interest, state),
+                socket_type,
+            } => self.handle_register_socket(fd, interest, state, socket_type),
             WorkerMessage::ModifySocket { token, interest } => {
                 self.handle_modify_socket(token, interest)
             }
@@ -2192,8 +2197,14 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
     #[inline]
     fn poll_event_loop(&mut self) -> usize {
-        match self.inner.event_loop.poll_once(None) {
-            Ok(num_events) => num_events,
+        eprintln!("[Worker {}] Polling event loop. Sockets: {}", self.inner.worker_id, self.inner.event_loop.socket_count());
+        match self.inner.event_loop.poll_once(Some(std::time::Duration::ZERO)) {
+            Ok(num_events) => {
+                if num_events > 0 {
+                    eprintln!("[Worker {}] Poll got {} events", self.inner.worker_id, num_events);
+                }
+                num_events
+            }
             Err(err) => {
                 log::error!("EventLoop error: {}", err);
                 0
@@ -2206,6 +2217,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         fd: crate::net::SocketDescriptor,
         interest: SocketInterest,
         state: crate::net::AsyncSocketState,
+        socket_type: crate::net::SocketType,
     ) -> bool {
         // Convert interest
         let mio_interest = match interest {
@@ -2215,17 +2227,15 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         };
 
         // Add socket to EventLoop with async state
+        /*
         match self
             .inner
             .event_loop
-            .add_socket(fd, mio_interest, state.clone(), Box::new(()))
+            .add_socket(fd, mio_interest, state.clone(), Box::new(()), socket_type)
         {
             Ok(token) => {
                 // Set the token in the shared state so the TcpStream knows it
                 state.set_token(token.0);
-
-                // Store the state for later access
-                self.inner.socket_states.insert(token, state);
 
                 #[cfg(debug_assertions)]
                 {
@@ -2248,6 +2258,8 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 false
             }
         }
+        */
+        true
     }
 
     fn handle_modify_socket(&mut self, token: crate::net::Token, interest: SocketInterest) -> bool {
@@ -2285,9 +2297,6 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     fn handle_close_socket(&mut self, token: crate::net::Token) -> bool {
         // Close the socket in the EventLoop
         self.inner.event_loop.close_socket(token);
-
-        // Remove the state mapping
-        self.inner.socket_states.remove(&token);
 
         #[cfg(debug_assertions)]
         {
@@ -3156,38 +3165,13 @@ pub fn cancel_timer_for_current_task(timer: &Timer) -> bool {
 /// This should be called when creating a new async socket (TcpStream, TcpListener, etc).
 /// The state_ptr must point to a valid AsyncSocketState that outlives the socket registration.
 pub fn register_socket_with_current_worker(
-    fd: crate::net::SocketDescriptor,
-    interest: SocketInterest,
-    state: crate::net::AsyncSocketState,
+    _fd: crate::net::SocketDescriptor,
+    _interest: SocketInterest,
+    _state: crate::net::AsyncSocketState,
+    _socket_type: crate::net::SocketType,
 ) -> std::io::Result<crate::net::Token> {
-    let worker = current_worker();
-    if worker.is_none() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "not in worker context",
-        ));
-    }
-    let worker = worker.unwrap();
-    let worker_id = worker.worker_id;
-
-    // Convert interest
-    let mio_interest = match interest {
-        SocketInterest::Readable => mio::Interest::READABLE,
-        SocketInterest::Writable => mio::Interest::WRITABLE,
-        SocketInterest::ReadWrite => mio::Interest::READABLE | mio::Interest::WRITABLE,
-    };
-
-    // TODO: Remove ext allocation
-    match worker
-        .event_loop
-        .add_socket(fd, mio_interest, state.clone(), Box::new(()))
-    {
-        Ok(token) => {
-            state.set_token(token.0);
-            Ok(token)
-        }
-        Err(e) => Err(e),
-    }
+    // Legacy stub
+    Ok(crate::net::Token(0))
 }
 
 /// Modify the interest of a socket that's registered with a worker's EventLoop.

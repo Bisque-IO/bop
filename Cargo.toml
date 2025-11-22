@@ -12,7 +12,9 @@ members = [
     "crates/maniac",
     # "crates/nuraft",
     "crates/sanakirja-core",
-    "crates/sanakirja"
+    "crates/sanakirja",
+    # "crates/monoio/monoio",
+    # "crates/monoio/monoio-macros"
 ]
 resolver = "2"
 

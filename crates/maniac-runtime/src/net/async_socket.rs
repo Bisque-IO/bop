@@ -10,16 +10,17 @@
 use std::sync::Arc;
 use std::task::Waker;
 
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use futures::task::AtomicWaker;
 
 /// Internal state for AsyncSocketState (to allow Arc-based cloning)
 #[derive(Debug)]
 struct AsyncSocketStateInner {
-    /// Read task waker (stored as RawWaker data pointer)
-    read_waker_data: AtomicPtr<()>,
+    /// Read task waker
+    read_waker: AtomicWaker,
 
-    /// Write task waker (stored as RawWaker data pointer)
-    write_waker_data: AtomicPtr<()>,
+    /// Write task waker
+    write_waker: AtomicWaker,
 
     /// Timeout occurred flag (atomic for lock-free access)
     timed_out: AtomicBool,
@@ -37,8 +38,7 @@ struct AsyncSocketStateInner {
 /// Separate read/write wakers since they may be on different tasks.
 /// NO data buffering - user code provides buffers when calling read/write.
 ///
-/// Waker storage is lock-free using AtomicPtr - we only store the data pointer from
-/// RawWaker and reconstruct using Task::waker_clone when waking.
+/// Uses futures::task::AtomicWaker for safe and efficient waker storage.
 #[derive(Clone, Debug)]
 pub struct AsyncSocketState {
     inner: Arc<AsyncSocketStateInner>,
@@ -49,8 +49,8 @@ impl AsyncSocketState {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(AsyncSocketStateInner {
-                read_waker_data: AtomicPtr::new(std::ptr::null_mut()),
-                write_waker_data: AtomicPtr::new(std::ptr::null_mut()),
+                read_waker: AtomicWaker::new(),
+                write_waker: AtomicWaker::new(),
                 timed_out: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
                 token: AtomicUsize::new(usize::MAX),
@@ -59,51 +59,23 @@ impl AsyncSocketState {
     }
 
     /// Store the read task waker for cross-worker wakeup
-    /// Extracts and stores only the data pointer from the waker
     pub fn set_read_waker(&self, waker: &Waker) {
-        // SAFETY: Waker is 2 pointers (data + vtable)
-        let data = unsafe {
-            let waker_ptr = waker as *const Waker;
-            *(waker_ptr as *const *const ())
-        };
-        self.inner
-            .read_waker_data
-            .store(data as *mut (), Ordering::Release);
+        self.inner.read_waker.register(waker);
     }
 
     /// Store the write task waker for cross-worker wakeup
-    /// Extracts and stores only the data pointer from the waker
     pub fn set_write_waker(&self, waker: &Waker) {
-        // SAFETY: Waker is 2 pointers (data + vtable)
-        let data = unsafe {
-            let waker_ptr = waker as *const Waker;
-            *(waker_ptr as *const *const ())
-        };
-        self.inner
-            .write_waker_data
-            .store(data as *mut (), Ordering::Release);
+        self.inner.write_waker.register(waker);
     }
 
     /// Wake the read task (called by Worker EventLoop when socket becomes readable)
     pub fn wake_read(&self) {
-        let data = self.inner.read_waker_data.load(Ordering::Acquire);
-        if !data.is_null() {
-            // Reconstruct waker from data pointer using Task::waker_clone
-            let raw_waker = unsafe { crate::runtime::task::Task::waker_clone(data) };
-            let waker = unsafe { Waker::from_raw(raw_waker) };
-            waker.wake();
-        }
+        self.inner.read_waker.wake();
     }
 
     /// Wake the write task (called by Worker EventLoop when socket becomes writable)
     pub fn wake_write(&self) {
-        let data = self.inner.write_waker_data.load(Ordering::Acquire);
-        if !data.is_null() {
-            // Reconstruct waker from data pointer using Task::waker_clone
-            let raw_waker = unsafe { crate::runtime::task::Task::waker_clone(data) };
-            let waker = unsafe { Waker::from_raw(raw_waker) };
-            waker.wake();
-        }
+        self.inner.write_waker.wake();
     }
 
     /// Wake both read and write tasks

@@ -30,6 +30,8 @@ mod spsc;
 pub mod sync;
 pub mod utils;
 
+pub mod monoio;
+
 pub use crate::utils::*;
 
 // Re-export socket registration functions for async networking

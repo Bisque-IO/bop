@@ -16,28 +16,6 @@ mod tests {
         f();
     }
 
-    // #[test]
-    // fn test_init_worker_preemption() {
-    //     run_serialized(|| {
-    //         let flag = AtomicBool::new(false);
-    //         crate::runtime::preemption::init_worker_thread_preemption(&flag);
-    //     });
-    // }
-
-    // #[test]
-    // fn test_check_and_clear_preemption() {
-    //     run_serialized(|| {
-    //         let flag = AtomicBool::new(true);
-    //         assert!(crate::runtime::preemption::check_and_clear_preemption(
-    //             &flag
-    //         ));
-    //         assert!(!flag.load(Ordering::Relaxed));
-    //         assert!(!crate::runtime::preemption::check_and_clear_preemption(
-    //             &flag
-    //         ));
-    //     });
-    // }
-
     #[test]
     // #[cfg(not(miri))]
     fn test_preemption_interruption() {
@@ -244,6 +222,282 @@ mod tests {
             }
 
             worker.join().expect("worker panicked");
+        });
+    }
+
+    #[test]
+    fn test_preemption_with_mutex() {
+        run_serialized(|| {
+            // This test ensures that if a generator holds a Mutex when preempted,
+            // the lock remains held and valid across the context switch.
+            // This verifies that the trampoline/yield mechanism preserves
+            // the thread state correctly and doesn't corrupt locks.
+
+            let preempt_flag = Arc::new(AtomicBool::new(false));
+            let lock = Arc::new(Mutex::new(0));
+            let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
+            let worker = {
+                let flag_clone = Arc::clone(&preempt_flag);
+                let lock_clone = Arc::clone(&lock);
+                thread::spawn(move || {
+                    let _guard = crate::runtime::preemption::init_worker_preemption()
+                        .expect("install handler");
+
+                    #[cfg(unix)]
+                    let handle = crate::runtime::preemption::WorkerThreadHandle::current()
+                        .expect("obtain unix handle");
+                    #[cfg(windows)]
+                    let handle =
+                        crate::runtime::preemption::WorkerThreadHandle::current(&flag_clone)
+                            .expect("obtain windows handle");
+                    handle_tx.send(handle).unwrap();
+
+                    let exit_signal = Arc::new(AtomicBool::new(false));
+                    let exit_clone = Arc::clone(&exit_signal);
+
+                    let mut generator =
+                        crate::generator::Gn::<()>::new_scoped(move |mut scope| {
+                            crate::runtime::preemption::set_generator_scope(
+                                &mut scope as *mut _ as *mut (),
+                            );
+
+                            // Wrap in catch_unwind to ensure clean stack behavior
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                // Lock the mutex inside the generator
+                                let _guard = lock_clone.lock().unwrap();
+                                ready_tx.send(()).expect("notify ready");
+
+                                // Busy loop while holding the lock
+                                let mut spin = 0u64;
+                                loop {
+                                    std::hint::black_box(spin);
+                                    spin = spin.wrapping_add(1);
+
+                                    if exit_clone.load(Ordering::Acquire) {
+                                        crate::runtime::preemption::clear_generator_scope();
+                                        return;
+                                    }
+                                }
+                            }));
+
+                            crate::generator::done()
+                        });
+
+                    use crate::runtime::preemption::GeneratorYieldReason;
+
+                    // Run generator until it signals readiness (locked mutex) and then yields/preempts
+                    let reason = generator
+                        .resume()
+                        .and_then(GeneratorYieldReason::from_usize)
+                        .expect("generator should yield");
+                    
+                    assert_eq!(reason, GeneratorYieldReason::Preempted, "Should be preempted");
+
+                    // Tell the generator to exit and resume it to completion.
+                    exit_signal.store(true, Ordering::Release);
+                    assert!(generator.resume().is_none());
+                })
+            };
+
+            let handle = handle_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("handle unavailable");
+
+            // Wait for generator to lock mutex
+            ready_rx.recv().expect("generator didn't start");
+
+            // Verify lock is held (try_lock should fail)
+            if let Ok(_) = lock.try_lock() {
+                panic!("Mutex should be locked by the generator!");
+            }
+
+            // Trigger Preemption
+            handle.interrupt().expect("interrupt failed");
+
+            // Now we wait for the worker thread to finish.
+            // The worker thread will verify preemption happened, then resume generator.
+            // Generator will exit and drop the lock.
+            worker.join().expect("worker panicked");
+
+            // Verify lock is released
+            match lock.try_lock() {
+                Ok(_) => {}
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    panic!("Mutex is poisoned! Generator likely panicked.");
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    panic!("Mutex is still locked! Generator did not release it.");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_generator_thread_migration() {
+        run_serialized(|| {
+            // This test verifies that a generator can be started on one thread,
+            // preempted, moved to another thread, and successfully resumed/finished.
+            
+            // Shared state
+            let preempt_flag = Arc::new(AtomicBool::new(false));
+            let exit_signal = Arc::new(AtomicBool::new(false));
+            
+            // Channels for passing the generator
+            // We need to wrap Generator in a struct that is Send? 
+            // Generator is Send if 'static.
+            // We'll use a channel of `Generator<'static, (), ()>`.
+            let (gen_tx, gen_rx) = std::sync::mpsc::channel();
+            let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+
+            // Thread A: The "Source" Thread
+            let thread_a = {
+                let flag = Arc::clone(&preempt_flag);
+                let exit = Arc::clone(&exit_signal);
+                thread::spawn(move || {
+                    let _guard = crate::runtime::preemption::init_worker_preemption().unwrap();
+                    
+                    #[cfg(unix)]
+                    let handle = crate::runtime::preemption::WorkerThreadHandle::current().unwrap();
+                    #[cfg(windows)]
+                    let handle = crate::runtime::preemption::WorkerThreadHandle::current(&flag).unwrap();
+                    
+                    handle_tx.send(handle).unwrap();
+
+                    let mut generator = crate::generator::Gn::<()>::new_scoped(move |mut scope| {
+                         crate::runtime::preemption::set_generator_scope(
+                             &mut scope as *mut _ as *mut (),
+                         );
+                         
+                         let mut spin = 0u64;
+                         loop {
+                             std::hint::black_box(spin);
+                             spin = spin.wrapping_add(1);
+                             
+                             if exit.load(Ordering::Acquire) {
+                                 crate::runtime::preemption::clear_generator_scope();
+                                 return crate::generator::done();
+                             }
+                         }
+                    });
+
+                    // Start and wait for preemption
+                    use crate::runtime::preemption::GeneratorYieldReason;
+                    let reason = generator.resume()
+                        .and_then(GeneratorYieldReason::from_usize)
+                        .expect("should yield");
+                        
+                    assert_eq!(reason, GeneratorYieldReason::Preempted);
+                    
+                    // Send the generator to Thread B
+                    // unsafe impl Send for Generator<'static>...
+                    // The compiler should deduce 'static here because we move Arc (Send + 'static)
+                    gen_tx.send(generator).unwrap();
+                })
+            };
+
+            // Interrupt Thread A
+            let handle = handle_rx.recv_timeout(Duration::from_secs(5)).expect("no handle");
+            // Wait a bit for loop
+            thread::sleep(Duration::from_millis(50));
+            handle.interrupt().expect("interrupt failed");
+            
+            thread_a.join().expect("thread A panicked");
+            
+            // Thread B: The "Destination" Thread
+            let thread_b = {
+                let exit = Arc::clone(&exit_signal);
+                thread::spawn(move || {
+                    // We don't strictly need preemption enabled on Thread B to resume,
+                    // but good practice if it might be preempted again.
+                    // For this test, we just want to finish it.
+                    
+                    let mut generator = gen_rx.recv().unwrap();
+                    
+                    // Signal exit
+                    exit.store(true, Ordering::Release);
+                    
+                    // Resume
+                    // This should resume on THIS thread's stack.
+                    assert!(generator.resume().is_none());
+                })
+            };
+            
+            thread_b.join().expect("thread B panicked");
+        });
+    }
+
+    #[test]
+    fn test_interrupt_long_sleep() {
+        run_serialized(|| {
+            // Test interrupting a blocking sleep.
+            // Note: On Windows, SuspendThread cannot interrupt a kernel Wait (Sleep).
+            // So this test effectively verifies platform behavior:
+            // - Unix: Signal interrupts Sleep -> Preempted immediately.
+            // - Windows: SuspendThread pauses Sleep -> Preempted ONLY after Sleep finishes?
+            //   Wait, if we Suspend, the thread stops. The Sleep timer counts.
+            //   When Sleep finishes, thread wakes.
+            //   THEN it executes Trampoline.
+            //   So on Windows, we expect "Preempted after sleep duration".
+            
+            let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+            let preempt_flag = Arc::new(AtomicBool::new(false));
+
+            let worker = {
+                let flag = Arc::clone(&preempt_flag);
+                thread::spawn(move || {
+                    let _guard = crate::runtime::preemption::init_worker_preemption().unwrap();
+                    #[cfg(unix)]
+                    let handle = crate::runtime::preemption::WorkerThreadHandle::current().unwrap();
+                    #[cfg(windows)]
+                    let handle = crate::runtime::preemption::WorkerThreadHandle::current(&flag).unwrap();
+                    handle_tx.send(handle).unwrap();
+
+                    let mut generator = crate::generator::Gn::<()>::new_scoped(move |mut scope| {
+                        crate::runtime::preemption::set_generator_scope(&mut scope as *mut _ as *mut ());
+                        
+                        // Sleep for 3 seconds
+                        println!("[Gen] Sleeping...");
+                        std::thread::sleep(Duration::from_secs(3));
+                        println!("[Gen] Woke up!");
+                        
+                        crate::runtime::preemption::clear_generator_scope();
+                        crate::generator::done()
+                    });
+
+                    use crate::runtime::preemption::GeneratorYieldReason;
+                    
+                    let start = std::time::Instant::now();
+                    let reason = generator.resume().and_then(GeneratorYieldReason::from_usize);
+                    let elapsed = start.elapsed();
+
+                    if let Some(GeneratorYieldReason::Preempted) = reason {
+                        println!("[Worker] Preempted after {:?}", elapsed);
+                        
+                        // On Unix, this should be fast (< 3s).
+                        #[cfg(unix)]
+                        assert!(elapsed < Duration::from_secs(2), "Unix sleep should be interrupted");
+                        
+                        // On Windows, this will likely be > 3s because we can't interrupt kernel wait.
+                        #[cfg(windows)]
+                        assert!(elapsed >= Duration::from_secs(3), "Windows sleep cannot be interrupted");
+                        
+                        // Resume to finish
+                        assert!(generator.resume().is_none());
+                    } else {
+                        panic!("[Worker] Generator failed to be preempted. Reason: {:?}", reason);
+                    }
+                })
+            };
+
+            let handle = handle_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            thread::sleep(Duration::from_millis(500)); // Ensure we are in sleep
+            
+            println!("[Test] Interrupting...");
+            handle.interrupt().expect("interrupt failed");
+            
+            worker.join().unwrap();
         });
     }
 }
