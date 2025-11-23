@@ -1,4 +1,4 @@
-#[cfg(all(unix, any(feature = "legacy", feature = "poll-io")))]
+#[cfg(all(unix, any(feature = "poll", feature = "poll-io")))]
 use std::os::unix::prelude::AsRawFd;
 use std::{
     io,
@@ -16,7 +16,7 @@ use {
 };
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::{driver::ready::Direction, MaybeFd};
 
 /// Accept
@@ -64,13 +64,13 @@ impl OpAble for Accept {
         .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd.registered_index().map(|idx| (Direction::Read, idx))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         let fd = self.fd.as_raw_socket();
         let addr = self.addr.0.as_mut_ptr() as *mut _;
@@ -79,7 +79,7 @@ impl OpAble for Accept {
         crate::syscall!(accept@FD(fd as _, addr, len), PartialEq::eq, INVALID_SOCKET)
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         let fd = self.fd.as_raw_fd();
         let addr = self.addr.0.as_mut_ptr() as *mut _;

@@ -41,7 +41,7 @@ pub(crate) struct Op<T: 'static + OpAble> {
     // Driver running the operation
     pub(super) driver: driver::Inner,
 
-    // Operation index in the slab(useless for legacy)
+    // Operation index in the slab(useless for poller)
     pub(super) index: usize,
 
     // Per-operation data
@@ -146,32 +146,32 @@ pub(crate) trait OpAble {
     #[cfg(all(target_os = "linux", feature = "iouring"))]
     fn uring_op(&mut self) -> io_uring::squeue::Entry;
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_interest(&self) -> Option<(super::ready::Direction, usize)>;
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd>;
 }
 
-/// If legacy is enabled and iouring is not, we can expose io interface in a poll-like way.
+/// If poll is enabled and iouring is not, we can expose io interface in a poll-like way.
 /// This can provide better compatibility for crates programmed in poll-like way.
 #[allow(dead_code)]
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 pub(crate) trait PollLegacy {
-    #[cfg(feature = "legacy")]
+    #[cfg(feature = "poll")]
     fn poll_legacy(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<CompletionMeta>;
     #[cfg(feature = "poll-io")]
     fn poll_io(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<CompletionMeta>;
 }
 
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 impl<T: OpAble> PollLegacy for T {
-    #[cfg(feature = "legacy")]
+    #[cfg(feature = "poll")]
     #[inline]
     fn poll_legacy(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<CompletionMeta> {
         #[cfg(all(feature = "iouring", feature = "tokio-compat"))]
         unsafe {
             extern "C" {
-                #[link_name = "tokio-compat can only be enabled when legacy feature is enabled and \
+                #[link_name = "tokio-compat can only be enabled when poll feature is enabled and \
                                iouring is not"]
                 fn trigger() -> !;
             }
@@ -209,7 +209,7 @@ impl<T: OpAble> Op<T> {
     }
 
     pub(crate) fn op_canceller(&self) -> OpCanceller {
-        #[cfg(feature = "legacy")]
+        #[cfg(feature = "poll")]
         if is_legacy() {
             return if let Some((dir, id)) = self.data.as_ref().unwrap().legacy_interest() {
                 OpCanceller {
@@ -225,7 +225,7 @@ impl<T: OpAble> Op<T> {
         }
         OpCanceller {
             index: self.index,
-            #[cfg(feature = "legacy")]
+            #[cfg(feature = "poll")]
             direction: None,
         }
     }
@@ -257,7 +257,7 @@ impl<T: OpAble> Drop for Op<T> {
     }
 }
 
-/// Check if current driver is legacy.
+/// Check if current driver is poller (legacy name kept for compatibility).
 #[allow(unused)]
 #[cfg(not(target_os = "linux"))]
 #[inline]
@@ -265,7 +265,7 @@ pub const fn is_legacy() -> bool {
     true
 }
 
-/// Check if current driver is legacy.
+/// Check if current driver is poller (legacy name kept for compatibility).
 #[cfg(target_os = "linux")]
 #[inline]
 pub fn is_legacy() -> bool {
@@ -275,7 +275,7 @@ pub fn is_legacy() -> bool {
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub(crate) struct OpCanceller {
     pub(super) index: usize,
-    #[cfg(feature = "legacy")]
+    #[cfg(feature = "poll")]
     pub(super) direction: Option<super::ready::Direction>,
 }
 

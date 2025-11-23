@@ -18,7 +18,7 @@ pub(crate) mod builder;
 #[allow(dead_code)]
 pub(crate) mod runtime;
 // mod scheduler;
-pub mod time;
+// pub mod time;
 
 extern crate alloc;
 
@@ -39,12 +39,12 @@ pub use builder::{Buildable, RuntimeBuilder};
 pub use driver::Driver;
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 pub use driver::IoUringDriver;
-#[cfg(feature = "legacy")]
-pub use driver::LegacyDriver;
+#[cfg(feature = "poll")]
+pub use driver::PollerDriver;
 
 // pub use runtime::{spawn, Runtime};
 pub use runtime::Runtime;
-#[cfg(any(all(target_os = "linux", feature = "iouring"), feature = "legacy"))]
+#[cfg(any(all(target_os = "linux", feature = "iouring"), feature = "poll"))]
 pub use {builder::FusionDriver, runtime::FusionRuntime};
 
 /// A specialized `Result` type for `io-uring` operations with buffers.

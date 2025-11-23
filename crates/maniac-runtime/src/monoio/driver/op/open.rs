@@ -3,7 +3,7 @@ use std::{ffi::CString, io, path::Path};
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use io_uring::{opcode, types};
 
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::{driver::ready::Direction, MaybeFd};
 use super::{Op, OpAble};
 use crate::monoio::{driver::util::cstr, fs::OpenOptions};
@@ -59,13 +59,13 @@ impl OpAble for Open {
             .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         None
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), not(windows)))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), not(windows)))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         crate::syscall!(open@FD(
             self.path.as_c_str().as_ptr(),
@@ -74,7 +74,7 @@ impl OpAble for Open {
         ))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         use std::{ffi::OsString, os::windows::ffi::OsStrExt};
 

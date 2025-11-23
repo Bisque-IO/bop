@@ -1,18 +1,18 @@
-#[cfg(all(unix, any(feature = "legacy", feature = "poll-io")))]
+#[cfg(all(unix, any(feature = "poll", feature = "poll-io")))]
 use std::os::unix::prelude::AsRawFd;
 use std::{io, net::SocketAddr};
 
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use io_uring::{opcode, types};
 use socket2::SockAddr;
-#[cfg(all(windows, any(feature = "legacy", feature = "poll-io")))]
+#[cfg(all(windows, any(feature = "poll", feature = "poll-io")))]
 use {
     std::os::windows::io::AsRawSocket,
     windows_sys::Win32::Networking::WinSock::{send, WSASendMsg, SOCKET_ERROR},
 };
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::{driver::ready::Direction, MaybeFd};
 #[cfg(unix)]
 use crate::monoio::net::unix::SocketAddr as UnixSocketAddr;
@@ -86,7 +86,7 @@ impl<T: IoBuf> OpAble for Send<T> {
         .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd
@@ -94,7 +94,7 @@ impl<T: IoBuf> OpAble for Send<T> {
             .map(|idx| (Direction::Write, idx))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         let fd = self.fd.as_raw_fd();
         #[cfg(target_os = "linux")]
@@ -111,7 +111,7 @@ impl<T: IoBuf> OpAble for Send<T> {
         ))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         let fd = self.fd.as_raw_socket();
         crate::syscall!(
@@ -198,7 +198,7 @@ impl<T: IoBuf> OpAble for SendMsg<T> {
             .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd
@@ -206,7 +206,7 @@ impl<T: IoBuf> OpAble for SendMsg<T> {
             .map(|idx| (Direction::Write, idx))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         #[cfg(target_os = "linux")]
         #[allow(deprecated)]
@@ -217,7 +217,7 @@ impl<T: IoBuf> OpAble for SendMsg<T> {
         crate::syscall!(sendmsg@NON_FD(fd, &*self.info.2, FLAGS))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         let fd = self.fd.as_raw_socket();
         let mut nsent = 0;
@@ -300,7 +300,7 @@ impl<T: IoBuf> OpAble for SendMsgUnix<T> {
             .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd
@@ -308,7 +308,7 @@ impl<T: IoBuf> OpAble for SendMsgUnix<T> {
             .map(|idx| (Direction::Write, idx))
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         #[cfg(target_os = "linux")]

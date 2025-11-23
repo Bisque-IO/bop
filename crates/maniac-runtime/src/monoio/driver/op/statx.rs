@@ -5,7 +5,7 @@ use io_uring::{opcode, types};
 #[cfg(target_os = "linux")]
 use libc::statx;
 
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::{driver::ready::Direction, MaybeFd};
 use super::{Op, OpAble};
 use crate::monoio::driver::{shared_fd::SharedFd, util::cstr};
@@ -75,14 +75,14 @@ impl OpAble for FdStatx {
             .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_interest(&self) -> Option<(crate::monoio::driver::ready::Direction, usize)> {
         self.inner
             .registered_index()
             .map(|idx| (Direction::Read, idx))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), target_os = "linux"))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), target_os = "linux"))]
     fn legacy_call(&mut self) -> std::io::Result<MaybeFd> {
         use std::os::fd::AsRawFd;
 
@@ -95,12 +95,12 @@ impl OpAble for FdStatx {
         ))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> std::io::Result<MaybeFd> {
         unimplemented!()
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), target_os = "macos"))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), target_os = "macos"))]
     fn legacy_call(&mut self) -> std::io::Result<MaybeFd> {
         use std::os::fd::AsRawFd;
 
@@ -166,12 +166,12 @@ impl OpAble for PathStatx {
             .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_interest(&self) -> Option<(crate::monoio::driver::ready::Direction, usize)> {
         None
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), target_os = "linux"))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), target_os = "linux"))]
     fn legacy_call(&mut self) -> std::io::Result<MaybeFd> {
         crate::syscall!(statx@NON_FD(
             libc::AT_FDCWD,
@@ -182,12 +182,12 @@ impl OpAble for PathStatx {
         ))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> std::io::Result<MaybeFd> {
         unimplemented!()
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), target_os = "macos"))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), target_os = "macos"))]
     fn legacy_call(&mut self) -> std::io::Result<MaybeFd> {
         if self.follow_symlinks {
             crate::syscall!(stat@NON_FD(

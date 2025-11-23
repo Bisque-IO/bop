@@ -71,8 +71,8 @@ impl TcpListener {
         let sys_listener =
             socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
 
-        #[cfg(feature = "legacy")]
-        Self::set_non_blocking(&sys_listener)?;
+        #[cfg(feature = "poll")]
+        sys_listener.set_nonblocking(true)?;
 
         let addr = socket2::SockAddr::from(addr);
         #[cfg(unix)]
@@ -240,13 +240,13 @@ impl TcpListener {
             })
     }
 
-    #[cfg(feature = "legacy")]
+    #[cfg(feature = "poll")]
     fn set_non_blocking(_socket: &socket2::Socket) -> io::Result<()> {
         crate::monoio::driver::CURRENT.with(|x| match x {
             // TODO: windows ioring support
             #[cfg(all(target_os = "linux", feature = "iouring"))]
             crate::monoio::driver::Inner::Uring(_) => Ok(()),
-            crate::monoio::driver::Inner::Legacy(_) => _socket.set_nonblocking(true),
+            crate::monoio::driver::Inner::Poller(_) => _socket.set_nonblocking(true),
         })
     }
 

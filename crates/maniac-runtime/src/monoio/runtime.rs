@@ -2,16 +2,13 @@ use std::future::Future;
 
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use crate::monoio::IoUringDriver;
-#[cfg(feature = "legacy")]
-use crate::monoio::LegacyDriver;
-#[cfg(any(all(target_os = "linux", feature = "iouring"), feature = "legacy"))]
-use crate::monoio::time::TimeDriver;
-use crate::monoio::{driver::Driver, time::driver::Handle as TimeHandle};
+#[cfg(feature = "poll")]
+use crate::monoio::PollerDriver;
+use crate::monoio::driver::Driver;
 
 thread_local! {
     pub(crate) static DEFAULT_CTX: Context = Context {
         thread_id: crate::monoio::utils::thread_id::DEFAULT_THREAD_ID,
-        time_handle: None,
         user_data: std::cell::Cell::new(std::ptr::null_mut()),
     };
 }
@@ -21,9 +18,6 @@ scoped_thread_local!(pub static CURRENT: Context);
 pub struct Context {
     /// Thread id(not the kernel thread id but a generated unique number)
     pub thread_id: usize,
-
-    /// Time Handle
-    pub time_handle: Option<TimeHandle>,
 
     /// User data (e.g. for storing Worker reference)
     pub user_data: std::cell::Cell<*mut ()>,
@@ -35,7 +29,6 @@ impl Context {
 
         Self {
             thread_id,
-            time_handle: None,
             user_data: std::cell::Cell::new(std::ptr::null_mut()),
         }
     }
@@ -116,26 +109,26 @@ impl std::task::Wake for DummyWaker {
     fn wake(self: std::sync::Arc<Self>) {}
 }
 
-/// Fusion Runtime is a wrapper of io_uring driver or legacy driver based
+/// Fusion Runtime is a wrapper of io_uring driver or poller driver based
 /// runtime.
-#[cfg(feature = "legacy")]
+#[cfg(feature = "poll")]
 pub enum FusionRuntime<#[cfg(all(target_os = "linux", feature = "iouring"))] L, R> {
     /// Uring driver based runtime.
     #[cfg(all(target_os = "linux", feature = "iouring"))]
     Uring(Runtime<L>),
-    /// Legacy driver based runtime.
-    Legacy(Runtime<R>),
+    /// Poller driver based runtime.
+    Poller(Runtime<R>),
 }
 
-/// Fusion Runtime is a wrapper of io_uring driver or legacy driver based
+/// Fusion Runtime is a wrapper of io_uring driver or poller driver based
 /// runtime.
-#[cfg(all(target_os = "linux", feature = "iouring", not(feature = "legacy")))]
+#[cfg(all(target_os = "linux", feature = "iouring", not(feature = "poll")))]
 pub enum FusionRuntime<L> {
     /// Uring driver based runtime.
     Uring(Runtime<L>),
 }
 
-#[cfg(all(target_os = "linux", feature = "iouring", feature = "legacy"))]
+#[cfg(all(target_os = "linux", feature = "iouring", feature = "poll"))]
 impl<L, R> FusionRuntime<L, R>
 where
     L: Driver,
@@ -153,9 +146,9 @@ where
                 tracing::info!("Monoio is running with io_uring driver");
                 inner.block_on(future)
             }
-            FusionRuntime::Legacy(inner) => {
+            FusionRuntime::Poller(inner) => {
                 #[cfg(feature = "debug")]
-                tracing::info!("Monoio is running with legacy driver");
+                tracing::info!("Monoio is running with poller driver");
                 inner.block_on(future)
             }
         }
@@ -164,21 +157,21 @@ where
     pub unsafe fn poll_once_unchecked(&mut self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
         match self {
             FusionRuntime::Uring(inner) => inner.poll_once_unchecked(timeout),
-            FusionRuntime::Legacy(inner) => inner.poll_once_unchecked(timeout),
+            FusionRuntime::Poller(inner) => inner.poll_once_unchecked(timeout),
         }
     }
 
     pub fn park_timeout(&mut self, duration: std::time::Duration) -> std::io::Result<()> {
         match self {
             FusionRuntime::Uring(inner) => inner.driver.park_timeout(duration),
-            FusionRuntime::Legacy(inner) => inner.driver.park_timeout(duration),
+            FusionRuntime::Poller(inner) => inner.driver.park_timeout(duration),
         }
     }
 
     pub fn submit(&mut self) -> std::io::Result<()> {
         match self {
             FusionRuntime::Uring(inner) => inner.driver.submit(),
-            FusionRuntime::Legacy(inner) => inner.driver.submit(),
+            FusionRuntime::Poller(inner) => inner.driver.submit(),
         }
     }
 
@@ -188,26 +181,26 @@ where
     {
         match self {
             FusionRuntime::Uring(inner) => inner.driver.with(|| CURRENT.set(&inner.context, f)),
-            FusionRuntime::Legacy(inner) => inner.driver.with(|| CURRENT.set(&inner.context, f)),
+            FusionRuntime::Poller(inner) => inner.driver.with(|| CURRENT.set(&inner.context, f)),
         }
     }
 
     pub fn park(&mut self) -> std::io::Result<()> {
         match self {
             FusionRuntime::Uring(inner) => inner.driver.park(),
-            FusionRuntime::Legacy(inner) => inner.driver.park(),
+            FusionRuntime::Poller(inner) => inner.driver.park(),
         }
     }
 
     pub fn unpark(&self) -> crate::monoio::driver::UnparkHandle {
         match self {
             FusionRuntime::Uring(inner) => inner.driver.unpark().into(),
-            FusionRuntime::Legacy(inner) => inner.driver.unpark().into(),
+            FusionRuntime::Poller(inner) => inner.driver.unpark().into(),
         }
     }
 }
 
-#[cfg(all(feature = "legacy", not(all(target_os = "linux", feature = "iouring"))))]
+#[cfg(all(feature = "poll", not(all(target_os = "linux", feature = "iouring"))))]
 impl<R> FusionRuntime<R>
 where
     R: Driver,
@@ -219,25 +212,25 @@ where
         F: Future,
     {
         match self {
-            FusionRuntime::Legacy(inner) => inner.block_on(future),
+            FusionRuntime::Poller(inner) => inner.block_on(future),
         }
     }
 
     pub unsafe fn poll_once_unchecked(&mut self, timeout: Option<std::time::Duration>) -> std::io::Result<()> {
         match self {
-            FusionRuntime::Legacy(inner) => inner.poll_once_unchecked(timeout),
+            FusionRuntime::Poller(inner) => inner.poll_once_unchecked(timeout),
         }
     }
 
     pub fn park_timeout(&mut self, duration: std::time::Duration) -> std::io::Result<()> {
         match self {
-            FusionRuntime::Legacy(inner) => inner.driver.park_timeout(duration),
+            FusionRuntime::Poller(inner) => inner.driver.park_timeout(duration),
         }
     }
 
     pub fn submit(&mut self) -> std::io::Result<()> {
         match self {
-            FusionRuntime::Legacy(inner) => inner.driver.submit(),
+            FusionRuntime::Poller(inner) => inner.driver.submit(),
         }
     }
 
@@ -246,24 +239,24 @@ where
         F: FnOnce() -> T,
     {
         match self {
-            FusionRuntime::Legacy(inner) => inner.driver.with(|| CURRENT.set(&inner.context, f)),
+            FusionRuntime::Poller(inner) => inner.driver.with(|| CURRENT.set(&inner.context, f)),
         }
     }
 
     pub fn park(&mut self) -> std::io::Result<()> {
         match self {
-            FusionRuntime::Legacy(inner) => inner.driver.park(),
+            FusionRuntime::Poller(inner) => inner.driver.park(),
         }
     }
 
     pub fn unpark(&self) -> crate::monoio::driver::UnparkHandle {
         match self {
-            FusionRuntime::Legacy(inner) => inner.driver.unpark().into(),
+            FusionRuntime::Poller(inner) => inner.driver.unpark().into(),
         }
     }
 }
 
-#[cfg(all(not(feature = "legacy"), all(target_os = "linux", feature = "iouring")))]
+#[cfg(all(not(feature = "poll"), all(target_os = "linux", feature = "iouring")))]
 impl<R> FusionRuntime<R>
 where
     R: Driver,
@@ -320,69 +313,33 @@ where
 }
 
 // L -> Fusion<L, R>
-#[cfg(all(target_os = "linux", feature = "iouring", feature = "legacy"))]
-impl From<Runtime<IoUringDriver>> for FusionRuntime<IoUringDriver, LegacyDriver> {
+#[cfg(all(target_os = "linux", feature = "iouring", feature = "poll"))]
+impl From<Runtime<IoUringDriver>> for FusionRuntime<IoUringDriver, PollerDriver> {
     fn from(r: Runtime<IoUringDriver>) -> Self {
-        Self::Uring(r)
-    }
-}
-
-// TL -> Fusion<TL, TR>
-#[cfg(all(target_os = "linux", feature = "iouring", feature = "legacy"))]
-impl From<Runtime<TimeDriver<IoUringDriver>>>
-    for FusionRuntime<TimeDriver<IoUringDriver>, TimeDriver<LegacyDriver>>
-{
-    fn from(r: Runtime<TimeDriver<IoUringDriver>>) -> Self {
         Self::Uring(r)
     }
 }
 
 // R -> Fusion<L, R>
-#[cfg(all(target_os = "linux", feature = "iouring", feature = "legacy"))]
-impl From<Runtime<LegacyDriver>> for FusionRuntime<IoUringDriver, LegacyDriver> {
-    fn from(r: Runtime<LegacyDriver>) -> Self {
-        Self::Legacy(r)
-    }
-}
-
-// TR -> Fusion<TL, TR>
-#[cfg(all(target_os = "linux", feature = "iouring", feature = "legacy"))]
-impl From<Runtime<TimeDriver<LegacyDriver>>>
-    for FusionRuntime<TimeDriver<IoUringDriver>, TimeDriver<LegacyDriver>>
-{
-    fn from(r: Runtime<TimeDriver<LegacyDriver>>) -> Self {
-        Self::Legacy(r)
+#[cfg(all(target_os = "linux", feature = "iouring", feature = "poll"))]
+impl From<Runtime<PollerDriver>> for FusionRuntime<IoUringDriver, PollerDriver> {
+    fn from(r: Runtime<PollerDriver>) -> Self {
+        Self::Poller(r)
     }
 }
 
 // R -> Fusion<R>
-#[cfg(all(feature = "legacy", not(all(target_os = "linux", feature = "iouring"))))]
-impl From<Runtime<LegacyDriver>> for FusionRuntime<LegacyDriver> {
-    fn from(r: Runtime<LegacyDriver>) -> Self {
-        Self::Legacy(r)
-    }
-}
-
-// TR -> Fusion<TR>
-#[cfg(all(feature = "legacy", not(all(target_os = "linux", feature = "iouring"))))]
-impl From<Runtime<TimeDriver<LegacyDriver>>> for FusionRuntime<TimeDriver<LegacyDriver>> {
-    fn from(r: Runtime<TimeDriver<LegacyDriver>>) -> Self {
-        Self::Legacy(r)
+#[cfg(all(feature = "poll", not(all(target_os = "linux", feature = "iouring"))))]
+impl From<Runtime<PollerDriver>> for FusionRuntime<PollerDriver> {
+    fn from(r: Runtime<PollerDriver>) -> Self {
+        Self::Poller(r)
     }
 }
 
 // L -> Fusion<L>
-#[cfg(all(target_os = "linux", feature = "iouring", not(feature = "legacy")))]
+#[cfg(all(target_os = "linux", feature = "iouring", not(feature = "poll")))]
 impl From<Runtime<IoUringDriver>> for FusionRuntime<IoUringDriver> {
     fn from(r: Runtime<IoUringDriver>) -> Self {
-        Self::Uring(r)
-    }
-}
-
-// TL -> Fusion<TL>
-#[cfg(all(target_os = "linux", feature = "iouring", not(feature = "legacy")))]
-impl From<Runtime<TimeDriver<IoUringDriver>>> for FusionRuntime<TimeDriver<IoUringDriver>> {
-    fn from(r: Runtime<TimeDriver<IoUringDriver>>) -> Self {
         Self::Uring(r)
     }
 }

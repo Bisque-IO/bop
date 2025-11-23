@@ -1,17 +1,16 @@
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use crate::monoio::IoUringDriver;
-use crate::monoio::time::driver::TimeDriver;
 use crate::monoio::{
-    FusionDriver, FusionRuntime, LegacyDriver, RuntimeBuilder, builder::Buildable,
+    FusionDriver, FusionRuntime, PollerDriver, RuntimeBuilder, builder::Buildable,
 };
 use std::io;
 use std::time::Duration;
 
 #[cfg(all(target_os = "linux", feature = "iouring"))]
-type RuntimeType = FusionRuntime<TimeDriver<IoUringDriver>, TimeDriver<LegacyDriver>>;
+type RuntimeType = FusionRuntime<IoUringDriver, PollerDriver>;
 
 #[cfg(not(all(target_os = "linux", feature = "iouring")))]
-type RuntimeType = FusionRuntime<TimeDriver<LegacyDriver>>;
+type RuntimeType = FusionRuntime<PollerDriver>;
 
 /// Event Loop - Monoio integration
 ///
@@ -25,13 +24,13 @@ pub struct EventLoop {
 impl EventLoop {
     pub fn new() -> io::Result<Self> {
         // Build monoio runtime
-        let runtime = RuntimeBuilder::<FusionDriver>::new().enable_all().build()?;
+        let runtime = RuntimeBuilder::<FusionDriver>::new().build()?;
 
         #[cfg(all(target_os = "linux", feature = "iouring"))]
         let runtime = FusionRuntime::Uring(runtime);
 
         #[cfg(not(all(target_os = "linux", feature = "iouring")))]
-        let runtime = FusionRuntime::Legacy(runtime);
+        let runtime = FusionRuntime::Poller(runtime);
 
         Ok(Self { runtime })
     }
@@ -94,7 +93,7 @@ impl EventLoop {
         Ok(())
     }
 
-    // Legacy methods to support existing tests/code temporarily
+    // Poller methods to support existing tests/code temporarily
 
     pub fn iteration_number(&self) -> i64 {
         0

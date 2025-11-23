@@ -309,7 +309,7 @@ impl CancelableAsyncReadRent for UnixStream {
     }
 }
 
-#[cfg(all(unix, feature = "legacy", feature = "tokio-compat"))]
+#[cfg(all(unix, feature = "poll", feature = "tokio-compat"))]
 impl tokio::io::AsyncRead for UnixStream {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
@@ -331,7 +331,7 @@ impl tokio::io::AsyncRead for UnixStream {
     }
 }
 
-#[cfg(all(unix, feature = "legacy", feature = "tokio-compat"))]
+#[cfg(all(unix, feature = "poll", feature = "tokio-compat"))]
 impl tokio::io::AsyncWrite for UnixStream {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,

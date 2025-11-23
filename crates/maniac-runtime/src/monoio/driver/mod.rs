@@ -3,21 +3,17 @@
 pub(crate) mod op;
 #[cfg(feature = "poll-io")]
 pub(crate) mod poll;
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 pub(crate) mod ready;
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 pub(crate) mod scheduled_io;
 #[allow(dead_code)]
 pub(crate) mod shared_fd;
 
-#[cfg(feature = "legacy")]
-pub(crate) mod legacy;
+#[cfg(feature = "poll")]
+pub(crate) mod poller;
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 mod uring;
-
-#[allow(missing_docs, unreachable_pub, dead_code, unused_imports)]
-#[cfg(all(windows, any(feature = "legacy", feature = "poll-io")))]
-pub(crate) mod iocp;
 
 mod util;
 
@@ -28,10 +24,10 @@ use std::{
 };
 
 #[allow(unreachable_pub)]
-#[cfg(feature = "legacy")]
-pub use self::legacy::LegacyDriver;
-#[cfg(feature = "legacy")]
-use self::legacy::LegacyInner;
+#[cfg(feature = "poll")]
+pub use self::poller::PollerDriver;
+#[cfg(feature = "poll")]
+use self::poller::PollerInner;
 use self::op::{CompletionMeta, Op, OpAble};
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 pub use self::uring::IoUringDriver;
@@ -94,8 +90,8 @@ scoped_thread_local!(pub(crate) static CURRENT: Inner);
 pub(crate) enum Inner {
     #[cfg(all(target_os = "linux", feature = "iouring"))]
     Uring(std::sync::Arc<std::cell::UnsafeCell<UringInner>>),
-    #[cfg(feature = "legacy")]
-    Legacy(std::sync::Arc<std::cell::UnsafeCell<LegacyInner>>),
+    #[cfg(feature = "poll")]
+    Poller(std::sync::Arc<std::cell::UnsafeCell<PollerInner>>),
 }
 
 unsafe impl Send for Inner {}
@@ -106,10 +102,10 @@ impl Inner {
         match self {
             #[cfg(all(target_os = "linux", feature = "iouring"))]
             Inner::Uring(this) => UringInner::submit_with_data(this, data),
-            #[cfg(feature = "legacy")]
-            Inner::Legacy(this) => LegacyInner::submit_with_data(this, data),
+            #[cfg(feature = "poll")]
+            Inner::Poller(this) => PollerInner::submit_with_data(this, data),
             #[cfg(all(
-                not(feature = "legacy"),
+                not(feature = "poll"),
                 not(all(target_os = "linux", feature = "iouring"))
             ))]
             _ => {
@@ -128,10 +124,10 @@ impl Inner {
         match self {
             #[cfg(all(target_os = "linux", feature = "iouring"))]
             Inner::Uring(this) => UringInner::poll_op(this, index, cx),
-            #[cfg(feature = "legacy")]
-            Inner::Legacy(this) => LegacyInner::poll_op::<T>(this, data, cx),
+            #[cfg(feature = "poll")]
+            Inner::Poller(this) => PollerInner::poll_op::<T>(this, data, cx),
             #[cfg(all(
-                not(feature = "legacy"),
+                not(feature = "poll"),
                 not(all(target_os = "linux", feature = "iouring"))
             ))]
             _ => {
@@ -149,10 +145,10 @@ impl Inner {
         match self {
             #[cfg(all(target_os = "linux", feature = "iouring"))]
             Inner::Uring(this) => UringInner::poll_legacy_op(this, data, cx),
-            #[cfg(feature = "legacy")]
-            Inner::Legacy(this) => LegacyInner::poll_op::<T>(this, data, cx),
+            #[cfg(feature = "poll")]
+            Inner::Poller(this) => PollerInner::poll_op::<T>(this, data, cx),
             #[cfg(all(
-                not(feature = "legacy"),
+                not(feature = "poll"),
                 not(all(target_os = "linux", feature = "iouring"))
             ))]
             _ => {
@@ -166,8 +162,8 @@ impl Inner {
     fn drop_op<T: 'static>(&self, index: usize, data: &mut Option<T>, skip_cancel: bool) {
         match self {
             Inner::Uring(this) => UringInner::drop_op(this, index, data, skip_cancel),
-            #[cfg(feature = "legacy")]
-            Inner::Legacy(_) => {}
+            #[cfg(feature = "poll")]
+            Inner::Poller(_) => {}
         }
     }
 
@@ -176,14 +172,14 @@ impl Inner {
         match self {
             #[cfg(all(target_os = "linux", feature = "iouring"))]
             Inner::Uring(this) => UringInner::cancel_op(this, op_canceller.index),
-            #[cfg(feature = "legacy")]
-            Inner::Legacy(this) => {
+            #[cfg(feature = "poll")]
+            Inner::Poller(this) => {
                 if let Some(direction) = op_canceller.direction {
-                    LegacyInner::cancel_op(this, op_canceller.index, direction)
+                    PollerInner::cancel_op(this, op_canceller.index, direction)
                 }
             }
             #[cfg(all(
-                not(feature = "legacy"),
+                not(feature = "poll"),
                 not(all(target_os = "linux", feature = "iouring"))
             ))]
             _ => {
@@ -192,12 +188,12 @@ impl Inner {
         }
     }
 
-    #[cfg(all(target_os = "linux", feature = "iouring", feature = "legacy"))]
+    #[cfg(all(target_os = "linux", feature = "iouring", feature = "poll"))]
     fn is_legacy(&self) -> bool {
-        matches!(self, Inner::Legacy(..))
+        matches!(self, Inner::Poller(..))
     }
 
-    #[cfg(all(target_os = "linux", feature = "iouring", not(feature = "legacy")))]
+    #[cfg(all(target_os = "linux", feature = "iouring", not(feature = "poll")))]
     fn is_legacy(&self) -> bool {
         false
     }
@@ -215,8 +211,8 @@ impl Inner {
 pub enum UnparkHandle {
     #[cfg(all(target_os = "linux", feature = "iouring"))]
     Uring(self::uring::UnparkHandle),
-    #[cfg(feature = "legacy")]
-    Legacy(self::legacy::UnparkHandle),
+    #[cfg(feature = "poll")]
+    Poller(self::poller::UnparkHandle),
 }
 
 // #[cfg(feature = "sync")]
@@ -225,10 +221,10 @@ impl unpark::Unpark for UnparkHandle {
         match self {
             #[cfg(all(target_os = "linux", feature = "iouring"))]
             UnparkHandle::Uring(inner) => inner.unpark(),
-            #[cfg(feature = "legacy")]
-            UnparkHandle::Legacy(inner) => inner.unpark(),
+            #[cfg(feature = "poll")]
+            UnparkHandle::Poller(inner) => inner.unpark(),
             #[cfg(all(
-                not(feature = "legacy"),
+                not(feature = "poll"),
                 not(all(target_os = "linux", feature = "iouring"))
             ))]
             _ => {
@@ -245,10 +241,10 @@ impl From<self::uring::UnparkHandle> for UnparkHandle {
     }
 }
 
-#[cfg(feature = "legacy")]
-impl From<self::legacy::UnparkHandle> for UnparkHandle {
-    fn from(inner: self::legacy::UnparkHandle) -> Self {
-        Self::Legacy(inner)
+#[cfg(feature = "poll")]
+impl From<self::poller::UnparkHandle> for UnparkHandle {
+    fn from(inner: self::poller::UnparkHandle) -> Self {
+        Self::Poller(inner)
     }
 }
 
@@ -258,8 +254,8 @@ impl UnparkHandle {
         CURRENT.with(|inner| match inner {
             #[cfg(all(target_os = "linux", feature = "iouring"))]
             Inner::Uring(this) => UringInner::unpark(this).into(),
-            #[cfg(feature = "legacy")]
-            Inner::Legacy(this) => LegacyInner::unpark(this).into(),
+            #[cfg(feature = "poll")]
+            Inner::Poller(this) => PollerInner::unpark(this).into(),
         })
     }
 }

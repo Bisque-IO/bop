@@ -4,7 +4,7 @@ use std::io;
 
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use io_uring::{opcode, types};
-#[cfg(all(unix, feature = "legacy"))]
+#[cfg(all(unix, feature = "poll"))]
 use {
     crate::monoio::driver::{op::MaybeFd, ready::Direction},
     std::os::unix::prelude::AsRawFd,
@@ -72,7 +72,7 @@ impl OpAble for Splice {
         .build()
     }
 
-    #[cfg(all(unix, feature = "legacy"))]
+    #[cfg(all(unix, feature = "poll"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         match self.direction {
@@ -87,7 +87,7 @@ impl OpAble for Splice {
         }
     }
 
-    #[cfg(all(unix, feature = "legacy"))]
+    #[cfg(all(unix, feature = "poll"))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         const FLAG: u32 = libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK;
         let fd_in = self.fd_in.as_raw_fd();

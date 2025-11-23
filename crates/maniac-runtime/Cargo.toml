@@ -17,7 +17,7 @@ default = [
     "race",
     "mio",
     "iouring",
-    "legacy",
+    "poll",
     "bytes",
     "utils",
     "async-cancel",
@@ -32,9 +32,9 @@ mio = ["dep:mio"]
 iouring = ["dep:io-uring"]
 
 # Monoio ported features
-legacy = ["mio"]
+poll = ["mio"]
 bytes = ["dep:bytes"]
-poll-io = ["legacy"] # needs mio
+poll-io = ["poll"] # needs mio
 zero-copy = []
 splice = []
 mkdirat = []

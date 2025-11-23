@@ -1,14 +1,14 @@
 use std::io;
-#[cfg(all(unix, any(feature = "legacy", feature = "poll-io")))]
+#[cfg(all(unix, any(feature = "poll", feature = "poll-io")))]
 use std::os::unix::prelude::AsRawFd;
 
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 pub(crate) use impls::*;
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use io_uring::{opcode, types};
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::{driver::ready::Direction, MaybeFd};
 use crate::monoio::{
     buf::{IoBufMut, IoVecBufMut},
@@ -79,13 +79,13 @@ impl<T: IoBufMut> OpAble for Read<T> {
         .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd.registered_index().map(|idx| (Direction::Read, idx))
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         #[cfg(unix)]
         let fd = self.fd.as_raw_fd();
@@ -124,13 +124,13 @@ impl<T: IoBufMut> OpAble for ReadAt<T> {
         .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd.registered_index().map(|idx| (Direction::Read, idx))
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         #[cfg(unix)]
         let fd = self.fd.as_raw_fd();
@@ -172,13 +172,13 @@ impl<T: IoVecBufMut> OpAble for ReadVec<T> {
             .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd.registered_index().map(|idx| (Direction::Read, idx))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         read_vectored(
             self.fd.raw_fd(),
@@ -187,7 +187,7 @@ impl<T: IoVecBufMut> OpAble for ReadVec<T> {
         )
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         // There is no `readv`-like syscall of file on windows, but this will be used to send
         // socket message.
@@ -250,13 +250,13 @@ impl<T: IoVecBufMut> OpAble for ReadVecAt<T> {
             .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd.registered_index().map(|idx| (Direction::Read, idx))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         read_vectored_at(
             self.fd.raw_fd(),
@@ -266,7 +266,7 @@ impl<T: IoVecBufMut> OpAble for ReadVecAt<T> {
         )
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         // There is no `readv` like syscall of file on windows, but this will be used to send
         // socket message.
@@ -308,7 +308,7 @@ impl<T: IoVecBufMut> OpAble for ReadVecAt<T> {
     }
 }
 
-#[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+#[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
 pub(crate) mod impls {
     use libc::iovec;
 
@@ -346,7 +346,7 @@ pub(crate) mod impls {
     }
 }
 
-#[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+#[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
 pub(crate) mod impls {
     use std::ffi::c_void;
 

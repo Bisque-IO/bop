@@ -1,4 +1,4 @@
-#[cfg(all(unix, any(feature = "legacy", feature = "poll-io")))]
+#[cfg(all(unix, any(feature = "poll", feature = "poll-io")))]
 use std::os::unix::prelude::AsRawFd;
 use std::{
     io,
@@ -13,7 +13,7 @@ use {
     crate::monoio::net::unix::SocketAddr as UnixSocketAddr,
     libc::{sockaddr_in, sockaddr_in6, sockaddr_storage, socklen_t, AF_INET, AF_INET6},
 };
-#[cfg(all(windows, any(feature = "legacy", feature = "poll-io")))]
+#[cfg(all(windows, any(feature = "poll", feature = "poll-io")))]
 use {
     std::os::windows::io::AsRawSocket,
     windows_sys::Win32::Networking::WinSock::recv,
@@ -33,7 +33,7 @@ use {
 };
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::{driver::ready::Direction, MaybeFd};
 use crate::monoio::{
     buf::{IoBufMut, IoVecBufMut, IoVecMeta, MsgMeta},
@@ -89,13 +89,13 @@ impl<T: IoBufMut> OpAble for Recv<T> {
         .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd.registered_index().map(|idx| (Direction::Read, idx))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         let fd = self.fd.as_raw_fd();
         crate::syscall!(recv@NON_FD(
@@ -106,7 +106,7 @@ impl<T: IoBufMut> OpAble for Recv<T> {
         ))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         let fd = self.fd.as_raw_socket();
         crate::syscall!(
@@ -211,7 +211,7 @@ impl<T: IoBufMut> Op<RecvMsg<T>> {
 }
 
 /// see https://github.com/microsoft/windows-rs/issues/2530
-#[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+#[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
 static WSA_RECV_MSG: std::sync::OnceLock<
     unsafe extern "system" fn(
         SOCKET,
@@ -228,19 +228,19 @@ impl<T: IoBufMut> OpAble for RecvMsg<T> {
         opcode::RecvMsg::new(types::Fd(self.fd.raw_fd()), &mut *self.info.2).build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd.registered_index().map(|idx| (Direction::Read, idx))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         let fd = self.fd.as_raw_fd();
         crate::syscall!(recvmsg@NON_FD(fd, &mut *self.info.2, 0))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         let fd = self.fd.as_raw_socket() as _;
         let func_ptr = WSA_RECV_MSG.get_or_init(|| unsafe {
@@ -348,13 +348,13 @@ impl<T: IoBufMut> OpAble for RecvMsgUnix<T> {
         opcode::RecvMsg::new(types::Fd(self.fd.raw_fd()), &mut self.info.2 as *mut _).build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd.registered_index().map(|idx| (Direction::Read, idx))
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         let fd = self.fd.as_raw_fd();
         crate::syscall!(recvmsg@NON_FD(fd, &mut self.info.2 as *mut _, 0))

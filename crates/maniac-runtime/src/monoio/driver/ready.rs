@@ -46,7 +46,7 @@ impl Ready {
     pub(crate) const WRITE_ALL: Ready = Ready(WRITABLE | WRITE_CLOSED | WRITE_CANCELED);
 
     #[cfg(windows)]
-    pub(crate) fn from_mio(event: &crate::monoio::driver::iocp::Event) -> Ready {
+    pub(crate) fn from_mio(event: &mio::event::Event) -> Ready {
         let mut ready = Ready::EMPTY;
 
         if event.is_readable() {
@@ -73,7 +73,7 @@ impl Ready {
     pub(crate) fn from_mio(event: &mio::event::Event) -> Ready {
         let mut ready = Ready::EMPTY;
 
-        #[cfg(all(target_os = "freebsd", feature = "legacy"))]
+        #[cfg(all(target_os = "freebsd", feature = "poll"))]
         {
             if event.is_aio() {
                 ready |= Ready::READABLE;

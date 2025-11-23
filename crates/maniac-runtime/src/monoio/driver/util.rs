@@ -97,7 +97,7 @@ macro_rules! syscall {
 
 #[cfg(all(
     not(all(target_os = "linux", feature = "iouring")),
-    not(feature = "legacy")
+    not(feature = "poll")
 ))]
 pub(crate) fn feature_panic() -> ! {
     panic!("one of iouring and legacy features must be enabled");

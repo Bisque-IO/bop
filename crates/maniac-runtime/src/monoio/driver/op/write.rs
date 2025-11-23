@@ -4,15 +4,15 @@ use std::os::unix::prelude::AsRawFd;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 pub(crate) use impls::*;
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use io_uring::{opcode, types};
-#[cfg(all(windows, any(feature = "legacy", feature = "poll-io")))]
+#[cfg(all(windows, any(feature = "poll", feature = "poll-io")))]
 use windows_sys::Win32::{Foundation::TRUE, Storage::FileSystem::WriteFile};
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::{driver::ready::Direction, MaybeFd};
 use crate::monoio::{
     buf::{IoBuf, IoVecBuf},
@@ -70,7 +70,7 @@ impl<T: IoBuf> OpAble for Write<T> {
         .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(crate::monoio::driver::ready::Direction, usize)> {
         self.fd
@@ -78,7 +78,7 @@ impl<T: IoBuf> OpAble for Write<T> {
             .map(|idx| (Direction::Write, idx))
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         #[cfg(windows)]
         let fd = self.fd.as_raw_handle() as _;
@@ -119,7 +119,7 @@ impl<T: IoBuf> OpAble for WriteAt<T> {
         .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd
@@ -127,7 +127,7 @@ impl<T: IoBuf> OpAble for WriteAt<T> {
             .map(|idx| (Direction::Write, idx))
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         #[cfg(windows)]
         let fd = self.fd.as_raw_handle() as _;
@@ -172,7 +172,7 @@ impl<T: IoVecBuf> OpAble for WriteVec<T> {
             .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd
@@ -180,7 +180,7 @@ impl<T: IoVecBuf> OpAble for WriteVec<T> {
             .map(|idx| (Direction::Write, idx))
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         #[cfg(windows)]
         let fd = self.fd.as_raw_handle() as _;
@@ -229,14 +229,14 @@ impl<T: IoVecBuf> OpAble for WriteVecAt<T> {
         .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_interest(&self) -> Option<(crate::monoio::driver::ready::Direction, usize)> {
         self.fd
             .registered_index()
             .map(|idx| (Direction::Write, idx))
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         write_vectored_at(
             self.fd.raw_fd(),
@@ -247,7 +247,7 @@ impl<T: IoVecBuf> OpAble for WriteVecAt<T> {
     }
 }
 
-#[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+#[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
 pub(crate) mod impls {
     use libc::iovec;
 
@@ -294,7 +294,7 @@ pub(crate) mod impls {
     }
 }
 
-#[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+#[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
 pub(crate) mod impls {
     use windows_sys::Win32::{
         Foundation::{GetLastError, ERROR_HANDLE_EOF},

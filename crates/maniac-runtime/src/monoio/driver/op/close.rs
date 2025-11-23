@@ -7,7 +7,7 @@ use io_uring::{opcode, types};
 #[cfg(windows)]
 use {std::os::windows::io::RawSocket, windows_sys::Win32::Networking::WinSock::closesocket};
 
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::MaybeFd;
 use super::{Op, OpAble};
 
@@ -40,13 +40,13 @@ impl OpAble for Close {
         opcode::Close::new(types::Fd(self.fd)).build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(crate::monoio::driver::ready::Direction, usize)> {
         None
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         #[cfg(unix)]
         return crate::syscall!(close@NON_FD(self.fd));

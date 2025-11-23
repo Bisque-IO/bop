@@ -1,7 +1,7 @@
 use std::io;
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::{driver::ready::Direction, MaybeFd};
 
 pub(crate) struct PollAdd {
@@ -11,7 +11,7 @@ pub(crate) struct PollAdd {
     fd: SharedFd,
     // true: read; false: write
     is_read: bool,
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     relaxed: bool,
 }
 
@@ -20,7 +20,7 @@ impl Op<PollAdd> {
         Op::submit_with(PollAdd {
             fd: fd.clone(),
             is_read: true,
-            #[cfg(any(feature = "legacy", feature = "poll-io"))]
+            #[cfg(any(feature = "poll", feature = "poll-io"))]
             relaxed: _relaxed,
         })
     }
@@ -29,7 +29,7 @@ impl Op<PollAdd> {
         Op::submit_with(PollAdd {
             fd: fd.clone(),
             is_read: false,
-            #[cfg(any(feature = "legacy", feature = "poll-io"))]
+            #[cfg(any(feature = "poll", feature = "poll-io"))]
             relaxed: _relaxed,
         })
     }
@@ -56,7 +56,7 @@ impl OpAble for PollAdd {
         .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         self.fd.registered_index().map(|idx| {
@@ -71,7 +71,7 @@ impl OpAble for PollAdd {
         })
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), not(windows)))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), not(windows)))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         if !self.relaxed {
             use std::{io::ErrorKind, os::fd::AsRawFd};
@@ -93,7 +93,7 @@ impl OpAble for PollAdd {
         Ok(MaybeFd::new_non_fd(1))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         use std::{
             io::{Error, ErrorKind},

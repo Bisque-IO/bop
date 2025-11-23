@@ -1,26 +1,14 @@
 use crate::monoio::driver::unpark::Unpark;
 
 pub(crate) struct EventWaker {
-    // raw waker
-    #[cfg(windows)]
-    waker: crate::monoio::driver::iocp::Waker,
-    #[cfg(unix)]
+
     waker: mio::Waker,
     // Atomic awake status
     pub(crate) awake: std::sync::atomic::AtomicBool,
 }
 
 impl EventWaker {
-    #[cfg(unix)]
     pub(crate) fn new(waker: mio::Waker) -> Self {
-        Self {
-            waker,
-            awake: std::sync::atomic::AtomicBool::new(true),
-        }
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn new(waker: crate::monoio::driver::iocp::Waker) -> Self {
         Self {
             waker,
             awake: std::sync::atomic::AtomicBool::new(true),
@@ -48,3 +36,4 @@ impl Unpark for UnparkHandle {
         }
     }
 }
+

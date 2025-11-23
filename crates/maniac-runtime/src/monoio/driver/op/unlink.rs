@@ -6,7 +6,7 @@ use io_uring::{opcode, squeue::Entry, types::Fd};
 use libc::{AT_FDCWD, AT_REMOVEDIR};
 
 use super::{MaybeFd, Op, OpAble};
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use crate::monoio::driver::ready::Direction;
 use crate::monoio::driver::util::cstr;
 
@@ -41,12 +41,12 @@ impl OpAble for Unlink {
             .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         None
     }
 
-    #[cfg(all(unix, any(feature = "legacy", feature = "poll-io")))]
+    #[cfg(all(unix, any(feature = "poll", feature = "poll-io")))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         if self.remove_dir {
             crate::syscall!(rmdir@NON_FD(self.path.as_c_str().as_ptr()))
@@ -55,7 +55,7 @@ impl OpAble for Unlink {
         }
     }
 
-    #[cfg(all(windows, any(feature = "legacy", feature = "poll-io")))]
+    #[cfg(all(windows, any(feature = "poll", feature = "poll-io")))]
     fn legacy_call(&mut self) -> std::io::Result<MaybeFd> {
         use std::io::{Error, ErrorKind};
 

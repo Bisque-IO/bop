@@ -13,7 +13,7 @@ macro_rules! err_to_false {
 }
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 fn detect_uring_inner() -> bool {
-    let val = std::env::var("MONOIO_FORCE_LEGACY_DRIVER");
+    let val = std::env::var("MONOIO_FORCE_POLL_DRIVER");
     match val {
         Ok(v) if matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes") => {
             return false;

@@ -47,13 +47,13 @@ impl UdpSocket {
         self.owner_worker_id
     }
 
-    #[cfg(feature = "legacy")]
+    #[cfg(feature = "poll")]
     fn set_non_blocking(_socket: &socket2::Socket) -> io::Result<()> {
         crate::monoio::driver::CURRENT.with(|x| match x {
             // TODO: windows ioring support
             #[cfg(all(target_os = "linux", feature = "iouring"))]
             crate::monoio::driver::Inner::Uring(_) => Ok(()),
-            crate::monoio::driver::Inner::Legacy(_) => _socket.set_nonblocking(true),
+            crate::monoio::driver::Inner::Poller(_) => _socket.set_nonblocking(true),
         })
     }
 
@@ -70,7 +70,7 @@ impl UdpSocket {
         };
         let socket =
             socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
-        #[cfg(feature = "legacy")]
+        #[cfg(feature = "poll")]
         Self::set_non_blocking(&socket)?;
 
         let addr = socket2::SockAddr::from(addr);

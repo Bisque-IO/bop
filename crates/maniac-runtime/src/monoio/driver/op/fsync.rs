@@ -4,7 +4,7 @@ use std::io;
 use io_uring::{opcode, types};
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::{driver::ready::Direction, MaybeFd};
 
 pub(crate) struct Fsync {
@@ -42,13 +42,13 @@ impl OpAble for Fsync {
         opc.build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     #[inline]
     fn legacy_interest(&self) -> Option<(Direction, usize)> {
         None
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         use std::os::windows::prelude::AsRawHandle;
 
@@ -61,7 +61,7 @@ impl OpAble for Fsync {
         )
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
     fn legacy_call(&mut self) -> io::Result<MaybeFd> {
         #[cfg(target_os = "linux")]
         if self.data_sync {

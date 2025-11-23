@@ -1,6 +1,6 @@
 use std::{ffi::CString, path::Path};
 
-#[cfg(any(feature = "legacy", feature = "poll-io"))]
+#[cfg(any(feature = "poll", feature = "poll-io"))]
 use super::MaybeFd;
 use super::{Op, OpAble};
 use crate::monoio::driver::util::cstr;
@@ -34,12 +34,12 @@ impl OpAble for Rename {
         .build()
     }
 
-    #[cfg(any(feature = "legacy", feature = "poll-io"))]
+    #[cfg(any(feature = "poll", feature = "poll-io"))]
     fn legacy_interest(&self) -> Option<(crate::monoio::driver::ready::Direction, usize)> {
         None
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), unix))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), unix))]
     fn legacy_call(&mut self) -> std::io::Result<MaybeFd> {
         crate::syscall!(renameat@NON_FD(
             libc::AT_FDCWD,
@@ -49,7 +49,7 @@ impl OpAble for Rename {
         ))
     }
 
-    #[cfg(all(any(feature = "legacy", feature = "poll-io"), windows))]
+    #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
     fn legacy_call(&mut self) -> std::io::Result<MaybeFd> {
         use std::io::{Error, ErrorKind};
 
