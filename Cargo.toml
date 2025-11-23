@@ -5,7 +5,6 @@ members = [
     # "crates/bop-mpmc",
     # "crates/vertx-cluster",
     # "crates/maniac-allocator",
-    "crates/maniac-runtime",
     # "crates/maniac-storage",
     # "crates/maniac-sys",
     # "crates/maniac-usockets",
@@ -26,7 +25,7 @@ version = "0.1.0"
 allocator-api2 = "0.3"
 anyhow = "1"
 arc-swap = "1.7"
-aws-lc-rs = "1.8"
+aws-lc-rs = "1.15"
 base64 = "0.22"
 bindgen = "0.72"
 bitflags = "2"
@@ -38,7 +37,6 @@ bop-proto = { path = "crates/bop-proto", version = "0.1.0" }
 # nuraft = { path = "crates/nuraft", version = "0.1.0" }
 # maniac-storage = { path = "crates/maniac-storage", version = "0.1.0" }
 # maniac-allocator = { path = "crates/maniac-allocator", version = "0.1.0", default-features = false }
-maniac-runtime = { path = "crates/maniac-runtime", version = "0.1.0" }
 # maniac-sys = { path = "crates/maniac-sys", version = "0.1.0" }
 # maniac-usockets = { path = "crates/maniac-usockets", version = "0.1.0", default-features = false }
 maniac = { path = "crates/maniac", version = "0.1.0" }
@@ -92,5 +90,5 @@ debug = true
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 strip = true

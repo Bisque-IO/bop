@@ -1,48 +1,161 @@
 [package]
 name = "maniac"
-version = "0.1.0"
 edition = "2024"
-authors = ["BOP Team"]
-description = "Massively scalable Rust async runtime"
+version.workspace = true
+authors = ["Maniac Team"]
+description = "High-performance async runtime with M:N threading and stackful coroutines"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bisque-io/bop"
-keywords = ["async", "runtime", "coroutines", "m-n", "networking"]
-categories = ["asynchronous", "concurrency", "network-programming"]
+keywords = ["async", "runtime", "coroutines", "green-threads", "m-n"]
+categories = ["asynchronous", "concurrency"]
+
+[features]
+# Enable mio by default for the usockets port; we rely on it for portable polling.
+# Added monoio features for compatibility with vendored code
+default = [
+    "std",
+    "race",
+    "mio",
+    "iouring",
+    "poll",
+    "bytes",
+    "utils",
+    "async-cancel",
+    "tls-rustls",
+    "tracing",
+    "unlinkat",
+    "renameat",
+    "symlinkat",
+]
+std = []
+race = []
+timers-introspection = []
+standard = []
+mio = ["dep:mio"]
+iouring = ["dep:io-uring"]
+
+# Monoio ported features
+poll = ["mio"]
+bytes = ["dep:bytes"]
+poll-io = ["poll"] # needs mio
+zero-copy = []
+splice = []
+mkdirat = []
+unlinkat = []
+renameat = []
+symlinkat = []
+signal = []
+utils = ["nix"]
+unsafe_io = []
+async-cancel = []
+tracing = ["dep:tracing"]
+debug = ["dep:tracing"] # enable debug tracing
+nix = ["dep:nix"]
+unstable = [] # enable unstable Rust features from monoio
+tokio-compat = [
+    "dep:tokio-io",
+    "dep:reusable-box-future",
+] # enable tokio AsyncRead/AsyncWrite compatibility  
+hyper-compat = [
+    "dep:hyper",
+    "poll-io",
+    "tokio-compat",
+] # enable hyper compatibility
+tls-rustls = ["dep:rustls"] # enable rustls TLS support
+tls-native = ["dep:native-tls"] # enable native-tls support
+tls-unsafe-io = [
+] # enable unsafe zero-copy I/O for TLS (requires careful lifetime management)
 
 [dependencies]
-# Local dependencies
-# maniac-allocator = { workspace = true }
-# maniac-sys = { workspace = true }
-# maniac-storage = { workspace = true }
-# maniac-usockets = { workspace = true }
-maniac-runtime = "0.1.0"
-
-# Serialization and data handling
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-base64 = { workspace = true }
-byteorder = { workspace = true }
-
-# Networking dependencies
-# compio = { workspace = true }
-# compio-tls = { workspace = true }
+async-channel = "2.5"
+async-task = "4.7"
+piper = "0.2"
+#congee = "0.4.1"
+core_affinity = "0.8"
+crossbeam = { workspace = true }
+#crossbeam-deque = "0.8"
+crossbeam-epoch = "0.9"
+crossbeam-utils = "0.8"
+dashmap = "6.1"
+futures-lite = "2.6"
 futures = { workspace = true }
-futures-util = { workspace = true }
-rustls = { workspace = true, features = ["aws-lc-rs", "std"] }
-aws-lc-rs = { workspace = true }
-rustls-pemfile = { workspace = true }
-log = { workspace = true }
+futures-io = "0.3"
+cfg-if = "1"
+log = "0.4"
+once_cell = "1.21"
+pin-project-lite = "0.2"
+rand = { workspace = true }
+aws-lc-rs = "1.15"
+socket2 = { version = "0.6", features = ["all"] }
+mio = { version = "1.1", optional = true, features = ["os-poll", "net"] }
+rustls = { package = "rustls", version = "0.23", features = [
+    "std",
+    "aws_lc_rs",
+], optional = true }
+rustls-webpki = "0.103"
+rustls-pemfile = "2.0"
+rustls-native-certs = "0.8"
+slab = "0.4.11"
+thiserror = { version = "2" }
+# Move libc to main dependencies to allow cross-platform compilation checking even if not used on Windows
+libc = "0.2"
+webpki-roots = "1.0.4"
+arc-swap.workspace = true
 
-#[features]
-#default = []
-## Enable async clustering support
-#async = ["tokio"]
-## Enable Raft consensus backend
-#raft = ["openraft"]
+# Vendor dependencies
+bytes = { version = "1", optional = true }
+tracing = { version = "0.1", optional = true }
+rustc-hash = "2.0"
+memchr = "2.7"
+auto-const-array = "0.2"
+nix = { version = "0.30.1", features = ["sched"], optional = true }
+flume = "0.11.1"
+reusable-box-future = { version = "0.2", optional = true }
+hyper = { version = "1.1", optional = true }
 
-[[bin]]
-name = "vertx-cluster"
-path = "src/main.rs"
+native-tls = { version = "0.2", optional = true }
+tokio-io = { package = "tokio", version = "1.0", default-features = false, features = [
+    "io-util",
+], optional = true }
+pollster = "0.4"
+
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.7", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Kernel",
+] }
 
 [dev-dependencies]
-tokio-test = { workspace = true }
+loom = "0.7"
+tokio = { version = "1.0", features = ["full", "io-util"] }
+criterion = "0.7"
+pollster = "0.4"
+#diatomic-waker = "0.2.3"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(loom)',
+    'cfg(diatomic_waker_loom)',
+    'cfg(multishot_loom)',
+    'cfg(async_event_loom)',
+] }
+# unexpected_cfgs = { level = "warn", check-cfg = ['cfg(diatomic_waker_loom)'] }
+unsafe_op_in_unsafe_fn = "allow"
+unused_unsafe = "allow"
+
+[[bench]]
+name = "signal_waker_perf"
+harness = false

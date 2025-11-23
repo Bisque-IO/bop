@@ -42,28 +42,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-stream"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
-dependencies = [
- "async-stream-impl",
- "futures-core",
- "pin-project-lite",
-]
-
-[[package]]
-name = "async-stream-impl"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "async-task"
 version = "4.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -126,12 +104,6 @@ dependencies = [
  "dunce",
  "fs_extra",
 ]
-
-[[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bindgen"
@@ -1070,24 +1042,6 @@ dependencies = [
 name = "maniac"
 version = "0.1.0"
 dependencies = [
- "aws-lc-rs",
- "base64",
- "byteorder",
- "futures",
- "futures-util",
- "log 0.4.28",
- "maniac-runtime 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "tokio-test",
-]
-
-[[package]]
-name = "maniac-runtime"
-version = "0.1.0"
-dependencies = [
  "arc-swap",
  "async-channel",
  "async-task",
@@ -1132,28 +1086,6 @@ dependencies = [
  "tracing",
  "webpki-roots",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "maniac-runtime"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9765f17f78acaf4b4fa7fd09f576612a0023106accc52191889666ff52bbd7bd"
-dependencies = [
- "cfg-if",
- "core_affinity",
- "crossbeam",
- "crossbeam-epoch",
- "crossbeam-utils",
- "dashmap",
- "futures",
- "futures-lite",
- "libc",
- "log 0.4.28",
- "once_cell",
- "pin-project-lite",
- "rand 0.9.2",
- "winapi",
 ]
 
 [[package]]
@@ -2111,30 +2043,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "tokio-stream"
-version = "0.1.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eca58d7bba4a75707817a2c44174253f9236b2d5fbd055602e9d5c07c139a047"
-dependencies = [
- "futures-core",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2468baabc3311435b55dd935f702f42cd1b8abb7e754fb7dfb16bd36aa88f9f7"
-dependencies = [
- "async-stream",
- "bytes",
- "futures-core",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]
