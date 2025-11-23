@@ -65,6 +65,7 @@ tls-rustls = ["dep:rustls"] # enable rustls TLS support
 tls-native = ["dep:native-tls"] # enable native-tls support
 tls-unsafe-io = [
 ] # enable unsafe zero-copy I/O for TLS (requires careful lifetime management)
+track-allocations = [] # internal feature for testing zero-allocation
 
 [dependencies]
 async-channel = "2.5"

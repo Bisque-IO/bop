@@ -1,8 +1,10 @@
+#[allow(unused_macros)]
 #[cfg(all(debug_assertions, feature = "debug"))]
 macro_rules! trace {
     ($( $args:expr ),*) => { tracing::trace!( $( $args ),* ); }
 }
 
+#[allow(unused_macros)]
 #[cfg(not(all(debug_assertions, feature = "debug")))]
 macro_rules! trace {
     ($( $args:expr ),*) => {};

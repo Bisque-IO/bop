@@ -3,7 +3,6 @@
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     // Track allocations for tests
     #[cfg(feature = "track-allocations")]

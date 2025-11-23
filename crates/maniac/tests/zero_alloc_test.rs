@@ -58,15 +58,15 @@ fn test_fs_module_compiles() {
     let path = PathBuf::from("/tmp/test");
 
     // These should compile if our implementation is correct
-    let _ = maniac::fs::remove_dir(&path);
-    let _ = maniac::fs::remove_file(&path);
-    let _ = maniac::fs::rename(&path, &path);
+    let _ = maniac::monoio::fs::remove_dir(&path);
+    let _ = maniac::monoio::fs::remove_file(&path);
+    let _ = maniac::monoio::fs::rename(&path, &path);
 
     // File operations
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        let _ = maniac::fs::File::open(&path);
-        let _ = maniac::fs::File::create(&path);
+        let _ = maniac::monoio::fs::File::open(&path);
+        let _ = maniac::monoio::fs::File::create(&path);
     }
 }
 

@@ -2,7 +2,7 @@
 use std::os::unix::prelude::AsRawFd;
 use std::{
     io,
-    mem::{transmute, MaybeUninit},
+    mem::{MaybeUninit, transmute},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 };
 
@@ -11,33 +11,32 @@ use io_uring::{opcode, types};
 #[cfg(unix)]
 use {
     crate::monoio::net::unix::SocketAddr as UnixSocketAddr,
-    libc::{sockaddr_in, sockaddr_in6, sockaddr_storage, socklen_t, AF_INET, AF_INET6},
+    libc::{AF_INET, AF_INET6, sockaddr_in, sockaddr_in6, sockaddr_storage, socklen_t},
 };
 #[cfg(all(windows, any(feature = "poll", feature = "poll-io")))]
 use {
     std::os::windows::io::AsRawSocket,
     windows_sys::Win32::Networking::WinSock::recv,
     windows_sys::{
-        core::GUID,
         Win32::{
             Networking::WinSock::{
-                WSAGetLastError, WSAIoctl, AF_INET, AF_INET6, LPFN_WSARECVMSG,
-                LPWSAOVERLAPPED_COMPLETION_ROUTINE, SIO_GET_EXTENSION_FUNCTION_POINTER, SOCKADDR,
-                SOCKADDR_IN as sockaddr_in, SOCKADDR_IN6 as sockaddr_in6,
-                SOCKADDR_STORAGE as sockaddr_storage, SOCKET, SOCKET_ERROR, WSAID_WSARECVMSG,
-                WSAMSG,
+                AF_INET, AF_INET6, LPFN_WSARECVMSG, LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+                SIO_GET_EXTENSION_FUNCTION_POINTER, SOCKADDR, SOCKADDR_IN as sockaddr_in,
+                SOCKADDR_IN6 as sockaddr_in6, SOCKADDR_STORAGE as sockaddr_storage, SOCKET,
+                SOCKET_ERROR, WSAGetLastError, WSAID_WSARECVMSG, WSAIoctl, WSAMSG,
             },
             System::IO::OVERLAPPED,
         },
+        core::GUID,
     },
 };
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
 #[cfg(any(feature = "poll", feature = "poll-io"))]
-use super::{driver::ready::Direction, MaybeFd};
+use super::{MaybeFd, driver::ready::Direction};
 use crate::monoio::{
-    buf::{IoBufMut, IoVecBufMut, IoVecMeta, MsgMeta},
     BufResult,
+    buf::{IoBufMut, IoVecBufMut, IoVecMeta, MsgMeta},
 };
 
 pub(crate) struct Recv<T> {
@@ -250,7 +249,7 @@ impl<T: IoBufMut> OpAble for RecvMsg<T> {
                 fd,
                 SIO_GET_EXTENSION_FUNCTION_POINTER,
                 &WSAID_WSARECVMSG as *const _ as *const std::ffi::c_void,
-                std::mem::size_of::<GUID>() as u32,
+                std::mem::size_of::<GUID>() as *const () as usize as u32,
                 &mut wsa_recv_msg as *mut _ as *mut std::ffi::c_void,
                 std::mem::size_of::<LPFN_WSARECVMSG>() as _,
                 &mut dw_bytes,
