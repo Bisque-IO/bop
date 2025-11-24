@@ -2,8 +2,8 @@ use maniac::future::block_on;
 use maniac::net::{TcpListener, TcpStream};
 use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 use maniac::runtime::DefaultExecutor;
-use maniac::monoio::buf::IoBuf;
-use maniac::monoio::io::{AsyncReadRent, AsyncWriteRentExt};
+use maniac::buf::IoBuf;
+use maniac::io::{AsyncReadRent, AsyncWriteRentExt};
 
 #[test]
 fn test_socket_optimization_flow() {

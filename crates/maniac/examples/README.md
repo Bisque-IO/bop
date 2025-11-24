@@ -224,6 +224,6 @@ cargo run --package maniac-runtime --example
 
 ## See Also
 
-- [EventLoop API documentation](../src/net/event_loop.rs)
+- [EventLoop API documentation](../src/runtime/event_loop.rs)
 - [SingleWheel timer documentation](../src/runtime/timer_wheel.rs)
 - [TLS support documentation](../src/net/tls.rs)

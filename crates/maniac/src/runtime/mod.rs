@@ -13,6 +13,7 @@
 //! - `JoinHandle`: Future that resolves when a spawned task completes
 //!
 pub mod deque;
+pub mod event_loop;
 pub mod mpsc;
 pub mod preemption;
 #[cfg(test)]
@@ -28,8 +29,31 @@ pub mod timer_wheel;
 pub mod waker;
 pub mod worker;
 
-use std::any::TypeId;
+pub use crate::{join, select, try_join};
+
+pub(crate) mod io_builder;
+#[allow(dead_code)]
+pub(crate) mod io_runtime;
+
 use std::future::{Future, IntoFuture};
+
+pub use io_builder::{Buildable, RuntimeBuilder};
+pub use crate::driver::Driver;
+#[cfg(all(target_os = "linux", feature = "iouring"))]
+pub use crate::driver::IoUringDriver;
+#[cfg(feature = "poll")]
+pub use crate::driver::PollerDriver;
+
+// pub use runtime::{spawn, Runtime};
+pub use io_runtime::IoRuntime;
+#[cfg(any(all(target_os = "linux", feature = "iouring"), feature = "poll"))]
+pub use {io_builder::FusionDriver, io_runtime::FusionRuntime};
+
+/// A specialized `Result` type for `io-uring` operations with buffers.
+pub use crate::buf::BufResult;
+
+use std::any::TypeId;
+
 use std::io;
 use std::panic::Location;
 use std::pin::Pin;
@@ -47,7 +71,7 @@ use worker::{WorkerService, WorkerServiceConfig};
 
 use crate::num_cpus;
 
-pub use crate::monoio::blocking::unblock;
+pub use crate::blocking::unblock;
 
 pub fn new_single_threaded() -> io::Result<DefaultRuntime> {
     let tick_service = TickService::new(Duration::from_millis(1));
@@ -189,7 +213,7 @@ impl<
     /// # Ok::<(), maniac::runtime::task::SpawnError>(())
     /// ```
     #[track_caller]
-    pub fn spawn_blocking<F, T>(&self, future: F) -> Result<crate::monoio::blocking::Task<T>, SpawnError>
+    pub fn spawn_blocking<F, T>(&self, future: F) -> Result<crate::blocking::Task<T>, SpawnError>
     where
         F: IntoFuture<Output = T> + Send + 'static,
         F::IntoFuture: Future<Output = T> + Send + 'static,

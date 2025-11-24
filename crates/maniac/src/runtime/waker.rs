@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 
-use crate::net::EventLoop;
+use crate::runtime::event_loop::EventLoop;
 use crate::utils::CachePadded;
 
 use crate::utils::bits::is_set;

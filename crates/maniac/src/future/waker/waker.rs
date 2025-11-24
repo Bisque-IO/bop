@@ -7,6 +7,11 @@ use crate::future::waker::WakeSinkRef;
 use crate::future::waker::loom_exports::cell::UnsafeCell;
 use crate::future::waker::loom_exports::sync::atomic::AtomicUsize;
 
+#[cfg(not(all(test, diatomic_waker_loom)))]
+use core::hint::spin_loop;
+#[cfg(all(test, diatomic_waker_loom))]
+use loom::hint::spin_loop;
+
 // The state of the waker is tracked by the following bit flags:
 //
 // * INDEX [I]: slot index of the current waker, if any (0 or 1),
@@ -343,6 +348,7 @@ impl DiatomicWaker {
     /// # Safety
     ///
     /// The caller must have exclusive access to the waker at index `idx`.
+    #[inline]
     unsafe fn set_waker(&self, idx: usize, new: Waker) {
         unsafe {
             self.waker[idx].with_mut(|waker| *waker = Some(new));
@@ -354,6 +360,7 @@ impl DiatomicWaker {
     /// # Safety
     ///
     /// The waker at index `idx` cannot be modified concurrently.
+    #[inline]
     unsafe fn wake_by_ref(&self, idx: usize) {
         self.waker[idx].with(|waker| {
             if let Some(waker) = unsafe { &*waker } {
@@ -368,6 +375,7 @@ impl DiatomicWaker {
     /// # Safety
     ///
     /// The waker at index `idx` cannot be modified concurrently.
+    #[inline]
     unsafe fn will_wake(&self, idx: usize, other: &Waker) -> bool {
         self.waker[idx].with(|waker| match unsafe { &*waker } {
             Some(waker) => waker.will_wake(other),
@@ -443,7 +451,10 @@ fn try_lock(state: &AtomicUsize) -> Result<usize, ()> {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return Ok(new_state),
-                Err(s) => old_state = s,
+                Err(s) => {
+                    old_state = s;
+                    spin_loop();
+                }
             }
         } else {
             // Failure path.
@@ -464,7 +475,10 @@ fn try_lock(state: &AtomicUsize) -> Result<usize, ()> {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return Err(()),
-                Err(s) => old_state = s,
+                Err(s) => {
+                    old_state = s;
+                    spin_loop();
+                }
             }
         };
     }
@@ -488,6 +502,7 @@ fn try_lock(state: &AtomicUsize) -> Result<usize, ()> {
 /// |  1  1  1  0  i  |  0  1  0  0  i  | (failure)
 /// |  1  1  1  1  i  |  0  1  0  0 !i  | (failure)
 ///
+#[inline]
 fn try_unlock(state: &AtomicUsize, mut old_state: usize) -> Result<(), usize> {
     loop {
         if old_state & NOTIFICATION == 0 {
@@ -505,7 +520,10 @@ fn try_unlock(state: &AtomicUsize, mut old_state: usize) -> Result<(), usize> {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return Ok(()),
-                Err(s) => old_state = s,
+                Err(s) => {
+                    old_state = s;
+                    spin_loop();
+                }
             }
         } else {
             // Failure path.
@@ -530,7 +548,10 @@ fn try_unlock(state: &AtomicUsize, mut old_state: usize) -> Result<(), usize> {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return Err(new_state),
-                Err(s) => old_state = s,
+                Err(s) => {
+                    old_state = s;
+                    spin_loop();
+                }
             }
         };
     }

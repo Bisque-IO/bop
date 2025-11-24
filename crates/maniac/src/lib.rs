@@ -21,20 +21,33 @@
 //! - **Blocking variant**: Optional blocking operations with timeout support
 //! - **Memory efficient**: Zero-copy operations where possible
 
+extern crate alloc;
+
+pub mod blocking;
+pub mod buf;
+#[cfg(feature = "tokio-compat")]
+pub mod compat;
+#[macro_use]
+pub mod driver;
+pub mod fs;
 pub mod future;
 pub mod generator;
+pub mod io;
 mod loom_exports;
-pub mod monoio;
 pub mod net;
 pub mod runtime;
 mod spsc;
 pub mod sync;
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
+pub mod tls;
 pub mod utils;
 
 pub use crate::utils::*;
 
 #[macro_use]
 pub mod macros;
+
+pub use buf::*;
 
 // Re-export socket registration functions for async networking
 pub use crate::runtime::worker::current_worker_id;

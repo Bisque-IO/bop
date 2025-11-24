@@ -5,7 +5,7 @@ use super::timer::{Timer, TimerHandle};
 use super::timer_wheel::TimerWheel;
 use super::waker::WorkerWaker;
 use crate::PopError;
-use crate::net::EventLoop;
+use crate::runtime::event_loop::EventLoop;
 use crate::runtime::preemption::GeneratorYieldReason;
 use crate::runtime::task::GeneratorOwnership;
 use crate::runtime::ticker::{TickHandler, TickHandlerRegistration};
@@ -77,8 +77,8 @@ pub fn is_worker_thread() -> bool {
 
 #[inline]
 pub fn current_worker<'a>() -> Option<&'a mut WorkerInner<'a>> {
-    if crate::monoio::runtime::CURRENT.is_set() {
-        crate::monoio::runtime::CURRENT.with(|ctx| {
+    if crate::runtime::io_runtime::CURRENT.is_set() {
+        crate::runtime::io_runtime::CURRENT.with(|ctx| {
             let ptr = ctx.user_data.get();
             if ptr.is_null() {
                 None
@@ -648,7 +648,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             // Create EventLoop for this worker (with integrated SingleWheel timer)
             // Box it to avoid stack overflow (EventLoop contains large Slab and buffers)
             let event_loop = Box::new(
-                crate::net::EventLoop::with_timer_wheel()
+                crate::runtime::event_loop::EventLoop::new()
                     .expect("Failed to create EventLoop for worker"),
             );
 
@@ -695,7 +695,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             let w_ptr = std::ptr::addr_of_mut!(w);
             // Wrap execution in monoio context and set user_data
             unsafe { &(*w_ptr).inner.event_loop }.with_context(|| {
-                crate::monoio::runtime::CURRENT.with(|ctx| {
+                crate::runtime::io_runtime::CURRENT.with(|ctx| {
                     ctx.user_data
                         .set(unsafe { &(*w_ptr).inner as *const _ as *mut () });
                 });
@@ -1271,7 +1271,7 @@ pub struct WorkerInner<'a> {
     /// Preemption flag for this worker - set by signal handler (Unix) or timer thread (Windows)
     preemption_requested: AtomicBool,
     /// Per-worker EventLoop for async I/O operations (boxed to avoid stack overflow)
-    event_loop: Box<crate::net::EventLoop>,
+    event_loop: Box<crate::runtime::event_loop::EventLoop>,
     /// I/O budget per run_once iteration (prevents I/O from starving tasks)
     io_budget: usize,
 }

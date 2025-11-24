@@ -1,4 +1,4 @@
-use maniac::monoio::blocking;
+use maniac::blocking;
 use std::time::{Duration, Instant};
 use std::thread;
 

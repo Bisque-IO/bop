@@ -2,7 +2,7 @@ pub use std::{future::Future, pin::Pin, task::Poll};
 
 pub use futures_util_fork::{maybe_done, poll_fn, MaybeDone, PollFn};
 
-pub use crate::monoio::utils::thread_rng_n;
+pub use crate::utils::thread_rng_n;
 
 mod futures_util_fork {
     use core::{fmt, mem, pin::Pin};

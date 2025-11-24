@@ -23,10 +23,10 @@
 /// able to run **concurrently** but not in **parallel**. This means all
 /// expressions are run on the same thread and if one branch blocks the thread,
 /// all other expressions will be unable to continue. If parallelism is
-/// required, spawn each async expression using [`monoio::spawn`] and pass the
+/// required, spawn each async expression using [`spawn`] and pass the
 /// join handle to `try_join!`.
 ///
-/// [`monoio::spawn`]: crate::monoio::spawn
+/// [`spawn`]: crate::spawn
 ///
 /// # Examples
 ///

@@ -1,6 +1,8 @@
 [workspace]
 members = [
 #    "crates/bop-aof",
+    "crates/bop-proto",
+    "crates/bop-protoc",
     # "crates/maniac-mdbx",
     # "crates/bop-mpmc",
     # "crates/vertx-cluster",
@@ -30,7 +32,7 @@ base64 = "0.22"
 bindgen = "0.72"
 bitflags = "2"
 # bop-aof = { path = "crates/bop-aof", version = "0.1.0" }
-bop-compiler = { path = "crates/bop-protoc", version = "0.1.0" }
+bop-protoc = { path = "crates/bop-protoc", version = "0.1.0" }
 # maniac-mdbx = { path = "crates/maniac-mdbx", version = "0.1.0" }
 # bop-mpmc = { path = "crates/bop-mpmc", version = "0.1.0" }
 bop-proto = { path = "crates/bop-proto", version = "0.1.0" }

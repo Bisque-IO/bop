@@ -49,10 +49,10 @@
 /// able to run **concurrently** but not in **parallel**. This means all
 /// expressions are run on the same thread and if one branch blocks the thread,
 /// all other expressions will be unable to continue. If parallelism is
-/// required, spawn each async expression using [`monoio::spawn`] and pass the
+/// required, spawn each async expression using [`spawn`] and pass the
 /// join handle to `select!`.
 ///
-/// [`monoio::spawn`]: crate::monoio::spawn
+/// [`spawn`]: crate::spawn
 ///
 /// # Fairness
 ///
@@ -65,7 +65,7 @@
 /// the futures in the order they appear from top to bottom. There are a few
 /// reasons you may want this:
 ///
-/// - The random number generation of `monoio::select!` has a non-zero CPU cost
+/// - The random number generation of `select!` has a non-zero CPU cost
 /// - Your futures may interact in a way where known polling order is significant
 ///
 /// But there is an important caveat to this mode. It becomes your
@@ -181,7 +181,7 @@
 ///     let mut sleep = std::pin::pin!(time::sleep(Duration::from_millis(50)));
 ///
 ///     while !sleep.is_elapsed() {
-///         monoio::select! {
+///         select! {
 ///             _ = &mut sleep, if !sleep.is_elapsed() => {
 ///                 println!("operation timed out");
 ///             }
@@ -274,7 +274,7 @@ macro_rules! select {
             $crate::select_priv_declare_output_enum!( ( $($count)* ) );
         }
 
-        // `monoio::macros::support` is a public, but doc(hidden) module
+        // `macros::support` is a public, but doc(hidden) module
         // including a re-export of all types needed by this macro.
         use $crate::macros::support::Future;
         use $crate::macros::support::Pin;

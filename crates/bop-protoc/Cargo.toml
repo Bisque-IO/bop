@@ -19,7 +19,7 @@ rlsf = { workspace = true }
 futures = { workspace = true }
 proc-macro2 = { workspace = true }
 allocator-api2 = { workspace = true }
-ghost-cell = { workspace = true }
+#ghost-cell = { workspace = true }
 bumpalo = { workspace = true }
 
 [target.'cfg(target_os = "wasi")'.dependencies]

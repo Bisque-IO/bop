@@ -8,12 +8,12 @@ fn test_path_operations_api() {
     let path = PathBuf::from("/tmp/test_file");
 
     // These should compile without errors
-    let _ = maniac::monoio::blocking::unblock_open(path.clone());
-    let _ = maniac::monoio::blocking::unblock_create(path.clone());
-    let _ = maniac::monoio::blocking::unblock_remove_file(path.clone());
-    let _ = maniac::monoio::blocking::unblock_remove_dir(path.clone());
-    let _ = maniac::monoio::blocking::unblock_create_dir(path.clone());
-    let _ = maniac::monoio::blocking::unblock_rename(path.clone(), path);
+    let _ = maniac::blocking::unblock_open(path.clone());
+    let _ = maniac::blocking::unblock_create(path.clone());
+    let _ = maniac::blocking::unblock_remove_file(path.clone());
+    let _ = maniac::blocking::unblock_remove_dir(path.clone());
+    let _ = maniac::blocking::unblock_create_dir(path.clone());
+    let _ = maniac::blocking::unblock_rename(path.clone(), path);
 }
 
 /// Test zero-allocation file descriptor operations
@@ -29,9 +29,9 @@ fn test_fd_operations_api() {
         let len = buf.len();
 
         // Test that the unblock_f* functions accept raw parameters
-        let _ = unsafe { maniac::monoio::blocking::unblock_fmetadata(fd) };
-        let _ = unsafe { maniac::monoio::blocking::unblock_fread(fd, ptr, len) };
-        let _ = unsafe { maniac::monoio::blocking::unblock_fwrite(fd, ptr as *const u8, len) };
+        let _ = unsafe { maniac::blocking::unblock_fmetadata(fd) };
+        let _ = unsafe { maniac::blocking::unblock_fread(fd, ptr, len) };
+        let _ = unsafe { maniac::blocking::unblock_fwrite(fd, ptr as *const u8, len) };
     }
 
     #[cfg(windows)]
@@ -44,9 +44,9 @@ fn test_fd_operations_api() {
         let len = buf.len();
 
         // Test that the unblock_f* functions accept raw parameters
-        let _ = unsafe { maniac::monoio::blocking::unblock_fmetadata(handle) };
-        let _ = unsafe { maniac::monoio::blocking::unblock_fread(handle, ptr, len) };
-        let _ = unsafe { maniac::monoio::blocking::unblock_fwrite(handle, ptr as *const u8, len) };
+        let _ = unsafe { maniac::blocking::unblock_fmetadata(handle) };
+        let _ = unsafe { maniac::blocking::unblock_fread(handle, ptr, len) };
+        let _ = unsafe { maniac::blocking::unblock_fwrite(handle, ptr as *const u8, len) };
     }
 }
 
@@ -58,15 +58,15 @@ fn test_fs_module_compiles() {
     let path = PathBuf::from("/tmp/test");
 
     // These should compile if our implementation is correct
-    let _ = maniac::monoio::fs::remove_dir(&path);
-    let _ = maniac::monoio::fs::remove_file(&path);
-    let _ = maniac::monoio::fs::rename(&path, &path);
+    let _ = maniac::fs::remove_dir(&path);
+    let _ = maniac::fs::remove_file(&path);
+    let _ = maniac::fs::rename(&path, &path);
 
     // File operations
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        let _ = maniac::monoio::fs::File::open(&path);
-        let _ = maniac::monoio::fs::File::create(&path);
+        let _ = maniac::fs::File::open(&path);
+        let _ = maniac::fs::File::create(&path);
     }
 }
 
@@ -74,13 +74,13 @@ fn test_fs_module_compiles() {
 #[test]
 fn test_no_unblock_calls_remain() {
     // This test would normally use static analysis to verify that
-    // no calls to `crate::monoio::blocking::unblock` remain in the fs module
+    // no calls to `crate::blocking::unblock` remain in the fs module
 
     // For now, we'll just verify that the unblock_* functions exist
     let path = PathBuf::from("/tmp/test");
 
     // These should be the new zero-allocation variants
-    let _ = maniac::monoio::blocking::unblock_open(path);
+    let _ = maniac::blocking::unblock_open(path);
 
     // If this compiles, our refactoring was successful
     assert!(true, "Zero-allocation refactoring successful");

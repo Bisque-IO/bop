@@ -37,7 +37,7 @@ mod tests {
     // Test path-based operations
     #[test]
     fn test_path_operations_no_extra_allocations() {
-        use maniac::monoio::blocking::*;
+        use maniac::blocking::*;
         // These tests verify that our zero-allocation unblock_* functions
         // don't allocate beyond what the caller already did
 
@@ -68,7 +68,7 @@ mod tests {
     // Test file descriptor operations
     #[test]
     fn test_fd_operations_no_extra_allocations() {
-        use maniac::monoio::blocking::*;
+        use maniac::blocking::*;
         let mut buf = vec![0u8; 1024];
         let ptr = buf.as_mut_ptr();
         let len = buf.len();
