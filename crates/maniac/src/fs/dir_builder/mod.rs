@@ -151,5 +151,7 @@ impl DirBuilderExt for DirBuilder {
 // currently, will use the std version of metadata, will change to use the io-uring version
 // when the statx is merge
 async fn is_dir(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+    let path = path.to_path_buf();
+    crate::blocking::unblock(move || std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()))
+        .await
 }

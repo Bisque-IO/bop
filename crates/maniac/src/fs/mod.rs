@@ -63,10 +63,17 @@ pub async fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
 
     #[cfg(windows)]
     let size = {
-        let sys_file = std::mem::ManuallyDrop::new(unsafe {
-            std::fs::File::from_raw_handle(file.as_raw_handle())
-        });
-        sys_file.metadata()?.len() as usize
+        use std::os::windows::io::AsRawHandle;
+        let handle = file.as_raw_handle() as std::os::windows::io::RawHandle;
+        let handle = handle as usize;
+        crate::blocking::unblock(move || {
+            let handle = handle as std::os::windows::io::RawHandle;
+            let sys_file = std::mem::ManuallyDrop::new(unsafe {
+                std::fs::File::from_raw_handle(handle)
+            });
+            sys_file.metadata().map(|m| m.len() as usize)
+        })
+        .await?
     };
 
     #[cfg(unix)]
@@ -96,8 +103,9 @@ pub async fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
     }
     #[cfg(not(all(target_os = "linux", feature = "iouring")))]
     {
+        crate::driver::op::Op::unlink(path)?.await.meta.result?;
         let path = path.as_ref().to_owned();
-        crate::blocking::unblock_remove_file(path).await?;
+        crate::blocking::unblock(move || std::fs::remove_file(path)).await?;
     }
     Ok(())
 }
@@ -112,7 +120,7 @@ pub async fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     #[cfg(not(all(target_os = "linux", feature = "iouring")))]
     {
         let path = path.as_ref().to_owned();
-        crate::blocking::unblock_remove_dir(path).await?;
+        crate::blocking::unblock(move || std::fs::remove_dir(path)).await?;
     }
     Ok(())
 }
@@ -128,10 +136,10 @@ pub async fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Resul
             .result?;
     }
     #[cfg(not(all(target_os = "linux", feature = "iouring")))]
-    {
+    {        
         let from = from.as_ref().to_owned();
         let to = to.as_ref().to_owned();
-        crate::blocking::unblock_rename(from, to).await?;
+        crate::blocking::unblock(move || std::fs::rename(from, to)).await?;
     }
     Ok(())
 }
