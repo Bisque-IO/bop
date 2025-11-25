@@ -1,11 +1,11 @@
 use std::{future::Future, io, path::Path};
 
 use crate::{
+    BufResult,
     buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut},
     driver::{op::Op, shared_fd::SharedFd},
     fs::OpenOptions,
     io::{AsyncReadRent, AsyncWriteRent},
-    BufResult,
 };
 
 #[cfg(unix)]
@@ -287,7 +287,7 @@ impl File {
                             "failed to fill whole buffer",
                         )),
                         buf,
-                    )
+                    );
                 }
                 Ok(n) => {
                     read += n;
@@ -437,7 +437,7 @@ impl File {
                             "failed to write whole buffer",
                         )),
                         buf,
-                    )
+                    );
                 }
                 Ok(n) => written += n,
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -476,14 +476,14 @@ impl File {
     /// }
     /// ```
     pub async fn sync_all(&self) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "iouring"))]
         {
             let op = Op::fsync(&self.fd).unwrap();
             let completion = op.await;
             completion.meta.result?;
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "iouring")))]
         {
             #[cfg(unix)]
             let fd = self.fd.raw_fd();
@@ -526,14 +526,14 @@ impl File {
     /// }
     /// ```
     pub async fn sync_data(&self) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "iouring"))]
         {
             let op = Op::datasync(&self.fd).unwrap();
             let completion = op.await;
             completion.meta.result?;
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "iouring")))]
         {
             #[cfg(unix)]
             let fd = self.fd.raw_fd();

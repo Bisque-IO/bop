@@ -264,7 +264,7 @@ impl<T: IoBufMut> OpAble for RecvMsg<T> {
                     io::Error::from_raw_os_error(WSAGetLastError())
                 )
             } else {
-                assert_eq!(dw_bytes, std::mem::size_of::<LPFN_WSARECVMSG>() as _);
+                assert_eq!(dw_bytes, std::mem::size_of::<LPFN_WSARECVMSG>() as u32);
                 wsa_recv_msg.unwrap()
             }
         });

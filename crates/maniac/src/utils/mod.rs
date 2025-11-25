@@ -26,7 +26,7 @@ pub use self::ctrlc::{CtrlC, Error as CtrlCError};
 #[cfg(feature = "utils")]
 mod bind_to_cpu_set;
 #[cfg(feature = "utils")]
-pub use bind_to_cpu_set::{bind_to_cpu_set, BindError};
+pub use bind_to_cpu_set::{BindError, bind_to_cpu_set};
 
 pub use bits::*;
 use core_affinity::CoreId;
@@ -43,9 +43,8 @@ pub fn num_cpus() -> usize {
 }
 
 pub fn cpu_cores() -> &'static [CoreId] {
-    static CPU_CORES: once_cell::sync::Lazy<Box<Option<Vec<CoreId>>>> = once_cell::sync::Lazy::new(|| {
-        Box::new(core_affinity::get_core_ids())
-    });
+    static CPU_CORES: once_cell::sync::Lazy<Box<Option<Vec<CoreId>>>> =
+        once_cell::sync::Lazy::new(|| Box::new(core_affinity::get_core_ids()));
     match (*CPU_CORES).as_ref() {
         Some(cores) => cores.as_slice(),
         None => &[],

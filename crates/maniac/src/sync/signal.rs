@@ -1257,6 +1257,4 @@ impl crate::spsc::SignalSchedule for AsyncSignalGate {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-}
+mod tests {}

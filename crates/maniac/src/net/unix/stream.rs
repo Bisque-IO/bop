@@ -6,19 +6,20 @@ use std::{
 };
 
 use super::{
-    socket_addr::{local_addr, pair, peer_addr, socket_addr, SocketAddr},
+    socket_addr::{SocketAddr, local_addr, pair, peer_addr, socket_addr},
     ucred::UCred,
 };
 use crate::{
+    BufResult,
     buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut},
     driver::{op::Op, shared_fd::SharedFd},
     io::{
-        as_fd::{AsReadFd, AsWriteFd, SharedFdWrapper},
-        operation_canceled, AsyncReadRent, AsyncWriteRent, CancelHandle, CancelableAsyncReadRent,
+        AsyncReadRent, AsyncWriteRent, CancelHandle, CancelableAsyncReadRent,
         CancelableAsyncWriteRent, Split,
+        as_fd::{AsReadFd, AsWriteFd, SharedFdWrapper},
+        operation_canceled,
     },
     net::new_socket,
-    BufResult,
 };
 
 /// UnixStream

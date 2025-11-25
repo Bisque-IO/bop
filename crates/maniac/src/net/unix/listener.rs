@@ -5,10 +5,10 @@ use std::{
     path::Path,
 };
 
-use super::{socket_addr::SocketAddr, UnixStream};
+use super::{UnixStream, socket_addr::SocketAddr};
 use crate::{
     driver::{op::Op, shared_fd::SharedFd},
-    io::{stream::Stream, CancelHandle},
+    io::{CancelHandle, stream::Stream},
     net::ListenerOpts,
 };
 

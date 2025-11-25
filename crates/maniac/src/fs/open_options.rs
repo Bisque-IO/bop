@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use std::os::unix::prelude::OpenOptionsExt;
-use std::{io, path::Path};
+use std::{io, path::{Path, PathBuf}};
 
 #[cfg(windows)]
 use windows_sys::Win32::{
@@ -345,15 +345,68 @@ impl OpenOptions {
     /// [`Other`]: io::ErrorKind::Other
     /// [`PermissionDenied`]: io::ErrorKind::PermissionDenied
     pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
-        let op = Op::open(path.as_ref(), self)?;
+        #[cfg(not(all(target_os = "linux", feature = "iouring")))]
+        {
+            // For non-io_uring systems, use blocking thread pool to avoid blocking the async runtime
+            let path = path.as_ref().to_path_buf();
+            let opts = self.clone();
+            let std_file = crate::blocking::unblock(move || {
+                let mut std_opts = std::fs::OpenOptions::new();
+                std_opts.read(opts.read);
+                std_opts.write(opts.write);
+                std_opts.append(opts.append);
+                std_opts.truncate(opts.truncate);
+                std_opts.create(opts.create);
+                std_opts.create_new(opts.create_new);
+                
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    std_opts.mode(opts.mode);
+                    std_opts.custom_flags(opts.custom_flags);
+                }
+                
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    if let Some(access_mode) = opts.access_mode {
+                        std_opts.access_mode(access_mode);
+                    }
+                    std_opts.share_mode(opts.share_mode);
+                    std_opts.attributes(opts.attributes);
+                    std_opts.security_qos_flags(opts.security_qos_flags);
+                    // Note: security_attributes is not directly settable via OpenOptionsExt
+                    // It's handled internally by the Windows API when opening
+                }
+                
+                std_opts.open(&path)
+            }).await?;
+            
+            #[cfg(unix)]
+            return Ok(File::from_std(std_file)?);
+            
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::{IntoRawHandle, FromRawHandle};
+                let handle = std_file.into_raw_handle();
+                let file = File::from_shared_fd(SharedFd::new_without_register(handle as _));
+                Ok(file)
+            }
+        }
+        
+        #[cfg(all(target_os = "linux", feature = "iouring"))]
+        {
+            // For io_uring systems, use the existing Op machinery
+            let op = Op::open(path.as_ref(), self)?;
 
-        // Await the completion of the event
-        let completion = op.await;
+            // Await the completion of the event
+            let completion = op.await;
 
-        // The file is open
-        Ok(File::from_shared_fd(SharedFd::new_without_register(
-            completion.meta.result?.into_inner() as _,
-        )))
+            // The file is open
+            Ok(File::from_shared_fd(SharedFd::new_without_register(
+                completion.meta.result?.into_inner() as _,
+            )))
+        }
     }
 
     #[cfg(unix)]

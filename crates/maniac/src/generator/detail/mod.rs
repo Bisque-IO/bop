@@ -33,7 +33,7 @@ pub mod asm;
 
 pub(crate) mod r#gen;
 
-pub use self::asm::{gen_init, initialize_call_frame, swap_registers, InitFn, Registers};
+pub use self::asm::{InitFn, Registers, gen_init, initialize_call_frame, swap_registers};
 
 #[inline]
 fn align_down(sp: *mut usize) -> *mut usize {

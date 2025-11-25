@@ -9,13 +9,13 @@ use std::{
 };
 
 use crate::{
+    BufResult,
     buf::{IoBufMut, IoVecBufMut},
     driver::{op::Op, shared_fd::SharedFd},
     io::{
-        as_fd::{AsReadFd, AsWriteFd, SharedFdWrapper},
         AsyncReadRent,
+        as_fd::{AsReadFd, AsWriteFd, SharedFdWrapper},
     },
-    BufResult,
 };
 
 /// Unix pipe.

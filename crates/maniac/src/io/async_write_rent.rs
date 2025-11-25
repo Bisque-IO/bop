@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::{
-    buf::{IoBuf, IoVecBuf},
     BufResult,
+    buf::{IoBuf, IoVecBuf},
 };
 
 /// The `AsyncWriteRent` trait provides asynchronous writing capabilities for structs

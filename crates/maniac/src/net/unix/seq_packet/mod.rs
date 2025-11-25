@@ -8,8 +8,8 @@ use std::{
 };
 
 use super::{
-    socket_addr::{local_addr, pair, peer_addr, socket_addr},
     SocketAddr,
+    socket_addr::{local_addr, pair, peer_addr, socket_addr},
 };
 use crate::{
     buf::{IoBuf, IoBufMut},

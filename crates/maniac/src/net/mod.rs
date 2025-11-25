@@ -19,8 +19,8 @@ use {
     windows_sys::Win32::{
         Foundation::NO_ERROR,
         Networking::WinSock::{
-            closesocket, ioctlsocket, socket, WSACleanup, WSAStartup, ADDRESS_FAMILY, FIONBIO,
-            INVALID_SOCKET, WINSOCK_SOCKET_TYPE,
+            ADDRESS_FAMILY, FIONBIO, INVALID_SOCKET, WINSOCK_SOCKET_TYPE, WSACleanup, WSAStartup,
+            closesocket, ioctlsocket, socket,
         },
     },
 };

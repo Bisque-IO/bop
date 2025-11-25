@@ -13,7 +13,7 @@ mod ucred;
 mod seq_packet;
 pub use datagram::UnixDatagram;
 pub use listener::UnixListener;
-pub use pipe::{new_pipe, Pipe};
+pub use pipe::{Pipe, new_pipe};
 #[cfg(target_os = "linux")]
 pub use seq_packet::{UnixSeqpacket, UnixSeqpacketListener};
 pub use socket_addr::SocketAddr;

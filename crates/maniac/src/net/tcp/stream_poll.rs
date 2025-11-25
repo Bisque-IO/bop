@@ -4,13 +4,13 @@ use std::{io, net::SocketAddr, time::Duration};
 
 #[cfg(unix)]
 use {
-    libc::{shutdown, SHUT_WR},
+    libc::{SHUT_WR, shutdown},
     std::os::fd::AsRawFd,
 };
 #[cfg(windows)]
 use {
     std::os::windows::io::AsRawSocket,
-    windows_sys::Win32::Networking::WinSock::{shutdown, SD_SEND as SHUT_WR},
+    windows_sys::Win32::Networking::WinSock::{SD_SEND as SHUT_WR, shutdown},
 };
 
 use super::TcpStream;

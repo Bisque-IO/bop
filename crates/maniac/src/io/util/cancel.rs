@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicBool},
 };
 
 use crate::driver::op::OpCanceller;

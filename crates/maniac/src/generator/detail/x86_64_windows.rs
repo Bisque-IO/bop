@@ -237,4 +237,3 @@ pub fn initialize_call_frame(
         *mut_offset(sp, -1) = 0;
     }
 }
-

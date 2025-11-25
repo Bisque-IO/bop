@@ -16,10 +16,12 @@ This library is an offshoot of [Asynchronix][asynchronix], an ongoing effort at
 a high performance asynchronous computation framework for system simulation.
 
 [atomic-waker]: https://docs.rs/atomic-waker/latest/atomic_waker/
+
 [eventcount]: https://www.1024cores.net/home/lock-free-algorithms/eventcounts
+
 [asynchronix]: https://github.com/asynchronics/asynchronix
 [^spinlocks]: The implementation of [AtomicWaker][atomic-waker] yields to the
-    runtime on contention, which is in effect an executor-mediated spinlock.
+runtime on contention, which is in effect an executor-mediated spinlock.
 
 ## Usage
 
@@ -110,7 +112,6 @@ absence of data races.
 
 [Loom]: https://github.com/tokio-rs/loom
 
-
 ## Implementation details
 
 A distinguishing feature of `diatomic-waker` is its use of two waker storage
@@ -139,12 +140,10 @@ atomic Read-Modify-Write (RMW) operations are:
 * very few RMWs and predictable cost on contention due to the absence of
   spinlocks.
 
-
 ## License
 
 This software is licensed under the [Apache License, Version 2.0](LICENSE-APACHE) or the
 [MIT license](LICENSE-MIT), at your option.
-
 
 ### Contribution
 

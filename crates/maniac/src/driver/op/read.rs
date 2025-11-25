@@ -9,10 +9,10 @@ use io_uring::{opcode, types};
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
 #[cfg(any(feature = "poll", feature = "poll-io"))]
-use super::{driver::ready::Direction, MaybeFd};
+use super::{MaybeFd, driver::ready::Direction};
 
-use crate::buf::{IoBufMut, IoVecBufMut};
 use crate::BufResult;
+use crate::buf::{IoBufMut, IoVecBufMut};
 
 macro_rules! read_result {
     ($($name:ident<$T:ident : $Trait:ident> { $buf:ident }),* $(,)?) => {
@@ -191,7 +191,7 @@ impl<T: IoVecBufMut> OpAble for ReadVec<T> {
         // There is no `readv`-like syscall of file on windows, but this will be used to send
         // socket message.
 
-        use windows_sys::Win32::Networking::WinSock::{WSAGetLastError, WSARecv, WSAESHUTDOWN};
+        use windows_sys::Win32::Networking::WinSock::{WSAESHUTDOWN, WSAGetLastError, WSARecv};
 
         let mut nread = 0;
         let mut flags = 0;
@@ -271,7 +271,7 @@ impl<T: IoVecBufMut> OpAble for ReadVecAt<T> {
         // socket message.
 
         use windows_sys::Win32::{
-            Networking::WinSock::{WSAGetLastError, WSARecv, WSAESHUTDOWN},
+            Networking::WinSock::{WSAESHUTDOWN, WSAGetLastError, WSARecv},
             System::IO::OVERLAPPED,
         };
 
@@ -350,7 +350,7 @@ pub(crate) mod impls {
     use std::ffi::c_void;
 
     use windows_sys::Win32::{
-        Foundation::{GetLastError, ERROR_HANDLE_EOF, TRUE},
+        Foundation::{ERROR_HANDLE_EOF, GetLastError, TRUE},
         Storage::FileSystem::ReadFile,
         System::IO::OVERLAPPED,
     };

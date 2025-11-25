@@ -33,8 +33,8 @@ pub(crate) use util::operation_canceled;
 #[cfg(all(target_os = "linux", feature = "splice"))]
 pub use util::zero_copy;
 pub use util::{
-    copy, BufReader, BufWriter, CancelHandle, Canceller, OwnedReadHalf, OwnedWriteHalf,
-    PrefixedReadIo, Split, Splitable,
+    BufReader, BufWriter, CancelHandle, Canceller, OwnedReadHalf, OwnedWriteHalf, PrefixedReadIo,
+    Split, Splitable, copy,
 };
 #[cfg(feature = "poll-io")]
 /// Convert a completion-based io to a poll-based io.

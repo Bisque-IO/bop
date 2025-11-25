@@ -12,8 +12,7 @@ pub mod io_wrapper;
 
 // Re-export commonly used types
 #[cfg(feature = "tls-rustls")]
-pub use rustls::{TlsConnector as RustlsConnector, TlsAcceptor as RustlsAcceptor};
+pub use rustls::{TlsAcceptor as RustlsAcceptor, TlsConnector as RustlsConnector};
 
 #[cfg(feature = "tls-native")]
-pub use native_tls::{TlsConnector as NativeTlsConnector, TlsAcceptor as NativeTlsAcceptor};
-
+pub use native_tls::{TlsAcceptor as NativeTlsAcceptor, TlsConnector as NativeTlsConnector};

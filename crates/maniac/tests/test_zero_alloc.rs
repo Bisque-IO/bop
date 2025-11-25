@@ -6,7 +6,7 @@ mod tests {
 
     // Track allocations for tests
     #[cfg(feature = "track-allocations")]
-    use std::alloc::{System, GlobalAlloc, Layout};
+    use std::alloc::{GlobalAlloc, Layout, System};
 
     #[cfg(feature = "track-allocations")]
     #[global_allocator]
@@ -24,12 +24,14 @@ mod tests {
     #[cfg(feature = "track-allocations")]
     unsafe impl GlobalAlloc for TrackingAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            self.allocated.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
+            self.allocated
+                .fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
             self.system.alloc(layout)
         }
 
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            self.allocated.fetch_sub(layout.size(), std::sync::atomic::Ordering::Relaxed);
+            self.allocated
+                .fetch_sub(layout.size(), std::sync::atomic::Ordering::Relaxed);
             self.system.dealloc(ptr, layout)
         }
     }
@@ -103,7 +105,7 @@ mod tests {
             use std::os::windows::io::RawHandle;
             // On Windows, 1 is not a valid handle value usually, but for compile/mock test it's fine
             // as long as we don't execute the task.
-            let handle: RawHandle = 1 as _; 
+            let handle: RawHandle = 1 as _;
 
             let task = unsafe { unblock_fmetadata(handle) };
             drop(task);

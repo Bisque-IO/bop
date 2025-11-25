@@ -1,7 +1,7 @@
-use crate::generator::rt::ContextStack;
-use crate::generator::stack::{overflow, Func};
-use crate::generator::yield_::yield_now;
 use crate::generator::Error;
+use crate::generator::rt::ContextStack;
+use crate::generator::stack::{Func, overflow};
+use crate::generator::yield_::yield_now;
 use std::any::Any;
 use std::panic;
 

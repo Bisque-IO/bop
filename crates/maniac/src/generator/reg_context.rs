@@ -1,4 +1,4 @@
-use crate::generator::detail::{initialize_call_frame, swap_registers, InitFn, Registers};
+use crate::generator::detail::{InitFn, Registers, initialize_call_frame, swap_registers};
 use crate::generator::stack::Stack;
 
 #[derive(Debug)]
@@ -70,8 +70,7 @@ mod test {
         let func: fn() = unsafe { transmute(f) };
         func();
 
-        let ctx: &RegContext =
-            unsafe { &*std::ptr::with_exposed_provenance::<RegContext>(arg) };
+        let ctx: &RegContext = unsafe { &*std::ptr::with_exposed_provenance::<RegContext>(arg) };
         RegContext::load(ctx);
 
         unreachable!("Should never comeback");

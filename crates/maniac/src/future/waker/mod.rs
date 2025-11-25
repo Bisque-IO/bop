@@ -173,8 +173,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::future::block_on;
-
-    use super::*;
+    use crate::future::waker::{DiatomicWaker, WakeSink};
 
     #[test]
     fn waker_wait_until() {

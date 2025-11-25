@@ -8,8 +8,8 @@ use std::{
 
 use super::CancelHandle;
 use crate::{
-    io::{AsyncReadRent, AsyncWriteRent, CancelableAsyncReadRent, CancelableAsyncWriteRent},
     BufResult,
+    io::{AsyncReadRent, AsyncWriteRent, CancelableAsyncReadRent, CancelableAsyncWriteRent},
 };
 
 /// Owned Read Half Part

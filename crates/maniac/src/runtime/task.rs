@@ -20,7 +20,10 @@ use libc::{MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, mmap, 
 use libc::{MAP_HUGE_2MB, MAP_HUGETLB};
 
 #[cfg(windows)]
-use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_LARGE_PAGES, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
+use windows_sys::Win32::System::Memory::{
+    MEM_COMMIT, MEM_LARGE_PAGES, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc,
+    VirtualFree,
+};
 
 pub type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -814,7 +817,7 @@ impl Task {
     pub(crate) fn clear_yielded(&self) {
         self.yielded.store(false, Ordering::Relaxed);
     }
-    
+
     /// Mark this task as yielded (for preemption or cooperative yields)
     #[inline(always)]
     pub(crate) fn mark_yielded(&self) {
@@ -950,9 +953,12 @@ impl Task {
         self.yielded.store(false, Ordering::Relaxed);
         self.cpu_time_enabled.store(false, Ordering::Relaxed);
         self.future_ptr.store(ptr::null_mut(), Ordering::Relaxed);
-        self.pinned_generator_ptr.store(ptr::null_mut(), Ordering::Relaxed);
-        self.pinned_generator_ownership.store(GeneratorOwnership::Owned as u8, Ordering::Relaxed);
-        self.generator_run_mode.store(GeneratorRunMode::None as u8, Ordering::Relaxed);
+        self.pinned_generator_ptr
+            .store(ptr::null_mut(), Ordering::Relaxed);
+        self.pinned_generator_ownership
+            .store(GeneratorOwnership::Owned as u8, Ordering::Relaxed);
+        self.generator_run_mode
+            .store(GeneratorRunMode::None as u8, Ordering::Relaxed);
         unsafe {
             let stats = &mut *self.stats.get();
             stats.reset();
@@ -973,19 +979,28 @@ impl Task {
         if ptr.is_null() {
             GeneratorGuard::empty(self)
         } else {
-            GeneratorGuard::new(self, unsafe { Generator::<'_, (), usize>::from_raw(ptr as *mut usize) })
+            GeneratorGuard::new(self, unsafe {
+                Generator::<'_, (), usize>::from_raw(ptr as *mut usize)
+            })
         }
     }
 
     /// Pin a generator to this task
     /// Safety: Only call from the worker thread that owns this task
     #[inline(always)]
-    pub unsafe fn pin_generator(&self, generator_ptr: *mut usize, ownership: GeneratorOwnership, mode: GeneratorRunMode) {
-        self.pinned_generator_ptr.store(generator_ptr as *mut (), Ordering::Release);
-        self.pinned_generator_ownership.store(ownership as u8, Ordering::Release);
+    pub unsafe fn pin_generator(
+        &self,
+        generator_ptr: *mut usize,
+        ownership: GeneratorOwnership,
+        mode: GeneratorRunMode,
+    ) {
+        self.pinned_generator_ptr
+            .store(generator_ptr as *mut (), Ordering::Release);
+        self.pinned_generator_ownership
+            .store(ownership as u8, Ordering::Release);
         self.generator_run_mode.store(mode as u8, Ordering::Release);
     }
-    
+
     /// Get the generator run mode
     #[inline(always)]
     pub fn generator_run_mode(&self) -> GeneratorRunMode {
@@ -1006,7 +1021,7 @@ impl Task {
     pub fn is_generator_owned_by_worker(&self) -> bool {
         self.pinned_generator_ownership.load(Ordering::Relaxed) == GeneratorOwnership::Worker as u8
     }
-    
+
     /// Set the generator run mode
     /// Safety: Only call from the worker thread that owns this task
     #[inline(always)]
@@ -1018,7 +1033,9 @@ impl Task {
     /// Safety: Only call from the worker thread that owns this task
     #[inline(always)]
     pub unsafe fn clear_pinned_generator(&self) {
-        let ptr = self.pinned_generator_ptr.swap(ptr::null_mut(), Ordering::AcqRel);
+        let ptr = self
+            .pinned_generator_ptr
+            .swap(ptr::null_mut(), Ordering::AcqRel);
     }
 }
 
@@ -1062,7 +1079,9 @@ impl<'a> Drop for GeneratorGuard<'a> {
                 core::mem::forget(generator);
             }
         } else {
-            unsafe { self.task.clear_pinned_generator(); }
+            unsafe {
+                self.task.clear_pinned_generator();
+            }
         }
     }
 }

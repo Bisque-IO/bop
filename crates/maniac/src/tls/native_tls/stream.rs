@@ -1,9 +1,9 @@
 use std::io::{self, Read, Write};
 
 use crate::{
+    BufResult,
     buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut, RawBuf},
     io::{AsyncReadRent, AsyncWriteRent, Split},
-    BufResult,
 };
 
 use super::utils::{Buffers, IOWrapper};

@@ -5,7 +5,10 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::SysStack;
-use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_GUARD, PAGE_READONLY, PAGE_READWRITE};
+use windows_sys::Win32::System::Memory::{
+    MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_GUARD, PAGE_READONLY, PAGE_READWRITE, VirtualAlloc,
+    VirtualFree, VirtualProtect,
+};
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 
 #[path = "overflow_windows.rs"]
@@ -81,4 +84,3 @@ pub fn min_stack_size() -> usize {
 pub fn max_stack_size() -> usize {
     usize::MAX
 }
-

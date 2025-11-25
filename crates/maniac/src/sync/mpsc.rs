@@ -14,16 +14,16 @@
 
 use super::signal::AsyncSignalGate;
 use super::signal::AsyncSignalWaker;
+use crate::CachePadded;
 use crate::spsc::Spsc;
 use crate::spsc::UnboundedSpsc;
 use crate::sync::signal::Signal;
 use crate::utils::bits::find_nearest;
-use crate::CachePadded;
 use crate::{PopError, PushError};
 use std::marker::PhantomData;
 use std::mem::{ManuallyDrop, MaybeUninit};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::thread;
 
 use std::pin::Pin;
@@ -630,7 +630,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
             // This synchronizes with the Release fence in Sender::drop() and ensures we see
             // any items pushed before the last producer dropped.
             std::sync::atomic::fence(Ordering::Acquire);
-            
+
             // Re-check state after attempting to pop (producer_count may have changed)
             let is_closed = inner.is_closed();
             // Use Relaxed here since the fence above provides the necessary synchronization
@@ -1772,8 +1772,10 @@ pub fn async_blocking_mpsc_from_parts<T, const P: usize, const NUM_SEGS_P2: usiz
 /// ```
 pub mod unbounded {
     use super::*;
-    use crate::spsc::unbounded::{UnboundedSender as UnboundedSender_, UnboundedReceiver as UnboundedReceiver_};
     use crate::spsc::NoOpSignal;
+    use crate::spsc::unbounded::{
+        UnboundedReceiver as UnboundedReceiver_, UnboundedSender as UnboundedSender_,
+    };
 
     /// A producer slot for unbounded MPSC containing an UnboundedSpsc queue
     struct UnboundedProducerSlot<T> {
@@ -1913,7 +1915,7 @@ pub mod unbounded {
             // Arc reference counting: We created an Arc::new (refcount=1), then cloned it
             // and converted the clone to raw via Arc::into_raw(Arc::clone(&slot)).
             // - Raw pointer stored in array represents 1 Arc reference
-            // - Original slot_arc variable holds the other Arc reference  
+            // - Original slot_arc variable holds the other Arc reference
             // - Total: 2 references, properly balanced for array + Sender ownership
             let slot_arc = slot_arc.expect("slot arc missing");
 
@@ -1962,9 +1964,7 @@ pub mod unbounded {
     }
 
     /// Create a new unbounded MPSC queue with a custom waker
-    pub fn unbounded_new_with_waker<T>(
-        waker: Arc<AsyncSignalWaker>,
-    ) -> UnboundedReceiver<T> {
+    pub fn unbounded_new_with_waker<T>(waker: Arc<AsyncSignalWaker>) -> UnboundedReceiver<T> {
         let mut queues = Vec::with_capacity(MAX_QUEUES);
         for _ in 0..MAX_QUEUES {
             queues.push(AtomicPtr::new(core::ptr::null_mut()));
@@ -2057,9 +2057,7 @@ pub mod unbounded {
 
     impl<T> Clone for UnboundedSender<T> {
         fn clone(&self) -> Self {
-            self.inner
-                .create_sender()
-                .expect("too many senders")
+            self.inner.create_sender().expect("too many senders")
         }
     }
 
@@ -2069,13 +2067,13 @@ pub mod unbounded {
             // The slot itself remains alive because the receiver holds a reference via
             // the raw pointer in the queues array, and the Arc in the array keeps it alive
             self.slot.sender.close_channel();
-            
+
             // Release fence to ensure all writes to the queue (from close_channel and
             // any prior pushes) are visible before we decrement producer_count.
             // This synchronizes with the Acquire fence in UnboundedReceiver::try_pop_with_waker(),
             // ensuring the receiver sees any items pushed before this sender was dropped.
             std::sync::atomic::fence(Ordering::Release);
-            
+
             // Decrement the active producer count using Release ordering to publish
             // the fence above and all prior writes.
             self.inner.producer_count.fetch_sub(1, Ordering::Release);
@@ -2125,7 +2123,7 @@ pub mod unbounded {
         pub fn try_pop_with_waker(&mut self) -> Result<(T, &DiatomicWaker), PopError> {
             // For unbounded, iterate through all registered producer slots
             let max_producer_id = self.inner.max_producer_id.load(Ordering::Acquire);
-            
+
             // Try to pop from any queue
             for producer_id in 0..=max_producer_id {
                 let slot_ptr = self.inner.queues[producer_id].load(Ordering::Acquire);
@@ -2146,7 +2144,7 @@ pub mod unbounded {
             // This synchronizes with the Release fence in UnboundedSender::drop() and ensures
             // we see any items pushed before the last producer dropped.
             std::sync::atomic::fence(Ordering::Acquire);
-            
+
             // Check if the channel is closed or all producers are gone
             let is_closed = self.inner.is_closed();
             // Use Relaxed here since the fence above provides the necessary synchronization
@@ -2167,7 +2165,7 @@ pub mod unbounded {
                         return Ok((value, &slot.space_waker));
                     }
                 }
-                
+
                 Err(PopError::Closed)
             } else {
                 Err(PopError::Empty)
@@ -2211,7 +2209,7 @@ pub mod unbounded {
 
             let producer_id = signal_index * 64 + (signal_bit as usize);
             let slot_ptr = self.inner.queues[producer_id].load(Ordering::Acquire);
-            
+
             if slot_ptr.is_null() {
                 self.misses += 1;
                 if empty {
@@ -2278,10 +2276,7 @@ pub mod unbounded {
     }
 
     impl<T> AsyncUnboundedMpscSender<T> {
-        fn new(
-            sender: UnboundedSender<T>,
-            shared: Arc<UnboundedAsyncMpscShared<T>>,
-        ) -> Self {
+        fn new(sender: UnboundedSender<T>, shared: Arc<UnboundedAsyncMpscShared<T>>) -> Self {
             Self { sender, shared }
         }
 
@@ -2331,10 +2326,7 @@ pub mod unbounded {
     }
 
     impl<T> AsyncUnboundedMpscReceiver<T> {
-        fn new(
-            receiver: UnboundedReceiver<T>,
-            shared: Arc<UnboundedAsyncMpscShared<T>>,
-        ) -> Self {
+        fn new(receiver: UnboundedReceiver<T>, shared: Arc<UnboundedAsyncMpscShared<T>>) -> Self {
             Self { receiver, shared }
         }
 
@@ -2411,10 +2403,7 @@ pub mod unbounded {
     }
 
     impl<T> BlockingUnboundedMpscSender<T> {
-        fn new(
-            sender: UnboundedSender<T>,
-            shared: Arc<UnboundedAsyncMpscShared<T>>,
-        ) -> Self {
+        fn new(sender: UnboundedSender<T>, shared: Arc<UnboundedAsyncMpscShared<T>>) -> Self {
             let parker = Parker::new();
             let parker_waker = Arc::new(ThreadUnparker {
                 unparker: parker.unparker(),
@@ -2476,10 +2465,7 @@ pub mod unbounded {
     }
 
     impl<T> BlockingUnboundedMpscReceiver<T> {
-        fn new(
-            receiver: UnboundedReceiver<T>,
-            shared: Arc<UnboundedAsyncMpscShared<T>>,
-        ) -> Self {
+        fn new(receiver: UnboundedReceiver<T>, shared: Arc<UnboundedAsyncMpscShared<T>>) -> Self {
             Self { receiver, shared }
         }
 
@@ -2533,9 +2519,9 @@ pub mod unbounded {
         }
     }
 
-
     /// Create an unbounded async MPSC queue
-    pub fn async_unbounded_mpsc<T>() -> (AsyncUnboundedMpscSender<T>, AsyncUnboundedMpscReceiver<T>) {
+    pub fn async_unbounded_mpsc<T>() -> (AsyncUnboundedMpscSender<T>, AsyncUnboundedMpscReceiver<T>)
+    {
         let (sender, receiver) = unbounded_new_with_sender();
         let inner = receiver.inner.clone();
         let shared = Arc::new(UnboundedAsyncMpscShared::new(inner));
@@ -2545,7 +2531,10 @@ pub mod unbounded {
     }
 
     /// Create a blocking unbounded MPSC queue
-    pub fn blocking_unbounded_mpsc<T>() -> (BlockingUnboundedMpscSender<T>, BlockingUnboundedMpscReceiver<T>) {
+    pub fn blocking_unbounded_mpsc<T>() -> (
+        BlockingUnboundedMpscSender<T>,
+        BlockingUnboundedMpscReceiver<T>,
+    ) {
         let (sender, receiver) = unbounded_new_with_sender();
         let inner = receiver.inner.clone();
         let shared = Arc::new(UnboundedAsyncMpscShared::new(inner));
@@ -2555,7 +2544,10 @@ pub mod unbounded {
     }
 
     /// Create a mixed unbounded MPSC with blocking senders and async receiver
-    pub fn blocking_async_unbounded_mpsc<T>() -> (BlockingUnboundedMpscSender<T>, AsyncUnboundedMpscReceiver<T>) {
+    pub fn blocking_async_unbounded_mpsc<T>() -> (
+        BlockingUnboundedMpscSender<T>,
+        AsyncUnboundedMpscReceiver<T>,
+    ) {
         let (sender, receiver) = unbounded_new_with_sender();
         let inner = receiver.inner.clone();
         let shared = Arc::new(UnboundedAsyncMpscShared::new(inner));
@@ -2565,7 +2557,10 @@ pub mod unbounded {
     }
 
     /// Create a mixed unbounded MPSC with async senders and blocking receiver
-    pub fn async_blocking_unbounded_mpsc<T>() -> (AsyncUnboundedMpscSender<T>, BlockingUnboundedMpscReceiver<T>) {
+    pub fn async_blocking_unbounded_mpsc<T>() -> (
+        AsyncUnboundedMpscSender<T>,
+        BlockingUnboundedMpscReceiver<T>,
+    ) {
         let (sender, receiver) = unbounded_new_with_sender();
         let inner = receiver.inner.clone();
         let shared = Arc::new(UnboundedAsyncMpscShared::new(inner));
@@ -2578,8 +2573,8 @@ pub mod unbounded {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::Duration;
 
@@ -3312,7 +3307,7 @@ mod tests {
         let consumer_handle = thread::spawn(move || {
             let mut received = Vec::new();
             let mut receiver = receiver_clone.lock().unwrap();
-            
+
             loop {
                 match receiver.recv() {
                     Ok(value) => {
@@ -3332,10 +3327,10 @@ mod tests {
         for handle in producer_handles {
             handle.join().unwrap();
         }
-        
+
         // Small sleep to ensure all items are settled in queues
         thread::sleep(Duration::from_millis(10));
-        
+
         drop(sender); // Close the channel
 
         // Wait for consumer
@@ -3343,8 +3338,13 @@ mod tests {
         received.sort();
 
         // Verify all items received
-        assert_eq!(received.len(), 1000, "Expected 1000 items but got {}", received.len());
-        
+        assert_eq!(
+            received.len(),
+            1000,
+            "Expected 1000 items but got {}",
+            received.len()
+        );
+
         // Build expected values: each producer sends 250 items in its range
         let mut expected = Vec::new();
         for producer_id in 0..4 {
@@ -3353,7 +3353,7 @@ mod tests {
             }
         }
         expected.sort();
-        
+
         assert_eq!(received, expected);
     }
 
@@ -3380,13 +3380,13 @@ mod tests {
         let receiver_clone = Arc::clone(&receiver);
         let receiver_task = tokio::spawn(async move {
             let mut items: Vec<u64> = Vec::new();
-            
+
             loop {
                 let result = {
                     let mut receiver_guard = receiver_clone.lock().unwrap();
                     receiver_guard.try_recv()
                 };
-                
+
                 match result {
                     Ok(value) => {
                         items.push(value);
@@ -3405,10 +3405,10 @@ mod tests {
         for task in producer_tasks {
             task.await.unwrap();
         }
-        
+
         // Small delay to ensure all items are settled
         tokio::time::sleep(Duration::from_millis(10)).await;
-        
+
         drop(sender); // Close the sender
 
         // Wait for receiver task
@@ -3416,8 +3416,13 @@ mod tests {
 
         // Verify all items received
         recv_items.sort();
-        assert_eq!(recv_items.len(), 1000, "Expected 1000 items but got {}", recv_items.len());
-        
+        assert_eq!(
+            recv_items.len(),
+            1000,
+            "Expected 1000 items but got {}",
+            recv_items.len()
+        );
+
         // Build expected values: each producer sends 250 items in its range
         let mut expected = Vec::new();
         for producer_id in 0..4 {
@@ -3426,7 +3431,7 @@ mod tests {
             }
         }
         expected.sort();
-        
+
         assert_eq!(recv_items, expected);
     }
 

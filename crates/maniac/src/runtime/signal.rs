@@ -872,6 +872,4 @@ impl SignalSchedule for SignalGate {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-}
+mod tests {}

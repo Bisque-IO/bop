@@ -1,6 +1,6 @@
 use std::{
-    panic,
     collections::HashMap,
+    panic,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
@@ -26,7 +26,6 @@ impl TickHandlerRegistration {
             handler_id,
         }
     }
-
 }
 
 impl Drop for TickHandlerRegistration {
@@ -185,7 +184,10 @@ impl TickService {
     ///
     /// Note: Must be called while holding the handlers lock to prevent race conditions.
     fn recalculate_tick_duration(&self, handlers: &mut HashMap<u64, TickHandlerState>) {
-        let default_duration_ns = self.default_tick_duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let default_duration_ns = self
+            .default_tick_duration
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
 
         let min_handler_duration_ns = handlers
             .values()
@@ -205,7 +207,8 @@ impl TickService {
 
         // Always store the new base duration and recalculate intervals
         // We hold the handlers lock so this is safe from race conditions
-        self.tick_duration_ns.store(min_handler_duration_ns, Ordering::Relaxed);
+        self.tick_duration_ns
+            .store(min_handler_duration_ns, Ordering::Relaxed);
 
         // Recalculate intervals for all handlers with the new base duration
         for state in handlers.values_mut() {
@@ -230,7 +233,7 @@ impl TickService {
         handler: Arc<dyn TickHandler>,
     ) -> Option<TickHandlerRegistration> {
         let mut handlers = self.handlers.lock().expect("handlers lock poisoned");
-        
+
         let handler_duration_ns = handler.tick_duration().as_nanos();
         debug_assert!(
             handler_duration_ns <= u128::from(u64::MAX),
@@ -246,16 +249,19 @@ impl TickService {
         } else {
             (handler_duration_ns + current_base_ns - 1) / current_base_ns // Round up
         };
-        
+
         let handler_id = self.next_handler_id.fetch_add(1, Ordering::Relaxed);
-        
-        handlers.insert(handler_id, TickHandlerState {
-            handler: Arc::downgrade(&handler),
+
+        handlers.insert(
             handler_id,
-            tick_interval,
-            handler_tick_count: 0,
-            stats: TickStats::default(),
-        });
+            TickHandlerState {
+                handler: Arc::downgrade(&handler),
+                handler_id,
+                tick_interval,
+                handler_tick_count: 0,
+                stats: TickStats::default(),
+            },
+        );
 
         // Update tick duration and recalculate intervals if needed
         self.recalculate_tick_duration(&mut handlers);
@@ -267,9 +273,9 @@ impl TickService {
     /// Returns true if a handler was found and removed.
     fn unregister(&self, handler_id: u64) -> bool {
         let mut handlers = self.handlers.lock().expect("handlers lock poisoned");
-        
+
         let removed = handlers.remove(&handler_id).is_some();
-        
+
         if removed {
             // Recalculate tick duration and intervals after removing a handler
             self.recalculate_tick_duration(&mut handlers);
@@ -301,36 +307,42 @@ impl TickService {
                 // Calculate target time for this tick to maintain precise timing
                 // We calculate based on the next tick to know when to wake up
                 let next_tick = tick_count.wrapping_add(1);
-                let target_time = if let Some(target_duration) = tick_duration.checked_mul(next_tick as u32) {
-                    start.checked_add(target_duration).unwrap_or_else(|| {
-                        // If we overflow Instant, just use now + tick_duration as fallback
+                let target_time =
+                    if let Some(target_duration) = tick_duration.checked_mul(next_tick as u32) {
+                        start.checked_add(target_duration).unwrap_or_else(|| {
+                            // If we overflow Instant, just use now + tick_duration as fallback
+                            Instant::now() + tick_duration
+                        })
+                    } else {
+                        // tick_count is too large to multiply, use incremental approach
                         Instant::now() + tick_duration
-                    })
-                } else {
-                    // tick_count is too large to multiply, use incremental approach
-                    Instant::now() + tick_duration
-                };
+                    };
 
                 if service.shutdown.load(Ordering::Acquire) {
                     // Graceful shutdown: notify all handlers with timeout
                     let handlers = service.handlers.lock().expect("handlers lock poisoned");
                     let shutdown_start = Instant::now();
-                    
+
                     for (_handler_id, state) in handlers.iter() {
                         // Check if we've exceeded the shutdown timeout
-                        let shutdown_timeout = Duration::from_nanos(service.shutdown_timeout_ns.load(Ordering::Relaxed));
+                        let shutdown_timeout = Duration::from_nanos(
+                            service.shutdown_timeout_ns.load(Ordering::Relaxed),
+                        );
                         if shutdown_start.elapsed() > shutdown_timeout {
                             eprintln!("Warning: Shutdown timeout exceeded, forcing exit");
                             break;
                         }
-                        
+
                         // Call on_shutdown with panic isolation
                         if let Some(handler) = state.handler.upgrade() {
                             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                                 handler.on_shutdown();
                             }));
-                            if service.log_handler_panics.load(Ordering::Relaxed) && result.is_err() {
-                                eprintln!("Warning: Handler on_shutdown() panicked during shutdown");
+                            if service.log_handler_panics.load(Ordering::Relaxed) && result.is_err()
+                            {
+                                eprintln!(
+                                    "Warning: Handler on_shutdown() panicked during shutdown"
+                                );
                                 service.error_count.fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -348,7 +360,7 @@ impl TickService {
                     let estimated_handlers = handlers.len();
                     let mut calls = Vec::with_capacity(estimated_handlers);
                     let mut dead_ids = Vec::new(); // Usually empty, so no pre-allocation
-                    
+
                     for (handler_id, state) in handlers.iter_mut() {
                         // Check if handler is still alive - if not, mark for cleanup immediately
                         // This ensures dead handlers are cleaned up promptly regardless of interval
@@ -365,11 +377,7 @@ impl TickService {
                         // Only call on_tick if tick_count is a multiple of this handler's interval
                         if tick_count % state.tick_interval == 0 {
                             if let Some(handler) = handler_alive {
-                                calls.push((
-                                    handler,
-                                    state.handler_tick_count,
-                                    *handler_id,
-                                ));
+                                calls.push((handler, state.handler_tick_count, *handler_id));
                                 state.handler_tick_count = state.handler_tick_count.wrapping_add(1);
                             }
                         } else {
@@ -386,7 +394,7 @@ impl TickService {
                     for dead_id in dead_handler_ids {
                         handlers.remove(&dead_id);
                     }
-                    
+
                     // Use the shared recalculation method to update tick duration and intervals
                     service.recalculate_tick_duration(&mut handlers);
                 }
@@ -402,7 +410,10 @@ impl TickService {
                         handler.on_tick(handler_tick_count, now_ns);
                     }));
                     if service.log_handler_panics.load(Ordering::Relaxed) && result.is_err() {
-                        eprintln!("Warning: Handler on_tick() panicked for tick {}", tick_count);
+                        eprintln!(
+                            "Warning: Handler on_tick() panicked for tick {}",
+                            tick_count
+                        );
                         service.error_count.fetch_add(1, Ordering::Relaxed);
                     }
 
@@ -418,7 +429,8 @@ impl TickService {
                     let mut handlers = service.handlers.lock().expect("handlers lock poisoned");
                     for (handler_id, handler_duration_ns) in stats_updates {
                         if let Some(state) = handlers.get_mut(&handler_id) {
-                            let prev_total = state.stats.total_ticks.fetch_add(1, Ordering::Relaxed);
+                            let prev_total =
+                                state.stats.total_ticks.fetch_add(1, Ordering::Relaxed);
                             let new_total = prev_total + 1;
 
                             // Update running average for handler duration
@@ -428,7 +440,8 @@ impl TickService {
                                 let prev_avg = state
                                     .stats
                                     .avg_tick_loop_duration_ns
-                                    .load(Ordering::Relaxed) as i64;
+                                    .load(Ordering::Relaxed)
+                                    as i64;
                                 let new_avg = prev_avg
                                     + ((handler_duration_ns as i64 - prev_avg) / new_total as i64);
                                 new_avg as u64
@@ -465,7 +478,10 @@ impl TickService {
                     // Behind schedule (or exactly on time)
                     let drift = after_sleep.duration_since(target_time).as_nanos();
                     if drift > i64::MAX as u128 {
-                        eprintln!("Warning: Extreme positive drift detected ({} ns), exceeding i64::MAX", drift);
+                        eprintln!(
+                            "Warning: Extreme positive drift detected ({} ns), exceeding i64::MAX",
+                            drift
+                        );
                         i64::MAX
                     } else {
                         drift as i64
@@ -474,7 +490,10 @@ impl TickService {
                     // Ahead of schedule (woke up early) - negative drift
                     let drift = target_time.duration_since(after_sleep).as_nanos();
                     if drift > i64::MAX as u128 {
-                        eprintln!("Warning: Extreme negative drift detected ({} ns), exceeding i64::MAX", drift);
+                        eprintln!(
+                            "Warning: Extreme negative drift detected ({} ns), exceeding i64::MAX",
+                            drift
+                        );
                         i64::MIN
                     } else {
                         -(drift as i64)
@@ -556,7 +575,12 @@ impl TickService {
         }
 
         // Join tick thread
-        if let Some(handle) = self.tick_thread.lock().expect("tick_thread lock poisoned").take() {
+        if let Some(handle) = self
+            .tick_thread
+            .lock()
+            .expect("tick_thread lock poisoned")
+            .take()
+        {
             let _ = handle.join();
         }
     }
@@ -574,13 +598,16 @@ impl TickService {
     /// Set the shutdown timeout for handlers
     pub fn set_shutdown_timeout(&self, timeout: Duration) {
         let timeout_ns = timeout.as_nanos().min(u128::from(u64::MAX)) as u64;
-        self.shutdown_timeout_ns.store(timeout_ns, Ordering::Relaxed);
+        self.shutdown_timeout_ns
+            .store(timeout_ns, Ordering::Relaxed);
     }
-
 
     /// Get error statistics for the tick service
     pub fn error_stats(&self) -> (u64, TickStatsSnapshot) {
-        (self.error_count.load(Ordering::Relaxed), self.tick_stats.snapshot())
+        (
+            self.error_count.load(Ordering::Relaxed),
+            self.tick_stats.snapshot(),
+        )
     }
 
     /// Enable or disable panic logging for handlers

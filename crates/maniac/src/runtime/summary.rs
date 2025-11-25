@@ -1,6 +1,6 @@
 use super::waker::WorkerWaker;
-use crate::utils::bits;
 use crate::utils::CachePadded;
+use crate::utils::bits;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -141,7 +141,6 @@ impl Summary {
     fn reservation_word(&self, leaf_idx: usize, signal_idx: usize) -> &AtomicU64 {
         &self.task_reservations[self.reservation_index(leaf_idx, signal_idx)]
     }
-
 
     #[inline(always)]
     fn try_reserve_in_leaf(&self, leaf_idx: usize) -> Option<(usize, usize, u8)> {
@@ -398,8 +397,7 @@ impl Summary {
         // eventually visit every leaf if the partition has no free slots.
         let worker_count = self.get_worker_count();
         let partition_count = worker_count.max(1);
-        let start_partition =
-            self.next_partition.fetch_add(1, Ordering::SeqCst) % partition_count;
+        let start_partition = self.next_partition.fetch_add(1, Ordering::SeqCst) % partition_count;
 
         for partition_offset in 0..partition_count {
             let worker_id = (start_partition + partition_offset) % partition_count;
@@ -422,8 +420,7 @@ impl Summary {
             let start_leaf_offset = random_seed % partition_len;
 
             for leaf_offset in 0..partition_len {
-                let leaf_idx =
-                    partition_start + (start_leaf_offset + leaf_offset) % partition_len;
+                let leaf_idx = partition_start + (start_leaf_offset + leaf_offset) % partition_len;
                 if let Some(found) = self.try_reserve_in_leaf(leaf_idx) {
                     return Some(found);
                 }
@@ -623,7 +620,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     /// Helper function to create a test Summary with dummy wakers
-    fn setup_tree(leaf_count: usize, signals_per_leaf: usize) -> (Summary, Vec<Arc<WorkerWaker>>, Arc<AtomicUsize>) {
+    fn setup_tree(
+        leaf_count: usize,
+        signals_per_leaf: usize,
+    ) -> (Summary, Vec<Arc<WorkerWaker>>, Arc<AtomicUsize>) {
         // Create dummy wakers for testing
         // SAFETY: The returned Arc<AtomicUsize> must outlive the Summary instance
         // to prevent dangling pointer access via Summary.worker_count
@@ -638,14 +638,14 @@ mod tests {
     #[test]
     fn mark_signal_active_updates_root_and_leaf() {
         let (tree, _wakers, _worker_count) = setup_tree(4, 4);
-        
+
         // First activation should return true (leaf was empty)
         assert!(tree.mark_signal_active(1, 1));
         assert_eq!(tree.leaf_words[1].load(Ordering::Relaxed), 1u64 << 1);
-        
+
         // Duplicate activation should return false (already active)
         assert!(!tree.mark_signal_active(1, 1));
-        
+
         // Clearing should work and return true (leaf became empty)
         assert!(tree.mark_signal_inactive(1, 1));
         assert_eq!(tree.leaf_words[1].load(Ordering::Relaxed), 0);
@@ -656,13 +656,13 @@ mod tests {
     #[test]
     fn mark_signal_inactive_if_empty_clears_summary() {
         let (tree, _wakers, _worker_count) = setup_tree(1, 2);
-        
+
         // Activate a signal
         assert!(tree.mark_signal_active(0, 1));
-        
+
         // Create an empty signal for testing
         let signal = AtomicU64::new(0);
-        
+
         // Should clear the summary bit since signal is empty
         tree.mark_signal_inactive_if_empty(0, 1, &signal);
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 0);
@@ -674,23 +674,23 @@ mod tests {
     fn reserve_task_in_leaf_exhausts_all_bits() {
         let (tree, _wakers, _worker_count) = setup_tree(1, 1);
         let mut bits = Vec::with_capacity(64);
-        
+
         // Reserve all 64 bits
         for _ in 0..64 {
             let bit = tree.reserve_task_in_leaf(0, 0).expect("expected free bit");
             bits.push(bit);
         }
-        
+
         // Verify we got all unique bits 0-63
         bits.sort_unstable();
         assert_eq!(bits, (0..64).collect::<Vec<_>>());
-        
+
         // Should be exhausted now
         assert!(
             tree.reserve_task_in_leaf(0, 0).is_none(),
             "all bits should be exhausted"
         );
-        
+
         // Release all bits for cleanup
         for bit in bits {
             tree.release_task_in_leaf(0, 0, bit as usize);
@@ -703,7 +703,7 @@ mod tests {
     fn reserve_task_round_robin_visits_all_leaves() {
         let (tree, _wakers, _worker_count) = setup_tree(4, 1);
         let mut observed = Vec::with_capacity(16);
-        
+
         // Reserve multiple tasks to ensure we visit different leaves
         // With random starting points, we should eventually hit all leaves
         for _ in 0..16 {
@@ -711,7 +711,7 @@ mod tests {
             observed.push(leaf);
             tree.release_task_in_leaf(leaf, sig, bit as usize);
         }
-        
+
         // Should have visited all 4 leaves at least once
         observed.sort_unstable();
         observed.dedup();
@@ -778,7 +778,7 @@ mod tests {
     #[test]
     fn reserve_and_release_task_updates_reservations() {
         let (tree, _wakers, _worker_count) = setup_tree(4, 1);
-        
+
         // Reserve a task
         let handle = tree.reserve_task().expect("task handle");
         assert_eq!(handle.1, 0); // signal idx
@@ -793,7 +793,7 @@ mod tests {
 
         // Release the task
         tree.release_task_in_leaf(handle.0, handle.1, handle.2 as usize);
-        
+
         // Verify reservation bitmap was cleared
         let reservation = tree
             .task_reservations
@@ -815,7 +815,7 @@ mod tests {
         let tree = Arc::new(tree);
         let threads = 4;
         let barrier = Arc::new(Barrier::new(threads));
-        
+
         // Each thread will set different bits in the same leaf
         let handles: Vec<_> = (0..threads)
             .map(|i| {
@@ -826,10 +826,16 @@ mod tests {
                     let signal_idx = i % 2;
                     let mask = 1u64 << signal_idx;
                     tree.mark_signal_active(0, signal_idx);
-                    
+
                     // Verify the bit is set
                     let leaf_word = tree.leaf_words[0].load(Ordering::Relaxed);
-                    assert_eq!(leaf_word & mask, mask, "Thread {}: bit {} should be set", i, signal_idx);
+                    assert_eq!(
+                        leaf_word & mask,
+                        mask,
+                        "Thread {}: bit {} should be set",
+                        i,
+                        signal_idx
+                    );
                 })
             })
             .collect();
@@ -847,21 +853,21 @@ mod tests {
     #[test]
     fn clear_leaf_bits_clears_specific_bits() {
         let (tree, _wakers, _worker_count) = setup_tree(1, 3);
-        
+
         // Set multiple bits
         tree.mark_signal_active(0, 0);
         tree.mark_signal_active(0, 1);
         tree.mark_signal_active(0, 2);
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 0b111);
-        
+
         // Clear middle bit
         assert!(tree.mark_signal_inactive(0, 1));
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 0b101);
-        
+
         // Clear first bit
         assert!(tree.mark_signal_inactive(0, 0));
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 0b100);
-        
+
         // Clear last bit - should return true (leaf became empty)
         assert!(tree.mark_signal_inactive(0, 2));
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 0);
@@ -871,19 +877,19 @@ mod tests {
     #[test]
     fn bit_operations_are_idempotent() {
         let (tree, _wakers, _worker_count) = setup_tree(1, 1);
-        
+
         // First activation should return true
         assert!(tree.mark_signal_active(0, 0));
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 1);
-        
+
         // Duplicate activation should return false
         assert!(!tree.mark_signal_active(0, 0));
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 1);
-        
+
         // First deactivation should return true
         assert!(tree.mark_signal_inactive(0, 0));
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 0);
-        
+
         // Duplicate deactivation should return false
         assert!(!tree.mark_signal_inactive(0, 0));
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 0);
@@ -902,7 +908,7 @@ mod tests {
         let threads = 8;
         let barrier = Arc::new(Barrier::new(threads));
         let reservations = Arc::new(Mutex::new(Vec::new()));
-        
+
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 let tree = Arc::clone(&tree);
@@ -927,13 +933,17 @@ mod tests {
 
         let guard = reservations.lock().unwrap();
         assert_eq!(guard.len(), 32); // 8 threads * 4 reservations each
-        
+
         // All reservations should be unique
         let mut unique = HashSet::new();
         for &bit in guard.iter() {
-            assert!(unique.insert(bit), "Duplicate reservation detected: {:?}", bit);
+            assert!(
+                unique.insert(bit),
+                "Duplicate reservation detected: {:?}",
+                bit
+            );
         }
-        
+
         // Cleanup
         for &bit in guard.iter() {
             tree.release_task_in_leaf(0, 0, bit as usize);
@@ -944,41 +954,54 @@ mod tests {
     #[test]
     fn reservation_exhaustion_and_wraparound() {
         let (tree, _wakers, _worker_count) = setup_tree(1, 1);
-        
+
         // Exhaust all 64 bits
         let mut reservations = Vec::new();
         for _ in 0..64 {
-            let bit = tree.reserve_task_in_leaf(0, 0).expect("Should get reservation");
+            let bit = tree
+                .reserve_task_in_leaf(0, 0)
+                .expect("Should get reservation");
             reservations.push(bit);
         }
-        
+
         // Should be exhausted
         assert!(tree.reserve_task_in_leaf(0, 0).is_none());
-        
+
         // Release half the bits (at even indices: 0, 2, 4, ..., 62)
         let released_bits: Vec<u8> = (0..32).map(|i| reservations[i * 2]).collect();
         let still_reserved: HashSet<u8> = (0..32).map(|i| reservations[i * 2 + 1]).collect();
-        
+
         for &bit in &released_bits {
             tree.release_task_in_leaf(0, 0, bit as usize);
         }
-        
+
         // Should be able to reserve again - should get the released bits
         let new_reservations: Vec<_> = (0..32)
-            .map(|_| tree.reserve_task_in_leaf(0, 0).expect("Should get reservation"))
+            .map(|_| {
+                tree.reserve_task_in_leaf(0, 0)
+                    .expect("Should get reservation")
+            })
             .collect();
-        
+
         // All new reservations should be unique
         let mut seen = HashSet::new();
         for &new_bit in &new_reservations {
-            assert!(seen.insert(new_bit), "Got duplicate reservation: {}", new_bit);
+            assert!(
+                seen.insert(new_bit),
+                "Got duplicate reservation: {}",
+                new_bit
+            );
         }
-        
+
         // All new reservations should be from the released bits, not the still-reserved ones
         for &new_bit in &new_reservations {
-            assert!(!still_reserved.contains(&new_bit), "Got reservation for still-reserved bit: {}", new_bit);
+            assert!(
+                !still_reserved.contains(&new_bit),
+                "Got reservation for still-reserved bit: {}",
+                new_bit
+            );
         }
-        
+
         // Cleanup
         for &bit in &reservations {
             tree.release_task_in_leaf(0, 0, bit as usize);
@@ -993,7 +1016,7 @@ mod tests {
     fn round_robin_signal_distribution() {
         let (tree, _wakers, _worker_count) = setup_tree(1, 4);
         let mut observed_signals = Vec::new();
-        
+
         // Reserve tasks and track signal distribution
         // With bit-ops selection, signals are chosen by trailing_zeros (lowest free bit)
         for _ in 0..8 {
@@ -1001,7 +1024,7 @@ mod tests {
             observed_signals.push(signal);
             tree.release_task_in_leaf(leaf, signal, 0); // Release immediately
         }
-        
+
         // Should have visited all signals (though not necessarily round-robin)
         observed_signals.sort_unstable();
         let unique_signals: HashSet<_> = observed_signals.iter().collect();
@@ -1016,19 +1039,19 @@ mod tests {
     #[test]
     fn compute_partition_owner_distribution() {
         let (tree, _wakers, _worker_count) = setup_tree(10, 1);
-        
+
         // Test with 3 workers
         for leaf_idx in 0..10 {
             let owner = tree.compute_partition_owner(leaf_idx, 3);
             assert!(owner < 3, "Owner {} should be < 3", owner);
         }
-        
+
         // Test with 1 worker (all leaves belong to worker 0)
         for leaf_idx in 0..10 {
             let owner = tree.compute_partition_owner(leaf_idx, 1);
             assert_eq!(owner, 0, "All leaves should belong to worker 0");
         }
-        
+
         // Test with equal workers and leaves (perfect distribution)
         // Create a tree with 5 leaves for this test
         let (tree5, _, _) = setup_tree(5, 1);
@@ -1042,15 +1065,15 @@ mod tests {
     #[test]
     fn partition_boundaries_are_correct() {
         let (tree, _wakers, _worker_count) = setup_tree(7, 1); // 7 leaves, 3 workers
-        
+
         // Worker 0: leaves 0, 1, 2 (3 leaves) - gets extra leaf
         assert_eq!(tree.partition_start_for_worker(0, 3), 0);
         assert_eq!(tree.partition_end_for_worker(0, 3), 3);
-        
-        // Worker 1: leaves 3, 4 (2 leaves)  
+
+        // Worker 1: leaves 3, 4 (2 leaves)
         assert_eq!(tree.partition_start_for_worker(1, 3), 3);
         assert_eq!(tree.partition_end_for_worker(1, 3), 5);
-        
+
         // Worker 2: leaves 5, 6 (2 leaves)
         assert_eq!(tree.partition_start_for_worker(2, 3), 5);
         assert_eq!(tree.partition_end_for_worker(2, 3), 7);
@@ -1060,13 +1083,13 @@ mod tests {
     #[test]
     fn global_to_local_leaf_conversion() {
         let (tree, _wakers, _worker_count) = setup_tree(6, 2); // 6 leaves, 2 workers
-        
+
         // Worker 0: leaves 0, 1, 2
         assert_eq!(tree.global_to_local_leaf_idx(0, 0, 2), Some(0));
         assert_eq!(tree.global_to_local_leaf_idx(1, 0, 2), Some(1));
         assert_eq!(tree.global_to_local_leaf_idx(2, 0, 2), Some(2));
         assert_eq!(tree.global_to_local_leaf_idx(3, 0, 2), None); // Not in partition
-        
+
         // Worker 1: leaves 3, 4, 5
         assert_eq!(tree.global_to_local_leaf_idx(3, 1, 2), Some(0));
         assert_eq!(tree.global_to_local_leaf_idx(4, 1, 2), Some(1));
@@ -1078,13 +1101,13 @@ mod tests {
     #[test]
     fn partition_computation_edge_cases() {
         let (tree, _wakers, _worker_count) = setup_tree(1, 1);
-        
+
         // Single leaf, single worker
         assert_eq!(tree.compute_partition_owner(0, 1), 0);
         assert_eq!(tree.partition_start_for_worker(0, 1), 0);
         assert_eq!(tree.partition_end_for_worker(0, 1), 1);
         assert_eq!(tree.global_to_local_leaf_idx(0, 0, 1), Some(0));
-        
+
         // Zero workers
         assert_eq!(tree.compute_partition_owner(0, 0), 0);
         assert_eq!(tree.partition_start_for_worker(0, 0), 0);
@@ -1103,21 +1126,21 @@ mod tests {
         let tree_ = Arc::clone(&tree);
         let flag = Arc::new(AtomicU64::new(0));
         let flag_ = Arc::clone(&flag);
-        
+
         let handle = thread::spawn(move || {
             // Set the flag with Release ordering
             flag_.store(1, Ordering::Release);
-            
+
             // Mark signal active (should be visible after flag is set)
             tree_.mark_signal_active(0, 0);
         });
-        
+
         handle.join().unwrap();
-        
+
         // Read with Acquire ordering (should see the flag)
         let observed_flag = flag.load(Ordering::Acquire);
         assert_eq!(observed_flag, 1);
-        
+
         // Signal should be active
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 1);
     }
@@ -1132,23 +1155,23 @@ mod tests {
         let data_ = Arc::clone(&data);
         let flag = Arc::new(AtomicU64::new(0));
         let flag_ = Arc::clone(&flag);
-        
+
         let handle = thread::spawn(move || {
             // Writer thread
             data_.store(42, Ordering::Relaxed);
             flag_.store(1, Ordering::Release);
             tree_.mark_signal_active(0, 0);
         });
-        
+
         handle.join().unwrap();
-        
+
         // Reader might see flag but not data due to relaxed ordering
         let observed_flag = flag.load(Ordering::Acquire);
         let observed_data = data.load(Ordering::Relaxed);
-        
+
         // Flag should be visible
         assert_eq!(observed_flag, 1);
-        
+
         // Data might not be visible (this test documents the behavior)
         // In practice, the signal activation provides some ordering
         assert_eq!(tree.leaf_words[0].load(Ordering::Relaxed), 1);
@@ -1162,18 +1185,18 @@ mod tests {
     #[test]
     fn boundary_conditions_for_indices() {
         let (tree, _wakers, _worker_count) = setup_tree(2, 3);
-        
+
         // Valid indices should work
         assert!(tree.mark_signal_active(0, 0));
         assert!(tree.mark_signal_active(1, 2));
         assert!(tree.reserve_task_in_leaf(0, 0).is_some());
         assert!(tree.reserve_task_in_leaf(1, 2).is_some());
-        
+
         // Invalid leaf index should return None/false
         assert!(!tree.mark_signal_active(2, 0)); // leaf_idx >= leaf_count
         assert!(!tree.mark_signal_inactive(2, 0));
         assert!(tree.reserve_task_in_leaf(2, 0).is_none());
-        
+
         // Invalid signal index should return None/false
         assert!(!tree.mark_signal_active(0, 3)); // signal_idx >= signals_per_leaf
         assert!(!tree.mark_signal_inactive(0, 3));
@@ -1185,11 +1208,12 @@ mod tests {
     fn zero_signals_per_leaf_handling() {
         // This should panic during creation
         let result = std::panic::catch_unwind(|| {
-            let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
+            let wakers: Vec<Arc<WorkerWaker>> =
+                (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
             let worker_count = Arc::new(AtomicUsize::new(2));
             Summary::new(2, 0, &wakers, &worker_count);
         });
-        
+
         assert!(result.is_err());
     }
 
@@ -1202,7 +1226,7 @@ mod tests {
             let worker_count = Arc::new(AtomicUsize::new(0));
             Summary::new(2, 2, &wakers, &worker_count);
         });
-        
+
         assert!(result.is_err());
     }
 
@@ -1211,15 +1235,17 @@ mod tests {
     fn reserve_task_various_configurations() {
         // Empty tree - should panic during creation, not during reserve_task
         let result = std::panic::catch_unwind(|| {
-            let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
+            let wakers: Vec<Arc<WorkerWaker>> =
+                (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
             let worker_count = Arc::new(AtomicUsize::new(2));
             Summary::new(0, 1, &wakers, &worker_count)
         });
         assert!(result.is_err(), "Empty tree should panic during creation");
-        
+
         // Tree with zero signals per leaf
         let result = std::panic::catch_unwind(|| {
-            let wakers: Vec<Arc<WorkerWaker>> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
+            let wakers: Vec<Arc<WorkerWaker>> =
+                (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
             let worker_count = Arc::new(AtomicUsize::new(2));
             Summary::new(2, 0, &wakers, &worker_count)
         });
@@ -1238,7 +1264,7 @@ mod tests {
         let threads = 12;
         let iterations = 100;
         let barrier = Arc::new(Barrier::new(threads));
-        
+
         let handles: Vec<_> = (0..threads)
             .map(|thread_id| {
                 let tree = Arc::clone(&tree);
@@ -1248,7 +1274,7 @@ mod tests {
                     for _ in 0..iterations {
                         let leaf_idx = thread_id % 4;
                         let signal_idx = thread_id % 2;
-                        
+
                         // Randomly activate or deactivate
                         if thread_id % 2 == 0 {
                             tree.mark_signal_active(leaf_idx, signal_idx);
@@ -1276,7 +1302,7 @@ mod tests {
     fn stress_test_partition_owner_with_changing_workers() {
         let (tree, _wakers, worker_count) = setup_tree(20, 1);
         let tree = Arc::new(tree);
-        
+
         let handles: Vec<_> = (0..8)
             .map(|i| {
                 let tree = Arc::clone(&tree);
@@ -1286,7 +1312,7 @@ mod tests {
                     let test_counts = [1, 2, 4, 5, 10];
                     for &count in &test_counts {
                         worker_count.store(count, Ordering::Relaxed);
-                        
+
                         // Compute partition owners for all leaves
                         for leaf_idx in 0..20 {
                             let owner = tree.compute_partition_owner(leaf_idx, count);
@@ -1310,58 +1336,63 @@ mod tests {
         let threads = 16; // Reduce threads to reduce contention
         let iterations = 200; // Reduce iterations
         let barrier = Arc::new(Barrier::new(threads));
-        
+
         let handles: Vec<_> = (0..threads)
-            .map(|thread_id| {
-                let tree = Arc::clone(&tree);
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    barrier.wait();
-                    for i in 0..iterations {
-                        // Try to reserve - may fail if all slots are taken
-                        if let Some((leaf, signal, bit)) = tree.reserve_task() {
-                            // Verify the bit is actually set in the reservation bitmap
-                            let reservation_word = tree.reservation_word(leaf, signal);
-                            let current = reservation_word.load(Ordering::SeqCst);
-                            let mask = 1u64 << bit;
-                            
-                            // The bit should be set
-                            assert!(current & mask != 0, 
-                                   "Thread {} iteration {}: Bit {} not set in reservation bitmap for ({}, {})", 
-                                   thread_id, i, bit, leaf, signal);
-                            
-                            // Hold for a bit to create contention
-                            thread::sleep(Duration::from_micros(100));
-                            
-                            // Release the reservation
-                            tree.release_task_in_leaf(leaf, signal, bit as usize);
-                            
-                            // Note: We don't verify the bit is cleared here because under high contention,
-                            // another thread may immediately re-reserve the same bit. The final check at
-                            // the end of the test verifies all bits are eventually released.
-                        }
-                    }
-                })
-            })
-            .collect();
+				.map(|thread_id| {
+					let tree = Arc::clone(&tree);
+					let barrier = Arc::clone(&barrier);
+					thread::spawn(move || {
+						barrier.wait();
+						for i in 0..iterations {
+							// Try to reserve - may fail if all slots are taken
+							if let Some((leaf, signal, bit)) = tree.reserve_task() {
+								// Verify the bit is actually set in the reservation bitmap
+								let reservation_word = tree.reservation_word(leaf, signal);
+								let current = reservation_word.load(Ordering::SeqCst);
+								let mask = 1u64 << bit;
+
+								// The bit should be set
+								assert!(current & mask != 0,
+												"Thread {} iteration {}: Bit {} not set in reservation bitmap for ({}, {})",
+												thread_id, i, bit, leaf, signal);
+
+								// Hold for a bit to create contention
+								thread::sleep(Duration::from_micros(100));
+
+								// Release the reservation
+								tree.release_task_in_leaf(leaf, signal, bit as usize);
+
+								// Note: We don't verify the bit is cleared here because under high contention,
+								// another thread may immediately re-reserve the same bit. The final check at
+								// the end of the test verifies all bits are eventually released.
+							}
+						}
+					})
+				})
+				.collect();
 
         // Wait for all threads to complete
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         // Verify all reservation bitmaps are empty
         for leaf in 0..tree.leaf_count {
             for signal in 0..tree.signals_per_leaf {
                 let reservation_word = tree.reservation_word(leaf, signal);
                 let current = reservation_word.load(Ordering::SeqCst);
-                assert_eq!(current, 0, 
-                          "Reservation bitmap not empty for leaf {}, signal {}: {:b}", 
-                          leaf, signal, current);
+                assert_eq!(
+                    current, 0,
+                    "Reservation bitmap not empty for leaf {}, signal {}: {:b}",
+                    leaf, signal, current
+                );
             }
         }
-        
-        println!("Successfully completed {} iterations with {} threads", iterations, threads);
+
+        println!(
+            "Successfully completed {} iterations with {} threads",
+            iterations, threads
+        );
     }
 
     /// Test TOCTOU race condition mitigation in notification system
@@ -1370,29 +1401,29 @@ mod tests {
         let (tree, wakers_, worker_count) = setup_tree(4, 2);
         let tree = Arc::new(tree);
         let tree_ = Arc::clone(&tree);
-        
+
         // Start with 2 workers
         worker_count.store(2, Ordering::Relaxed);
-        
+
         let handle = thread::spawn(move || {
             let tree = tree_;
             // Simulate rapid worker count changes
             for count in [1, 3, 0, 2, 4] {
                 worker_count.store(count, Ordering::Relaxed);
-                
+
                 // Try to trigger notifications - should not panic
                 for leaf_idx in 0..4 {
                     // These calls should handle the changing worker count safely
                     tree.notify_partition_owner_active(leaf_idx);
                     tree.notify_partition_owner_inactive(leaf_idx);
                 }
-                
+
                 thread::yield_now();
             }
         });
-        
+
         handle.join().unwrap();
-        
+
         // Tree should still be functional
         assert!(tree.mark_signal_active(0, 0));
         assert!(tree.reserve_task().is_some());

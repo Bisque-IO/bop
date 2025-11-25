@@ -10,17 +10,17 @@ use std::{
     time::Duration,
 };
 
-use io_uring::{cqueue, opcode, types::Timespec, IoUring};
+use io_uring::{IoUring, cqueue, opcode, types::Timespec};
 use lifecycle::MaybeFdLifecycle;
 
 use super::{
-    op::{CompletionMeta, Op, OpAble},
     // ready::Ready,
     // scheduled_io::ScheduledIo,
-    util::timespec,
+    CURRENT,
     Driver,
     Inner,
-    CURRENT,
+    op::{CompletionMeta, Op, OpAble},
+    util::timespec,
 };
 use crate::utils::slab::Slab;
 
@@ -483,9 +483,7 @@ impl Drop for IoUringDriver {
         // Dealloc leaked memory
         unsafe { std::ptr::drop_in_place(self.timespec) };
 
-        unsafe {
-            std::ptr::drop_in_place(self.eventfd_read_dst)
-        };
+        unsafe { std::ptr::drop_in_place(self.eventfd_read_dst) };
     }
 }
 

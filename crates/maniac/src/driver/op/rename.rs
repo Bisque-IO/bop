@@ -53,7 +53,7 @@ impl OpAble for Rename {
     fn legacy_call(&mut self) -> std::io::Result<MaybeFd> {
         use std::io::{Error, ErrorKind};
 
-        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
+        use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MoveFileExW};
 
         use crate::driver::util::to_wide_string;
 

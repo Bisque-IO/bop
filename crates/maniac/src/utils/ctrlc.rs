@@ -9,10 +9,10 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use ctrlc::set_handler;
 pub use ctrlc::Error;
+use ctrlc::set_handler;
 
-use crate::driver::{unpark::Unpark, UnparkHandle};
+use crate::driver::{UnparkHandle, unpark::Unpark};
 
 static WAKER: AtomicPtr<Waker> = AtomicPtr::new(null_mut());
 static ACTIVE: AtomicBool = AtomicBool::new(false);

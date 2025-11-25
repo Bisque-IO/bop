@@ -10,7 +10,7 @@ use crate::{
     io::stream::Stream,
     net::{
         new_socket,
-        unix::{socket_addr::socket_addr, SocketAddr},
+        unix::{SocketAddr, socket_addr::socket_addr},
     },
 };
 

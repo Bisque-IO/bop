@@ -90,14 +90,11 @@ pub async fn write<P: AsRef<Path>, C: IoBuf>(path: P, contents: C) -> (io::Resul
 /// Removes a file from the filesystem.
 #[cfg(feature = "unlinkat")]
 pub async fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
     {
-        crate::driver::op::Op::unlink(path)?
-            .await
-            .meta
-            .result?;
+        crate::driver::op::Op::unlink(path)?.await.meta.result?;
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", feature = "iouring")))]
     {
         let path = path.as_ref().to_owned();
         crate::blocking::unblock_remove_file(path).await?;
@@ -108,14 +105,11 @@ pub async fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// Removes an empty directory.
 #[cfg(feature = "unlinkat")]
 pub async fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
     {
-        crate::driver::op::Op::rmdir(path)?
-            .await
-            .meta
-            .result?;
+        crate::driver::op::Op::rmdir(path)?.await.meta.result?;
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", feature = "iouring")))]
     {
         let path = path.as_ref().to_owned();
         crate::blocking::unblock_remove_dir(path).await?;
@@ -126,14 +120,14 @@ pub async fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// Rename a file or directory to a new name.
 #[cfg(feature = "renameat")]
 pub async fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
     {
         crate::driver::op::Op::rename(from.as_ref(), to.as_ref())?
             .await
             .meta
             .result?;
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", feature = "iouring")))]
     {
         let from = from.as_ref().to_owned();
         let to = to.as_ref().to_owned();

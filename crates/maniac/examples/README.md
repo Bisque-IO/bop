@@ -9,6 +9,7 @@ This directory contains working examples of TCP client and server applications u
 A production-ready echo server that handles **multiple concurrent connections**.
 
 **Features:**
+
 - Multiple concurrent connections
 - Per-connection 60-second idle timeout
 - Non-blocking I/O with EventLoop + SingleWheel timers
@@ -16,11 +17,13 @@ A production-ready echo server that handles **multiple concurrent connections**.
 - Proper FD management
 
 **Run:**
+
 ```bash
 cargo run --example tcp_echo_server_complete
 ```
 
 **Test:**
+
 ```bash
 # Open multiple terminals and connect
 nc 127.0.0.1 8080
@@ -32,17 +35,20 @@ nc 127.0.0.1 8080
 A minimal echo server for learning the basics - accepts **one** connection only.
 
 **Features:**
+
 - Single connection handling
 - 60-second idle timeout
 - Simplest possible EventLoop usage
 - Great starting point for learning
 
 **Run:**
+
 ```bash
 cargo run --example tcp_echo_server_simple
 ```
 
 **Test:**
+
 ```bash
 nc 127.0.0.1 8080
 ```
@@ -52,12 +58,14 @@ nc 127.0.0.1 8080
 A TCP client that connects, sends a message, and receives responses.
 
 **Features:**
+
 - Non-blocking TCP connection
 - 30-second connection timeout
 - Automatic message sending on connect
 - Response printing
 
 **Run:**
+
 ```bash
 # First, start the echo server
 cargo run --example tcp_echo_server_complete
@@ -68,9 +76,11 @@ cargo run --example tcp_client
 
 ### 4. Multi-Connection Architecture Demo (`tcp_echo_server_multi.rs`)
 
-Demonstrates the architectural challenges of dynamic socket addition from within callbacks. **For educational purposes only** - see `tcp_echo_server_complete.rs` for the working solution.
+Demonstrates the architectural challenges of dynamic socket addition from within callbacks. **For educational purposes
+only** - see `tcp_echo_server_complete.rs` for the working solution.
 
 **Run:**
+
 ```bash
 cargo run --example tcp_echo_server_multi
 ```
@@ -193,9 +203,11 @@ loop {
 
 ### Current Limitations
 
-1. **Manual FD management**: Users must use `std::mem::forget` to prevent socket closure. A future RAII wrapper would improve this.
+1. **Manual FD management**: Users must use `std::mem::forget` to prevent socket closure. A future RAII wrapper would
+   improve this.
 
-2. **No callback-based socket addition**: Event handlers cannot directly add new sockets to the EventLoop. Use the pattern above instead.
+2. **No callback-based socket addition**: Event handlers cannot directly add new sockets to the EventLoop. Use the
+   pattern above instead.
 
 ### Future Improvements
 
@@ -224,6 +236,6 @@ cargo run --package maniac-runtime --example
 
 ## See Also
 
-- [EventLoop API documentation](../src/runtime/event_loop.rs)
+- [EventLoop API documentation](../src/runtime/io_driver.rs)
 - [SingleWheel timer documentation](../src/runtime/timer_wheel.rs)
 - [TLS support documentation](../src/net/tls.rs)

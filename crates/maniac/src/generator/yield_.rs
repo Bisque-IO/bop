@@ -5,9 +5,9 @@
 use std::any::Any;
 use std::sync::atomic;
 
-use crate::generator::gen_impl::{unlikely, Generator};
+use crate::generator::gen_impl::{Generator, unlikely};
 use crate::generator::reg_context::RegContext;
-use crate::generator::rt::{is_generator, Context, ContextStack, Error};
+use crate::generator::rt::{Context, ContextStack, Error, is_generator};
 
 /// it's a special return instruction that yield nothing
 /// but only terminate the generator safely

@@ -14,8 +14,8 @@ use super::{
     ready::{self, Ready},
     scheduled_io::ScheduledIo,
 };
-use std::task::ready;
 use crate::utils::slab::Slab;
+use std::task::ready;
 
 mod waker;
 pub(crate) use waker::UnparkHandle;
@@ -222,7 +222,6 @@ impl PollerInner {
         })
     }
 
-
     pub(crate) fn unpark(this: &Arc<UnsafeCell<PollerInner>>) -> waker::UnparkHandle {
         let inner = unsafe { &*this.get() };
         let weak = std::sync::Arc::downgrade(&inner.shared_waker);
@@ -261,4 +260,3 @@ impl Drop for PollerDriver {
         // Clean up any resources if necessary
     }
 }
-

@@ -1,6 +1,6 @@
 pub use std::{future::Future, pin::Pin, task::Poll};
 
-pub use futures_util_fork::{maybe_done, poll_fn, MaybeDone, PollFn};
+pub use futures_util_fork::{MaybeDone, PollFn, maybe_done, poll_fn};
 
 pub use crate::utils::thread_rng_n;
 

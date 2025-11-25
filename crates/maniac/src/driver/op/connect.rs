@@ -4,13 +4,13 @@ use std::{io, net::SocketAddr};
 use io_uring::{opcode, types};
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{
-    connect, socklen_t, AF_INET, AF_INET6, IN6_ADDR, IN6_ADDR_0, IN_ADDR, IN_ADDR_0, SOCKADDR_IN,
-    SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKET_ERROR,
+    AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, SOCKADDR_IN, SOCKADDR_IN6,
+    SOCKADDR_IN6_0, SOCKET_ERROR, connect, socklen_t,
 };
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
 #[cfg(any(feature = "poll", feature = "poll-io"))]
-use super::{driver::ready::Direction, MaybeFd};
+use super::{MaybeFd, driver::ready::Direction};
 
 pub(crate) struct Connect {
     pub(crate) fd: SharedFd,

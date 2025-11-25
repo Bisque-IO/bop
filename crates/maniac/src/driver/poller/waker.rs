@@ -1,7 +1,6 @@
 use crate::driver::unpark::Unpark;
 
 pub(crate) struct EventWaker {
-
     waker: mio::Waker,
     // Atomic awake status
     pub(crate) awake: std::sync::atomic::AtomicBool,
@@ -36,4 +35,3 @@ impl Unpark for UnparkHandle {
         }
     }
 }
-

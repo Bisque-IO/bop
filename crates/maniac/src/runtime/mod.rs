@@ -13,7 +13,7 @@
 //! - `JoinHandle`: Future that resolves when a spawned task completes
 //!
 pub mod deque;
-pub mod event_loop;
+pub mod io_driver;
 pub mod mpsc;
 pub mod preemption;
 #[cfg(test)]
@@ -37,12 +37,12 @@ pub(crate) mod io_runtime;
 
 use std::future::{Future, IntoFuture};
 
-pub use io_builder::{Buildable, RuntimeBuilder};
 pub use crate::driver::Driver;
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 pub use crate::driver::IoUringDriver;
 #[cfg(feature = "poll")]
 pub use crate::driver::PollerDriver;
+pub use io_builder::{Buildable, RuntimeBuilder};
 
 // pub use runtime::{spawn, Runtime};
 pub use io_runtime::IoRuntime;

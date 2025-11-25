@@ -19,7 +19,7 @@ mod raw_buf;
 pub use raw_buf::{RawBuf, RawBufVectored};
 
 mod vec_wrapper;
-pub(crate) use vec_wrapper::{read_vec_meta, write_vec_meta, IoVecMeta};
+pub(crate) use vec_wrapper::{IoVecMeta, read_vec_meta, write_vec_meta};
 
 mod msg;
 pub use msg::{MsgBuf, MsgBufMut, MsgMeta};

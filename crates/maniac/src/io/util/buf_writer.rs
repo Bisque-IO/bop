@@ -1,9 +1,9 @@
 use std::{future::Future, io};
 
 use crate::{
+    BufResult,
     buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut, IoVecWrapper, Slice},
     io::{AsyncBufRead, AsyncReadRent, AsyncWriteRent, AsyncWriteRentExt},
-    BufResult,
 };
 
 /// BufWriter is a struct with a buffer. BufWriter implements AsyncWriteRent,

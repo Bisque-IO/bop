@@ -2,8 +2,8 @@ use std::future::Future;
 
 use super::{CancelHandle, CancelableAsyncReadRent, CancelableAsyncWriteRent};
 use crate::{
-    buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut, Slice, SliceMut},
     BufResult,
+    buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut, Slice, SliceMut},
 };
 
 macro_rules! reader_trait {
@@ -105,7 +105,7 @@ where
                             "failed to fill whole buffer",
                         )),
                         buf,
-                    )
+                    );
                 }
                 Ok(n) => {
                     read += n;
@@ -138,7 +138,7 @@ where
                             "failed to fill whole buffer",
                         )),
                         buf,
-                    )
+                    );
                 }
                 Ok(n) => read += n,
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -215,7 +215,7 @@ where
                             "failed to write whole buffer",
                         )),
                         buf,
-                    )
+                    );
                 }
                 Ok(n) => written += n,
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -245,7 +245,7 @@ where
                             "failed to write whole buffer",
                         )),
                         buf,
-                    )
+                    );
                 }
                 Ok(n) => {
                     written += n;

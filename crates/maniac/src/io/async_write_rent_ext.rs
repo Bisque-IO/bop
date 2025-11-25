@@ -1,9 +1,9 @@
 use std::future::Future;
 
 use crate::{
+    BufResult,
     buf::{IoBuf, IoVecBuf, Slice},
     io::AsyncWriteRent,
-    BufResult,
 };
 
 /// AsyncWriteRentExt
@@ -40,7 +40,7 @@ where
                             "failed to write whole buffer",
                         )),
                         buf,
-                    )
+                    );
                 }
                 Ok(n) => written += n,
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -66,7 +66,7 @@ where
                             "failed to write whole buffer",
                         )),
                         buf,
-                    )
+                    );
                 }
                 Ok(n) => {
                     written += n;

@@ -8,17 +8,17 @@ use socket2::SockAddr;
 #[cfg(all(windows, any(feature = "poll", feature = "poll-io")))]
 use {
     std::os::windows::io::AsRawSocket,
-    windows_sys::Win32::Networking::WinSock::{send, WSASendMsg, SOCKET_ERROR},
+    windows_sys::Win32::Networking::WinSock::{SOCKET_ERROR, WSASendMsg, send},
 };
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
 #[cfg(any(feature = "poll", feature = "poll-io"))]
-use super::{driver::ready::Direction, MaybeFd};
+use super::{MaybeFd, driver::ready::Direction};
 #[cfg(unix)]
 use crate::net::unix::SocketAddr as UnixSocketAddr;
 use crate::{
-    buf::{IoBuf, IoVecBufMut, IoVecMeta, MsgMeta},
     BufResult,
+    buf::{IoBuf, IoVecBufMut, IoVecMeta, MsgMeta},
 };
 
 pub(crate) struct Send<T> {

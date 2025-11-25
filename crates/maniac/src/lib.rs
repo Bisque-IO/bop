@@ -47,6 +47,8 @@ pub use crate::utils::*;
 #[macro_use]
 pub mod macros;
 
+pub use crate::blocking::unblock;
+
 pub use buf::*;
 
 // Re-export socket registration functions for async networking

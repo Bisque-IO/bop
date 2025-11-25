@@ -5,7 +5,7 @@ use super::timer::{Timer, TimerHandle};
 use super::timer_wheel::TimerWheel;
 use super::waker::WorkerWaker;
 use crate::PopError;
-use crate::runtime::event_loop::EventLoop;
+use crate::runtime::io_driver::IoDriver;
 use crate::runtime::preemption::GeneratorYieldReason;
 use crate::runtime::task::GeneratorOwnership;
 use crate::runtime::ticker::{TickHandler, TickHandlerRegistration};
@@ -42,7 +42,7 @@ const MESSAGE_BATCH_SIZE: usize = 4096;
 // - WorkerWaker.status bit 62: partition cache has work
 
 /// Trait for cross-worker operations that don't depend on const parameters
-pub(crate) trait CrossWorkerOps: Send + Sync {
+pub(crate) trait WorkerBus: Send + Sync {
     fn post_cancel_message(&self, from_worker_id: u32, to_worker_id: u32, timer_id: u64) -> bool;
 
     fn post_remote_read(
@@ -102,15 +102,20 @@ pub fn current_timer_wheel<'a>() -> Option<&'a mut TimerWheel<TimerHandle>> {
     unsafe { Some(&mut *worker.timer_wheel) }
 }
 
-pub fn current_event_loop<'a>() -> Option<&'a mut EventLoop> {
+pub fn current_event_loop<'a>() -> Option<&'a mut IoDriver> {
     let worker = current_worker()?;
-    unsafe { Some(&mut *worker.event_loop) }
+    unsafe { Some(&mut *worker.io) }
 }
 
 /// Returns the most recent `now_ns` observed by the active worker.
-pub fn current_worker_now_ns() -> Option<u64> {
-    let timer_wheel = current_timer_wheel()?;
-    Some(timer_wheel.now_ns())
+pub fn current_worker_now_ns() -> u64 {
+    let timer_wheel = current_timer_wheel();
+    if let Some(timer_wheel) = current_timer_wheel() {
+        timer_wheel.now_ns()
+    } else {
+        // fallback to high frequency clock
+        Instant::now().elapsed().as_nanos() as u64
+    }
 }
 
 /// Returns the current worker's ID, or None if not called from within a worker context.
@@ -325,10 +330,8 @@ pub enum WorkerMessage {
         waker: Waker,
     },
 
-
     Noop,
 }
-
 
 unsafe impl Send for WorkerMessage {}
 unsafe impl Sync for WorkerMessage {}
@@ -498,7 +501,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             arena,
             summary_tree,
             config,
-            tick_duration: tick_duration,
+            tick_duration,
             tick_duration_ns,
             clock_ns: Arc::new(AtomicU64::new(0)),
             wakers,
@@ -535,7 +538,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                 .is_err()
             {
                 // Log error but continue spawning others
-                eprintln!("Failed to spawn worker {}", worker_id);
+                tracing::trace!("Failed to spawn worker {}", worker_id);
             }
         }
 
@@ -648,7 +651,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             // Create EventLoop for this worker (with integrated SingleWheel timer)
             // Box it to avoid stack overflow (EventLoop contains large Slab and buffers)
             let event_loop = Box::new(
-                crate::runtime::event_loop::EventLoop::new()
+                crate::runtime::io_driver::IoDriver::new()
                     .expect("Failed to create EventLoop for worker"),
             );
 
@@ -668,7 +671,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                         // The service Arc is kept alive for the lifetime of the worker.
                         &mut *service_clone.timers[worker_id].get()
                     },
-                    cross_worker_ops: unsafe { &*(&*service_clone as *const dyn CrossWorkerOps) },
+                    bus: unsafe { &*(&*service_clone as *const dyn WorkerBus) },
                     wake_stats: WakeStats::default(),
                     stats: WorkerStats::default(),
                     partition_start,
@@ -684,7 +687,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                     current_task: std::ptr::null_mut(),
                     current_scope: std::ptr::null_mut(),
                     preemption_requested: AtomicBool::new(false),
-                    event_loop,
+                    io: event_loop,
                     io_budget: 16, // Process up to 16 I/O events per run_once iteration
                 },
             };
@@ -694,7 +697,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             // Wrap execution in monoio context and set user_data
             let w_ptr = std::ptr::addr_of_mut!(w);
             // Wrap execution in monoio context and set user_data
-            unsafe { &(*w_ptr).inner.event_loop }.with_context(|| {
+            unsafe { &(*w_ptr).inner.io }.with_context(|| {
                 crate::runtime::io_runtime::CURRENT.with(|ctx| {
                     ctx.user_data
                         .set(unsafe { &(*w_ptr).inner as *const _ as *mut () });
@@ -736,7 +739,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                     unsafe { (*w_ptr).run() };
                 }));
                 if let Err(e) = result {
-                    eprintln!("[Worker {}] Panicked: {:?}", worker_id, e);
+                    tracing::trace!("[Worker {}] Panicked: {:?}", worker_id, e);
                 }
             });
             // w.run();
@@ -809,7 +812,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
         #[cfg(debug_assertions)]
         {
-            eprintln!("[WorkerService] Shutdown initiated, sending shutdown messages...");
+            tracing::trace!("[WorkerService] Shutdown initiated, sending shutdown messages...");
         }
 
         // Send shutdown messages to all active workers
@@ -827,23 +830,21 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
         #[cfg(debug_assertions)]
         {
-            eprintln!("[WorkerService] Joining worker threads...");
+            tracing::trace!("[WorkerService] Joining worker threads...");
         }
-        eprintln!("[WorkerService] Joining worker threads...");
 
         // Join all worker threads
         for (idx, worker_thread) in self.worker_threads.iter().enumerate() {
             if let Some(handle) = worker_thread.lock().unwrap().take() {
                 #[cfg(debug_assertions)]
                 {
-                    eprintln!("[WorkerService] Joining worker thread {}...", idx);
+                    tracing::trace!("[WorkerService] Joining worker thread {}...", idx);
                 }
                 let _ = handle.join();
                 #[cfg(debug_assertions)]
                 {
-                    eprintln!("[Worker Service] Worker thread {} joined", idx);
+                    tracing::trace!("[Worker Service] Worker thread {} joined", idx);
                 }
-                eprintln!("[Worker Service] Worker thread {} joined", idx);
             }
         }
 
@@ -856,9 +857,8 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
         #[cfg(debug_assertions)]
         {
-            eprintln!("[WorkerService] Shutdown complete");
+            tracing::trace!("[WorkerService] Shutdown complete");
         }
-        eprintln!("[WorkerService] Shutdown complete");
     }
 
     /// Returns the current worker count
@@ -898,7 +898,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             if time_since_update > stuck_threshold_ns {
                 #[cfg(debug_assertions)]
                 {
-                    eprintln!(
+                    tracing::trace!(
                         "[Supervisor] WARNING: Worker {} appears stuck (no update for {}ns)",
                         worker_id, time_since_update
                     );
@@ -922,7 +922,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
         #[cfg(debug_assertions)]
         {
-            eprintln!("[Supervisor] Shutting down, worker_count={}", worker_count);
+            tracing::trace!("[Supervisor] Shutting down, worker_count={}", worker_count);
         }
 
         // Send graceful shutdown to all active workers
@@ -930,12 +930,12 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             #[cfg(debug_assertions)]
             {
                 let is_active = self.worker_actives[worker_id].load(Ordering::Relaxed) != 0;
-                eprintln!("[Supervisor] Worker {} active={}", worker_id, is_active);
+                tracing::trace!("[Supervisor] Worker {} active={}", worker_id, is_active);
             }
             if self.worker_actives[worker_id].load(Ordering::Relaxed) != 0 {
                 #[cfg(debug_assertions)]
                 {
-                    eprintln!("[Supervisor] Sending shutdown to worker {}", worker_id);
+                    tracing::trace!("[Supervisor] Sending shutdown to worker {}", worker_id);
                 }
                 // SAFETY: unsafe_try_push only requires a shared reference
                 let _ = unsafe {
@@ -948,7 +948,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
 
         #[cfg(debug_assertions)]
         {
-            eprintln!("[Supervisor] Sent graceful shutdown to all workers");
+            tracing::trace!("[Supervisor] Sent graceful shutdown to all workers");
         }
 
         // Wait for workers to finish (with timeout)
@@ -971,7 +971,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             if shutdown_start.elapsed() > shutdown_timeout {
                 #[cfg(debug_assertions)]
                 {
-                    eprintln!(
+                    tracing::trace!(
                         "[Supervisor] Graceful shutdown timeout, {} workers still active",
                         active_count
                     );
@@ -1032,7 +1032,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     }
 }
 
-impl<const P: usize, const NUM_SEGS_P2: usize> CrossWorkerOps for WorkerService<P, NUM_SEGS_P2> {
+impl<const P: usize, const NUM_SEGS_P2: usize> WorkerBus for WorkerService<P, NUM_SEGS_P2> {
     fn post_cancel_message(&self, from_worker_id: u32, to_worker_id: u32, timer_id: u64) -> bool {
         self.post_message(
             from_worker_id,
@@ -1067,7 +1067,6 @@ impl<const P: usize, const NUM_SEGS_P2: usize> CrossWorkerOps for WorkerService<
 }
 
 impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
-
     // Helper method for CrossWorkerOps implementation
     fn post_remote_read_impl(
         &self,
@@ -1253,7 +1252,7 @@ pub struct WorkerInner<'a> {
     shutdown: &'a AtomicBool,
     yield_queue: &'a YieldWorker<TaskHandle>,
     timer_wheel: &'a mut TimerWheel<TimerHandle>,
-    pub(crate) cross_worker_ops: &'static dyn CrossWorkerOps,
+    pub(crate) bus: &'static dyn WorkerBus,
     wake_stats: WakeStats,
     stats: WorkerStats,
     partition_start: usize,
@@ -1271,7 +1270,7 @@ pub struct WorkerInner<'a> {
     /// Preemption flag for this worker - set by signal handler (Unix) or timer thread (Windows)
     preemption_requested: AtomicBool,
     /// Per-worker EventLoop for async I/O operations (boxed to avoid stack overflow)
-    event_loop: Box<crate::runtime::event_loop::EventLoop>,
+    io: Box<crate::runtime::io_driver::IoDriver>,
     /// I/O budget per run_once iteration (prevents I/O from starving tasks)
     io_budget: usize,
 }
@@ -1294,7 +1293,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Drop for Worker<'a, P, NUM_SE
     fn drop(&mut self) {
         #[cfg(debug_assertions)]
         {
-            eprintln!("[Worker {}] Dropped", self.inner.worker_id);
+            tracing::trace!("[Worker {}] Dropped", self.inner.worker_id);
         }
     }
 }
@@ -1346,7 +1345,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     fn run_once(&mut self, run_ctx: &mut RunContext) -> bool {
         let mut did_work = false;
 
-        if self.poll_event_loop() > 0 {
+        if self.poll_io() > 0 {
             did_work = true;
         }
 
@@ -1526,7 +1525,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                         loop {
                             // Check for shutdown
                             if worker.inner.shutdown.load(Ordering::Relaxed) {
-                                // eprintln!("Worker {} received shutdown flag", self.inner.worker_id);
+                                // tracing::trace!("Worker {} received shutdown flag", self.inner.worker_id);
                                 worker.inner.current_scope = core::ptr::null_mut();
                                 return 0;
                             }
@@ -1577,14 +1576,14 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                                     Some(duration) => {
                                         // On Windows, WorkerWaker uses alertable waits to allow APC execution
                                         worker.service.wakers[waker_id].acquire_timeout_with_io(
-                                            &mut worker.inner.event_loop,
+                                            &mut worker.inner.io,
                                             duration,
                                         );
                                     }
                                     None => {
                                         // On Windows, WorkerWaker uses alertable waits to allow APC execution
                                         worker.service.wakers[waker_id].acquire_timeout_with_io(
-                                            &mut worker.inner.event_loop,
+                                            &mut worker.inner.io,
                                             Duration::from_millis(250),
                                         );
                                     }
@@ -1663,7 +1662,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             //     // }
         }
 
-        eprintln!("Worker is done running: {}", self.inner.worker_id);
+        tracing::trace!("Worker is done running: {}", self.inner.worker_id);
     }
 
     /// Calculate how long the worker can park, considering both the wait strategy
@@ -1744,12 +1743,8 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 self.inner.shutdown.store(true, Ordering::Release);
                 true
             }
-            WorkerMessage::RemoteRead { token, waker } => {
-                self.handle_remote_read(token, waker)
-            }
-            WorkerMessage::RemoteWrite { token, waker } => {
-                self.handle_remote_write(token, waker)
-            }
+            WorkerMessage::RemoteRead { token, waker } => self.handle_remote_read(token, waker),
+            WorkerMessage::RemoteWrite { token, waker } => self.handle_remote_write(token, waker),
             WorkerMessage::Noop => true,
         }
     }
@@ -1779,7 +1774,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         // TODO: Send this back to supervisor via a response channel
         #[cfg(debug_assertions)]
         {
-            eprintln!(
+            tracing::trace!(
                 "[Worker {}] Health: tasks_polled={}, yield_queue={}, mpsc_queue={}, partitions={:?}, has_work={}",
                 snapshot.worker_id,
                 snapshot.stats.tasks_polled,
@@ -1798,7 +1793,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
         #[cfg(debug_assertions)]
         {
-            eprintln!(
+            tracing::trace!(
                 "[Worker {}] Received graceful shutdown signal",
                 self.inner.worker_id
             );
@@ -1822,7 +1817,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
         #[cfg(debug_assertions)]
         {
-            eprintln!("[Worker {}] Set shutdown flag", self.inner.worker_id);
+            tracing::trace!("[Worker {}] Set shutdown flag", self.inner.worker_id);
         }
     }
 
@@ -1847,20 +1842,20 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     }
 
     #[inline]
-    fn poll_event_loop(&mut self) -> usize {
-        eprintln!(
-            "[Worker {}] Polling event loop. Sockets: {}",
-            self.inner.worker_id,
-            self.inner.event_loop.socket_count()
-        );
+    fn poll_io(&mut self) -> usize {
+        // tracing::trace!(
+        //     "[Worker {}] Polling event loop. Sockets: {}",
+        //     self.inner.worker_id,
+        //     self.inner.io.socket_count()
+        // );
         match self
             .inner
-            .event_loop
+            .io
             .poll_once(Some(std::time::Duration::ZERO))
         {
             Ok(num_events) => {
                 if num_events > 0 {
-                    eprintln!(
+                    tracing::trace!(
                         "[Worker {}] Poll got {} events",
                         self.inner.worker_id, num_events
                     );
@@ -1873,7 +1868,6 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             }
         }
     }
-
 
     fn enqueue_timer_entry(&mut self, deadline_ns: u64, handle: TimerHandle) -> Option<u64> {
         match self.inner.timer_wheel.schedule_timer(deadline_ns, handle) {
@@ -2537,7 +2531,8 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                         timer.reset();
                     }
                 } else {
-                    // TODO: support cross-worker cancellation when necessary.
+                    // Cancel timer on other worker.
+                    self.inner.bus.post_cancel_message(self.inner.worker_id, worker_id, timer.timer_id());
                 }
             }
         }
@@ -2589,7 +2584,7 @@ pub fn schedule_timer_for_task(_cx: &Context<'_>, timer: &Timer, delay: Duration
             } else {
                 // Cross-worker cancellation: send message to the worker that owns the timer
                 let existing_id = timer.timer_id();
-                if worker.cross_worker_ops.post_cancel_message(
+                if worker.bus.post_cancel_message(
                     worker_id,
                     existing_worker_id,
                     existing_id,
@@ -2660,7 +2655,7 @@ pub fn cancel_timer_for_current_task(timer: &Timer) -> bool {
 
     // Cross-worker cancellation: send message to the worker that owns the timer
     if worker
-        .cross_worker_ops
+        .bus
         .post_cancel_message(worker_id, timer_worker_id, timer_id)
     {
         timer.mark_cancelled(timer_id);
@@ -2669,4 +2664,3 @@ pub fn cancel_timer_for_current_task(timer: &Timer) -> bool {
         false
     }
 }
-

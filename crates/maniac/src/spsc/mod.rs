@@ -117,7 +117,7 @@ use crate::{PopError, PushError};
 mod l2;
 pub use l2::{LayeredReceiver, LayeredSender, LayeredSpsc};
 pub mod unbounded;
-pub use unbounded::{UnboundedSpsc, UnboundedSender, UnboundedReceiver};
+pub use unbounded::{UnboundedReceiver, UnboundedSender, UnboundedSpsc};
 
 /// Trait for types that can schedule queue execution.
 ///

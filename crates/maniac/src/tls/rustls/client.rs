@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::io::{AsyncReadRent, AsyncWriteRent, OwnedReadHalf, OwnedWriteHalf};
-use rustls::{pki_types::ServerName, ClientConfig, ClientConnection};
+use rustls::{ClientConfig, ClientConnection, pki_types::ServerName};
 
-use super::{stream::Stream, TlsError};
+use super::{TlsError, stream::Stream};
 
 /// A wrapper around an underlying raw stream which implements the TLS protocol.
 pub type TlsStream<IO> = Stream<IO, ClientConnection>;

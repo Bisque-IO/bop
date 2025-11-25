@@ -1,8 +1,8 @@
 [workspace]
 members = [
 #    "crates/bop-aof",
-    "crates/bop-proto",
-    "crates/bop-protoc",
+#    "crates/bop-proto",
+#    "crates/bop-protoc",
     # "crates/maniac-mdbx",
     # "crates/bop-mpmc",
     # "crates/vertx-cluster",
@@ -12,8 +12,8 @@ members = [
     # "crates/maniac-usockets",
     "crates/maniac",
     # "crates/nuraft",
-    "crates/sanakirja-core",
-    "crates/sanakirja",
+#    "crates/sanakirja-core",
+#    "crates/sanakirja",
     # "crates/monoio/monoio",
     # "crates/monoio/monoio-macros"
 ]
@@ -32,18 +32,18 @@ base64 = "0.22"
 bindgen = "0.72"
 bitflags = "2"
 # bop-aof = { path = "crates/bop-aof", version = "0.1.0" }
-bop-protoc = { path = "crates/bop-protoc", version = "0.1.0" }
+#bop-protoc = { path = "crates/bop-protoc", version = "0.1.0" }
 # maniac-mdbx = { path = "crates/maniac-mdbx", version = "0.1.0" }
 # bop-mpmc = { path = "crates/bop-mpmc", version = "0.1.0" }
-bop-proto = { path = "crates/bop-proto", version = "0.1.0" }
+#bop-proto = { path = "crates/bop-proto", version = "0.1.0" }
 # nuraft = { path = "crates/nuraft", version = "0.1.0" }
 # maniac-storage = { path = "crates/maniac-storage", version = "0.1.0" }
 # maniac-allocator = { path = "crates/maniac-allocator", version = "0.1.0", default-features = false }
 # maniac-sys = { path = "crates/maniac-sys", version = "0.1.0" }
 # maniac-usockets = { path = "crates/maniac-usockets", version = "0.1.0", default-features = false }
 maniac = { path = "crates/maniac", version = "0.1.0" }
-sanakirja-core = { path = "crates/sanakirja-core", version = "1.4.1" }
-sanakirja = { path = "crates/sanakirja", version = "1.4.1" }
+#sanakirja-core = { path = "crates/sanakirja-core", version = "1.4.1" }
+#sanakirja = { path = "crates/sanakirja", version = "1.4.1" }
 bumpalo = { version = "3.17.0", features = ["collections", "boxed"] }
 byteorder = "1.5"
 cc = "1.2"
@@ -81,7 +81,7 @@ tokio-test = "0.4"
 tokio-util = "0.7"
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 tracing-subscriber = "0.3"
-vertx-cluster = { path = "crates/vertx-cluster", version = "0.1.0" }
+#vertx-cluster = { path = "crates/vertx-cluster", version = "0.1.0" }
 zstd = "0.13"
 
 [profile.dev]

@@ -4,8 +4,8 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::windows::io::{
     AsRawHandle, AsRawSocket, FromRawSocket, IntoRawSocket, OwnedSocket, RawHandle, RawSocket,
 };
-use std::{cell::UnsafeCell, io, sync::Arc};
 use std::task::ready;
+use std::{cell::UnsafeCell, io, sync::Arc};
 
 use super::CURRENT;
 use super::scheduled_io::ScheduledIo;
@@ -63,13 +63,11 @@ impl State {
             let reg = CURRENT
                 .with(|inner| match inner {
                     #[cfg(all(target_os = "linux", feature = "iouring"))]
-                    crate::driver::Inner::Uring(r) => {
-                        super::IoUringDriver::register_poll_io(
-                            r,
-                            &mut source,
-                            super::ready::RW_INTERESTS,
-                        )
-                    }
+                    crate::driver::Inner::Uring(r) => super::IoUringDriver::register_poll_io(
+                        r,
+                        &mut source,
+                        super::ready::RW_INTERESTS,
+                    ),
                     #[cfg(feature = "poll")]
                     crate::driver::Inner::Poller(_) => panic!("unexpected poller runtime"),
                 })
@@ -183,8 +181,7 @@ impl SharedFd {
 
         // Create ScheduledIo first (for poller platforms)
         #[cfg(feature = "poll")]
-        let scheduled_io =
-            std::sync::Arc::new(crate::driver::scheduled_io::ScheduledIo::new());
+        let scheduled_io = std::sync::Arc::new(crate::driver::scheduled_io::ScheduledIo::new());
 
         #[cfg(all(target_os = "linux", feature = "iouring", feature = "poll"))]
         let state = match CURRENT.with(|inner| match inner {
@@ -229,8 +226,7 @@ impl SharedFd {
             feature = "poll",
             not(all(target_os = "linux", feature = "iouring"))
         ))]
-        let scheduled_io =
-            std::sync::Arc::new(crate::driver::scheduled_io::ScheduledIo::new());
+        let scheduled_io = std::sync::Arc::new(crate::driver::scheduled_io::ScheduledIo::new());
 
         #[cfg(all(
             unix,
@@ -278,8 +274,7 @@ impl SharedFd {
 
         const RW_INTERESTS: mio::Interest = mio::Interest::READABLE.add(mio::Interest::WRITABLE);
 
-        let scheduled_io =
-            std::sync::Arc::new(crate::driver::scheduled_io::ScheduledIo::new());
+        let scheduled_io = std::sync::Arc::new(crate::driver::scheduled_io::ScheduledIo::new());
 
         let state = {
             // Create a temporary mio::net::TcpStream for registration
@@ -336,9 +331,7 @@ impl SharedFd {
                 state: UnsafeCell::new(state),
                 worker_id: current_worker_id().expect("not on worker"),
                 #[cfg(feature = "poll")]
-                scheduled_io: std::sync::Arc::new(
-                    crate::driver::scheduled_io::ScheduledIo::new(),
-                ),
+                scheduled_io: std::sync::Arc::new(crate::driver::scheduled_io::ScheduledIo::new()),
             }),
         }
     }
@@ -357,9 +350,7 @@ impl SharedFd {
                 fd,
                 state: UnsafeCell::new(state),
                 worker_id: current_worker_id().expect("not on worker"),
-                scheduled_io: std::sync::Arc::new(
-                    crate::driver::scheduled_io::ScheduledIo::new(),
-                ),
+                scheduled_io: std::sync::Arc::new(crate::driver::scheduled_io::ScheduledIo::new()),
             }),
         }
     }
@@ -393,9 +384,7 @@ impl SharedFd {
     /// Get the scheduled_io for this fd (for ops that need readiness)
     #[cfg(feature = "poll")]
     #[inline]
-    pub(crate) fn scheduled_io(
-        &self,
-    ) -> &std::sync::Arc<crate::driver::scheduled_io::ScheduledIo> {
+    pub(crate) fn scheduled_io(&self) -> &std::sync::Arc<crate::driver::scheduled_io::ScheduledIo> {
         &self.inner.scheduled_io
     }
 

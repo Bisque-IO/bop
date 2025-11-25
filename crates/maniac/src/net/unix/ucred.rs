@@ -41,11 +41,11 @@ pub(crate) use self::impl_macos::get_peer_cred;
 pub(crate) mod impl_macos {
     use std::{
         io,
-        mem::{size_of, MaybeUninit},
+        mem::{MaybeUninit, size_of},
         os::unix::io::AsRawFd,
     };
 
-    use libc::{c_void, getpeereid, getsockopt, pid_t, LOCAL_PEEREPID, SOL_LOCAL};
+    use libc::{LOCAL_PEEREPID, SOL_LOCAL, c_void, getpeereid, getsockopt, pid_t};
 
     use crate::net::unix::UnixStream;
 
@@ -94,7 +94,7 @@ pub(crate) mod impl_linux {
     use libc::sockpeercred as ucred;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     use libc::ucred;
-    use libc::{c_void, getsockopt, socklen_t, SOL_SOCKET, SO_PEERCRED};
+    use libc::{SO_PEERCRED, SOL_SOCKET, c_void, getsockopt, socklen_t};
 
     use crate::net::unix::UnixStream;
 

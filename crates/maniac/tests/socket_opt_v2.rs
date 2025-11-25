@@ -1,9 +1,9 @@
-use maniac::future::block_on;
-use maniac::net::{TcpListener, TcpStream};
-use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
-use maniac::runtime::DefaultExecutor;
 use maniac::buf::IoBuf;
+use maniac::future::block_on;
 use maniac::io::{AsyncReadRent, AsyncWriteRentExt};
+use maniac::net::{TcpListener, TcpStream};
+use maniac::runtime::DefaultExecutor;
+use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 
 #[test]
 fn test_socket_optimization_flow() {
@@ -32,9 +32,7 @@ fn test_socket_optimization_flow() {
                 let (res, buf) = stream.read(buf).await;
                 let n = res.expect("read failed");
                 eprintln!("Server read {} bytes", n);
-                let (res, _) = stream
-                    .write_all(buf.slice(0..n))
-                    .await;
+                let (res, _) = stream.write_all(buf.slice(0..n)).await;
                 res.expect("write_all failed");
                 eprintln!("Server wrote back");
             };

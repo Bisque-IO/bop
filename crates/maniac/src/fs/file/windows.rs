@@ -17,17 +17,14 @@ impl AsRawHandle for File {
     }
 }
 
-pub(crate) async fn read<T: IoBufMut>(
-    fd: SharedFd,
-    mut buf: T,
-) -> crate::BufResult<usize, T> {
+pub(crate) async fn read<T: IoBufMut>(fd: SharedFd, mut buf: T) -> crate::BufResult<usize, T> {
     let handle = fd.raw_handle() as std::os::windows::io::RawHandle;
     let ptr = buf.write_ptr();
     let len = buf.bytes_total();
 
     // Safety: buffer is owned by this async function (buf)
     let result = unsafe { crate::blocking::unblock_fread(handle, ptr, len).await };
-    
+
     match result {
         Ok(n) => {
             unsafe { buf.set_init(n) };
@@ -47,7 +44,7 @@ pub(crate) async fn read_at<T: IoBufMut>(
     let len = buf.bytes_total();
 
     let result = unsafe { crate::blocking::unblock_fread_at(handle, ptr, len, pos).await };
-    
+
     match result {
         Ok(n) => {
             unsafe { buf.set_init(n) };
@@ -57,16 +54,13 @@ pub(crate) async fn read_at<T: IoBufMut>(
     }
 }
 
-pub(crate) async fn write<T: IoBuf>(
-    fd: SharedFd,
-    buf: T,
-) -> crate::BufResult<usize, T> {
+pub(crate) async fn write<T: IoBuf>(fd: SharedFd, buf: T) -> crate::BufResult<usize, T> {
     let handle = fd.raw_handle() as std::os::windows::io::RawHandle;
     let ptr = buf.read_ptr();
     let len = buf.bytes_init();
 
     let result = unsafe { crate::blocking::unblock_fwrite(handle, ptr, len).await };
-    
+
     match result {
         Ok(n) => (Ok(n), buf),
         Err(e) => (Err(e), buf),
@@ -83,7 +77,7 @@ pub(crate) async fn write_at<T: IoBuf>(
     let len = buf.bytes_init();
 
     let result = unsafe { crate::blocking::unblock_fwrite_at(handle, ptr, len, pos).await };
-    
+
     match result {
         Ok(n) => (Ok(n), buf),
         Err(e) => (Err(e), buf),

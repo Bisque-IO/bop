@@ -2,8 +2,8 @@ use std::future::Future;
 
 use super::AsyncReadRent;
 use crate::{
-    buf::{IoBufMut, IoVecBufMut, SliceMut},
     BufResult,
+    buf::{IoBufMut, IoVecBufMut, SliceMut},
 };
 
 macro_rules! reader_trait {
@@ -99,7 +99,7 @@ where
                             "failed to fill whole buffer",
                         )),
                         buf,
-                    )
+                    );
                 }
                 Ok(n) => {
                     read += n;
@@ -131,7 +131,7 @@ where
                             "failed to fill whole buffer",
                         )),
                         buf,
-                    )
+                    );
                 }
                 Ok(n) => read += n,
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}

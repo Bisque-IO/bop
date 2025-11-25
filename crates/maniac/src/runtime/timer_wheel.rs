@@ -34,7 +34,7 @@ pub enum TimerWheelError {
 }
 
 /// Timer entry stored in the wheel
-/// 
+///
 /// Each entry contains the absolute deadline in nanoseconds, the computed deadline tick
 /// (for efficient spoke calculation), and the associated data.
 #[derive(Debug)]
@@ -190,11 +190,11 @@ impl<T> SingleWheel<T> {
     }
 
     /// Schedule a timer into this wheel
-    /// 
+    ///
     /// Uses hashing to determine which spoke (tick) the timer belongs to, then finds
     /// an available slot within that spoke. Employs a hint-based optimization for
     /// O(1) average-case insertion.
-    /// 
+    ///
     /// # Returns
     /// Returns `(spoke_index, slot_index)` tuple that can be encoded into a timer ID
     pub fn schedule_internal(
@@ -214,11 +214,11 @@ impl<T> SingleWheel<T> {
         // Using bit shift instead of division for performance
         let deadline_tick =
             (deadline_ns.saturating_sub(start_time_ns)) >> self.resolution_bits_to_shift;
-        
+
         // Hash into spoke using bitwise AND (faster than modulo)
         // spoke_index = deadline_tick % ticks_per_wheel
         let spoke_index = (deadline_tick & self.tick_mask as u64) as usize;
-        
+
         // Calculate start index of this spoke in the flat array
         // tick_start_index = spoke_index * tick_allocation
         let mut tick_start_index = spoke_index << self.allocation_bits_to_shift;
@@ -253,7 +253,8 @@ impl<T> SingleWheel<T> {
             Some(idx) => idx,
             None => {
                 // Double the allocation for this spoke (and all spokes)
-                let new_slot = self.increase_capacity(spoke_index)
+                let new_slot = self
+                    .increase_capacity(spoke_index)
                     .map_err(|_| TimerWheelError::CapacityExceeded)?;
                 // Recalculate start index after capacity increase
                 tick_start_index = spoke_index << self.allocation_bits_to_shift;
@@ -295,7 +296,11 @@ impl<T> SingleWheel<T> {
     ///
     /// # Returns
     /// Returns the timer data if found, or an error if the timer doesn't exist
-    pub fn cancel_internal(&mut self, spoke_index: usize, slot_index: usize) -> Result<Option<T>, TimerWheelError> {
+    pub fn cancel_internal(
+        &mut self,
+        spoke_index: usize,
+        slot_index: usize,
+    ) -> Result<Option<T>, TimerWheelError> {
         // Validate bounds BEFORE computing wheel_index to prevent integer overflow
         // This is a safety check - overflow could cause incorrect indexing
         if spoke_index >= self.ticks_per_wheel || slot_index >= self.tick_allocation {
@@ -348,11 +353,13 @@ impl<T> SingleWheel<T> {
         output: &mut Vec<(u64, u64, T)>,
     ) -> usize {
         // Update internal clock
-        self.now_ns.store(now_ns, std::sync::atomic::Ordering::Release);
+        self.now_ns
+            .store(now_ns, std::sync::atomic::Ordering::Release);
         output.clear();
 
         // Calculate which tick we should be at given current time
-        let target_tick = (now_ns.saturating_sub(self.start_time_ns)) >> self.resolution_bits_to_shift;
+        let target_tick =
+            (now_ns.saturating_sub(self.start_time_ns)) >> self.resolution_bits_to_shift;
 
         // Early exit if no timers
         if self.timer_count == 0 {
@@ -424,16 +431,18 @@ impl<T> SingleWheel<T> {
     }
 
     /// Double the capacity of all spokes in the wheel
-    /// 
+    ///
     /// When a spoke runs out of slots, we double the allocation for ALL spokes
     /// (not just the full one) to maintain uniform indexing. This is expensive
     /// but amortized over many insertions.
-    /// 
+    ///
     /// # Returns
     /// Returns the old tick allocation size (which becomes the first new slot index)
     fn increase_capacity(&mut self, spoke_index: usize) -> Result<usize, TimerWheelError> {
         // Double the allocation (must remain power of 2)
-        let new_tick_allocation = self.tick_allocation.checked_mul(2)
+        let new_tick_allocation = self
+            .tick_allocation
+            .checked_mul(2)
             .ok_or(TimerWheelError::Overflow)?;
         let new_allocation_bits = new_tick_allocation.trailing_zeros();
 
@@ -454,8 +463,8 @@ impl<T> SingleWheel<T> {
         // Copy all existing timers to new array
         // Each spoke's data is copied to the same relative position in the new spoke
         for j in 0..self.ticks_per_wheel {
-            let old_start = j << old_allocation_bits;  // Old spoke start
-            let new_start = j << new_allocation_bits;  // New spoke start
+            let old_start = j << old_allocation_bits; // Old spoke start
+            let new_start = j << new_allocation_bits; // New spoke start
             // Copy all slots from old spoke to new spoke
             for k in 0..old_tick_allocation {
                 new_wheel[new_start + k] = self.wheel[old_start + k].take();
@@ -489,11 +498,7 @@ impl<T> SingleWheel<T> {
     /// # Returns
     /// Returns a timer ID that can be used to cancel the timer, or an error if
     /// the deadline is invalid or capacity is exceeded.
-    pub fn schedule_timer(
-        &mut self,
-        deadline_ns: u64,
-        data: T,
-    ) -> Result<u64, TimerWheelError> {
+    pub fn schedule_timer(&mut self, deadline_ns: u64, data: T) -> Result<u64, TimerWheelError> {
         // Validate deadline: must be > 0 and >= now_ns
         let now_ns = self.now_ns.load(std::sync::atomic::Ordering::Relaxed);
         if deadline_ns == 0 || deadline_ns < self.start_time_ns || deadline_ns < now_ns {
@@ -587,7 +592,8 @@ impl<T> SingleWheel<T> {
     /// Set the current time in nanoseconds
     #[inline]
     pub fn set_now_ns(&mut self, now_ns: u64) {
-        self.now_ns.store(now_ns, std::sync::atomic::Ordering::Release);
+        self.now_ns
+            .store(now_ns, std::sync::atomic::Ordering::Release);
     }
 
     /// Clear all timers from the wheel
@@ -609,7 +615,7 @@ impl<T> SingleWheel<T> {
 }
 
 /// High-performance hierarchical timing wheel
-/// 
+///
 /// Uses a two-level hierarchy to efficiently handle timers across a wide time range:
 /// - **L0 (Fast wheel)**: Handles near-term timers (0 to ~1 second)
 ///   - Fine-grained resolution for accurate short-term scheduling
@@ -617,7 +623,7 @@ impl<T> SingleWheel<T> {
 /// - **L1 (Medium wheel)**: Handles long-term timers (~1 second to ~18 minutes)
 ///   - Coarser resolution to reduce memory overhead
 ///   - Timers cascade down to L0 as their deadline approaches
-/// 
+///
 /// The hierarchy allows O(1) scheduling and cancellation while supporting
 /// a wide range of timer durations without excessive memory usage.
 pub struct TimerWheel<T> {
@@ -674,13 +680,13 @@ impl<T> TimerWheel<T> {
     }
 
     /// Create hierarchical timer wheel with custom initial allocation per tick
-    /// 
+    ///
     /// # Arguments
     /// * `tick_resolution` - L0 tick duration (must be power of 2 nanoseconds)
     /// * `ticks_per_wheel` - Number of spokes per wheel (must be power of 2)
     /// * `initial_tick_allocation` - Initial slots per tick (must be power of 2)
     /// * `worker_id` - Worker ID that owns this timer wheel
-    /// 
+    ///
     /// # Design Notes
     /// The L1 tick resolution equals one full L0 rotation, creating a natural
     /// cascading relationship: when an L1 tick expires, all its timers are
@@ -712,15 +718,15 @@ impl<T> TimerWheel<T> {
     }
 
     /// Schedule a timer for an absolute deadline
-    /// 
+    ///
     /// The deadline is specified as nanoseconds since wheel creation. The timer
     /// is automatically placed in the appropriate wheel (L0 for near-term, L1 for
     /// long-term) based on the deadline value.
-    /// 
+    ///
     /// # Arguments
     /// * `deadline_ns` - Absolute deadline in nanoseconds (must be > 0 and in the future)
     /// * `data` - User data to associate with this timer
-    /// 
+    ///
     /// # Returns
     /// Returns a timer ID that can be used to cancel the timer, or an error if
     /// the deadline is invalid or capacity is exceeded.
@@ -735,27 +741,27 @@ impl<T> TimerWheel<T> {
         // Route to appropriate wheel based on deadline distance
         if deadline_ns < self.l0_coverage_ns {
             // Near-term timer: schedule in L0 (fast wheel)
-            let (spoke, slot) = self
-                .l0
-                .schedule_internal(deadline_ns, self.start_time_ns, data, 0)?;
+            let (spoke, slot) =
+                self.l0
+                    .schedule_internal(deadline_ns, self.start_time_ns, data, 0)?;
             Ok(Self::encode_timer_id(0, spoke, slot)?)
         } else {
             // Long-term timer: schedule in L1 (medium wheel)
             // Will cascade down to L0 as deadline approaches
-            let (spoke, slot) = self
-                .l1
-                .schedule_internal(deadline_ns, self.start_time_ns, data, 1)?;
+            let (spoke, slot) =
+                self.l1
+                    .schedule_internal(deadline_ns, self.start_time_ns, data, 1)?;
             Ok(Self::encode_timer_id(1, spoke, slot)?)
         }
     }
 
     /// Cancel a previously scheduled timer
-    /// 
+    ///
     /// O(1) operation - directly indexes into the wheel using the timer ID.
-    /// 
+    ///
     /// # Arguments
     /// * `timer_id` - Timer ID returned from `schedule_timer()`
-    /// 
+    ///
     /// # Returns
     /// Returns the timer data if found and cancelled, or an error if the timer
     /// doesn't exist or the timer ID is invalid.
@@ -770,16 +776,16 @@ impl<T> TimerWheel<T> {
     }
 
     /// Poll for expired timers
-    /// 
+    ///
     /// Checks for timers that have expired by the given `now_ns` time. First cascades
     /// L1 timers that are now within L0 coverage down to L0, then polls L0 for
     /// expired timers.
-    /// 
+    ///
     /// # Arguments
     /// * `now_ns` - Current time in nanoseconds
     /// * `expiry_limit` - Maximum number of expired timers to return
     /// * `output` - Buffer to write expired timer tuples: `(timer_id, deadline_ns, data)`
-    /// 
+    ///
     /// # Returns
     /// Returns the number of expired timers found (may be less than `expiry_limit`)
     pub fn poll(
@@ -802,11 +808,11 @@ impl<T> TimerWheel<T> {
     }
 
     /// Cascade timers from L1 to L0
-    /// 
+    ///
     /// Moves L1 timers that are now within L0's coverage range down to L0.
     /// This ensures long-term timers are handled by the fast wheel as their
     /// deadline approaches, enabling accurate expiration.
-    /// 
+    ///
     /// Cascading happens when: deadline_ns < now_ns + l0_coverage_ns
     /// This means the timer will expire within one L0 rotation, so it should
     /// be in L0 for precise timing.
@@ -835,7 +841,7 @@ impl<T> TimerWheel<T> {
             // Check each slot in this spoke
             for slot_idx in 0..self.l1.tick_allocation {
                 let wheel_index = tick_start + slot_idx;
-                
+
                 // Check if this timer should be cascaded to L0
                 // Criteria: deadline is within L0 coverage from now
                 let should_cascade = matches!(
@@ -880,12 +886,12 @@ impl<T> TimerWheel<T> {
     }
 
     /// Poll L0 wheel for expired timers
-    /// 
+    ///
     /// Scans L0 for timers that have expired by `now_ns`. Uses an optimized
     /// incremental scan starting from `current_tick` to avoid scanning the entire
     /// wheel when only a few ticks have expired. Falls back to a full scan if
     /// cascaded timers may exist in earlier ticks.
-    /// 
+    ///
     /// # Performance
     /// - Best case: O(expired_timers) - only scans expired ticks
     /// - Worst case: O(ticks_per_wheel × tick_allocation) - full wheel scan
@@ -1007,7 +1013,7 @@ impl<T> TimerWheel<T> {
     }
 
     /// Advance the wheel's current tick position without polling
-    /// 
+    ///
     /// Useful for synchronizing the wheel's position when time advances
     /// without immediately processing expired timers.
     pub fn advance_to(&mut self, now_ns: u64) {
@@ -1018,7 +1024,7 @@ impl<T> TimerWheel<T> {
     }
 
     /// Get the time corresponding to the next tick
-    /// 
+    ///
     /// Returns the absolute time (in nanoseconds) when the next tick will occur.
     pub fn current_tick_time_ns(&self) -> u64 {
         ((self.l0.current_tick + 1) << self.l0.resolution_bits_to_shift) + self.start_time_ns
@@ -1030,10 +1036,10 @@ impl<T> TimerWheel<T> {
     }
 
     /// Get the earliest deadline among all active timers
-    /// 
+    ///
     /// Uses cached values when available for O(1) performance. Falls back to
     /// full wheel scans when cache is invalidated (O(ticks_per_wheel × tick_allocation)).
-    /// 
+    ///
     /// # Returns
     /// Returns the earliest deadline in nanoseconds, or `None` if no timers are scheduled.
     pub fn next_deadline(&mut self) -> Option<u64> {
@@ -1080,10 +1086,10 @@ impl<T> TimerWheel<T> {
     }
 
     /// Recompute the cached earliest deadline for L0
-    /// 
+    ///
     /// Scans the entire L0 wheel to find the earliest deadline. This is expensive
     /// (O(ticks_per_wheel × tick_allocation)) but only runs when the cache is invalidated.
-    /// 
+    ///
     /// Must scan the entire wheel because cascaded timers may exist in any tick,
     /// not just those after current_tick.
     fn recompute_l0_deadline(&mut self) {
@@ -1111,7 +1117,7 @@ impl<T> TimerWheel<T> {
     }
 
     /// Recompute the cached earliest deadline for L1
-    /// 
+    ///
     /// Scans the entire L1 wheel to find the earliest deadline. This is expensive
     /// (O(ticks_per_wheel × tick_allocation)) but only runs when the cache is invalidated.
     fn recompute_l1_deadline(&mut self) {
@@ -1159,7 +1165,7 @@ impl<T> TimerWheel<T> {
         for slot in &mut self.l1.wheel {
             *slot = None;
         }
-        
+
         self.l0.timer_count = 0;
         self.l1.timer_count = 0;
         self.l0.cached_next_deadline = SingleWheel::<T>::NULL_DEADLINE;
@@ -1167,12 +1173,12 @@ impl<T> TimerWheel<T> {
     }
 
     /// Encode wheel level, spoke, and slot into a compact timer ID
-    /// 
+    ///
     /// Timer ID format (64 bits):
     /// - Bits 62-63: Level (0=L0, 1=L1)
     /// - Bits 32-61: Spoke index (30 bits, max 1<<30 spokes)
     /// - Bits 0-31:  Slot index (32 bits, max 1<<32 slots)
-    /// 
+    ///
     /// This encoding allows O(1) timer cancellation by directly decoding
     /// the wheel location from the timer ID.
     #[inline]
@@ -1193,7 +1199,7 @@ impl<T> TimerWheel<T> {
     }
 
     /// Decode a timer ID into wheel level, spoke, and slot indices
-    /// 
+    ///
     /// Reverse of `encode_timer_id()`. Extracts the three components
     /// needed to locate a timer in the wheel structure.
     #[inline]

@@ -2,8 +2,8 @@ use std::{io, net::SocketAddr};
 
 use super::TcpStream;
 use crate::io::{
-    as_fd::{AsReadFd, AsWriteFd, SharedFdWrapper},
     OwnedReadHalf, OwnedWriteHalf,
+    as_fd::{AsReadFd, AsWriteFd, SharedFdWrapper},
 };
 
 /// OwnedReadHalf.

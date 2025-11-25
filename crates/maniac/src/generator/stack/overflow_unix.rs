@@ -1,7 +1,7 @@
-use crate::generator::rt::{guard, ContextStack};
+use crate::generator::rt::{ContextStack, guard};
 
 use crate::generator::yield_::yield_now;
-use libc::{sigaction, sighandler_t, SA_ONSTACK, SA_SIGINFO, SIGBUS, SIGSEGV};
+use libc::{SA_ONSTACK, SA_SIGINFO, SIGBUS, SIGSEGV, sigaction, sighandler_t};
 use std::mem;
 use std::mem::MaybeUninit;
 use std::ptr::null_mut;

@@ -5,11 +5,11 @@ use std::{
 
 use crate::buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut, RawBuf};
 
-use crate::{
-    io::{AsyncReadRent, AsyncWriteRent, Split},
-    BufResult,
-};
 use super::super::io_wrapper::{ReadBuffer, WriteBuffer};
+use crate::{
+    BufResult,
+    io::{AsyncReadRent, AsyncWriteRent, Split},
+};
 use rustls::{ClientConnection, ConnectionCommon, ServerConnection, SideData};
 
 #[derive(Debug)]

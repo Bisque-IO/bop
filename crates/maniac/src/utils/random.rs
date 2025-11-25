@@ -12,7 +12,9 @@ pub struct Random {
 
 impl Random {
     pub fn new() -> Self {
-        Self { seed: rng().next_u64() }
+        Self {
+            seed: rng().next_u64(),
+        }
     }
 
     pub fn new_with_seed(seed: u64) -> Self {
@@ -37,10 +39,11 @@ impl Random {
 fn now_nanos() -> u64 {
     // Return the current time as the number of nanoseconds since the Unix epoch as a u64
     use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards");
     now.as_nanos() as u64
 }
-
 
 thread_local! {
     static THREAD_RND: UnsafeCell<Random> = UnsafeCell::new(Random { seed: now_nanos() });
@@ -53,6 +56,3 @@ pub fn random_u64() -> u64 {
 pub fn random_usize() -> usize {
     THREAD_RND.with(|r| unsafe { &mut *r.get() }.next()) as usize
 }
-
-
-

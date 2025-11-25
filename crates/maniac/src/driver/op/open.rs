@@ -4,7 +4,7 @@ use std::{ffi::CString, io, path::Path};
 use io_uring::{opcode, types};
 
 #[cfg(any(feature = "poll", feature = "poll-io"))]
-use super::{driver::ready::Direction, MaybeFd};
+use super::{MaybeFd, driver::ready::Direction};
 use super::{Op, OpAble};
 use crate::{driver::util::cstr, fs::OpenOptions};
 

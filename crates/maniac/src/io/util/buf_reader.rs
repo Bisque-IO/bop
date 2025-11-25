@@ -1,9 +1,9 @@
 use std::future::Future;
 
 use crate::{
+    BufResult,
     buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut, IoVecWrapperMut},
     io::{AsyncBufRead, AsyncReadRent, AsyncWriteRent},
-    BufResult,
 };
 
 /// BufReader is a struct with a buffer. BufReader implements AsyncBufRead

@@ -66,7 +66,6 @@ of data races so soundness issues _are_ possible.
 
 [Loom]: https://github.com/tokio-rs/loom
 
-
 ## Implementation
 
 Sending, receiving and recycling a sender are lock-free operations; the last two
@@ -80,7 +79,6 @@ only extra cost is 1 RMW in case the waker was updated (which is rare in
 practice). Also, the implementation of `multishot` partially offsets this extra
 cost by using arithmetic atomic operations when sending rather than the
 typically more expensive compare-and-swap operation.
-
 
 ## License
 

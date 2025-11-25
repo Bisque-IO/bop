@@ -9,12 +9,14 @@ use std::{
 use std::os::unix::fs::FileExt;
 
 use super::File;
+use crate::uring_op;
 use crate::{
     buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut},
     driver::{op::Op, shared_fd::SharedFd},
-    fs::{Metadata, metadata::FileAttr},
+    fs::Metadata,
 };
-use crate::uring_op;
+#[cfg(unix)]
+use crate::fs::metadata::FileAttr;
 
 impl File {
     /// Converts a [`std::fs::File`] to a [`fs::File`](File).
@@ -48,13 +50,13 @@ impl File {
     /// }
     /// ```
     pub async fn metadata(&self) -> io::Result<Metadata> {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "iouring"))]
         {
             metadata(self.fd.clone()).await
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "iouring")))]
         {
-            // On non-Linux Unix (macOS/BSD), we use blocking thread pool for metadata
+            // On non-io_uring systems (including Linux without io_uring), we use blocking thread pool for metadata
             let fd = self.fd.raw_fd();
             // Zero-allocation version using the dedicated unblock_fmetadata function
             // Safety: File descriptor remains valid for the duration of the operation
@@ -62,17 +64,19 @@ impl File {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", feature = "iouring")))]
     pub async fn open(path: impl AsRef<Path>) -> io::Result<File> {
         let path = path.as_ref().to_owned();
-        let std_file = crate::blocking::unblock_open(path).await?;
+        // let std_file = crate::blocking::unblock_open(path).await?;
+        let std_file = crate::blocking::unblock(move || std::fs::File::open(path)).await?;
         File::from_std(std_file)
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", feature = "iouring")))]
     pub async fn create(path: impl AsRef<Path>) -> io::Result<File> {
-        let path = path.as_ref().to_owned();
-        let std_file = crate::blocking::unblock_create(path).await?;
+        // let path = path.as_ref().to_owned();
+        // let std_file = crate::blocking::unblock_create(path).await?;
+        let std_file = crate::blocking::unblock(move || std::fs::File::create(path)).await?;
         File::from_std(std_file)
     }
 }
@@ -84,13 +88,13 @@ impl AsRawFd for File {
 }
 
 pub(crate) async fn metadata(fd: SharedFd) -> std::io::Result<Metadata> {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
     {
         let flags = libc::AT_STATX_SYNC_AS_STAT | libc::AT_EMPTY_PATH;
         let op = Op::statx_using_fd(fd, flags)?;
         op.result().await.map(FileAttr::from).map(Metadata)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", feature = "iouring")))]
     {
         // This fallback is handled inside File::metadata for non-linux now
         // But if called directly with SharedFd:
@@ -101,7 +105,7 @@ pub(crate) async fn metadata(fd: SharedFd) -> std::io::Result<Metadata> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "iouring"))]
 mod linux_impl {
     use super::*;
 
@@ -117,14 +121,9 @@ mod linux_impl {
 #[cfg(target_os = "linux")]
 pub(crate) use linux_impl::*;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "iouring")))]
 mod fallback_impl {
-    use super::*;
-
-    pub(crate) async fn read<T: IoBufMut>(
-        fd: SharedFd,
-        mut buf: T,
-    ) -> crate::BufResult<usize, T> {
+    pub(crate) async fn read<T: IoBufMut>(fd: SharedFd, mut buf: T) -> crate::BufResult<usize, T> {
         let raw_fd = fd.raw_fd();
         // Using zero-allocation variant with raw pointers
         let ptr = buf.write_ptr();
@@ -159,8 +158,7 @@ mod fallback_impl {
         // 1. buf is owned by this async function and won't move
         // 2. The blocking thread only accesses the pointer during the read_at
         // 3. We wait for completion before returning
-        let result =
-            unsafe { crate::blocking::unblock_fread_at(raw_fd, ptr, len, pos).await };
+        let result = unsafe { crate::blocking::unblock_fread_at(raw_fd, ptr, len, pos).await };
 
         match result {
             Ok(n) => {
@@ -171,10 +169,7 @@ mod fallback_impl {
         }
     }
 
-    pub(crate) async fn write<T: IoBuf>(
-        fd: SharedFd,
-        buf: T,
-    ) -> crate::BufResult<usize, T> {
+    pub(crate) async fn write<T: IoBuf>(fd: SharedFd, buf: T) -> crate::BufResult<usize, T> {
         let raw_fd = fd.raw_fd();
         // Using zero-allocation variant with raw pointers
         let ptr = buf.read_ptr();
@@ -203,48 +198,76 @@ mod fallback_impl {
         // 1. buf is immutable during write and owned by this function
         // 2. The blocking thread only accesses the pointer during the write_at
         // 3. We wait for completion before returning
-        let result =
-            unsafe { crate::blocking::unblock_fwrite_at(raw_fd, ptr, len, pos).await };
+        let result = unsafe { crate::blocking::unblock_fwrite_at(raw_fd, ptr, len, pos).await };
 
         (result, buf)
     }
 
-    // Implementing vectored IO via loop for fallback
+    // Implementing vectored IO using readv/writev syscalls via blocking thread pool
     pub(crate) async fn read_vectored<T: IoVecBufMut>(
         fd: SharedFd,
         mut buf_vec: T,
     ) -> crate::BufResult<usize, T> {
-        // Simple implementation: read into first buffer, or implement proper vectored read via readv if available?
-        // std::fs::File has read_vectored.
         let raw_fd = fd.raw_fd();
+        // Get pointers and length before moving into closure
+        let iovec_ptr = buf_vec.write_iovec_ptr();
+        let iovec_len = buf_vec.write_iovec_len().min(i32::MAX as usize);
 
-        // NOTE: A robust implementation of read_vectored for fallback is non-trivial with current traits.
-        // For now, return an error indicating the operation is not implemented.
-        // We could implement this in the future using zero-allocation operations if needed.
-        (
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "read_vectored fallback not fully implemented",
-            )),
-            buf_vec,
-        )
+        // Safety:
+        // 1. buf_vec is owned by this function and remains valid during the operation
+        // 2. The iovec structures are owned by buf_vec and remain valid
+        // 3. The blocking thread only accesses the iovec structures during the readv call
+        // 4. We wait for completion before returning
+        // Note: We capture raw_fd and pointers by value, not buf_vec itself
+        let result = crate::blocking::unblock(move || {
+            unsafe {
+                let nread = libc::readv(raw_fd, iovec_ptr, iovec_len as _);
+                if nread < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(nread as usize)
+                }
+            }
+        }).await;
+
+        match result {
+            Ok(n) => {
+                unsafe { buf_vec.set_init(n) };
+                (Ok(n), buf_vec)
+            }
+            Err(e) => (Err(e), buf_vec),
+        }
     }
 
     pub(crate) async fn write_vectored<T: IoVecBuf>(
         fd: SharedFd,
         buf_vec: T,
     ) -> crate::BufResult<usize, T> {
-        // Similar issue as read_vectored.
-        // We could implement this in the future using zero-allocation operations if needed.
-        (
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "write_vectored fallback not fully implemented",
-            )),
-            buf_vec,
-        )
+        let raw_fd = fd.raw_fd();
+        // Get pointers and length before moving into closure
+        let iovec_ptr = buf_vec.read_iovec_ptr();
+        let iovec_len = buf_vec.read_iovec_len().min(i32::MAX as usize);
+
+        // Safety:
+        // 1. buf_vec is owned by this function and remains valid during the operation
+        // 2. The iovec structures are owned by buf_vec and remain valid
+        // 3. The blocking thread only accesses the iovec structures during the writev call
+        // 4. We wait for completion before returning
+        // Note: We capture raw_fd and pointers by value, not buf_vec itself
+        let result = crate::blocking::unblock(move || {
+            unsafe {
+                let nwritten = libc::writev(raw_fd, iovec_ptr as *const libc::iovec, iovec_len as _);
+                if nwritten < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(nwritten as usize)
+                }
+            }
+        }).await;
+
+        (result, buf_vec)
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "iouring")))]
 pub(crate) use fallback_impl::*;

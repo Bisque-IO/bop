@@ -13,7 +13,7 @@ use crate::buf::{IoBuf, IoBufMut};
 
 use crate::{
     driver::{op::Op, shared_fd::SharedFd},
-    io::{operation_canceled, CancelHandle, Split},
+    io::{CancelHandle, Split, operation_canceled},
 };
 
 /// A UDP socket.
@@ -40,7 +40,10 @@ impl UdpSocket {
     pub(crate) fn from_shared_fd(fd: SharedFd) -> Self {
         // Default to 0 if not in worker context (e.g. unit tests), otherwise current worker
         let owner_worker_id = crate::runtime::worker::current_worker_id().unwrap_or(0);
-        Self { fd, owner_worker_id }
+        Self {
+            fd,
+            owner_worker_id,
+        }
     }
 
     /// Returns the ID of the worker that owns this socket.

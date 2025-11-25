@@ -5,7 +5,7 @@ use io_uring::{opcode, types};
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
 #[cfg(any(feature = "poll", feature = "poll-io"))]
-use super::{driver::ready::Direction, MaybeFd};
+use super::{MaybeFd, driver::ready::Direction};
 
 pub(crate) struct Fsync {
     #[allow(unused)]

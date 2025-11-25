@@ -1,4 +1,4 @@
-use super::{assert_stream, Stream};
+use super::{Stream, assert_stream};
 
 /// Stream for the [`iter`] function.
 #[derive(Debug, Clone)]

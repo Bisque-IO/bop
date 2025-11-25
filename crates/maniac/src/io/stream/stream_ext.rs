@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use super::{assert_stream, Stream};
+use super::{Stream, assert_stream};
 
 /// Stream extensions.
 pub trait StreamExt: Stream {

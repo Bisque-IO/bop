@@ -1,8 +1,8 @@
 use std::{future::Future, io::Cursor};
 
 use crate::{
-    buf::{IoBufMut, IoVecBufMut},
     BufResult,
+    buf::{IoBufMut, IoVecBufMut},
 };
 
 /// The `AsyncReadRent` trait defines asynchronous reading operations for objects that

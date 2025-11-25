@@ -1,10 +1,10 @@
 use std::future::Future;
 
-use super::{split::Split, CancelHandle};
+use super::{CancelHandle, split::Split};
 use crate::{
+    BufResult,
     buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut, IoVecWrapperMut},
     io::{AsyncReadRent, AsyncWriteRent, CancelableAsyncReadRent, CancelableAsyncWriteRent},
-    BufResult,
 };
 
 /// PrefixedReadIO facilitates the addition of a prefix to an IO stream,

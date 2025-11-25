@@ -27,9 +27,13 @@ a high performance asynchronous computation framework for system simulation. It
 is also used in the [Tachyonix][tachyonix] MPSC channel.
 
 [event_listener]: https://docs.rs/event_listener/latest/event_listener/
+
 [eventcount]: https://www.1024cores.net/home/lock-free-algorithms/eventcounts
+
 [diatomic-waker]: https://github.com/asynchronics/diatomic-waker
+
 [asynchronix]: https://github.com/asynchronics/asynchronix
+
 [tachyonix]: https://github.com/asynchronics/tachyonix
 
 ## Usage
@@ -61,7 +65,6 @@ The API is more opinionated and designed to preventing potential misuse such as:
 - *Inadequate atomic synchronization of the predicate*. The `notify*` and
   `wait_until` methods always insert atomic fences to ensure proper
   synchronization: there is no equivalent to `notify_additional_relaxed`.
-
 
 ## Examples
 
@@ -120,12 +123,10 @@ of data races so soundness issues _are_ possible.
 
 [Loom]: https://github.com/tokio-rs/loom
 
-
 ## License
 
 This software is licensed under the [Apache License, Version 2.0](LICENSE-APACHE) or the
 [MIT license](LICENSE-MIT), at your option.
-
 
 ### Contribution
 

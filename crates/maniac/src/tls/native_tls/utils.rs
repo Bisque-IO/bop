@@ -1,7 +1,7 @@
 use std::{cell::UnsafeCell, io, rc::Rc};
 
-use crate::io::{AsyncReadRent, AsyncWriteRent};
 use super::super::io_wrapper::{ReadBuffer, WriteBuffer};
+use crate::io::{AsyncReadRent, AsyncWriteRent};
 use native_tls::HandshakeError as NativeHandshakeError;
 
 use super::{TlsError, TlsStream};

@@ -1,7 +1,10 @@
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use crate::driver::IoUringDriver;
 use crate::driver::PollerDriver;
-use crate::runtime::{io_builder::{Buildable, FusionDriver, RuntimeBuilder}, io_runtime::FusionRuntime};
+use crate::runtime::{
+    io_builder::{Buildable, FusionDriver, RuntimeBuilder},
+    io_runtime::FusionRuntime,
+};
 use std::io;
 use std::time::Duration;
 
@@ -15,12 +18,12 @@ type RuntimeType = FusionRuntime<PollerDriver>;
 ///
 /// This replaces the custom mio-based loop with monoio's runtime.
 /// It adapts monoio to function as the reactor for maniac-runtime's workers.
-pub struct EventLoop {
+pub struct IoDriver {
     // We use TimeDriver wrap to support timeouts
     pub(crate) runtime: RuntimeType,
 }
 
-impl EventLoop {
+impl IoDriver {
     pub fn new() -> io::Result<Self> {
         // Build monoio runtime
         let runtime = RuntimeBuilder::<FusionDriver>::new().build()?;
@@ -73,35 +76,6 @@ impl EventLoop {
     pub fn waker(&self) -> io::Result<crate::driver::UnparkHandle> {
         Ok(self.runtime.unpark())
     }
-
-    pub fn with_timer_wheel() -> io::Result<Self> {
-        Self::new()
-    }
-
-    pub fn modify_socket(&self, _token: mio::Token, _interest: mio::Interest) -> io::Result<()> {
-        Ok(())
-    }
-
-    pub fn close_socket(&self, _token: mio::Token) {}
-
-    pub fn set_timeout(&self, _token: mio::Token, _delay: Duration) -> io::Result<()> {
-        Ok(())
-    }
-
-    pub fn cancel_timeout(&self, _token: mio::Token) -> io::Result<()> {
-        Ok(())
-    }
-
-    // Poller methods to support existing tests/code temporarily
-
-    pub fn iteration_number(&self) -> i64 {
-        0
-    }
-
-    pub fn socket_count(&self) -> usize {
-        0
-    }
-
 }
 
 // Re-export UnparkHandle as it's used by waker()

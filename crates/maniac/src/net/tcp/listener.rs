@@ -6,7 +6,7 @@ use std::{
 
 #[cfg(unix)]
 use {
-    libc::{sockaddr_in, sockaddr_in6, AF_INET, AF_INET6},
+    libc::{AF_INET, AF_INET6, sockaddr_in, sockaddr_in6},
     std::os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
 };
 #[cfg(windows)]
@@ -20,7 +20,7 @@ use {
 use super::stream::TcpStream;
 use crate::{
     driver::{op::Op, shared_fd::SharedFd},
-    io::{stream::Stream, CancelHandle},
+    io::{CancelHandle, stream::Stream},
     net::ListenerOpts,
 };
 

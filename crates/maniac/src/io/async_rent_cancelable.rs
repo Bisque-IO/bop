@@ -2,8 +2,8 @@ use std::future::Future;
 
 use super::{AsyncReadRent, AsyncWriteRent, CancelHandle};
 use crate::{
-    buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut},
     BufResult,
+    buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut},
 };
 
 /// CancelableAsyncReadRent: async read with a ownership of a buffer and ability to cancel io.
@@ -63,7 +63,7 @@ pub trait CancelableAsyncWriteRent: AsyncWriteRent {
 
     /// Same as shutdown
     fn cancelable_shutdown(&mut self, c: CancelHandle)
-        -> impl Future<Output = std::io::Result<()>>;
+    -> impl Future<Output = std::io::Result<()>>;
 }
 
 impl<A: ?Sized + CancelableAsyncWriteRent> CancelableAsyncWriteRent for &mut A {

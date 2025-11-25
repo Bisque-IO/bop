@@ -1,11 +1,11 @@
 use maniac::blocking;
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
-use std::io::Write;
-#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd};
 
@@ -30,20 +30,18 @@ fn test_blocking_cancellation_unix_pipe() {
 
     // 2. Buffer
     let mut buffer = vec![0u8; 1024];
-    
+
     println!("Spawning task...");
     // Safety: buffer outlives the task because we block/drop the task within this scope
     // before buffer is dropped.
-    let task = unsafe {
-        blocking::unblock_fread(fd, buffer.as_mut_ptr(), buffer.len())
-    };
+    let task = unsafe { blocking::unblock_fread(fd, buffer.as_mut_ptr(), buffer.len()) };
 
     // 3. Sleep to let it block on read()
     thread::sleep(Duration::from_millis(100));
 
     println!("Dropping task (should cancel)...");
     let start = Instant::now();
-    // 4. Drop the task. 
+    // 4. Drop the task.
     // The reader is blocked on read().
     // Drop should trigger SIGUSR1.
     // sys::read loop should catch EINTR, check is_closed(), and return Err.
@@ -54,7 +52,10 @@ fn test_blocking_cancellation_unix_pipe() {
 
     // 5. Ensure it returned quickly (e.g. < 1s)
     // Without cancellation, it would hang forever (until pipe closed, but we hold tx_pipe).
-    assert!(elapsed < Duration::from_secs(1), "Cancellation took too long");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "Cancellation took too long"
+    );
 }
 
 #[test]
@@ -65,9 +66,7 @@ fn test_blocking_read_success() {
     let mut buffer = vec![0u8; 1024];
 
     // Spawn read
-    let task = unsafe {
-        blocking::unblock_fread(fd, buffer.as_mut_ptr(), buffer.len())
-    };
+    let task = unsafe { blocking::unblock_fread(fd, buffer.as_mut_ptr(), buffer.len()) };
 
     // Write to pipe
     tx_pipe.write_all(b"hello").expect("write failed");
@@ -88,7 +87,7 @@ fn test_blocking_execute_safety() {
         thread::sleep(Duration::from_millis(200));
         42
     });
-    
+
     // Drop immediately. Should not block/spin.
     let start = Instant::now();
     drop(task);
@@ -97,4 +96,3 @@ fn test_blocking_execute_safety() {
     // It should be instant (well under the 200ms sleep time).
     assert!(elapsed < Duration::from_millis(50));
 }
-

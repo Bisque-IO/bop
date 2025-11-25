@@ -1,4 +1,4 @@
-use openssl_sys::{c_char, c_int, ENGINE};
+use openssl_sys::{ENGINE, c_char, c_int};
 
 extern "C" {
     pub fn ENGINE_init(engine: *mut ENGINE) -> c_int;

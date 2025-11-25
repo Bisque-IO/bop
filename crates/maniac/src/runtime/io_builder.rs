@@ -6,10 +6,7 @@ use crate::driver::IoUringDriver;
 use crate::driver::PollerDriver;
 #[cfg(any(feature = "poll", feature = "iouring"))]
 use crate::utils::thread_id::gen_id;
-use crate::{
-    driver::Driver,
-    runtime::io_runtime::IoRuntime,
-};
+use crate::{driver::Driver, runtime::io_runtime::IoRuntime};
 
 #[cfg(any(feature = "poll", feature = "iouring"))]
 thread_local! {
@@ -32,9 +29,7 @@ pub struct RuntimeBuilder<D> {
 
 impl<D> RuntimeBuilder<D> {
     pub fn new() -> Self {
-        Self {
-            _mark: PhantomData,
-        }
+        Self { _mark: PhantomData }
     }
 }
 
@@ -57,14 +52,16 @@ impl DriverNew for IoUringDriver {
     }
 }
 
-impl<D> Buildable for RuntimeBuilder<D> 
-where D: Driver + DriverNew {
+impl<D> Buildable for RuntimeBuilder<D>
+where
+    D: Driver + DriverNew,
+{
     type Output = IoRuntime<D>;
 
     fn build(self) -> io::Result<Self::Output> {
         let driver = D::new()?;
         let context = crate::runtime::io_runtime::Context::new();
-        
+
         Ok(IoRuntime::new(context, driver))
     }
 }

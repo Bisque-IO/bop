@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicUsize;
 #[test]
 fn summary_tree_notifies_partition_owner_on_activity() {
     let wakers: Vec<_> = (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(2);
+    let worker_count = Arc::new(AtomicUsize::new(2));
     let tree = Summary::new(4, 1, &wakers, &worker_count);
 
     // Leaf 3 belongs to worker 1 (leaves {0,1} -> worker 0, {2,3} -> worker 1).
@@ -54,7 +54,7 @@ fn summary_tree_notifies_partition_owner_on_activity() {
 #[test]
 fn summary_tree_compute_partition_owner_matches_layout() {
     let wakers: Vec<_> = (0..3).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(3);
+    let worker_count = Arc::new(AtomicUsize::new(3));
     let tree = Summary::new(7, 1, &wakers, &worker_count);
 
     // Layout with 7 leaves and 3 workers => first worker gets 3 leaves, others 2 each.
@@ -77,7 +77,7 @@ fn summary_tree_compute_partition_owner_matches_layout() {
 #[test]
 fn summary_tree_reservations_are_unique_and_release_cleanly() {
     let wakers: Vec<_> = (0..1).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(1);
+    let worker_count = Arc::new(AtomicUsize::new(1));
     let tree = Summary::new(1, 1, &wakers, &worker_count);
 
     let mut slots = vec![];
@@ -105,7 +105,7 @@ fn summary_tree_reservations_are_unique_and_release_cleanly() {
 #[test]
 fn summary_tree_mark_signal_active_is_idempotent() {
     let wakers: Vec<_> = (0..1).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(1);
+    let worker_count = Arc::new(AtomicUsize::new(1));
     let tree = Summary::new(2, 1, &wakers, &worker_count);
 
     let owner = &wakers[0];
@@ -151,7 +151,7 @@ fn summary_tree_mark_signal_active_is_idempotent() {
 #[test]
 fn summary_tree_mark_signal_inactive_only_when_leaf_empty() {
     let wakers: Vec<_> = (0..1).map(|_| Arc::new(WorkerWaker::new())).collect();
-    let worker_count = AtomicUsize::new(1);
+    let worker_count = Arc::new(AtomicUsize::new(1));
     let tree = Summary::new(1, 2, &wakers, &worker_count);
 
     assert!(tree.mark_signal_active(0, 0));

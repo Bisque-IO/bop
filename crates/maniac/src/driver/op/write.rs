@@ -13,10 +13,10 @@ use windows_sys::Win32::{Foundation::TRUE, Storage::FileSystem::WriteFile};
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
 #[cfg(any(feature = "poll", feature = "poll-io"))]
-use super::{driver::ready::Direction, MaybeFd};
+use super::{MaybeFd, driver::ready::Direction};
 use crate::{
-    buf::{IoBuf, IoVecBuf},
     BufResult,
+    buf::{IoBuf, IoVecBuf},
 };
 
 macro_rules! write_result {
@@ -297,7 +297,7 @@ pub(crate) mod impls {
 #[cfg(all(any(feature = "poll", feature = "poll-io"), windows))]
 pub(crate) mod impls {
     use windows_sys::Win32::{
-        Foundation::{GetLastError, ERROR_HANDLE_EOF},
+        Foundation::{ERROR_HANDLE_EOF, GetLastError},
         Networking::WinSock::WSABUF,
         System::IO::OVERLAPPED,
     };
@@ -308,7 +308,15 @@ pub(crate) mod impls {
     pub(crate) fn write(fd: isize, buf: *const u8, len: usize) -> io::Result<MaybeFd> {
         let mut bytes_write = 0;
 
-        let ret = unsafe { WriteFile(fd as _, buf, len as _, &mut bytes_write, std::ptr::null_mut()) };
+        let ret = unsafe {
+            WriteFile(
+                fd as _,
+                buf,
+                len as _,
+                &mut bytes_write,
+                std::ptr::null_mut(),
+            )
+        };
         if ret == TRUE {
             return Ok(MaybeFd::new_non_fd(bytes_write));
         }
@@ -330,8 +338,10 @@ pub(crate) mod impls {
         let mut bytes_write = 0;
 
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        overlapped.Anonymous.Anonymous.Offset = offset as u32; // Lower 32 bits of the offset
-        overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32; // Higher 32 bits of the offset
+        unsafe {
+            overlapped.Anonymous.Anonymous.Offset = offset as u32; // Lower 32 bits of the offset
+            overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32; // Higher 32 bits of the offset
+        }
 
         let ret = unsafe {
             WriteFile(
@@ -360,7 +370,7 @@ pub(crate) mod impls {
         buf_vec: *const WSABUF,
         len: usize,
     ) -> io::Result<MaybeFd> {
-        use windows_sys::Win32::Networking::WinSock::{WSAGetLastError, WSASend, WSAESHUTDOWN};
+        use windows_sys::Win32::Networking::WinSock::{WSAESHUTDOWN, WSAGetLastError, WSASend};
 
         let mut bytes_sent = 0;
 

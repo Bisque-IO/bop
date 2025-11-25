@@ -2,7 +2,7 @@
 use std::os::unix::prelude::AsRawFd;
 use std::{
     io,
-    mem::{size_of, MaybeUninit},
+    mem::{MaybeUninit, size_of},
 };
 
 #[cfg(all(target_os = "linux", feature = "iouring"))]
@@ -11,13 +11,13 @@ use io_uring::{opcode, types};
 use {
     std::os::windows::prelude::AsRawSocket,
     windows_sys::Win32::Networking::WinSock::{
-        accept, socklen_t, INVALID_SOCKET, SOCKADDR_STORAGE,
+        INVALID_SOCKET, SOCKADDR_STORAGE, accept, socklen_t,
     },
 };
 
 use super::{super::shared_fd::SharedFd, Op, OpAble};
 #[cfg(any(feature = "poll", feature = "poll-io"))]
-use super::{driver::ready::Direction, MaybeFd};
+use super::{MaybeFd, driver::ready::Direction};
 
 /// Accept
 pub(crate) struct Accept {
@@ -89,19 +89,19 @@ impl OpAble for Accept {
         // On platforms that support it we can use `accept4(2)` to set `NONBLOCK`
         // and `CLOEXEC` in the call to accept the connection.
         #[cfg(any(
-            // Android x86's seccomp profile forbids calls to `accept4(2)`
-            // See https://github.com/tokio-rs/mio/issues/1445 for details
-            all(
-                not(target_arch="x86"),
-                target_os = "android"
-            ),
-            target_os = "dragonfly",
-            target_os = "freebsd",
-            target_os = "illumos",
-            target_os = "linux",
-            target_os = "netbsd",
-            target_os = "openbsd"
-        ))]
+			// Android x86's seccomp profile forbids calls to `accept4(2)`
+			// See https://github.com/tokio-rs/mio/issues/1445 for details
+			all(
+				not(target_arch = "x86"),
+				target_os = "android"
+			),
+			target_os = "dragonfly",
+			target_os = "freebsd",
+			target_os = "illumos",
+			target_os = "linux",
+			target_os = "netbsd",
+			target_os = "openbsd"
+		))]
         return {
             let flag = libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
             crate::syscall!(accept4@FD(fd, addr, len, flag))

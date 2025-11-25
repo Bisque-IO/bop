@@ -25,12 +25,12 @@ use std::{
 
 use crate::scoped_thread_local;
 
+use self::op::{CompletionMeta, Op, OpAble};
 #[allow(unreachable_pub)]
 #[cfg(feature = "poll")]
 pub use self::poller::PollerDriver;
 #[cfg(feature = "poll")]
 use self::poller::PollerInner;
-use self::op::{CompletionMeta, Op, OpAble};
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 pub use self::uring::IoUringDriver;
 #[cfg(all(target_os = "linux", feature = "iouring"))]

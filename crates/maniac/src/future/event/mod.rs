@@ -404,7 +404,7 @@ enum WaitUntilState {
 
 pin_project! {
     /// A future that can be `await`ed until a predicate is satisfied or until a
-    /// deadline elapses.
+        /// deadline elapses.
     pub struct WaitUntilOrTimeout<'a, F: FnMut() -> Option<T>, T, D: Future<Output = ()>> {
         wait_until: WaitUntil<'a, F, T>,
         #[pin]

@@ -1,9 +1,9 @@
 use std::{cell::UnsafeCell, io};
 
 use crate::{
+    BufResult,
     buf::IoBufMut,
     io::{AsyncReadRent, AsyncWriteRent, AsyncWriteRentExt, Split},
-    BufResult,
 };
 
 use super::{box_future::MaybeArmedBoxFuture, buf::Buf};

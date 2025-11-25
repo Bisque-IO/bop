@@ -3,8 +3,8 @@ use std::fmt;
 use crate::io::{AsyncReadRent, AsyncWriteRent};
 
 use super::{
-    utils::{handshake, IOWrapper},
     TlsError, TlsStream,
+    utils::{IOWrapper, handshake},
 };
 
 /// A wrapper around a `native_tls::TlsAcceptor`, providing an async `accept`

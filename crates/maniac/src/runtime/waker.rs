@@ -1,9 +1,8 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-
-use crate::runtime::event_loop::EventLoop;
+use crate::runtime::io_driver::IoDriver;
 use crate::utils::CachePadded;
 
 use crate::utils::bits::is_set;
@@ -169,7 +168,6 @@ pub struct WorkerWaker {
     /// When partition_summary transitions 0→non-zero, `STATUS_BIT_PARTITION`
     /// is set and a permit is added to wake the worker.
     partition_summary: CachePadded<AtomicU64>,
-
 }
 
 impl WorkerWaker {
@@ -654,7 +652,7 @@ impl WorkerWaker {
     ///
     /// - `true` if a permit was acquired
     /// - `false` if returned due to I/O event (no permit acquired)
-    pub fn acquire_with_io(&self, event_loop: &mut EventLoop) -> bool {
+    pub fn acquire_with_io(&self, event_loop: &mut IoDriver) -> bool {
         if self.try_acquire() {
             return true;
         }
@@ -697,17 +695,17 @@ impl WorkerWaker {
             // In the new design, poll_once processes events internally via callbacks/handlers.
             // So if we return false, it just means "no permit acquired".
             // But we should loop if we just woke up spuriously or for I/O that was handled internally.
-            
+
             // Actually, if poll_once processed events, those events might have pushed work to queues.
             // So we should loop and check try_acquire again.
             // If we are here, try_acquire failed.
-            
+
             // Wait, if poll_once returned, it means some event happened.
             // If it was a Waker event (from release()), we should retry acquiring.
             // If it was an I/O event, the handler ran. The handler might have woken a task.
             // Waking a task pushes it to a queue and calls mark_active/release.
             // So permits would increase.
-            
+
             // So: simply looping is correct. We only return true if we got a permit.
             // BUT: what if we want to break to process something else?
             // The worker loop structure is:
@@ -724,7 +722,7 @@ impl WorkerWaker {
     /// Blocking acquire with timeout.
     ///
     /// Like `acquire_with_io()`, but returns after `timeout` if no permit becomes available.
-    pub fn acquire_timeout_with_io(&self, event_loop: &mut EventLoop, timeout: Duration) -> bool {
+    pub fn acquire_timeout_with_io(&self, event_loop: &mut IoDriver, timeout: Duration) -> bool {
         if self.try_acquire() {
             return true;
         }
@@ -1170,7 +1168,6 @@ impl WorkerWaker {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1189,17 +1186,17 @@ mod tests {
     #[test]
     fn test_mark_active() {
         let waker = Arc::new(WorkerWaker::new());
-        
+
         // Mark word 0 active
         waker.mark_active(0);
         assert_eq!(waker.status() & 1, 1);
         assert_eq!(waker.permits(), 1);
         assert_eq!(waker.snapshot_summary(), 1);
-        
+
         // Mark same word again (should not add permit)
         waker.mark_active(0);
         assert_eq!(waker.permits(), 1);
-        
+
         // Mark another word
         waker.mark_active(5);
         assert_eq!(waker.permits(), 2);
@@ -1212,42 +1209,42 @@ mod tests {
         // But creating a real EventLoop in a unit test might be heavy
         // and require OS resources.
         // For now, we'll just test the try_acquire path which doesn't need IO
-        
+
         let waker = Arc::new(WorkerWaker::new());
-        
+
         // Initial state: empty
         assert!(!waker.try_acquire());
-        
+
         // Add work
         waker.mark_active(0);
         assert_eq!(waker.permits(), 1);
-        
+
         // Acquire
         assert!(waker.try_acquire());
         assert_eq!(waker.permits(), 0);
-        
+
         // Empty again
         assert!(!waker.try_acquire());
     }
-    
+
     #[test]
     fn test_integration_with_event_loop() {
         let waker = Arc::new(WorkerWaker::new());
-        let mut event_loop = EventLoop::new().unwrap();
+        let mut event_loop = IoDriver::new().unwrap();
         let io_waker = event_loop.waker().unwrap();
-        
+
         // Thread to wake us up
         let waker_clone = waker.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
             waker_clone.mark_active(0);
         });
-        
+
         // Should block and then return true when work arrives
         // Note: This blocks the test thread, which is fine
         assert!(waker.acquire_with_io(&mut event_loop));
         assert_eq!(waker.permits(), 0);
-        
+
         // Try timeout version
         let start = std::time::Instant::now();
         assert!(!waker.acquire_timeout_with_io(&mut event_loop, Duration::from_millis(50)));

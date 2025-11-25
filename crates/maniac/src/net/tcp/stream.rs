@@ -6,28 +6,27 @@ use std::{
     time::Duration,
 };
 
-    #[cfg(unix)]
-    use {
-        libc::{AF_INET, AF_INET6, SOCK_STREAM},
-        std::os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
-    };
-    #[cfg(windows)]
-    use {
-        std::os::windows::prelude::{AsRawSocket, FromRawSocket, IntoRawSocket, RawSocket},
-        windows_sys::Win32::Networking::WinSock::{
-            AF_INET, AF_INET6, SOCK_STREAM,
-        },
-    };
+#[cfg(unix)]
+use {
+    libc::{AF_INET, AF_INET6, SOCK_STREAM},
+    std::os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
+};
+#[cfg(windows)]
+use {
+    std::os::windows::prelude::{AsRawSocket, FromRawSocket, IntoRawSocket, RawSocket},
+    windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, SOCK_STREAM},
+};
 
 use crate::{
+    BufResult,
     buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut},
     driver::{op::Op, shared_fd::SharedFd},
     io::{
-        as_fd::{AsReadFd, AsWriteFd, SharedFdWrapper},
-        operation_canceled, AsyncReadRent, AsyncWriteRent, CancelHandle, CancelableAsyncReadRent,
+        AsyncReadRent, AsyncWriteRent, CancelHandle, CancelableAsyncReadRent,
         CancelableAsyncWriteRent, Split,
+        as_fd::{AsReadFd, AsWriteFd, SharedFdWrapper},
+        operation_canceled,
     },
-    BufResult,
 };
 
 /// Custom tcp connect options
@@ -351,11 +350,16 @@ impl AsyncWriteRent for TcpStream {
         #[cfg(all(feature = "poll", not(all(target_os = "linux", feature = "iouring"))))]
         {
             if self.fd.is_remote() {
-                return futures::future::Either::Left(RemoteWritevOp::new(self.fd.clone(), buf_vec));
+                return futures::future::Either::Left(RemoteWritevOp::new(
+                    self.fd.clone(),
+                    buf_vec,
+                ));
             }
         }
         #[cfg(all(feature = "poll", not(all(target_os = "linux", feature = "iouring"))))]
-        return futures::future::Either::Right(Op::writev(self.fd.clone(), buf_vec).unwrap().result());
+        return futures::future::Either::Right(
+            Op::writev(self.fd.clone(), buf_vec).unwrap().result(),
+        );
         #[cfg(all(target_os = "linux", feature = "iouring"))]
         Op::writev(self.fd.clone(), buf_vec).unwrap().result()
     }
@@ -492,33 +496,46 @@ struct RemoteReadOp<T> {
 
 impl<T> RemoteReadOp<T> {
     fn new(fd: SharedFd, buf: T) -> Self {
-        Self { fd, buf: Some(buf), cancel: None }
+        Self {
+            fd,
+            buf: Some(buf),
+            cancel: None,
+        }
     }
-    
+
     fn new_cancelable(fd: SharedFd, buf: T, cancel: CancelHandle) -> Self {
-        Self { fd, buf: Some(buf), cancel: Some(cancel) }
+        Self {
+            fd,
+            buf: Some(buf),
+            cancel: Some(cancel),
+        }
     }
 }
-
 
 #[cfg(feature = "poll")]
 impl<T: IoBufMut> Future for RemoteReadOp<T> {
     type Output = BufResult<usize, T>;
 
-    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         // Check for cancellation first
         if let Some(ref cancel) = self.cancel {
             if cancel.canceled() {
-                return std::task::Poll::Ready((Err(operation_canceled()), self.buf.take().unwrap()));
+                return std::task::Poll::Ready((
+                    Err(operation_canceled()),
+                    self.buf.take().unwrap(),
+                ));
             }
         }
-        
+
         // Register waker FIRST to avoid lost wakeup race
         // If data arrives between registration and syscall, we'll just get it on the syscall
         unsafe {
             self.fd.reader_waker().register(cx.waker());
         }
-        
+
         let mut stream = unsafe {
             #[cfg(unix)]
             {
@@ -543,12 +560,8 @@ impl<T: IoBufMut> Future for RemoteReadOp<T> {
                 unsafe { buf.set_init(n) };
                 std::task::Poll::Ready((Ok(n), self.buf.take().unwrap()))
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::task::Poll::Pending
-            }
-            Err(e) => {
-                std::task::Poll::Ready((Err(e), self.buf.take().unwrap()))
-            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => std::task::Poll::Pending,
+            Err(e) => std::task::Poll::Ready((Err(e), self.buf.take().unwrap())),
         }
     }
 }
@@ -562,32 +575,45 @@ struct RemoteReadvOp<T> {
 
 impl<T> RemoteReadvOp<T> {
     fn new(fd: SharedFd, buf: T) -> Self {
-        Self { fd, buf: Some(buf), cancel: None }
+        Self {
+            fd,
+            buf: Some(buf),
+            cancel: None,
+        }
     }
-    
+
     fn new_cancelable(fd: SharedFd, buf: T, cancel: CancelHandle) -> Self {
-        Self { fd, buf: Some(buf), cancel: Some(cancel) }
+        Self {
+            fd,
+            buf: Some(buf),
+            cancel: Some(cancel),
+        }
     }
 }
-
 
 #[cfg(feature = "poll")]
 impl<T: IoVecBufMut> Future for RemoteReadvOp<T> {
     type Output = BufResult<usize, T>;
 
-    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         // Check for cancellation first
         if let Some(ref cancel) = self.cancel {
             if cancel.canceled() {
-                return std::task::Poll::Ready((Err(operation_canceled()), self.buf.take().unwrap()));
+                return std::task::Poll::Ready((
+                    Err(operation_canceled()),
+                    self.buf.take().unwrap(),
+                ));
             }
         }
-        
+
         // Register waker FIRST to avoid lost wakeup race
         unsafe {
             self.fd.reader_waker().register(cx.waker());
         }
-        
+
         let mut stream = unsafe {
             #[cfg(unix)]
             {
@@ -598,38 +624,38 @@ impl<T: IoVecBufMut> Future for RemoteReadvOp<T> {
                 std::net::TcpStream::from_raw_socket(self.fd.raw_socket())
             }
         };
-        
+
         #[cfg(unix)]
         let res = {
-             let buf = self.buf.as_mut().unwrap();
+            let buf = self.buf.as_mut().unwrap();
             let iovec_ptr = buf.write_iovec_ptr();
             let iovec_len = buf.write_iovec_len();
-            let slices = unsafe { std::slice::from_raw_parts_mut(iovec_ptr as *mut std::io::IoSliceMut, iovec_len) };
+            let slices = unsafe {
+                std::slice::from_raw_parts_mut(iovec_ptr as *mut std::io::IoSliceMut, iovec_len)
+            };
             std::io::Read::read_vectored(&mut stream, slices)
         };
-        
+
         #[cfg(windows)]
         let res = {
-             let buf = self.buf.as_mut().unwrap();
-             let wsabuf_ptr = buf.write_wsabuf_ptr();
-             let wsabuf_len = buf.write_wsabuf_len();
-             let slices = unsafe { std::slice::from_raw_parts_mut(wsabuf_ptr as *mut std::io::IoSliceMut, wsabuf_len) };
-             std::io::Read::read_vectored(&mut stream, slices)
+            let buf = self.buf.as_mut().unwrap();
+            let wsabuf_ptr = buf.write_wsabuf_ptr();
+            let wsabuf_len = buf.write_wsabuf_len();
+            let slices = unsafe {
+                std::slice::from_raw_parts_mut(wsabuf_ptr as *mut std::io::IoSliceMut, wsabuf_len)
+            };
+            std::io::Read::read_vectored(&mut stream, slices)
         };
 
         std::mem::forget(stream);
-        
+
         match res {
             Ok(n) => {
                 unsafe { self.buf.as_mut().unwrap().set_init(n) };
                 std::task::Poll::Ready((Ok(n), self.buf.take().unwrap()))
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::task::Poll::Pending
-            }
-            Err(e) => {
-                std::task::Poll::Ready((Err(e), self.buf.take().unwrap()))
-            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => std::task::Poll::Pending,
+            Err(e) => std::task::Poll::Ready((Err(e), self.buf.take().unwrap())),
         }
     }
 }
@@ -643,32 +669,45 @@ struct RemoteWriteOp<T> {
 
 impl<T> RemoteWriteOp<T> {
     fn new(fd: SharedFd, buf: T) -> Self {
-        Self { fd, buf: Some(buf), cancel: None }
+        Self {
+            fd,
+            buf: Some(buf),
+            cancel: None,
+        }
     }
-    
+
     fn new_cancelable(fd: SharedFd, buf: T, cancel: CancelHandle) -> Self {
-        Self { fd, buf: Some(buf), cancel: Some(cancel) }
+        Self {
+            fd,
+            buf: Some(buf),
+            cancel: Some(cancel),
+        }
     }
 }
-
 
 #[cfg(feature = "poll")]
 impl<T: IoBuf> Future for RemoteWriteOp<T> {
     type Output = BufResult<usize, T>;
 
-    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         // Check for cancellation first
         if let Some(ref cancel) = self.cancel {
             if cancel.canceled() {
-                return std::task::Poll::Ready((Err(operation_canceled()), self.buf.take().unwrap()));
+                return std::task::Poll::Ready((
+                    Err(operation_canceled()),
+                    self.buf.take().unwrap(),
+                ));
             }
         }
-        
+
         // Register waker FIRST to avoid lost wakeup race
         unsafe {
             self.fd.writer_waker().register(cx.waker());
         }
-        
+
         let mut stream = unsafe {
             #[cfg(unix)]
             {
@@ -679,7 +718,7 @@ impl<T: IoBuf> Future for RemoteWriteOp<T> {
                 std::net::TcpStream::from_raw_socket(self.fd.raw_socket())
             }
         };
-        
+
         let buf = self.buf.as_ref().unwrap();
         let ptr = buf.read_ptr();
         let len = buf.bytes_init();
@@ -689,9 +728,7 @@ impl<T: IoBuf> Future for RemoteWriteOp<T> {
         std::mem::forget(stream);
 
         match res {
-            Ok(n) => {
-                std::task::Poll::Ready((Ok(n), self.buf.take().unwrap()))
-            }
+            Ok(n) => std::task::Poll::Ready((Ok(n), self.buf.take().unwrap())),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Register waker directly via SharedFd
                 unsafe {
@@ -699,9 +736,7 @@ impl<T: IoBuf> Future for RemoteWriteOp<T> {
                 }
                 std::task::Poll::Pending
             }
-            Err(e) => {
-                std::task::Poll::Ready((Err(e), self.buf.take().unwrap()))
-            }
+            Err(e) => std::task::Poll::Ready((Err(e), self.buf.take().unwrap())),
         }
     }
 }
@@ -715,32 +750,45 @@ struct RemoteWritevOp<T> {
 
 impl<T> RemoteWritevOp<T> {
     fn new(fd: SharedFd, buf: T) -> Self {
-        Self { fd, buf: Some(buf), cancel: None }
+        Self {
+            fd,
+            buf: Some(buf),
+            cancel: None,
+        }
     }
-    
+
     fn new_cancelable(fd: SharedFd, buf: T, cancel: CancelHandle) -> Self {
-        Self { fd, buf: Some(buf), cancel: Some(cancel) }
+        Self {
+            fd,
+            buf: Some(buf),
+            cancel: Some(cancel),
+        }
     }
 }
-
 
 #[cfg(feature = "poll")]
 impl<T: IoVecBuf> Future for RemoteWritevOp<T> {
     type Output = BufResult<usize, T>;
 
-    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         // Check for cancellation first
         if let Some(ref cancel) = self.cancel {
             if cancel.canceled() {
-                return std::task::Poll::Ready((Err(operation_canceled()), self.buf.take().unwrap()));
+                return std::task::Poll::Ready((
+                    Err(operation_canceled()),
+                    self.buf.take().unwrap(),
+                ));
             }
         }
-        
+
         // Register waker FIRST to avoid lost wakeup race
         unsafe {
             self.fd.writer_waker().register(cx.waker());
         }
-        
+
         let mut stream = unsafe {
             #[cfg(unix)]
             {
@@ -757,34 +805,34 @@ impl<T: IoVecBuf> Future for RemoteWritevOp<T> {
             let buf = self.buf.as_ref().unwrap();
             let iovec_ptr = buf.read_iovec_ptr();
             let iovec_len = buf.read_iovec_len();
-            let slices = unsafe { std::slice::from_raw_parts(iovec_ptr as *const std::io::IoSlice, iovec_len) };
+            let slices = unsafe {
+                std::slice::from_raw_parts(iovec_ptr as *const std::io::IoSlice, iovec_len)
+            };
             std::io::Write::write_vectored(&mut stream, slices)
         };
-        
+
         #[cfg(windows)]
         let res = {
-             let buf = self.buf.as_ref().unwrap();
-             let wsabuf_ptr = buf.read_wsabuf_ptr();
-             let wsabuf_len = buf.read_wsabuf_len();
-             let slices = unsafe { std::slice::from_raw_parts(wsabuf_ptr as *const std::io::IoSlice, wsabuf_len) };
-             std::io::Write::write_vectored(&mut stream, slices)
+            let buf = self.buf.as_ref().unwrap();
+            let wsabuf_ptr = buf.read_wsabuf_ptr();
+            let wsabuf_len = buf.read_wsabuf_len();
+            let slices = unsafe {
+                std::slice::from_raw_parts(wsabuf_ptr as *const std::io::IoSlice, wsabuf_len)
+            };
+            std::io::Write::write_vectored(&mut stream, slices)
         };
 
         std::mem::forget(stream);
-        
+
         match res {
-            Ok(n) => {
-                std::task::Poll::Ready((Ok(n), self.buf.take().unwrap()))
-            }
+            Ok(n) => std::task::Poll::Ready((Ok(n), self.buf.take().unwrap())),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 unsafe {
                     self.fd.writer_waker().register(cx.waker());
                 }
                 std::task::Poll::Pending
             }
-            Err(e) => {
-                std::task::Poll::Ready((Err(e), self.buf.take().unwrap()))
-            }
+            Err(e) => std::task::Poll::Ready((Err(e), self.buf.take().unwrap())),
         }
     }
 }
@@ -802,12 +850,14 @@ impl RemotePollReadOp {
     }
 }
 
-
 #[cfg(feature = "poll")]
 impl Future for RemotePollReadOp {
     type Output = io::Result<()>;
 
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         // For remote poll operations, we just register the waker and return ready immediately
         // The remote FD is not registered with our local poller, so we can't check actual readiness
         // Users should handle WouldBlock errors themselves
@@ -831,12 +881,14 @@ impl RemotePollWriteOp {
     }
 }
 
-
 #[cfg(feature = "poll")]
 impl Future for RemotePollWriteOp {
     type Output = io::Result<()>;
 
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         // For remote poll operations, we just register the waker and return ready immediately
         // The remote FD is not registered with our local poller, so we can't check actual readiness
         // Users should handle WouldBlock errors themselves
@@ -912,7 +964,7 @@ impl tokio::io::AsyncRead for TcpStream {
                 unsafe {
                     self.fd.reader_waker().register(cx.waker());
                 }
-                
+
                 let mut stream = unsafe {
                     #[cfg(unix)]
                     {
@@ -923,13 +975,13 @@ impl tokio::io::AsyncRead for TcpStream {
                         std::net::TcpStream::from_raw_socket(self.fd.raw_socket())
                     }
                 };
-                
+
                 // Remote read: use direct syscall
                 let slice = buf.unfilled_mut();
 
                 let res = std::io::Read::read(&mut stream, slice);
                 std::mem::forget(stream);
-                
+
                 return match res {
                     Ok(n) => {
                         unsafe {
@@ -941,9 +993,7 @@ impl tokio::io::AsyncRead for TcpStream {
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::task::Poll::Pending
                     }
-                    Err(e) => {
-                        std::task::Poll::Ready(Err(e))
-                    }
+                    Err(e) => std::task::Poll::Ready(Err(e)),
                 };
             }
         }
@@ -978,7 +1028,7 @@ impl tokio::io::AsyncWrite for TcpStream {
                 unsafe {
                     self.fd.writer_waker().register(cx.waker());
                 }
-                
+
                 let mut stream = unsafe {
                     #[cfg(unix)]
                     {
@@ -992,17 +1042,13 @@ impl tokio::io::AsyncWrite for TcpStream {
 
                 let res = std::io::Write::write(&mut stream, buf);
                 std::mem::forget(stream);
-                
+
                 return match res {
-                    Ok(n) => {
-                        std::task::Poll::Ready(Ok(n))
-                    }
+                    Ok(n) => std::task::Poll::Ready(Ok(n)),
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::task::Poll::Pending
                     }
-                    Err(e) => {
-                        std::task::Poll::Ready(Err(e))
-                    }
+                    Err(e) => std::task::Poll::Ready(Err(e)),
                 };
             }
         }
@@ -1052,7 +1098,7 @@ impl tokio::io::AsyncWrite for TcpStream {
                 unsafe {
                     self.fd.writer_waker().register(cx.waker());
                 }
-                
+
                 let mut stream = unsafe {
                     #[cfg(unix)]
                     {
@@ -1066,17 +1112,13 @@ impl tokio::io::AsyncWrite for TcpStream {
 
                 let res = std::io::Write::write_vectored(&mut stream, bufs);
                 std::mem::forget(stream);
-                
+
                 return match res {
-                    Ok(n) => {
-                        std::task::Poll::Ready(Ok(n))
-                    }
+                    Ok(n) => std::task::Poll::Ready(Ok(n)),
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::task::Poll::Pending
                     }
-                    Err(e) => {
-                        std::task::Poll::Ready(Err(e))
-                    }
+                    Err(e) => std::task::Poll::Ready(Err(e)),
                 };
             }
         }

@@ -5,7 +5,7 @@ mod stream_ext;
 
 use std::future::Future;
 
-pub use iter::{iter, Iter};
+pub use iter::{Iter, iter};
 pub use stream_ext::StreamExt;
 
 /// A stream of values produced asynchronously in pure async/await.

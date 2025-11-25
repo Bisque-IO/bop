@@ -18,7 +18,7 @@ where
 {
     #[inline]
     fn execute(&self, fut: F) {
-        crate::runtime::io_runtime:::spawn(fut);
+        crate::runtime::io_runtime::spawn(fut);
     }
 }
 

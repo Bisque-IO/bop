@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use mio::{event::Source, Events};
+use mio::{Events, event::Source};
 use mio::{Interest, Token};
 
 use super::{op::MaybeFd, ready::Direction, scheduled_io::ScheduledIo};

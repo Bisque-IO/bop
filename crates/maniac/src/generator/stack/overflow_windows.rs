@@ -1,6 +1,8 @@
-use crate::generator::rt::{guard, Context, ContextStack};
+use crate::generator::rt::{Context, ContextStack, guard};
 use std::sync::Once;
-use windows_sys::Win32::System::Diagnostics::Debug::{AddVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS};
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    AddVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS,
+};
 
 const EXCEPTION_STACK_OVERFLOW: i32 = 0xC00000FD_u32 as i32;
 
@@ -48,8 +50,23 @@ pub fn init_once() {
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn context_init(parent: &mut Context, context: &mut CONTEXT) {
-    let [rbx, rsp, rbp, _, r12, r13, r14, r15, _, _, _, stack_base, stack_limit, dealloc_stack, ..] =
-        parent.regs.regs.gpr;
+    let [
+        rbx,
+        rsp,
+        rbp,
+        _,
+        r12,
+        r13,
+        r14,
+        r15,
+        _,
+        _,
+        _,
+        stack_base,
+        stack_limit,
+        dealloc_stack,
+        ..,
+    ] = parent.regs.regs.gpr;
 
     let rip = *(rsp as *const usize);
     let rsp = rsp + std::mem::size_of::<usize>();
@@ -76,4 +93,3 @@ unsafe fn context_init(parent: &mut Context, context: &mut CONTEXT) {
     *((teb + 0x10) as *mut usize) = stack_limit;
     *((teb + 0x1478) as *mut usize) = dealloc_stack;
 }
-

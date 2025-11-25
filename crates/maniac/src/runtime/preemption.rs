@@ -594,13 +594,13 @@ mod impl_x64 {
                         0,
                     ) == 0
                     {
-                        println!(
+                        tracing::trace!(
                             "DuplicateHandle failed: {}",
                             std::io::Error::last_os_error()
                         );
                         return Err(PreemptionError::ThreadSetupFailed);
                     }
-                    println!("DuplicateHandle succeeded, handle: {:?}", real_handle);
+                    tracing::trace!("DuplicateHandle succeeded, handle: {:?}", real_handle);
                     Ok(Self {
                         thread_handle: real_handle,
                         preemption_flag: preemption_flag as *const AtomicBool,
@@ -611,7 +611,7 @@ mod impl_x64 {
             pub fn interrupt(&self) -> Result<(), PreemptionError> {
                 unsafe {
                     if SuspendThread(self.thread_handle) == u32::MAX {
-                        println!("SuspendThread failed: {}", std::io::Error::last_os_error());
+                        tracing::trace!("SuspendThread failed: {}", std::io::Error::last_os_error());
                         return Err(PreemptionError::InterruptFailed);
                     }
                     (*self.preemption_flag).store(true, Ordering::Release);
@@ -627,11 +627,11 @@ mod impl_x64 {
                     // Check alignment
                     let addr = context as *const _ as usize;
                     if addr % 16 != 0 {
-                        println!("CONTEXT not aligned: 0x{:x}", addr);
+                        tracing::trace!("CONTEXT not aligned: 0x{:x}", addr);
                     }
 
                     if GetThreadContext(self.thread_handle, context) == 0 {
-                        println!(
+                        tracing::trace!(
                             "GetThreadContext failed: {} (addr: 0x{:x})",
                             std::io::Error::last_os_error(),
                             addr
@@ -656,7 +656,7 @@ mod impl_x64 {
                         &mut written,
                     ) == 0
                     {
-                        println!(
+                        tracing::trace!(
                             "WriteProcessMemory failed: {}",
                             std::io::Error::last_os_error()
                         );
@@ -667,7 +667,7 @@ mod impl_x64 {
                     context.Rsp = rsp;
                     context.Rip = preemption_trampoline as *const () as u64;
                     if SetThreadContext(self.thread_handle, context) == 0 {
-                        println!(
+                        tracing::trace!(
                             "SetThreadContext failed: {}",
                             std::io::Error::last_os_error()
                         );
@@ -1092,13 +1092,13 @@ mod impl_aarch64 {
                         0,
                     ) == 0
                     {
-                        println!(
+                        tracing::trace!(
                             "DuplicateHandle failed: {}",
                             std::io::Error::last_os_error()
                         );
                         return Err(PreemptionError::ThreadSetupFailed);
                     }
-                    println!("DuplicateHandle succeeded, handle: {:?}", real_handle);
+                    tracing::trace!("DuplicateHandle succeeded, handle: {:?}", real_handle);
                     Ok(Self {
                         thread_handle: real_handle,
                         preemption_flag: preemption_flag as *const AtomicBool,
@@ -1118,7 +1118,7 @@ mod impl_aarch64 {
                     }
 
                     if SuspendThread(self.thread_handle) == u32::MAX {
-                        println!("SuspendThread failed: {}", std::io::Error::last_os_error());
+                        tracing::trace!("SuspendThread failed: {}", std::io::Error::last_os_error());
                         return Err(PreemptionError::InterruptFailed);
                     }
 
@@ -1132,7 +1132,7 @@ mod impl_aarch64 {
                     let mut context: CONTEXT = std::mem::zeroed();
                     context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
                     if GetThreadContext(self.thread_handle, &mut context) == 0 {
-                        println!(
+                        tracing::trace!(
                             "GetThreadContext failed: {}",
                             std::io::Error::last_os_error()
                         );
@@ -1153,7 +1153,7 @@ mod impl_aarch64 {
                     }
 
                     if SetThreadContext(self.thread_handle, &context) == 0 {
-                        println!(
+                        tracing::trace!(
                             "SetThreadContext failed: {}",
                             std::io::Error::last_os_error()
                         );
