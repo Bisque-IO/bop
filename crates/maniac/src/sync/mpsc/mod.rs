@@ -38,6 +38,10 @@ use rand::RngCore;
 
 use std::ptr::{self, NonNull};
 
+pub mod bounded;
+pub mod dynamic;
+pub mod unbounded;
+
 /// A waker implementation that unparks a thread.
 ///
 /// Used to integrate blocking operations with the async waker infrastructure,

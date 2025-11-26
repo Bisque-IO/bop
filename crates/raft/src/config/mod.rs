@@ -21,7 +21,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use openraft::Config;
+//! use maniac_raft::Config;
 //!
 //! let config = Config {
 //!     heartbeat_interval: 50,

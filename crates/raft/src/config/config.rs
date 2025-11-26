@@ -110,7 +110,7 @@ fn parse_snapshot_policy(src: &str) -> Result<SnapshotPolicy, ConfigError> {
 /// Create a configuration, optionally customize fields, validate it, and pass to [`Raft::new`]:
 ///
 /// ```ignore
-/// use openraft::Config;
+/// use maniac_raft::Config;
 /// use std::sync::Arc;
 ///
 /// let config = Config {
@@ -385,14 +385,14 @@ impl Config {
     /// # Examples
     ///
     /// ```
-    /// use openraft::Config;
+    /// use maniac_raft::Config;
     ///
     /// let config = Config::build(&[
     ///     "myapp",
     ///     "--election-timeout-min", "300",
     ///     "--election-timeout-max", "500",
     /// ])?;
-    /// # Ok::<(), openraft::ConfigError>(())
+    /// # Ok::<(), maniac_raft::ConfigError>(())
     /// ```
     pub fn build(args: &[&str]) -> Result<Config, ConfigError> {
         let config = <Self as Parser>::try_parse_from(args).map_err(|e| ConfigError::ParseError {

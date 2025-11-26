@@ -91,7 +91,7 @@ where C: RaftTypeConfig
     /// # Examples
     ///
     /// ```ignore
-    /// use openraft::BasicNode;
+    /// use maniac_raft::BasicNode;
     ///
     /// // Add node 4 as a learner (non-blocking)
     /// let node = BasicNode { addr: "127.0.0.1:8083".to_string() };

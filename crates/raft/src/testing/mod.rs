@@ -18,7 +18,7 @@
 //! Import test utilities to verify your implementations:
 //!
 //! ```ignore
-//! use openraft::testing::log::Suite;
+//! use maniac_raft::testing::log::Suite;
 //!
 //! #[test]
 //! fn test_log_storage() {

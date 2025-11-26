@@ -9,6 +9,6 @@ pub(crate) mod raft_leader_id;
 compile_error!(
     r#"`single-term-leader` is removed.
 To enable standard Raft mode:
-- either add `LeaderId = openraft::impls::leader_id_std::LeaderId` to `declare_raft_types!(YourTypeConfig)` statement,
+- either add `LeaderId = maniac_raft::impls::leader_id_std::LeaderId` to `declare_raft_types!(YourTypeConfig)` statement,
 - or add `type LeaderId: opernaft::impls::leader_id_std::LeaderId` to the `RaftTypeConfig` implementation."#
 );

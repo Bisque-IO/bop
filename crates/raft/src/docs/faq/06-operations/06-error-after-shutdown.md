@@ -1,7 +1,7 @@
 ### Error logs after `raft.shutdown()` completes
 
 **Symptom**: After calling [`Raft::shutdown`][] which returns successfully, logs show
-`ERROR openraft::raft::raft_inner: failure sending RaftMsg to RaftCore; message: AppendEntries ... core_result=Err(Stopped)`
+`ERROR maniac_raft::raft::raft_inner: failure sending RaftMsg to RaftCore; message: AppendEntries ... core_result=Err(Stopped)`
 
 **Cause**: Other nodes in the cluster continue sending RPCs to this node. The `Raft` handle still
 exists and receives these RPCs, but the internal Raft core has stopped, so forwarding fails.

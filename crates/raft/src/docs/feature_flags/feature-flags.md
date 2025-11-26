@@ -10,7 +10,7 @@ because Openraft provides a blanket implementation that adapts `RaftNetwork`
 implementations to [`RaftNetworkV2`]. For example:
 
 ```rust,ignore
-pub trait RaftTypeConfigExt: openraft::RaftTypeConfig {}
+pub trait RaftTypeConfigExt: maniac_raft::RaftTypeConfig {}
 pub struct YourNetworkType {}
 impl<T: RaftTypeConfigExt> RaftNetworkV2<T> for YourNetworkType {}
 ```
@@ -90,11 +90,11 @@ See: [tracing doc: emitting-log-records](https://docs.rs/tracing/latest/tracing/
 
 ## feature-flag `type-alias`
 
-Enable this feature to use type shortcuts defined in `openraft::alias::*`
+Enable this feature to use type shortcuts defined in `maniac_raft::alias::*`
 
 For example:
 ```rust,ignore
-use openraft::alias::SnapshotDataOf;
+use maniac_raft::alias::SnapshotDataOf;
 
 struct MyTypeConfig;
 impl RaftTypeconfig For MyTypeConfig { /*...*/ }

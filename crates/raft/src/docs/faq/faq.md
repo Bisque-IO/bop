@@ -362,7 +362,7 @@ a list of active nodes without modifying cluster membership.
 
 ### How to minimize error logging when a follower is offline
 
-Excessive error logging, like `ERROR openraft::replication: 248: RPCError err=NetworkError: ...`, occurs when a follower node becomes unresponsive. To alleviate this, implement a mechanism within [`RaftNetwork`][] that returns a [`Unreachable`][] error instead of a [`NetworkError`][] when immediate replication retries to the affected node are not advised.
+Excessive error logging, like `ERROR maniac_raft::replication: 248: RPCError err=NetworkError: ...`, occurs when a follower node becomes unresponsive. To alleviate this, implement a mechanism within [`RaftNetwork`][] that returns a [`Unreachable`][] error instead of a [`NetworkError`][] when immediate replication retries to the affected node are not advised.
 
 [`RaftNetwork`]: `crate::network::RaftNetwork`
 [`Unreachable`]: `crate::error::Unreachable`
@@ -473,7 +473,7 @@ struct MyNode {
 2. Register the custom node type with `declare_raft_types!` macro:
 
 ```rust,ignore
-openraft::declare_raft_types!(
+maniac_raft::declare_raft_types!(
    pub MyRaftConfig:
        // ...
        NodeId = u64,        // Use the appropriate type for NodeId
@@ -504,7 +504,7 @@ leader, or retry the membership query after the new leader is elected.
 ### Error logs after `raft.shutdown()` completes
 
 **Symptom**: After calling [`Raft::shutdown`][] which returns successfully, logs show
-`ERROR openraft::raft::raft_inner: failure sending RaftMsg to RaftCore; message: AppendEntries ... core_result=Err(Stopped)`
+`ERROR maniac_raft::raft::raft_inner: failure sending RaftMsg to RaftCore; message: AppendEntries ... core_result=Err(Stopped)`
 
 **Cause**: Other nodes in the cluster continue sending RPCs to this node. The `Raft` handle still
 exists and receives these RPCs, but the internal Raft core has stopped, so forwarding fails.
@@ -642,7 +642,7 @@ pub(crate) fn following_handler(&mut self) -> FollowingHandler<C> {
 
 ### Excessive "RPCError err=NetworkError" in logs when a node is offline
 
-**Symptom**: Continuous error logs `ERROR openraft::replication: RPCError err=NetworkError`
+**Symptom**: Continuous error logs `ERROR maniac_raft::replication: RPCError err=NetworkError`
 when a follower is unreachable
 
 **Cause**: Openraft retries replication aggressively. Each failed RPC logs an error.

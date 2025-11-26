@@ -42,5 +42,5 @@ Openraft supports several feature flags to customize functionality:
 
 **Compatibility**:
 - `compat` - Provide basic compatible types for upgrades
-- `type-alias` - Enable `openraft::alias::*` type shortcuts (unstable)
+- `type-alias` - Enable `maniac_raft::alias::*` type shortcuts (unstable)
 

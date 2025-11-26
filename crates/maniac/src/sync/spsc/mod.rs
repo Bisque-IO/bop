@@ -138,6 +138,8 @@ use crate::future::waker::DiatomicWaker;
 use crate::parking::{Parker, Unparker};
 use std::task::Wake;
 
+pub mod dynamic;
+
 /// A waker implementation that unparks a thread.
 ///
 /// Used to integrate blocking operations with the async waker infrastructure,

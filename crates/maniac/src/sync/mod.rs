@@ -1,10 +1,12 @@
 pub mod mpsc;
 pub mod mpsc_bounded;
 pub mod mpsc_unbounded;
+pub mod dyn_mpsc_unbounded;
 pub mod mutex;
 pub mod oneshot;
 pub mod signal;
 pub mod spsc;
+pub mod dyn_spsc;
 // pub mod mpmc;
 pub mod watch;
 pub mod multishot;

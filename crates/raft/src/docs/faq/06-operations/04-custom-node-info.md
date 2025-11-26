@@ -20,7 +20,7 @@ struct MyNode {
 2. Register the custom node type with `declare_raft_types!` macro:
 
 ```rust,ignore
-openraft::declare_raft_types!(
+maniac_raft::declare_raft_types!(
    pub MyRaftConfig:
        // ...
        NodeId = u64,        // Use the appropriate type for NodeId

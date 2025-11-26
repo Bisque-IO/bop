@@ -38,7 +38,7 @@ use crate::vote::raft_vote::RaftVote;
 /// Use defaults for all types except application data:
 ///
 /// ```ignore
-/// openraft::declare_raft_types!(
+/// maniac_raft::declare_raft_types!(
 ///     pub MyTypeConfig:
 ///         D = String,
 ///         R = String,
@@ -50,19 +50,19 @@ use crate::vote::raft_vote::RaftVote;
 /// Specify all types explicitly:
 ///
 /// ```ignore
-/// openraft::declare_raft_types!(
+/// maniac_raft::declare_raft_types!(
 ///     pub MyTypeConfig:
 ///         D                = ClientRequest,
 ///         R                = ClientResponse,
 ///         NodeId           = u64,
-///         Node             = openraft::impls::BasicNode,
+///         Node             = maniac_raft::impls::BasicNode,
 ///         Term             = u64,
-///         LeaderId         = openraft::impls::leader_id_adv::LeaderId<Self>,
-///         Vote             = openraft::impls::Vote<Self>,
-///         Entry            = openraft::impls::Entry<Self>,
+///         LeaderId         = maniac_raft::impls::leader_id_adv::LeaderId<Self>,
+///         Vote             = maniac_raft::impls::Vote<Self>,
+///         Entry            = maniac_raft::impls::Entry<Self>,
 ///         SnapshotData     = Cursor<Vec<u8>>,
-///         Responder<T>     = openraft::impls::OneshotResponder<Self, T>,
-///         AsyncRuntime     = openraft::impls::TokioRuntime,
+///         Responder<T>     = maniac_raft::impls::OneshotResponder<Self, T>,
+///         AsyncRuntime     = maniac_raft::impls::TokioRuntime,
 /// );
 /// ```
 ///

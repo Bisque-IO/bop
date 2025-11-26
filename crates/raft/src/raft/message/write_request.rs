@@ -57,7 +57,7 @@ where C: RaftTypeConfig
     /// # Examples
     ///
     /// ```ignore
-    /// use openraft::impls::ProgressResponder;
+    /// use maniac_raft::impls::ProgressResponder;
     ///
     /// let (responder, _commit_rx, complete_rx) = ProgressResponder::new();
     /// raft.write(my_data).responder(responder).await?;

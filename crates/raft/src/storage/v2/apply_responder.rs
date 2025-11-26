@@ -17,9 +17,9 @@ use crate::storage::v2::apply_responder_inner::ApplyResponderInner;
 /// # Example
 ///
 /// ```ignore
-/// use openraft::storage::EntryResponder;
-/// use openraft::StorageError;
-/// use openraft::EntryPayload;
+/// use maniac_raft::storage::EntryResponder;
+/// use maniac_raft::StorageError;
+/// use maniac_raft::EntryPayload;
 ///
 /// async fn apply<I>(&mut self, entries: I) -> Result<(), StorageError<C>>
 /// where

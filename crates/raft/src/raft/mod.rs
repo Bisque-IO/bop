@@ -129,19 +129,19 @@ use crate::vote::raft_vote::RaftVoteExt;
 ///
 /// Example:
 /// ```ignore
-/// openraft::declare_raft_types!(
+/// maniac_raft::declare_raft_types!(
 ///    pub TypeConfig:
 ///        D            = ClientRequest,
 ///        R            = ClientResponse,
 ///        NodeId       = u64,
-///        Node         = openraft::BasicNode,
+///        Node         = maniac_raft::BasicNode,
 ///        Term         = u64,
-///        LeaderId     = openraft::impls::leader_id_adv::LeaderId<Self>,
-///        Vote           = openraft::impls::Vote<Self>,
-///        Entry          = openraft::Entry<Self>,
+///        LeaderId     = maniac_raft::impls::leader_id_adv::LeaderId<Self>,
+///        Vote           = maniac_raft::impls::Vote<Self>,
+///        Entry          = maniac_raft::Entry<Self>,
 ///        SnapshotData   = Cursor<Vec<u8>>,
-///        Responder<T>   = openraft::impls::OneshotResponder<Self, T>,
-///        AsyncRuntime   = openraft::TokioRuntime,
+///        Responder<T>   = maniac_raft::impls::OneshotResponder<Self, T>,
+///        AsyncRuntime   = maniac_raft::TokioRuntime,
 /// );
 /// ```
 ///
@@ -149,18 +149,18 @@ use crate::vote::raft_vote::RaftVoteExt;
 /// - `D`:            `String`
 /// - `R`:            `String`
 /// - `NodeId`:       `u64`
-/// - `Node`:         `::openraft::impls::BasicNode`
+/// - `Node`:         `::maniac_raft::impls::BasicNode`
 /// - `Term`:         `u64`
-/// - `LeaderId`:     `::openraft::impls::leader_id_adv::LeaderId<Self>`
-/// - `Vote`:           `::openraft::impls::Vote<Self>`
-/// - `Entry`:          `::openraft::impls::Entry<Self>`
+/// - `LeaderId`:     `::maniac_raft::impls::leader_id_adv::LeaderId<Self>`
+/// - `Vote`:           `::maniac_raft::impls::Vote<Self>`
+/// - `Entry`:          `::maniac_raft::impls::Entry<Self>`
 /// - `SnapshotData`:   `Cursor<Vec<u8>>`
-/// - `Responder<T>`:   `::openraft::impls::OneshotResponder<Self, T>`
-/// - `AsyncRuntime`:   `::openraft::impls::TokioRuntime`
+/// - `Responder<T>`:   `::maniac_raft::impls::OneshotResponder<Self, T>`
+/// - `AsyncRuntime`:   `::maniac_raft::impls::TokioRuntime`
 ///
 /// For example, to declare with only `D` and `R` types:
 /// ```ignore
-/// openraft::declare_raft_types!(
+/// maniac_raft::declare_raft_types!(
 ///    pub TypeConfig:
 ///        D = ClientRequest,
 ///        R = ClientResponse,
@@ -169,7 +169,7 @@ use crate::vote::raft_vote::RaftVoteExt;
 ///
 /// Or just use the default type config:
 /// ```ignore
-/// openraft::declare_raft_types!(pub TypeConfig);
+/// maniac_raft::declare_raft_types!(pub TypeConfig);
 /// ```
 #[macro_export]
 macro_rules! declare_raft_types {
@@ -970,7 +970,7 @@ where C: RaftTypeConfig
     /// # Examples
     ///
     /// ```ignore
-    /// use openraft::impls::ProgressResponder;
+    /// use maniac_raft::impls::ProgressResponder;
     ///
     /// // Fire-and-forget
     /// raft.write(my_data).await?;
@@ -1056,7 +1056,7 @@ where C: RaftTypeConfig
     ///
     /// ```ignore
     /// use std::collections::BTreeMap;
-    /// use openraft::BasicNode;
+    /// use maniac_raft::BasicNode;
     ///
     /// // Initialize a single-node cluster
     /// let mut nodes = BTreeMap::new();
@@ -1375,7 +1375,7 @@ where C: RaftTypeConfig
     ///
     /// ```ignore
     /// # use std::time::Duration;
-    /// # use openraft::{State, Raft};
+    /// # use maniac_raft::{State, Raft};
     ///
     /// let timeout = Duration::from_millis(200);
     ///

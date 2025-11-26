@@ -29,7 +29,7 @@ use crate::type_config::async_runtime::watch::Watch;
 ///
 /// ```rust,ignore
 /// struct MyCustomRuntime;
-/// impl openraft::AsyncRuntime for MyCustomRuntime { /* omitted */ }
+/// impl maniac_raft::AsyncRuntime for MyCustomRuntime { /* omitted */ }
 ///
 /// // Build a runtime
 /// let rt = MyCustomRuntime::new();

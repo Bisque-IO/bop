@@ -59,7 +59,7 @@ The simplest way to define your types config for example `TypeConfig`
 is using [`declare_raft_types!`] macro:
 
 ```ignore
-openraft::declare_raft_types!(
+maniac_raft::declare_raft_types!(
    pub TypeConfig: D = Request, R = Response
 );
 ```
@@ -77,17 +77,17 @@ and it generates the following type definitions:
 ```ignore
 pub struct TypeConfig {}
 
-impl openraft::RaftTypeConfig for TypeConfig {
+impl maniac_raft::RaftTypeConfig for TypeConfig {
     type D                = Request;
     type R                = Response;
 
     // Following are absent in `declare_raft_types` and filled with default values:
     type NodeId           = u64;
-    type Node             = openraft::impls::BasicNode;
-    type Entry            = openraft::impls::Entry<TypeConfig>;
-    type Responder<T>     = openraft::impls::OneshotResponder<TypeConfig, T>
-        where T: openraft::OptionalSend + 'static;
-    type AsyncRuntime     = openraft::impls::TokioRuntime;
+    type Node             = maniac_raft::impls::BasicNode;
+    type Entry            = maniac_raft::impls::Entry<TypeConfig>;
+    type Responder<T>     = maniac_raft::impls::OneshotResponder<TypeConfig, T>
+        where T: maniac_raft::OptionalSend + 'static;
+    type AsyncRuntime     = maniac_raft::impls::TokioRuntime;
     type SnapshotData     = Cursor<Vec<u8>>;
 }
 ```
@@ -246,7 +246,7 @@ For a real-world implementation, you may want to use [Tonic gRPC](https://github
 > implementations to `RaftNetworkV2`. For example:
 >
 > ```rust,ignore
-> pub trait RaftTypeConfigExt: openraft::RaftTypeConfig {}
+> pub trait RaftTypeConfigExt: maniac_raft::RaftTypeConfig {}
 > pub struct YourNetworkType {}
 > impl<T: RaftTypeConfigExt> RaftNetworkV2<T> for YourNetworkType {}
 > ```
@@ -343,7 +343,7 @@ In Openraft, an implementation of [`RaftNetwork`] needs to connect to remote Raf
 
 ```ignore
 pub struct TypeConfig {}
-impl openraft::RaftTypeConfig for TypeConfig {
+impl maniac_raft::RaftTypeConfig for TypeConfig {
    // ...
    type Node = BasicNode;
 }
@@ -374,7 +374,7 @@ Finally, we put these parts together and boot up a raft node
 :
 
 ```ignore
-openraft::declare_raft_types!(
+maniac_raft::declare_raft_types!(
     pub TypeConfig:
         D = Request,
         R = Response,
@@ -390,7 +390,7 @@ async fn main() -> std::io::Result<()> {
     let state_machine_store = Arc::new(StateMachineStore::default());
     let network = Network {};
 
-    let raft = openraft::Raft::new(
+    let raft = maniac_raft::Raft::new(
         node_id,
         config.clone(),
         network,

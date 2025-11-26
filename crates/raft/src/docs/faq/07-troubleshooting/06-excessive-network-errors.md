@@ -1,6 +1,6 @@
 ### Excessive "RPCError err=NetworkError" in logs when a node is offline
 
-**Symptom**: Continuous error logs `ERROR openraft::replication: RPCError err=NetworkError`
+**Symptom**: Continuous error logs `ERROR maniac_raft::replication: RPCError err=NetworkError`
 when a follower is unreachable
 
 **Cause**: Openraft retries replication aggressively. Each failed RPC logs an error.

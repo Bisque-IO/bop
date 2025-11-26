@@ -65,7 +65,7 @@ Follow the following steps to update your application to pass compilation with v
   Openraft provides a default implementation: `TokioRuntime`.
   For example:
   ```ignore
-  openraft::declare_raft_types!(
+  maniac_raft::declare_raft_types!(
     pub TypeConfig:
         // ...
         AsyncRuntime = TokioRuntime
@@ -103,7 +103,7 @@ To use arbitrary snapshot data, the application needs to:
 
 - Specify the snapshot data type in `RaftTypeConfig`:
   ```ignore
-  openraft::declare_raft_types!(
+  maniac_raft::declare_raft_types!(
     pub TypeConfig:
         // ...
         SnapshotData = YourSnapshotData

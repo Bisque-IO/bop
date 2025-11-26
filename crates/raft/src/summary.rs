@@ -12,8 +12,8 @@ use std::fmt;
 ///
 /// # Examples
 /// ```rust,ignore
-/// # use openraft::MessageSummary;
-/// # use openraft::testing::log_id;
+/// # use maniac_raft::MessageSummary;
+/// # use maniac_raft::testing::log_id;
 /// let lid = log_id(1, 2, 3);
 /// assert_eq!("1-2-3", lid.to_string(), "LogId is Display");
 /// assert_eq!("1-2-3", lid.summary(), "Thus LogId is also MessageSummary");
