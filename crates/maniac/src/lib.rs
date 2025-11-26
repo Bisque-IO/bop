@@ -40,7 +40,11 @@ mod spsc;
 pub mod sync;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub mod tls;
+pub mod time;
 pub mod utils;
+
+#[cfg(feature = "raft")]
+pub mod raft;
 
 pub use crate::utils::*;
 

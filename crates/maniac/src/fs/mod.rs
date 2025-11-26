@@ -103,7 +103,6 @@ pub async fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
     }
     #[cfg(not(all(target_os = "linux", feature = "iouring")))]
     {
-        crate::driver::op::Op::unlink(path)?.await.meta.result?;
         let path = path.as_ref().to_owned();
         crate::blocking::unblock(move || std::fs::remove_file(path)).await?;
     }

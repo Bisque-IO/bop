@@ -26,7 +26,9 @@ default = [
     "unlinkat",
     "renameat",
     "symlinkat",
+    "zero-copy",
 ]
+raft = ["dep:maniac-raft"]
 std = []
 race = []
 timers-introspection = []
@@ -68,54 +70,59 @@ tls-unsafe-io = [
 track-allocations = [] # internal feature for testing zero-allocation
 
 [dependencies]
-#congee = "0.4.1"
-core_affinity = "0.8"
-crossbeam = "0.8"
-#crossbeam-deque = "0.8"
-crossbeam-epoch = "0.9"
-crossbeam-utils = "0.8"
-dashmap = "6.1"
-futures-lite = "2.6"
-futures = "0.3"
-futures-io = "0.3"
-cfg-if = "1"
-log = "0.4"
-once_cell = "1.21"
-pin-project-lite = "0.2"
-rand = "0.9"
-aws-lc-rs = "1.15"
-socket2 = { version = "0.6", features = ["all"] }
-mio = { version = "1.1", optional = true, features = ["os-poll", "net", "os-ext"] }
-rustls = { package = "rustls", version = "0.23", features = [
-    "std",
-    "aws_lc_rs",
-], optional = true }
-rustls-webpki = "0.103"
-rustls-pemfile = "2.0"
-rustls-native-certs = "0.8"
-thiserror = { version = "2" }
-# Move libc to main dependencies to allow cross-platform compilation checking even if not used on Windows
-libc = "0.2"
-webpki-roots = "1.0.4"
-arc-swap = "1.7"
-
-# Vendor dependencies
-bytes = { version = "1", optional = true }
-tracing = { version = "0.1", optional = true }
-rustc-hash = "2.0"
-memchr = "2.7"
-auto-const-array = "0.2"
-nix = { version = "0.30", features = ["sched"], optional = true }
-flume = "0.11.1"
-reusable-box-future = { version = "0.2", optional = true }
-hyper = { version = "1.1", optional = true }
-
-native-tls = { version = "0.2", optional = true }
-tokio = { version = "1", default-features = false, features = [
+anyerror = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+arc-swap = { workspace = true }
+auto-const-array = { workspace = true }
+aws-lc-rs = { workspace = true }
+bytes = { workspace = true, optional = true }
+byte-unit = { workspace = true, optional = true }
+cfg-if = { workspace = true }
+chrono = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+core_affinity = { workspace = true }
+crossbeam = { workspace = true }
+crossbeam-epoch = { workspace = true }
+crossbeam-utils = { workspace = true }
+dashmap = { workspace = true }
+derive_more = { workspace = true, features = ["full"] }
+flume = { workspace = true }
+futures-lite = { workspace = true }
+futures = { workspace = true }
+futures-io = { workspace = true }
+hyper = { workspace = true, optional = true }
+libc = { workspace = true }
+log = { workspace = true }
+once_cell = { workspace = true }
+pin-project-lite = { workspace = true }
+pollster = { workspace = true }
+rand = { workspace = true }
+memchr = { workspace = true }
+mio = { workspace = true, optional = true, features = [
+    "os-poll",
+    "net",
+    "os-ext",
+] }
+native-tls = { workspace = true, optional = true }
+nix = { workspace = true, features = ["sched"], optional = true }
+reusable-box-future = { workspace = true, optional = true }
+rustc-hash = { workspace = true }
+rustls = { workspace = true, features = ["std", "aws_lc_rs"], optional = true }
+rustls-webpki = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-native-certs = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+socket2 = { workspace = true, features = ["all"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, default-features = false, features = [
     "io-util",
 ], optional = true }
-pollster = "0.4"
+tracing = { workspace = true, optional = true }
+webpki-roots = { workspace = true }
 
+maniac-raft-macros = { path = "../raft-macros", version = "0.10.0", optional = true }
+maniac-raft = { path = "../raft", version = "0.10.0", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }
@@ -136,10 +143,10 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-loom = "0.7"
-tokio = { version = "1", features = ["full", "io-util"] }
-criterion = "0.7"
-pollster = "0.4"
+loom = { workspace = true }
+tokio = { workspace = true, features = ["full", "io-util"] }
+criterion = { workspace = true }
+pollster = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
