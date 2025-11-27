@@ -52,7 +52,7 @@ use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Waker};
 
 #[cfg(unix)]
-use libc::{pthread_kill, pthread_t, SIGUSR1};
+use libc::{SIGUSR1, pthread_kill, pthread_t};
 
 const EMPTY: usize = 0b001;
 const OPEN: usize = 0b010;
@@ -184,12 +184,10 @@ impl<T> Receiver<T> {
                 }
                 return Err(ManuallyDrop::into_inner(this));
             }
-            match inner.state.compare_exchange_weak(
-                state,
-                0,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
+            match inner
+                .state
+                .compare_exchange_weak(state, 0, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => {
                     unsafe {
                         if state & EMPTY == 0 {
@@ -353,8 +351,7 @@ impl<T> Sender<T> {
     pub fn send(self, t: T) {
         let this = ManuallyDrop::new(self);
         unsafe { this.inner.as_ref().write_value(t) };
-        let mut idx =
-            state_to_index(unsafe { this.inner.as_ref().state.load(Ordering::Relaxed) });
+        let mut idx = state_to_index(unsafe { this.inner.as_ref().state.load(Ordering::Relaxed) });
         loop {
             let waker = unsafe { this.inner.as_ref().take_waker(idx) };
             let state = unsafe {

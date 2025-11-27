@@ -13,12 +13,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let iterations = 16;
 
     let arena_config = TaskArenaConfig::new(4, 256)?;
-    let runtime: Executor<10, 6> = Executor::new(
-        arena_config,
-        TaskArenaOptions::default(),
-        workers.min(4),
-        workers.min(4),
-    )?;
+    let runtime: Executor<10, 6> =
+        Executor::new(arena_config, TaskArenaOptions::default(), workers.min(4))?;
     let operations = Arc::new(AtomicUsize::new(0));
 
     let start = Instant::now();

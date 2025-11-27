@@ -1,6 +1,9 @@
 #[cfg(unix)]
 use std::os::unix::prelude::OpenOptionsExt;
-use std::{io, path::{Path, PathBuf}};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 #[cfg(windows)]
 use windows_sys::Win32::{
@@ -358,14 +361,14 @@ impl OpenOptions {
                 std_opts.truncate(opts.truncate);
                 std_opts.create(opts.create);
                 std_opts.create_new(opts.create_new);
-                
+
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::OpenOptionsExt;
                     std_opts.mode(opts.mode);
                     std_opts.custom_flags(opts.custom_flags);
                 }
-                
+
                 #[cfg(windows)]
                 {
                     use std::os::windows::fs::OpenOptionsExt;
@@ -378,22 +381,23 @@ impl OpenOptions {
                     // Note: security_attributes is not directly settable via OpenOptionsExt
                     // It's handled internally by the Windows API when opening
                 }
-                
+
                 std_opts.open(&path)
-            }).await?;
-            
+            })
+            .await?;
+
             #[cfg(unix)]
             return Ok(File::from_std(std_file)?);
-            
+
             #[cfg(windows)]
             {
-                use std::os::windows::io::{IntoRawHandle, FromRawHandle};
+                use std::os::windows::io::{FromRawHandle, IntoRawHandle};
                 let handle = std_file.into_raw_handle();
                 let file = File::from_shared_fd(SharedFd::new_without_register(handle as _));
                 Ok(file)
             }
         }
-        
+
         #[cfg(all(target_os = "linux", feature = "iouring"))]
         {
             // For io_uring systems, use the existing Op machinery

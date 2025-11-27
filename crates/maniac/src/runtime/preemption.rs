@@ -611,7 +611,10 @@ mod impl_x64 {
             pub fn interrupt(&self) -> Result<(), PreemptionError> {
                 unsafe {
                     if SuspendThread(self.thread_handle) == u32::MAX {
-                        tracing::trace!("SuspendThread failed: {}", std::io::Error::last_os_error());
+                        tracing::trace!(
+                            "SuspendThread failed: {}",
+                            std::io::Error::last_os_error()
+                        );
                         return Err(PreemptionError::InterruptFailed);
                     }
                     (*self.preemption_flag).store(true, Ordering::Release);
@@ -1118,7 +1121,10 @@ mod impl_aarch64 {
                     }
 
                     if SuspendThread(self.thread_handle) == u32::MAX {
-                        tracing::trace!("SuspendThread failed: {}", std::io::Error::last_os_error());
+                        tracing::trace!(
+                            "SuspendThread failed: {}",
+                            std::io::Error::last_os_error()
+                        );
                         return Err(PreemptionError::InterruptFailed);
                     }
 

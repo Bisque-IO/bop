@@ -38,9 +38,9 @@ use rand::RngCore;
 
 use std::ptr::{self, NonNull};
 
-pub mod bounded;
+// pub mod bounded; // Commented out - file doesn't exist yet
 pub mod dynamic;
-pub mod unbounded;
+// pub mod unbounded; // Commented out - conflicts with inline module at line 1777
 
 /// A waker implementation that unparks a thread.
 ///

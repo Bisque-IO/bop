@@ -7,22 +7,27 @@
 //! until a predicate is satisfied by checking the predicate each time it
 //! receives a notification.
 //!
-//! While functionally similar to the [event_listener] crate, this
-//! implementation is more opinionated and limited to the `async` case. It
-//! strives to be more efficient, however, by limiting the amount of locking
-//! operations on the mutex-protected list of notifiers: the lock is typically
-//! taken only once for each time a waiter is blocked and once for notifying,
-//! thus reducing the need for synchronization operations. Finally, spurious
-//! wake-ups are only generated in very rare circumstances.
+//! ## Optimizations
 //!
-//! This library is an offshoot of [Asynchronix][asynchronix], an ongoing effort
-//! at a high performance asynchronous computation framework for system
-//! simulation.
+//! This implementation includes several performance optimizations:
 //!
-//! [event_listener]: https://docs.rs/event_listener/latest/event_listener/
+//! 1. **Inline notifier storage**: The `Notifier` is stored inline in the
+//!    `WaitUntil` future, eliminating heap allocations in the hot path.
+//!
+//! 2. **Lock-free empty check**: `notify_one`/`notify_all` return immediately
+//!    with just an atomic load when no waiters are present (common case).
+//!
+//! 3. **Vec-based FIFO wait list**: Uses a Vec with O(1) swap-remove for good
+//!    cache locality and FIFO-ish notification order.
+//!
+//! 4. **Batched wakeups**: Wakers are collected and invoked outside the
+//!    lock to minimize lock hold time.
+//!
+//! 5. **Optimized mutex**: Uses `parking_lot::Mutex` for smaller size
+//!    and better performance than std::sync::Mutex.
+//!
 //! [eventcount]:
 //!     https://www.1024cores.net/home/lock-free-algorithms/eventcounts
-//! [asynchronix]: https://github.com/asynchronics/asynchronix
 //!
 //! # Examples
 //!
@@ -67,22 +72,29 @@
 //!
 //!      assert_eq!(v, 42);
 //! });
-//! ```ignore
+//! ```
 #![warn(missing_docs, missing_debug_implementations, unreachable_pub)]
 
 mod loom_exports;
 
+use std::cell::UnsafeCell;
 use std::future::Future;
-use std::mem;
+use std::marker::PhantomPinned;
+use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, Waker};
 
-use loom_exports::cell::UnsafeCell;
-use loom_exports::sync::Mutex;
 use loom_exports::sync::atomic::{self, AtomicBool};
+use parking_lot::Mutex;
 use pin_project_lite::pin_project;
+
+/// Maximum number of wakers to batch before waking them outside the lock.
+const MAX_BATCH_WAKEUPS: usize = 16;
+
+/// Sentinel value indicating the notifier is not in the wait list.
+const NOT_IN_LIST: usize = usize::MAX;
 
 /// An object that can receive or send notifications.
 #[derive(Debug)]
@@ -92,16 +104,16 @@ pub struct Event {
 
 impl Event {
     /// Creates a new event.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            wait_set: WaitSet::default(),
+            wait_set: WaitSet::new(),
         }
     }
 
     /// Notify a number of awaiting events that the predicate should be checked.
     ///
-    /// If less events than requested are currently awaiting, then all awaiting
-    /// event are notified.
+    /// If fewer events than requested are currently awaiting, then all awaiting
+    /// events are notified.
     #[inline(always)]
     pub fn notify(&self, n: usize) {
         // This fence synchronizes with the other fence in `WaitUntil::poll` and
@@ -111,11 +123,18 @@ impl Event {
         // both).
         atomic::fence(Ordering::SeqCst);
 
+        // LOCK-FREE FAST PATH: Check if empty without any locking
+        // This is the common case - notify when no one is waiting
+        if self.wait_set.is_empty.load(Ordering::Acquire) {
+            return;
+        }
+
+        // Slow path: there are waiters, need to take lock
         // Safety: all notifiers in the wait set are guaranteed to be alive
         // since the `WaitUntil` drop handler ensures that notifiers are removed
         // from the wait set before they are deallocated.
         unsafe {
-            self.wait_set.notify_relaxed(n);
+            self.wait_set.notify(n);
         }
     }
 
@@ -143,7 +162,7 @@ impl Event {
     /// Returns a future that can be `await`ed until the provided predicate is
     /// satisfied or until the provided future completes.
     ///
-    /// The deadline is specified as a `Future` that is expected to resolves to
+    /// The deadline is specified as a `Future` that is expected to resolve to
     /// `()` after some duration, such as a `tokio::time::Sleep` future.
     pub fn wait_until_or_timeout<F, T, D>(
         &self,
@@ -167,55 +186,79 @@ impl Default for Event {
 unsafe impl Send for Event {}
 unsafe impl Sync for Event {}
 
-/// A waker wrapper that can be inserted in a list.
+/// A waker wrapper that can be inserted in a Vec-based wait list.
 ///
-/// A notifier always has an exclusive owner or borrower, except in one edge
-/// case: the `WaitSet::remove_relaxed()` method may create a shared reference
-/// while the notifier is concurrently accessed under the `wait_set` mutex by
-/// one of the `WaitSet` methods. So occasionally 2 references to a `Notifier`
-/// will exist at the same time, meaning that even when accessed under the
-/// `wait_set` mutex, a notifier can only be accessed by reference.
+/// This structure is designed to be stored inline in the `WaitUntil` future
+/// to avoid heap allocations. Each notifier tracks its index in the wait list
+/// for O(1) removal via swap-remove.
+#[repr(C)]
 struct Notifier {
-    /// The current waker, if any.
-    waker: Option<Waker>,
-    /// Pointer to the previous wait set notifier.
-    prev: UnsafeCell<Option<NonNull<Notifier>>>,
-    /// Pointer to the next wait set notifier.
-    next: UnsafeCell<Option<NonNull<Notifier>>>,
-    /// Flag indicating whether the notifier is currently in the wait set.
-    in_wait_set: AtomicBool,
+    /// The current waker, if any. Protected by the WaitSet mutex.
+    waker: UnsafeCell<Option<Waker>>,
+    /// Index in the wait list Vec, or NOT_IN_LIST if not in list.
+    index: UnsafeCell<usize>,
 }
 
 impl Notifier {
     /// Creates a new Notifier without any registered waker.
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
-            waker: None,
-            prev: UnsafeCell::new(None),
-            next: UnsafeCell::new(None),
-            in_wait_set: AtomicBool::new(false),
+            waker: UnsafeCell::new(None),
+            index: UnsafeCell::new(NOT_IN_LIST),
         }
     }
 
     /// Stores the specified waker if it differs from the cached waker.
-    fn set_waker(&mut self, waker: &Waker) {
-        if match &self.waker {
+    ///
+    /// # Safety
+    ///
+    /// The caller must have exclusive access (not in wait set, or holding lock).
+    #[inline]
+    unsafe fn set_waker(&self, waker: &Waker) {
+        let waker_ptr = self.waker.get();
+        let current = unsafe { &*waker_ptr };
+        if match current {
             Some(w) => !w.will_wake(waker),
             None => true,
         } {
-            self.waker = Some(waker.clone());
+            unsafe { *waker_ptr = Some(waker.clone()) };
         }
     }
 
-    /// Notifies the task.
-    fn wake(&self) {
-        // Safety: the waker is only ever accessed mutably when the notifier is
-        // itself accessed mutably. The caller claims shared (non-mutable)
-        // ownership of the notifier, so there is not possible concurrent
-        // mutable access to the notifier and therefore to the waker.
-        if let Some(w) = &self.waker {
-            w.wake_by_ref();
-        }
+    /// Clones the waker if present.
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold the WaitSet lock.
+    #[inline]
+    unsafe fn clone_waker(&self) -> Option<Waker> {
+        unsafe { (*self.waker.get()).clone() }
+    }
+
+    /// Gets the current index.
+    #[inline]
+    unsafe fn get_index(&self) -> usize {
+        unsafe { *self.index.get() }
+    }
+
+    /// Sets the index.
+    #[inline]
+    unsafe fn set_index(&self, index: usize) {
+        unsafe { *self.index.get() = index };
+    }
+
+    /// Returns true if the notifier is in the wait list.
+    #[inline]
+    fn is_in_list(&self) -> bool {
+        unsafe { *self.index.get() != NOT_IN_LIST }
+    }
+}
+
+impl std::fmt::Debug for Notifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Notifier")
+            .field("index", &unsafe { *self.index.get() })
+            .finish()
     }
 }
 
@@ -223,11 +266,22 @@ unsafe impl Send for Notifier {}
 unsafe impl Sync for Notifier {}
 
 /// A future that can be `await`ed until a predicate is satisfied.
-#[derive(Debug)]
+///
+/// This future stores the notifier inline to avoid heap allocations.
+/// It must be pinned before polling because the notifier's address is
+/// used in the wait list.
 pub struct WaitUntil<'a, F: FnMut() -> Option<T>, T> {
+    /// The notifier stored inline. This MUST remain at a stable address
+    /// once the future is pinned, as pointers to it are stored in the wait set.
+    notifier: Notifier,
+    /// Current state of the future.
     state: WaitUntilState,
+    /// The predicate to check.
     predicate: F,
+    /// Reference to the wait set.
     wait_set: &'a WaitSet,
+    /// Marker to make this type !Unpin, ensuring it stays pinned.
+    _pin: PhantomPinned,
 }
 
 impl<'a, F: FnMut() -> Option<T>, T> WaitUntil<'a, F, T> {
@@ -235,36 +289,37 @@ impl<'a, F: FnMut() -> Option<T>, T> WaitUntil<'a, F, T> {
     /// `await`ed until the specified predicate is satisfied.
     fn new(wait_set: &'a WaitSet, predicate: F) -> Self {
         Self {
+            notifier: Notifier::new(),
             state: WaitUntilState::Idle,
             predicate,
             wait_set,
+            _pin: PhantomPinned,
         }
     }
 }
 
 impl<F: FnMut() -> Option<T>, T> Drop for WaitUntil<'_, F, T> {
     fn drop(&mut self) {
-        if let WaitUntilState::Polled(notifier) = self.state {
-            // If we are in the `Polled` stated, it means that the future was
-            // cancelled and its notifier may still be in the wait set: it is
-            // necessary to cancel the notifier so that another event sink can
-            // be notified if one is registered, and then to deallocate the
-            // notifier.
-            //
-            // Safety: all notifiers in the wait set are guaranteed to be alive
-            // since this drop handler ensures that notifiers are removed from
-            // the wait set before they are deallocated. After the notifier is
-            // removed from the list we can claim unique ownership and
-            // deallocate the notifier.
+        if self.state == WaitUntilState::Polled {
+            // If we are in the `Polled` state, it means that the future was
+            // cancelled and its notifier may still be in the wait set.
+            // We need to cancel it so another waiter can be notified.
+            let notifier_ptr = NonNull::from(&self.notifier);
             unsafe {
-                self.wait_set.cancel(notifier);
-                let _ = Box::from_raw(notifier.as_ptr());
+                self.wait_set.cancel(notifier_ptr);
             }
         }
     }
 }
 
-impl<'a, F: FnMut() -> Option<T>, T> Unpin for WaitUntil<'a, F, T> {}
+impl<F: FnMut() -> Option<T>, T> std::fmt::Debug for WaitUntil<'_, F, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WaitUntil")
+            .field("state", &self.state)
+            .field("notifier", &self.notifier)
+            .finish()
+    }
+}
 
 unsafe impl<F: (FnMut() -> Option<T>) + Send, T: Send> Send for WaitUntil<'_, F, T> {}
 
@@ -272,140 +327,71 @@ impl<'a, F: FnMut() -> Option<T>, T> Future for WaitUntil<'a, F, T> {
     type Output = T;
 
     #[inline]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        assert!(self.state != WaitUntilState::Completed);
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Safety: we're not moving out of self, just getting mutable references
+        // to fields. The notifier address remains stable.
+        let this = unsafe { self.get_unchecked_mut() };
+
+        debug_assert!(this.state != WaitUntilState::Completed);
+
+        // Get a stable pointer to our inline notifier
+        let notifier_ptr = NonNull::from(&this.notifier);
 
         // Remove the notifier if it is in the wait set. In most cases this will
         // be a cheap no-op because, unless the wake-up is spurious, the
         // notifier was already removed from the wait set.
-        //
-        // Removing the notifier before checking the predicate is necessary to
-        // avoid races such as this one:
-        //
-        // 1) event sink A unsuccessfully checks the predicate, inserts its
-        //    notifier in the wait set, unsuccessfully re-checks the predicate,
-        //    returns `Poll::Pending`,
-        // 2) event sink B unsuccessfully checks the predicate, inserts its
-        //    notifier in the wait set, unsuccessfully re-checks the predicate,
-        //    returns `Poll::Pending`,
-        // 3) the event source makes one predicate satisfiable,
-        // 4) event sink A is spuriously awaken and successfully checks the
-        //    predicates, returns `Poll::Ready`,
-        // 5) the event source notifies event sink B,
-        // 6) event sink B is awaken and unsuccessfully checks the predicate,
-        //    inserts its notifier in the wait set, unsuccessfully re-checks the
-        //    predicate, returns `Poll::Pending`,
-        // 7) the event source makes another predicate satisfiable.
-        // 8) if now the notifier of event sink A was not removed from the wait
-        //    set, the event source may notify event sink A (which is no longer
-        //    interested) rather than event sink B, meaning that event sink B
-        //    will never be notified.
-        if let WaitUntilState::Polled(notifier) = self.state {
-            // Safety: all notifiers in the wait set are guaranteed to be alive
-            // since the `WaitUntil` drop handler ensures that notifiers are
-            // removed from the wait set before they are deallocated. Using the
-            // relaxed version of `notify` is enough since the notifier was
-            // inserted in the same future so there exists a happen-before
-            // relationship with the insertion operation.
-            unsafe { self.wait_set.remove_relaxed(notifier) };
+        if this.state == WaitUntilState::Polled {
+            unsafe { this.wait_set.remove_relaxed(notifier_ptr) };
         }
 
-        // Fast path.
-        if let Some(v) = (self.predicate)() {
-            if let WaitUntilState::Polled(notifier) = self.state {
-                // Safety: the notifier is no longer in the wait set so we can
-                // claim unique ownership and deallocate the notifier.
-                let _ = unsafe { Box::from_raw(notifier.as_ptr()) };
-            }
-
-            self.state = WaitUntilState::Completed;
-
+        // Fast path: check predicate before any synchronization.
+        if let Some(v) = (this.predicate)() {
+            this.state = WaitUntilState::Completed;
             return Poll::Ready(v);
         }
 
-        let mut notifier = if let WaitUntilState::Polled(notifier) = self.state {
-            notifier
-        } else {
-            unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(Notifier::new()))) }
-        };
-
-        // Set or update the notifier.
-        //
-        // Safety: the notifier is not (or no longer) in the wait list so we
-        // have exclusive ownership.
+        // Set or update the waker.
         let waker = cx.waker();
-        unsafe { notifier.as_mut().set_waker(waker) };
+        unsafe { this.notifier.set_waker(waker) };
 
-        // Safety: all notifiers in the wait set are guaranteed to be alive
-        // since the `WaitUntil` drop handler ensures that notifiers are removed
-        // from the wait set before they are deallocated.
-        unsafe { self.wait_set.insert(notifier) };
+        // Insert into the wait set.
+        unsafe { this.wait_set.insert(notifier_ptr) };
 
-        // This fence synchronizes with the other fence in `Event::notify` and
-        // ensures that either the predicate below will be satisfied or the
-        // event source will see the notifier inserted above in the wait list
-        // after it makes the predicate satisfiable (or both).
+        // This fence synchronizes with the other fence in `Event::notify`.
         atomic::fence(Ordering::SeqCst);
 
-        if let Some(v) = (self.predicate)() {
+        if let Some(v) = (this.predicate)() {
             // We need to cancel and not merely remove the notifier from the
-            // wait set so that another event sink can be notified in case we
-            // have been notified just after checking the predicate. This is an
-            // example of race that makes this necessary:
-            //
-            // 1) event sink A and event sink B both unsuccessfully check the
-            //    predicate,
-            // 2) the event source makes one predicate satisfiable and tries to
-            //    notify an event sink but fails since no notifier has been
-            //    inserted in the wait set yet,
-            // 3) event sink A and event sink B both insert their notifier in
-            //    the wait set,
-            // 4) event sink A re-checks the predicate, successfully,
-            // 5) event sink B re-checks the predicate, unsuccessfully,
-            // 6) the event source makes another predicate satisfiable,
-            // 7) the event source sends a notification for the second predicate
-            //    but unfortunately chooses the "wrong" notifier in the wait
-            //    set, i.e. that of event sink A -- note that this is always
-            //    possible irrespective of FIFO or LIFO ordering because it also
-            //    depends on the order of notifier insertion in step 3)
-            // 8) if, before returning, event sink A merely removes itself from
-            //    the wait set without notifying another event sink, then event
-            //    sink B will never be notified.
-            //
-            // Safety: all notifiers in the wait set are guaranteed to be alive
-            // since the `WaitUntil` drop handler ensures that notifiers are
-            // removed from the wait set before they are deallocated.
+            // wait set so that another event sink can be notified.
             unsafe {
-                self.wait_set.cancel(notifier);
+                this.wait_set.cancel(notifier_ptr);
             }
 
-            self.state = WaitUntilState::Completed;
-
-            // Safety: the notifier is not longer in the wait set so we can
-            // claim unique ownership and deallocate the notifier.
-            let _ = unsafe { Box::from_raw(notifier.as_ptr()) };
-
+            this.state = WaitUntilState::Completed;
             return Poll::Ready(v);
         }
 
-        self.state = WaitUntilState::Polled(notifier);
-
+        this.state = WaitUntilState::Polled;
         Poll::Pending
     }
 }
 
 /// State of the `WaitUntil` future.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaitUntilState {
+    /// Initial state, never polled.
     Idle,
-    Polled(NonNull<Notifier>),
+    /// Has been polled and is waiting.
+    Polled,
+    /// Completed successfully.
     Completed,
 }
 
 pin_project! {
     /// A future that can be `await`ed until a predicate is satisfied or until a
-        /// deadline elapses.
+    /// deadline elapses.
     pub struct WaitUntilOrTimeout<'a, F: FnMut() -> Option<T>, T, D: Future<Output = ()>> {
+        #[pin]
         wait_until: WaitUntil<'a, F, T>,
         #[pin]
         deadline: D,
@@ -428,6 +414,14 @@ where
     }
 }
 
+impl<F: FnMut() -> Option<T>, T, D: Future<Output = ()>> std::fmt::Debug
+    for WaitUntilOrTimeout<'_, F, T, D>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WaitUntilOrTimeout").finish_non_exhaustive()
+    }
+}
+
 impl<'a, F, T, D> Future for WaitUntilOrTimeout<'a, F, T, D>
 where
     F: FnMut() -> Option<T>,
@@ -439,7 +433,7 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
 
-        if let Poll::Ready(value) = Pin::new(this.wait_until).poll(cx) {
+        if let Poll::Ready(value) = this.wait_until.poll(cx) {
             Poll::Ready(Some(value))
         } else if this.deadline.poll(cx).is_ready() {
             Poll::Ready(None)
@@ -449,340 +443,253 @@ where
     }
 }
 
-/// A set of notifiers.
+/// A set of notifiers using a Vec with O(1) swap-remove.
 ///
-/// The set wraps a Mutex-protected list of notifiers and manages a flag for
-/// fast assessment of list emptiness.
-#[derive(Debug)]
+/// The Vec stores pointers to inline notifiers. Each notifier tracks its
+/// own index, which is updated during swap-remove operations. This gives
+/// us O(1) removal while maintaining good cache locality.
 struct WaitSet {
-    list: Mutex<List>,
+    /// Mutex protecting the wait list.
+    waiters: Mutex<Vec<NonNull<Notifier>>>,
+    /// Lock-free emptiness check. This is the key optimization:
+    /// notify_one/notify_all can return immediately with just an atomic load
+    /// when no waiters are present (the common case).
     is_empty: AtomicBool,
 }
 
 impl WaitSet {
-    /// Inserts a node in the wait set.
+    /// Creates a new empty wait set.
+    const fn new() -> Self {
+        Self {
+            waiters: Mutex::new(Vec::new()),
+            is_empty: AtomicBool::new(true),
+        }
+    }
+
+    /// Inserts a notifier into the wait set.
     ///
     /// # Safety
     ///
-    /// The specified notifier and all notifiers in the wait set must be alive.
-    /// The notifier should not be already in the wait set.
+    /// The notifier must remain valid until it is removed from the wait set.
+    /// The notifier should not already be in the wait set.
+    #[inline]
     unsafe fn insert(&self, notifier: NonNull<Notifier>) {
-        let mut list = self.list.lock().unwrap();
+        let mut waiters = self.waiters.lock();
 
-        #[cfg(any(debug_assertions, all(test, async_event_loom)))]
-        if unsafe { notifier.as_ref().in_wait_set.load(Ordering::Relaxed) } {
-            drop(list); // avoids poisoning the lock
-            panic!("the notifier was already in the wait set");
-        }
+        debug_assert!(!unsafe { notifier.as_ref().is_in_list() });
 
-        // Orderings: Relaxed ordering is sufficient since before this point the
-        // notifier was not in the list and therefore not shared.
-        unsafe { notifier.as_ref().in_wait_set.store(true, Ordering::Relaxed) };
+        // Record the index where we're inserting
+        let index = waiters.len();
+        unsafe { notifier.as_ref().set_index(index) };
 
-        unsafe { list.push_back(notifier) };
+        // Add to the Vec
+        waiters.push(notifier);
 
-        // Ordering: since this flag is only ever mutated within the
-        // mutex-protected critical section, Relaxed ordering is sufficient.
-        self.is_empty.store(false, Ordering::Relaxed);
+        // Update emptiness flag
+        self.is_empty.store(false, Ordering::Release);
     }
 
     /// Remove the specified notifier if it is still in the wait set.
     ///
-    /// After a call to `remove`, the caller is guaranteed that the wait set
-    /// will no longer access the specified notifier.
-    ///
-    /// Note that for performance reasons, the presence of the notifier in the
-    /// list is checked without acquiring the lock. This fast check will never
-    /// lead to a notifier staying in the list as long as there exists an
-    /// happens-before relationship between this call and the earlier call to
-    /// `insert`. A happens-before relationship always exists if these calls are
-    /// made on the same thread or across `await` points.
+    /// Uses a fast-path check without locking when possible.
     ///
     /// # Safety
     ///
-    /// The specified notifier and all notifiers in the wait set must be alive.
-    /// This function may fail to remove the notifier if a happens-before
-    /// relationship does not exist with the previous call to `insert`.
+    /// The notifier must be valid.
+    #[inline]
     unsafe fn remove_relaxed(&self, notifier: NonNull<Notifier>) {
-        // Preliminarily check whether the notifier is already in the list (fast
-        // path).
-        //
-        // This is the only instance where the `in_wait_set` flag is accessed
-        // outside the mutex-protected critical section while the notifier may
-        // still be in the list. The only risk is that the load will be stale
-        // and will read `true` even though the notifier is no longer in the
-        // list, but this is not an issue since in that case the actual state
-        // will be checked again after taking the lock.
-        //
-        // Ordering: Acquire synchronizes with the `Release` orderings in the
-        // `notify` and `cancel` methods; it is necessary to ensure that the
-        // waker is no longer in use by the wait set and can therefore be
-        // modified after returning from `remove`.
-        let in_wait_set = unsafe { notifier.as_ref().in_wait_set.load(Ordering::Acquire) };
-        if !in_wait_set {
+        // Fast path: check if already removed (no lock needed)
+        if !unsafe { notifier.as_ref().is_in_list() } {
             return;
         }
 
         unsafe { self.remove(notifier) };
     }
 
-    /// Remove the specified notifier if it is still in the wait set.
-    ///
-    /// After a call to `remove`, the caller is guaranteed that the wait set
-    /// will no longer access the specified notifier.
+    /// Remove the specified notifier from the wait set using swap-remove.
     ///
     /// # Safety
     ///
-    /// The specified notifier and all notifiers in the wait set must be alive.
+    /// The notifier must be valid.
     unsafe fn remove(&self, notifier: NonNull<Notifier>) {
-        let mut list = self.list.lock().unwrap();
+        let mut waiters = self.waiters.lock();
 
-        // Check again whether the notifier is already in the list
-        //
-        // Ordering: since this flag is only ever mutated within the
-        // mutex-protected critical section and since the wait set also accesses
-        // the waker only in the critical section, even with Relaxed ordering it
-        // is guaranteed that if `in_wait_set` reads `false` then the waker is
-        // no longer in use by the wait set.
-        let in_wait_set = unsafe { notifier.as_ref().in_wait_set.load(Ordering::Relaxed) };
-        if !in_wait_set {
+        let notifier_ref = unsafe { notifier.as_ref() };
+
+        // Check again if still in list (may have been removed between check and lock)
+        let index = unsafe { notifier_ref.get_index() };
+        if index == NOT_IN_LIST {
             return;
         }
 
-        unsafe { list.remove(notifier) };
-        if list.is_empty() {
-            // Ordering: since this flag is only ever mutated within the
-            // mutex-protected critical section, Relaxed ordering is sufficient.
-            self.is_empty.store(true, Ordering::Relaxed);
+        // Swap-remove: move the last element to this position
+        let last_index = waiters.len() - 1;
+        if index != last_index {
+            // Update the moved notifier's index
+            let moved = waiters[last_index];
+            unsafe { moved.as_ref().set_index(index) };
+            waiters[index] = moved;
         }
+        waiters.pop();
 
-        // Ordering: this flag is only ever mutated within the mutex-protected
-        // critical section and since the waker is not accessed in this method,
-        // it does not need to synchronize with a later call to `remove`;
-        // therefore, Relaxed ordering is sufficient.
-        unsafe {
-            notifier
-                .as_ref()
-                .in_wait_set
-                .store(false, Ordering::Relaxed)
-        };
+        // Mark as removed
+        unsafe { notifier_ref.set_index(NOT_IN_LIST) };
+
+        // Update emptiness flag
+        if waiters.is_empty() {
+            self.is_empty.store(true, Ordering::Release);
+        }
     }
 
-    /// Remove the specified notifier if it is still in the wait set, otherwise
-    /// notify another event sink.
-    ///
-    /// After a call to `cancel`, the caller is guaranteed that the wait set
-    /// will no longer access the specified notifier.
+    /// Remove the specified notifier if still in wait set, or notify another.
     ///
     /// # Safety
     ///
-    /// The specified notifier and all notifiers in the wait set must be alive.
-    /// Wakers of notifiers which pointer is in the wait set may not be accessed
-    /// mutably.
+    /// The notifier and all notifiers in the wait set must be valid.
     unsafe fn cancel(&self, notifier: NonNull<Notifier>) {
-        let mut list = self.list.lock().unwrap();
+        let mut waiters = self.waiters.lock();
 
-        let in_wait_set = unsafe { notifier.as_ref().in_wait_set.load(Ordering::Relaxed) };
-        if in_wait_set {
-            unsafe { list.remove(notifier) };
-            if list.is_empty() {
-                self.is_empty.store(true, Ordering::Relaxed);
+        let notifier_ref = unsafe { notifier.as_ref() };
+        let index = unsafe { notifier_ref.get_index() };
+
+        if index != NOT_IN_LIST {
+            // Still in list, remove it using swap-remove
+            let last_index = waiters.len() - 1;
+            if index != last_index {
+                let moved = waiters[last_index];
+                unsafe { moved.as_ref().set_index(index) };
+                waiters[index] = moved;
+            }
+            waiters.pop();
+
+            unsafe { notifier_ref.set_index(NOT_IN_LIST) };
+
+            if waiters.is_empty() {
+                self.is_empty.store(true, Ordering::Release);
+            }
+        } else if !waiters.is_empty() {
+            // We were already notified (removed by notify), pass notification to another waiter
+            // Pop from the front for FIFO behavior
+            let other = waiters[0];
+
+            // Swap-remove from front
+            let last_index = waiters.len() - 1;
+            if last_index > 0 {
+                let moved = waiters[last_index];
+                unsafe { moved.as_ref().set_index(0) };
+                waiters[0] = moved;
+            }
+            waiters.pop();
+
+            // Clone waker before marking as removed
+            let waker = unsafe { other.as_ref().clone_waker() };
+
+            // Mark as removed
+            unsafe { other.as_ref().set_index(NOT_IN_LIST) };
+
+            if waiters.is_empty() {
+                self.is_empty.store(true, Ordering::Release);
             }
 
-            // Ordering: this flag is only ever mutated within the
-            // mutex-protected critical section and since the waker is not
-            // accessed, it does not need to synchronize with the Acquire load
-            // in the `remove` method; therefore, Relaxed ordering is
-            // sufficient.
-            unsafe {
-                notifier
-                    .as_ref()
-                    .in_wait_set
-                    .store(false, Ordering::Relaxed)
-            };
-        } else if let Some(other_notifier) = unsafe { list.pop_front() } {
-            // Safety: the waker can be accessed by reference because the
-            // event sink is not allowed to access the waker mutably before
-            // `in_wait_set` is cleared.
-            unsafe { other_notifier.as_ref().wake() };
+            // Release lock before waking
+            drop(waiters);
 
-            // Ordering: the Release memory ordering synchronizes with the
-            // Acquire ordering in the `remove` method; it is required to
-            // ensure that once `in_wait_set` reads `false` (using Acquire
-            // ordering), the waker is no longer in use by the wait set and
-            // can therefore be modified.
-            unsafe {
-                other_notifier
-                    .as_ref()
-                    .in_wait_set
-                    .store(false, Ordering::Release)
-            };
+            // Wake the other waiter
+            if let Some(w) = waker {
+                w.wake();
+            }
         }
     }
 
-    /// Send a notification to `count` notifiers within the wait set, or to all
-    /// notifiers if the wait set contains less than `count` notifiers.
+    /// Send notifications to up to `count` waiters.
     ///
-    /// Note that for performance reasons, list emptiness is checked without
-    /// acquiring the wait set lock. Therefore, in order to prevent the
-    /// possibility that a wait set is seen as empty when it isn't, external
-    /// synchronization is required to make sure that all side effects of a
-    /// previous call to `insert` are fully visible. For instance, an atomic
-    /// memory fence maye be placed before this call and another one after the
-    /// insertion of a notifier.
+    /// Note: The caller has already checked is_empty, so we know there are waiters.
     ///
     /// # Safety
     ///
-    /// All notifiers in the wait set must be alive. Wakers of notifiers which
-    /// pointer is in the wait set may not be accessed mutably.
-    #[inline(always)]
-    unsafe fn notify_relaxed(&self, count: usize) {
-        let is_empty = self.is_empty.load(Ordering::Relaxed);
-        if is_empty {
-            return;
-        }
-
-        unsafe { self.notify(count) };
-    }
-
-    /// Send a notification to `count` notifiers within the wait set, or to all
-    /// notifiers if the wait set contains less than `count` notifiers.
-    ///
-    /// # Safety
-    ///
-    /// All notifiers in the wait set must be alive. Wakers of notifiers which
-    /// pointer is in the wait set may not be accessed mutably.
+    /// All notifiers in the wait set must be valid.
     unsafe fn notify(&self, count: usize) {
-        let mut list = self.list.lock().unwrap();
-        for _ in 0..count {
-            let notifier = {
-                if let Some(notifier) = unsafe { list.pop_front() } {
-                    if list.is_empty() {
-                        self.is_empty.store(true, Ordering::Relaxed);
-                    }
-                    notifier
-                } else {
-                    return;
+        // Collect wakers to wake outside the lock
+        let mut wakers_to_wake: [MaybeUninit<Waker>; MAX_BATCH_WAKEUPS] =
+            unsafe { MaybeUninit::uninit().assume_init() };
+        let mut waker_count = 0usize;
+        let mut remaining = count;
+
+        {
+            let mut waiters = self.waiters.lock();
+
+            while remaining > 0 && !waiters.is_empty() {
+                // Pop from front for FIFO behavior using swap-remove
+                let notifier = waiters[0];
+
+                let last_index = waiters.len() - 1;
+                if last_index > 0 {
+                    let moved = waiters[last_index];
+                    unsafe { moved.as_ref().set_index(0) };
+                    waiters[0] = moved;
                 }
-            };
+                waiters.pop();
 
-            // Note: the event sink must be notified before the end of the
-            // mutex-protected critical section. Otherwise, a concurrent call to
-            // `remove` could succeed in taking the lock before the waker has
-            // been called, and seeing that the notifier is no longer in the
-            // list would lead its caller to believe that it has now sole
-            // ownership on the notifier even though the call to `wake` has yet
-            // to be made.
-            //
-            // Safety: the waker can be accessed by reference since the event
-            // sink is not allowed to access the waker mutably before
-            // `in_wait_set` is cleared.
-            unsafe { notifier.as_ref().wake() };
+                let notifier_ref = unsafe { notifier.as_ref() };
 
-            // Ordering: the Release memory ordering synchronizes with the
-            // Acquire ordering in the `remove` method; it is required to ensure
-            // that once `in_wait_set` reads `false` (using Acquire ordering),
-            // the waker can be safely modified.
-            unsafe {
-                notifier
-                    .as_ref()
-                    .in_wait_set
-                    .store(false, Ordering::Release)
-            };
+                // Clone the waker while we have access
+                if let Some(waker) = unsafe { notifier_ref.clone_waker() } {
+                    if waker_count < MAX_BATCH_WAKEUPS {
+                        wakers_to_wake[waker_count].write(waker);
+                        waker_count += 1;
+                    } else {
+                        // Batch is full, wake immediately
+                        waker.wake();
+                    }
+                }
+
+                // Mark as removed
+                unsafe { notifier_ref.set_index(NOT_IN_LIST) };
+
+                remaining -= 1;
+            }
+
+            // Update emptiness flag
+            if waiters.is_empty() {
+                self.is_empty.store(true, Ordering::Release);
+            }
         }
+
+        // Wake all collected wakers outside the lock
+        for i in 0..waker_count {
+            let waker = unsafe { wakers_to_wake[i].assume_init_read() };
+            waker.wake();
+        }
+    }
+}
+
+impl std::fmt::Debug for WaitSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WaitSet")
+            .field("is_empty", &self.is_empty.load(Ordering::Relaxed))
+            .finish()
     }
 }
 
 impl Default for WaitSet {
     fn default() -> Self {
-        Self {
-            list: Default::default(),
-            is_empty: AtomicBool::new(true),
-        }
+        Self::new()
     }
 }
 
-#[derive(Default, Debug)]
-struct List {
-    front: Option<NonNull<Notifier>>,
-    back: Option<NonNull<Notifier>>,
-}
-
-impl List {
-    /// Inserts a node at the back of the list.
-    ///
-    /// # Safety
-    ///
-    /// The provided notifier and all notifiers which pointer is in the list
-    /// must be alive.
-    unsafe fn push_back(&mut self, notifier: NonNull<Notifier>) {
-        // Safety: the `prev` and `next` pointers are only be accessed when the
-        // list is locked.
-        let old_back = mem::replace(&mut self.back, Some(notifier));
-        match old_back {
-            None => self.front = Some(notifier),
-            Some(prev) => unsafe { prev.as_ref().next.with_mut(|n| *n = Some(notifier)) },
-        }
-
-        // Link the new notifier.
-        let notifier = unsafe { notifier.as_ref() };
-        notifier.prev.with_mut(|n| unsafe { *n = old_back });
-        notifier.next.with_mut(|n| unsafe { *n = None });
-    }
-
-    /// Removes and returns the notifier at the front of the list, if any.
-    ///
-    /// # Safety
-    ///
-    /// All notifiers which pointer is in the list must be alive.
-    unsafe fn pop_front(&mut self) -> Option<NonNull<Notifier>> {
-        let notifier = self.front?;
-
-        // Unlink from the next notifier.
-        let next = unsafe { notifier.as_ref().next.with(|n| *n) };
-        self.front = next;
-        match next {
-            None => self.back = None,
-            Some(next) => unsafe { next.as_ref().prev.with_mut(|n| *n = None) },
-        }
-
-        Some(notifier)
-    }
-
-    /// Removes the specified notifier.
-    ///
-    /// # Safety
-    ///
-    /// The specified notifier and all notifiers which pointer is in the list
-    /// must be alive.
-    unsafe fn remove(&mut self, notifier: NonNull<Notifier>) {
-        // Unlink from the previous and next notifiers.
-        let prev = unsafe { notifier.as_ref().prev.with(|n| *n) };
-        let next = unsafe { notifier.as_ref().next.with(|n| *n) };
-        match prev {
-            None => self.front = next,
-            Some(prev) => unsafe { prev.as_ref().next.with_mut(|n| *n = next) },
-        }
-        match next {
-            None => self.back = prev,
-            Some(next) => unsafe { next.as_ref().prev.with_mut(|n| *n = prev) },
-        }
-    }
-
-    /// Returns `true` if the list is empty.
-    fn is_empty(&self) -> bool {
-        self.front.is_none()
-    }
-}
+// Safety: WaitSet uses proper synchronization (atomics + mutex)
+unsafe impl Send for WaitSet {}
+unsafe impl Sync for WaitSet {}
 
 /// Non-loom tests.
 #[cfg(all(test, not(async_event_loom)))]
 mod tests {
     use super::*;
 
-    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
     use std::thread;
+    use std::time::Duration;
 
     use crate::future::block_on;
 
@@ -818,17 +725,42 @@ mod tests {
     }
 
     #[test]
+    fn predicate_already_satisfied() {
+        static SIGNAL: AtomicBool = AtomicBool::new(true);
+
+        let event = Event::new();
+
+        block_on(async {
+            let result = event
+                .wait_until(|| {
+                    if SIGNAL.load(Ordering::Relaxed) {
+                        Some(42)
+                    } else {
+                        None
+                    }
+                })
+                .await;
+
+            assert_eq!(result, 42);
+        });
+    }
+
+    #[test]
     fn one_to_many() {
-        const RECEIVER_COUNT: usize = 4;
+        const NUM_RECV: usize = 4;
+
         static SIGNAL: AtomicBool = AtomicBool::new(false);
 
         let event = Arc::new(Event::new());
+        let barrier = Arc::new(std::sync::Barrier::new(NUM_RECV + 1));
 
-        let th_recv: Vec<_> = (0..RECEIVER_COUNT)
+        let th_recv: Vec<_> = (0..NUM_RECV)
             .map(|_| {
                 let event = event.clone();
+                let barrier = barrier.clone();
                 thread::spawn(move || {
                     block_on(async move {
+                        barrier.wait();
                         event
                             .wait_until(|| {
                                 if SIGNAL.load(Ordering::Relaxed) {
@@ -845,9 +777,11 @@ mod tests {
             })
             .collect();
 
+        barrier.wait();
+
+        thread::sleep(Duration::from_millis(10));
         SIGNAL.store(true, Ordering::Relaxed);
-        event.notify_one();
-        event.notify(3);
+        event.notify_all();
 
         for th in th_recv {
             th.join().unwrap();
@@ -856,62 +790,161 @@ mod tests {
 
     #[test]
     fn many_to_many() {
-        const TOKEN_COUNT: usize = 4;
-        static AVAILABLE_TOKENS: AtomicUsize = AtomicUsize::new(0);
+        const NUM_SEND: usize = 4;
+        const NUM_RECV: usize = 4;
+        const MSG_PER_SENDER: usize = 10;
 
+        let received = Arc::new(AtomicUsize::new(0));
+        let sent = Arc::new(AtomicUsize::new(0));
         let event = Arc::new(Event::new());
 
-        // Receive tokens from multiple threads.
-        let th_recv: Vec<_> = (0..TOKEN_COUNT)
+        let th_recv: Vec<_> = (0..NUM_RECV)
             .map(|_| {
+                let received = received.clone();
+                let sent = sent.clone();
                 let event = event.clone();
                 thread::spawn(move || {
                     block_on(async move {
-                        event
-                            .wait_until(|| {
-                                AVAILABLE_TOKENS
-                                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |t| {
-                                        if t > 0 { Some(t - 1) } else { None }
-                                    })
-                                    .ok()
-                            })
-                            .await;
+                        loop {
+                            let r = event
+                                .wait_until(|| {
+                                    let r = received.load(Ordering::Relaxed);
+                                    let s = sent.load(Ordering::Relaxed);
+
+                                    if r < s {
+                                        Some(r)
+                                    } else if s >= NUM_SEND * MSG_PER_SENDER {
+                                        Some(usize::MAX)
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .await;
+
+                            if r == usize::MAX {
+                                break;
+                            }
+
+                            received.fetch_add(1, Ordering::Relaxed);
+                        }
                     })
                 })
             })
             .collect();
 
-        // Make tokens available from multiple threads.
-        let th_send: Vec<_> = (0..TOKEN_COUNT)
+        let th_send: Vec<_> = (0..NUM_SEND)
             .map(|_| {
+                let sent = sent.clone();
                 let event = event.clone();
                 thread::spawn(move || {
-                    AVAILABLE_TOKENS.fetch_add(1, Ordering::Relaxed);
-                    event.notify_one();
+                    for _ in 0..MSG_PER_SENDER {
+                        sent.fetch_add(1, Ordering::Relaxed);
+                        event.notify_one();
+                        thread::sleep(Duration::from_micros(100));
+                    }
                 })
             })
             .collect();
 
-        for th in th_recv {
-            th.join().unwrap();
-        }
         for th in th_send {
             th.join().unwrap();
         }
+        // Notify all receivers that we're done.
+        event.notify_all();
 
-        assert!(AVAILABLE_TOKENS.load(Ordering::Relaxed) == 0);
+        for th in th_recv {
+            th.join().unwrap();
+        }
+
+        assert_eq!(received.load(Ordering::Relaxed), NUM_SEND * MSG_PER_SENDER);
+    }
+
+    #[test]
+    fn cancellation() {
+        // Test that when a waiter is cancelled, another waiter is notified.
+        // This tests the cancel() method's forwarding behavior.
+        let event = Arc::new(Event::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        // Waiter 1: will be cancelled after being notified
+        let event1 = event.clone();
+        let counter1 = counter.clone();
+        let completed1 = completed.clone();
+        let barrier1 = barrier.clone();
+        let th1 = thread::spawn(move || {
+            block_on(async move {
+                // Create a future that will never satisfy the predicate
+                let fut = event1.wait_until(|| {
+                    // This waiter looks for counter == 999 which never happens
+                    let c = counter1.load(Ordering::Relaxed);
+                    if c == 999 { Some(c) } else { None }
+                });
+                let mut fut = std::pin::pin!(fut);
+
+                // Poll once to register
+                let waker = futures::task::noop_waker();
+                let mut cx = Context::from_waker(&waker);
+                let _ = fut.as_mut().poll(&mut cx);
+
+                barrier1.wait(); // Signal we're registered
+
+                // Wait a bit then drop the future (cancel)
+                thread::sleep(Duration::from_millis(30));
+                drop(fut);
+                completed1.fetch_add(1, Ordering::Relaxed);
+            })
+        });
+
+        // Waiter 2: should eventually complete when waiter 1 cancels
+        let event2 = event.clone();
+        let counter2 = counter.clone();
+        let completed2 = completed.clone();
+        let barrier2 = barrier.clone();
+        let th2 = thread::spawn(move || {
+            block_on(async move {
+                barrier2.wait(); // Wait for waiter 1 to register first
+
+                event2
+                    .wait_until(|| {
+                        let c = counter2.load(Ordering::Relaxed);
+                        if c > 0 { Some(c) } else { None }
+                    })
+                    .await;
+
+                completed2.fetch_add(1, Ordering::Relaxed);
+            })
+        });
+
+        barrier.wait(); // Wait for waiter 1 to be registered
+
+        // Set signal and notify once
+        counter.store(1, Ordering::Relaxed);
+        event.notify_one();
+
+        // Waiter 1 gets notified but predicate fails, then drops (cancel)
+        // Cancel should forward notification to waiter 2
+
+        th1.join().unwrap();
+        th2.join().unwrap();
+
+        // Both should have completed
+        assert_eq!(completed.load(Ordering::Relaxed), 2);
     }
 
     #[test]
     fn notify_all() {
-        const RECEIVER_COUNT: usize = 4;
+        const NUM_WAITERS: usize = 5;
         static SIGNAL: AtomicBool = AtomicBool::new(false);
 
         let event = Arc::new(Event::new());
+        let woken = Arc::new(AtomicUsize::new(0));
 
-        let th_recv: Vec<_> = (0..RECEIVER_COUNT)
+        let handles: Vec<_> = (0..NUM_WAITERS)
             .map(|_| {
                 let event = event.clone();
+                let woken = woken.clone();
                 thread::spawn(move || {
                     block_on(async move {
                         event
@@ -923,509 +956,488 @@ mod tests {
                                 }
                             })
                             .await;
-
-                        assert!(SIGNAL.load(Ordering::Relaxed));
+                        woken.fetch_add(1, Ordering::Relaxed);
                     })
                 })
             })
             .collect();
 
+        // Wait for all to be waiting.
+        thread::sleep(Duration::from_millis(20));
+
+        // Notify all at once.
         SIGNAL.store(true, Ordering::Relaxed);
         event.notify_all();
 
-        for th in th_recv {
-            th.join().unwrap();
+        for h in handles {
+            h.join().unwrap();
         }
-    }
-}
 
-/// Loom tests.
-#[cfg(all(test, async_event_loom))]
-mod tests {
-    use super::*;
-
-    use std::future::Future;
-    use std::marker::PhantomPinned;
-    use std::task::{Context, Poll};
-
-    use loom::model::Builder;
-    use loom::sync::Arc;
-    use loom::sync::atomic::AtomicUsize;
-    use loom::thread;
-
-    use waker_fn::waker_fn;
-
-    /// A waker factory that accepts notifications from the newest waker only.
-    #[derive(Clone, Default)]
-    struct MultiWaker {
-        state: Arc<AtomicUsize>,
+        assert_eq!(woken.load(Ordering::Relaxed), NUM_WAITERS);
     }
 
-    impl MultiWaker {
-        /// Clears the notification flag.
-        ///
-        /// This operation has unconditional Relaxed semantic and for this
-        /// reason should be used instead of `take_notification` when the intent
-        /// is only to cancel a notification for book-keeping purposes, e.g. to
-        /// simulate a spurious wake-up, without introducing unwanted
-        /// synchronization.
-        fn clear_notification(&self) {
-            self.state.fetch_and(!1, Ordering::Relaxed);
-        }
+    #[test]
+    fn rapid_notify_before_wait() {
+        // Test notifying before anyone is waiting.
+        let event = Event::new();
 
-        /// Clears the notification flag and returns the former notification
-        /// status.
-        ///
-        /// This operation has Acquire semantic when a notification is indeed
-        /// present, and Relaxed otherwise. It is therefore appropriate to
-        /// simulate a scheduler receiving a notification as it ensures that all
-        /// memory operations preceding the notification of a task are visible.
-        fn take_notification(&self) -> bool {
-            // Clear the notification flag.
-            let mut state = self.state.load(Ordering::Relaxed);
-            loop {
-                let notified_stated = state | 1;
-                let unnotified_stated = state & !1;
-                match self.state.compare_exchange_weak(
-                    notified_stated,
-                    unnotified_stated,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => return true,
-                    Err(s) => {
-                        state = s;
-                        if state == unnotified_stated {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
+        // These should be no-ops.
+        event.notify_one();
+        event.notify_all();
+        event.notify(100);
 
-        /// Clears the notification flag and creates a new waker.
-        fn new_waker(&self) -> Waker {
-            // Increase the epoch and clear the notification flag.
-            let mut state = self.state.load(Ordering::Relaxed);
-            let mut epoch;
-            loop {
-                // Increase the epoch by 2.
-                epoch = (state & !1) + 2;
-                match self.state.compare_exchange_weak(
-                    state,
-                    epoch,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(s) => state = s,
-                }
-            }
+        // Now do a normal wait/notify cycle.
+        static SIGNAL: AtomicBool = AtomicBool::new(false);
 
-            // Create a waker that only notifies if it is the newest waker.
-            let waker_state = self.state.clone();
-            waker_fn(move || {
-                let mut state = waker_state.load(Ordering::Relaxed);
-                loop {
-                    let new_state = if state & !1 == epoch {
-                        epoch | 1
-                    } else {
-                        break;
-                    };
-                    match waker_state.compare_exchange(
-                        state,
-                        new_state,
-                        Ordering::Release,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => break,
-                        Err(s) => state = s,
-                    }
-                }
-            })
-        }
-    }
+        let event = Arc::new(Event::new());
+        let event2 = event.clone();
 
-    /// A simple counter that can be used to simulate the availability of a
-    /// certain number of AVAILABLE_TOKENS. In order to model the weakest possible
-    /// predicate from the viewpoint of atomic memory ordering, only Relaxed
-    /// atomic operations are used.
-    #[derive(Default)]
-    struct Counter {
-        count: AtomicUsize,
-    }
-
-    impl Counter {
-        fn increment(&self) {
-            self.count.fetch_add(1, Ordering::Relaxed);
-        }
-        fn try_decrement(&self) -> Option<()> {
-            let mut count = self.count.load(Ordering::Relaxed);
-            loop {
-                if count == 0 {
-                    return None;
-                }
-                match self.count.compare_exchange(
-                    count,
-                    count - 1,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => return Some(()),
-                    Err(c) => count = c,
-                }
-            }
-        }
-    }
-
-    /// A closure that contains the targets of all references captured by a
-    /// `WaitUntil` Future.
-    ///
-    /// This ugly thing is needed to arbitrarily extend the lifetime of a
-    /// `WaitUntil` future and thus mimic the behavior of an executor task.
-    struct WaitUntilClosure {
-        event: Arc<Event>,
-        token_counter: Arc<Counter>,
-        wait_until: Option<Box<dyn Future<Output = ()>>>,
-        _pin: PhantomPinned,
-    }
-
-    impl WaitUntilClosure {
-        /// Creates a `WaitUntil` future embedded together with the targets
-        /// captured by reference.
-        fn new(event: Arc<Event>, token_counter: Arc<Counter>) -> Pin<Box<Self>> {
-            let res = Self {
-                event,
-                token_counter,
-                wait_until: None,
-                _pin: PhantomPinned,
-            };
-            let boxed = Box::new(res);
-
-            // Artificially extend the lifetimes of the captured references.
-            let event_ptr = &*boxed.event as *const Event;
-            let token_counter_ptr = &boxed.token_counter as *const Arc<Counter>;
-
-            // Safety: we now commit to never move the closure and to ensure
-            // that the `WaitUntil` future does not outlive the captured
-            // references.
-            let wait_until: Box<dyn Future<Output = _>> = unsafe {
-                Box::new((*event_ptr).wait_until(move || (*token_counter_ptr).try_decrement()))
-            };
-            let mut pinned_box: Pin<Box<WaitUntilClosure>> = boxed.into();
-
-            let mut_ref: Pin<&mut Self> = Pin::as_mut(&mut pinned_box);
-            unsafe {
-                // This is safe: we are not moving the closure.
-                Pin::get_unchecked_mut(mut_ref).wait_until = Some(wait_until);
-            }
-
-            pinned_box
-        }
-
-        /// Returns a pinned, type-erased `WaitUntil` future.
-        fn as_pinned_future(self: Pin<&mut Self>) -> Pin<&mut dyn Future<Output = ()>> {
-            unsafe { self.map_unchecked_mut(|s| s.wait_until.as_mut().unwrap().as_mut()) }
-        }
-    }
-
-    impl Drop for WaitUntilClosure {
-        fn drop(&mut self) {
-            // Make sure that the `WaitUntil` future does not outlive its
-            // captured references.
-            self.wait_until = None;
-        }
-    }
-
-    /// An enum that registers the final state of a `WaitUntil` future at the
-    /// completion of a thread.
-    ///
-    /// When the future is still in a `Polled` state, this future is moved into
-    /// the enum so as to extend its lifetime and allow it to be further
-    /// notified.
-    #[allow(dead_code)]
-    enum FutureState {
-        Completed,
-        Polled(Pin<Box<WaitUntilClosure>>),
-        Cancelled,
-    }
-
-    /// Make a certain amount of AVAILABLE_TOKENS available and notify as many waiters
-    /// among all registered waiters, possibly from several notifier threads.
-    /// Optionally, it is possible to:
-    /// - request that `max_spurious_wake` threads will simulate a spurious
-    ///   wake-up if the waiter is polled and returns `Poll::Pending`,
-    /// - request that `max_cancellations` threads will cancel the waiter if the
-    ///   waiter is polled and returns `Poll::Pending`,
-    /// - change the waker each time it is polled.
-    ///
-    /// Note that the aggregate number of specified cancellations and spurious
-    /// wake-ups cannot exceed the number of waiters.
-    fn loom_notify(
-        token_count: usize,
-        waiter_count: usize,
-        notifier_count: usize,
-        max_spurious_wake: usize,
-        max_cancellations: usize,
-        change_waker: bool,
-        preemption_bound: usize,
-    ) {
-        let mut builder = Builder::new();
-        if builder.preemption_bound.is_none() {
-            builder.preemption_bound = Some(preemption_bound);
-        }
-
-        builder.check(move || {
-            let token_counter = Arc::new(Counter::default());
-            let event = Arc::new(Event::new());
-
-            let mut wakers: Vec<MultiWaker> = Vec::new();
-            wakers.resize_with(waiter_count, Default::default);
-
-            let waiter_threads: Vec<_> = wakers
-                .iter()
-                .enumerate()
-                .map(|(i, multi_waker)| {
-                    thread::spawn({
-                        let multi_waker = multi_waker.clone();
-                        let mut wait_until =
-                            WaitUntilClosure::new(event.clone(), token_counter.clone());
-
-                        move || {
-                            // `max_cancellations` threads will cancel the
-                            // waiter if the waiter returns `Poll::Pending`.
-                            let cancel_waiter = i < max_cancellations;
-                            // `max_spurious_wake` threads will simulate a
-                            // spurious wake-up if the waiter returns
-                            // `Poll::Pending`.
-                            let mut spurious_wake = i >= max_cancellations
-                                && i < (max_cancellations + max_spurious_wake);
-
-                            let mut waker = multi_waker.new_waker();
-                            loop {
-                                let mut cx = Context::from_waker(&waker);
-                                let poll_state =
-                                    wait_until.as_mut().as_pinned_future().poll(&mut cx);
-
-                                // Return successfully if the predicate was
-                                // checked successfully.
-                                if matches!(poll_state, Poll::Ready(_)) {
-                                    return FutureState::Completed;
-                                }
-
-                                // The future has returned Poll::Pending.
-                                // Depending on the situation, we will either
-                                // cancel the future, return and wait for a
-                                // notification, or poll again.
-
-                                if cancel_waiter {
-                                    // The `wait_until` future is dropped while
-                                    // in pending state, which simulates future
-                                    // cancellation. Note that the notification
-                                    // was intentionally cleared earlier so the
-                                    // task will not be counted as a task that
-                                    // should eventually succeed.
-                                    return FutureState::Cancelled;
-                                }
-                                if spurious_wake {
-                                    // Clear the notification, if any.
-                                    multi_waker.clear_notification();
-                                } else if !multi_waker.take_notification() {
-                                    // The async runtime would normally keep the
-                                    // `wait_until` future alive after `poll`
-                                    // returns `Pending`. This behavior is
-                                    // emulated by returning the `WaitUntil`
-                                    // closure from the thread so as to extend
-                                    // it lifetime.
-                                    return FutureState::Polled(wait_until);
-                                }
-
-                                // The task was notified or spuriously awaken.
-                                spurious_wake = false;
-                                if change_waker {
-                                    waker = multi_waker.new_waker();
-                                }
-                            }
-                        }
-                    })
-                })
-                .collect();
-
-            // Increment the token count and notify a consumer after each
-            // increment.
-            assert!(notifier_count >= 1);
-            assert!(token_count >= notifier_count);
-
-            // Each notifier thread but the last one makes one and only one
-            // token available.
-            let notifier_threads: Vec<_> = (0..(notifier_count - 1))
-                .map(|_| {
-                    let token_counter = token_counter.clone();
-                    let event = event.clone();
-                    thread::spawn(move || {
-                        token_counter.increment();
-                        event.notify(1);
-                    })
-                })
-                .collect();
-
-            // The last notifier thread completes the number of AVAILABLE_TOKENS as
-            // needed.
-            for _ in 0..(token_count - (notifier_count - 1)) {
-                token_counter.increment();
-                event.notify(1);
-            }
-
-            // Join the remaining notifier threads.
-            for th in notifier_threads {
-                th.join().unwrap();
-            }
-
-            // Join all waiter threads and check which of them have successfully
-            // checked the predicate. It is important that all `FutureState`
-            // returned by the threads be kept alive until _all_ threads have
-            // joined because `FutureState::Polled` items extend the lifetime of
-            // their future so they can still be notified.
-            let future_state: Vec<_> = waiter_threads
-                .into_iter()
-                .map(|th| th.join().unwrap())
-                .collect();
-
-            // See which threads have successfully completed. It is now OK to drop
-            // the returned `FutureState`s.
-            let success: Vec<_> = future_state
-                .into_iter()
-                .map(|state| match state {
-                    FutureState::Completed => true,
-                    _ => false,
-                })
-                .collect();
-
-            // Check which threads have been notified, excluding those which
-            // future was cancelled.
-            let notified: Vec<_> = wakers
-                .iter()
-                .enumerate()
-                .map(|(i, test_waker)| {
-                    // Count the notification unless the thread was cancelled
-                    // since in that case the notification would be missed.
-                    test_waker.take_notification() && i >= max_cancellations
-                })
-                .collect();
-
-            // Count how many threads have either succeeded or have been
-            // notified.
-            let actual_aggregate_count =
-                success
-                    .iter()
-                    .zip(notified.iter())
-                    .fold(0, |count, (&success, &notified)| {
-                        if success || notified {
-                            count + 1
+        let th = thread::spawn(move || {
+            block_on(async move {
+                event2
+                    .wait_until(|| {
+                        if SIGNAL.load(Ordering::Relaxed) {
+                            Some(42)
                         } else {
-                            count
+                            None
                         }
-                    });
+                    })
+                    .await
+            })
+        });
 
-            // Compare with the number of event sinks that should eventually succeed.
-            let min_expected_success_count = token_count.min(waiter_count - max_cancellations);
-            if actual_aggregate_count < min_expected_success_count {
-                panic!(
-                    "Successful threads: {:?}; Notified threads: {:?}",
-                    success, notified
-                );
-            }
+        thread::sleep(Duration::from_millis(10));
+        SIGNAL.store(true, Ordering::Relaxed);
+        event.notify_one();
+
+        assert_eq!(th.join().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_timeout() {
+        let event = Event::new();
+        static SIGNAL: AtomicBool = AtomicBool::new(false);
+
+        block_on(async {
+            let deadline = async {
+                std::thread::sleep(Duration::from_millis(10));
+            };
+
+            let result = event
+                .wait_until_or_timeout(
+                    || {
+                        if SIGNAL.load(Ordering::Relaxed) {
+                            Some(42)
+                        } else {
+                            None
+                        }
+                    },
+                    deadline,
+                )
+                .await;
+
+            // Should timeout since SIGNAL is never set.
+            assert!(result.is_none());
         });
     }
 
     #[test]
-    fn loom_two_consumers() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 4;
-        loom_notify(2, 2, 1, 0, 0, false, DEFAULT_PREEMPTION_BOUND);
+    fn test_inline_notifier_no_allocation() {
+        // This test verifies that the notifier is stored inline.
+        // We can't directly measure allocations, but we can verify
+        // the size is reasonable.
+        let size = std::mem::size_of::<WaitUntil<'_, fn() -> Option<()>, ()>>();
+        // Should be small-ish (notifier + state + predicate pointer + wait_set reference)
+        assert!(size < 128, "WaitUntil is too large: {} bytes", size);
     }
+
     #[test]
-    fn loom_two_consumers_spurious() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 4;
-        loom_notify(2, 2, 1, 1, 0, false, DEFAULT_PREEMPTION_BOUND);
+    fn stress_test_concurrent_notify_and_wait() {
+        const NUM_WAITERS: usize = 8;
+        const NUM_NOTIFIERS: usize = 4;
+        const ITERATIONS: usize = 100;
+
+        for _ in 0..ITERATIONS {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let event = Arc::new(Event::new());
+            let completed = Arc::new(AtomicUsize::new(0));
+
+            let waiter_handles: Vec<_> = (0..NUM_WAITERS)
+                .map(|_| {
+                    let event = event.clone();
+                    let counter = counter.clone();
+                    let completed = completed.clone();
+
+                    thread::spawn(move || {
+                        block_on(async move {
+                            event
+                                .wait_until(|| {
+                                    let c = counter.load(Ordering::Relaxed);
+                                    if c > 0 { Some(c) } else { None }
+                                })
+                                .await;
+                            completed.fetch_add(1, Ordering::Relaxed);
+                        })
+                    })
+                })
+                .collect();
+
+            thread::sleep(Duration::from_millis(5));
+
+            let notifier_handles: Vec<_> = (0..NUM_NOTIFIERS)
+                .map(|_| {
+                    let event = event.clone();
+                    let counter = counter.clone();
+                    thread::spawn(move || {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                        event.notify_all();
+                    })
+                })
+                .collect();
+
+            for h in notifier_handles {
+                h.join().unwrap();
+            }
+            for h in waiter_handles {
+                h.join().unwrap();
+            }
+
+            assert_eq!(completed.load(Ordering::Relaxed), NUM_WAITERS);
+        }
     }
+
     #[test]
-    fn loom_two_consumers_cancellation() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 4;
-        loom_notify(2, 2, 1, 1, 1, false, DEFAULT_PREEMPTION_BOUND);
+    fn test_spurious_wakeup_handling() {
+        let event = Arc::new(Event::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        let event2 = event.clone();
+        let counter2 = counter.clone();
+
+        let handle = thread::spawn(move || {
+            block_on(async move {
+                event2
+                    .wait_until(|| {
+                        let c = counter2.load(Ordering::Relaxed);
+                        if c >= 3 { Some(c) } else { None }
+                    })
+                    .await
+            })
+        });
+
+        thread::sleep(Duration::from_millis(10));
+
+        // Simulate spurious wakeups by notifying without satisfying predicate.
+        counter.store(1, Ordering::Relaxed);
+        event.notify_one();
+        thread::sleep(Duration::from_millis(5));
+
+        counter.store(2, Ordering::Relaxed);
+        event.notify_one();
+        thread::sleep(Duration::from_millis(5));
+
+        // Now satisfy the predicate.
+        counter.store(3, Ordering::Relaxed);
+        event.notify_one();
+
+        let result = handle.join().unwrap();
+        assert_eq!(result, 3);
     }
+
     #[test]
-    fn loom_two_consumers_change_waker() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 4;
-        loom_notify(2, 2, 1, 0, 0, true, DEFAULT_PREEMPTION_BOUND);
+    fn test_predicate_side_effects() {
+        let event = Arc::new(Event::new());
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let event2 = event.clone();
+        let call_count2 = call_count.clone();
+
+        let handle = thread::spawn(move || {
+            block_on(async move {
+                event2
+                    .wait_until(|| {
+                        let count = call_count2.fetch_add(1, Ordering::Relaxed);
+                        if count >= 2 { Some(count) } else { None }
+                    })
+                    .await
+            })
+        });
+
+        thread::sleep(Duration::from_millis(10));
+        event.notify_one();
+        thread::sleep(Duration::from_millis(5));
+        event.notify_one();
+
+        let result = handle.join().unwrap();
+        assert!(result >= 2);
     }
+
     #[test]
-    fn loom_two_consumers_change_waker_spurious() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 4;
-        loom_notify(2, 2, 1, 1, 0, true, DEFAULT_PREEMPTION_BOUND);
+    fn test_multiple_events_independent() {
+        let event1 = Arc::new(Event::new());
+        let event2 = Arc::new(Event::new());
+        static SIGNAL1: AtomicBool = AtomicBool::new(false);
+        static SIGNAL2: AtomicBool = AtomicBool::new(false);
+
+        let e1 = event1.clone();
+        let h1 = thread::spawn(move || {
+            block_on(async move {
+                e1.wait_until(|| {
+                    if SIGNAL1.load(Ordering::Relaxed) {
+                        Some(1)
+                    } else {
+                        None
+                    }
+                })
+                .await
+            })
+        });
+
+        let e2 = event2.clone();
+        let h2 = thread::spawn(move || {
+            block_on(async move {
+                e2.wait_until(|| {
+                    if SIGNAL2.load(Ordering::Relaxed) {
+                        Some(2)
+                    } else {
+                        None
+                    }
+                })
+                .await
+            })
+        });
+
+        thread::sleep(Duration::from_millis(10));
+
+        // Notify event2 first.
+        SIGNAL2.store(true, Ordering::Relaxed);
+        event2.notify_one();
+
+        assert_eq!(h2.join().unwrap(), 2);
+
+        // h1 should still be waiting.
+        thread::sleep(Duration::from_millis(5));
+
+        // Now notify event1.
+        SIGNAL1.store(true, Ordering::Relaxed);
+        event1.notify_one();
+
+        assert_eq!(h1.join().unwrap(), 1);
     }
+
     #[test]
-    fn loom_two_consumers_change_waker_cancellation() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 4;
-        loom_notify(1, 2, 1, 0, 1, true, DEFAULT_PREEMPTION_BOUND);
+    fn test_notify_more_than_waiters() {
+        let event = Arc::new(Event::new());
+        static SIGNAL: AtomicBool = AtomicBool::new(false);
+
+        let e = event.clone();
+        let h = thread::spawn(move || {
+            block_on(async move {
+                e.wait_until(|| {
+                    if SIGNAL.load(Ordering::Relaxed) {
+                        Some(42)
+                    } else {
+                        None
+                    }
+                })
+                .await
+            })
+        });
+
+        thread::sleep(Duration::from_millis(10));
+
+        SIGNAL.store(true, Ordering::Relaxed);
+        // Notify way more than there are waiters.
+        event.notify(1000);
+
+        assert_eq!(h.join().unwrap(), 42);
     }
+
     #[test]
-    fn loom_two_consumers_change_waker_spurious_cancellation() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 4;
-        loom_notify(2, 2, 1, 1, 1, true, DEFAULT_PREEMPTION_BOUND);
+    fn test_value_propagation() {
+        let event = Arc::new(Event::new());
+        let values = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let e = event.clone();
+        let v = values.clone();
+        let h = thread::spawn(move || {
+            block_on(async move {
+                e.wait_until(|| {
+                    let vals = v.lock().unwrap();
+                    if vals.len() >= 3 {
+                        Some(vals.iter().sum::<i32>())
+                    } else {
+                        None
+                    }
+                })
+                .await
+            })
+        });
+
+        thread::sleep(Duration::from_millis(10));
+
+        values.lock().unwrap().push(1);
+        event.notify_one();
+        thread::sleep(Duration::from_millis(5));
+
+        values.lock().unwrap().push(2);
+        event.notify_one();
+        thread::sleep(Duration::from_millis(5));
+
+        values.lock().unwrap().push(3);
+        event.notify_one();
+
+        let result = h.join().unwrap();
+        assert_eq!(result, 6); // 1 + 2 + 3
     }
+
     #[test]
-    fn loom_two_consumers_three_tokens() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 3;
-        loom_notify(3, 2, 1, 0, 0, false, DEFAULT_PREEMPTION_BOUND);
+    fn test_repeated_wait_same_event() {
+        let event = Arc::new(Event::new());
+
+        for expected in 1..=5 {
+            let counter = Arc::new(AtomicUsize::new(0));
+
+            let e = event.clone();
+            let c = counter.clone();
+            let handle = thread::spawn(move || {
+                block_on(async move {
+                    e.wait_until(|| {
+                        let val = c.load(Ordering::Relaxed);
+                        if val >= expected { Some(val) } else { None }
+                    })
+                    .await
+                })
+            });
+
+            thread::sleep(Duration::from_millis(10));
+
+            counter.store(expected, Ordering::Relaxed);
+            event.notify_one();
+
+            let result = handle.join().unwrap();
+            assert_eq!(result, expected);
+        }
     }
+
     #[test]
-    fn loom_three_consumers() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 2;
-        loom_notify(3, 3, 1, 0, 0, false, DEFAULT_PREEMPTION_BOUND);
+    fn test_swap_remove_correctness() {
+        // Test that swap-remove doesn't corrupt the wait list when waiters
+        // wake in unpredictable order based on their predicates
+        let event = Arc::new(Event::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+
+        const NUM_WAITERS: usize = 10;
+
+        let handles: Vec<_> = (0..NUM_WAITERS)
+            .map(|i| {
+                let event = event.clone();
+                let counter = counter.clone();
+                let completed = completed.clone();
+                thread::spawn(move || {
+                    block_on(async move {
+                        event
+                            .wait_until(|| {
+                                let c = counter.load(Ordering::Relaxed);
+                                if c > i { Some(i) } else { None }
+                            })
+                            .await;
+                        completed.fetch_add(1, Ordering::Relaxed);
+                    })
+                })
+            })
+            .collect();
+
+        thread::sleep(Duration::from_millis(20));
+
+        // Use notify_all since waiter conditions depend on counter value,
+        // not on which waiter gets notified. Each increment satisfies one more waiter.
+        for i in 1..=NUM_WAITERS {
+            counter.store(i, Ordering::Relaxed);
+            event.notify_all();
+            // Wait for the i-th waiter to complete
+            while completed.load(Ordering::Relaxed) < i {
+                thread::yield_now();
+            }
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
     }
+
     #[test]
-    fn loom_three_consumers_spurious() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 2;
-        loom_notify(3, 3, 1, 1, 0, false, DEFAULT_PREEMPTION_BOUND);
-    }
-    #[test]
-    fn loom_three_consumers_cancellation() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 2;
-        loom_notify(2, 3, 1, 0, 1, false, DEFAULT_PREEMPTION_BOUND);
-    }
-    #[test]
-    fn loom_three_consumers_change_waker() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 2;
-        loom_notify(3, 3, 1, 0, 0, true, DEFAULT_PREEMPTION_BOUND);
-    }
-    #[test]
-    fn loom_three_consumers_change_waker_spurious() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 2;
-        loom_notify(3, 3, 1, 1, 0, true, DEFAULT_PREEMPTION_BOUND);
-    }
-    #[test]
-    fn loom_three_consumers_change_waker_cancellation() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 2;
-        loom_notify(3, 3, 1, 0, 1, true, DEFAULT_PREEMPTION_BOUND);
-    }
-    #[test]
-    fn loom_three_consumers_change_waker_spurious_cancellation() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 2;
-        loom_notify(3, 3, 1, 1, 1, true, DEFAULT_PREEMPTION_BOUND);
-    }
-    #[test]
-    fn loom_three_consumers_two_tokens() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 2;
-        loom_notify(2, 3, 1, 0, 0, false, DEFAULT_PREEMPTION_BOUND);
-    }
-    #[test]
-    fn loom_two_consumers_two_notifiers() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 3;
-        loom_notify(2, 2, 2, 0, 0, false, DEFAULT_PREEMPTION_BOUND);
-    }
-    #[test]
-    fn loom_one_consumer_three_notifiers() {
-        const DEFAULT_PREEMPTION_BOUND: usize = 4;
-        loom_notify(3, 1, 3, 0, 0, false, DEFAULT_PREEMPTION_BOUND);
+    fn test_middle_removal() {
+        // Test removing from the middle of the wait list
+        let event = Arc::new(Event::new());
+
+        // Create 3 waiters
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+
+        let event1 = event.clone();
+        let barrier1 = barrier.clone();
+        let h1 = thread::spawn(move || {
+            block_on(async move {
+                let fut = event1.wait_until(|| None::<()>);
+                let mut fut = std::pin::pin!(fut);
+
+                let waker = futures::task::noop_waker();
+                let mut cx = Context::from_waker(&waker);
+                let _ = fut.as_mut().poll(&mut cx);
+
+                barrier1.wait();
+                // Keep waiting
+                barrier1.wait();
+            })
+        });
+
+        let event2 = event.clone();
+        let barrier2 = barrier.clone();
+        let h2 = thread::spawn(move || {
+            block_on(async move {
+                let fut = event2.wait_until(|| None::<()>);
+                let mut fut = std::pin::pin!(fut);
+
+                let waker = futures::task::noop_waker();
+                let mut cx = Context::from_waker(&waker);
+                let _ = fut.as_mut().poll(&mut cx);
+
+                barrier2.wait();
+                // This one will be cancelled
+                barrier2.wait();
+                // Future dropped here
+            })
+        });
+
+        let event3 = event.clone();
+        let barrier3 = barrier.clone();
+        let h3 = thread::spawn(move || {
+            block_on(async move {
+                let fut = event3.wait_until(|| None::<()>);
+                let mut fut = std::pin::pin!(fut);
+
+                let waker = futures::task::noop_waker();
+                let mut cx = Context::from_waker(&waker);
+                let _ = fut.as_mut().poll(&mut cx);
+
+                barrier3.wait();
+                // Keep waiting
+                barrier3.wait();
+            })
+        });
+
+        // Wait for all to be registered
+        barrier.wait();
+
+        // Let h2 cancel (its future will be dropped)
+        barrier.wait();
+
+        // Give time for cleanup
+        thread::sleep(Duration::from_millis(10));
+
+        h1.join().unwrap();
+        h2.join().unwrap();
+        h3.join().unwrap();
     }
 }

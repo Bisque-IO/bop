@@ -68,9 +68,8 @@ pub async fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
         let handle = handle as usize;
         crate::blocking::unblock(move || {
             let handle = handle as std::os::windows::io::RawHandle;
-            let sys_file = std::mem::ManuallyDrop::new(unsafe {
-                std::fs::File::from_raw_handle(handle)
-            });
+            let sys_file =
+                std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(handle) });
             sys_file.metadata().map(|m| m.len() as usize)
         })
         .await?
@@ -135,7 +134,7 @@ pub async fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Resul
             .result?;
     }
     #[cfg(not(all(target_os = "linux", feature = "iouring")))]
-    {        
+    {
         let from = from.as_ref().to_owned();
         let to = to.as_ref().to_owned();
         crate::blocking::unblock(move || std::fs::rename(from, to)).await?;

@@ -30,9 +30,8 @@ pub use error::Elapsed;
 #[doc(inline)]
 pub use instant::Instant;
 #[doc(inline)]
-pub use interval::{interval, interval_at, Interval, MissedTickBehavior};
+pub use interval::{Interval, MissedTickBehavior, interval, interval_at};
 #[doc(inline)]
-pub use sleep::{sleep, sleep_until, Sleep};
+pub use sleep::{Sleep, sleep, sleep_until};
 #[doc(inline)]
-pub use timeout::{timeout, timeout_at, Timeout};
-
+pub use timeout::{Timeout, timeout, timeout_at};

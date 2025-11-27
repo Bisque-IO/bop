@@ -9,14 +9,14 @@ use std::{
 use std::os::unix::fs::FileExt;
 
 use super::File;
+#[cfg(unix)]
+use crate::fs::metadata::FileAttr;
 use crate::uring_op;
 use crate::{
     buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut},
     driver::{op::Op, shared_fd::SharedFd},
     fs::Metadata,
 };
-#[cfg(unix)]
-use crate::fs::metadata::FileAttr;
 
 impl File {
     /// Converts a [`std::fs::File`] to a [`fs::File`](File).
@@ -219,16 +219,15 @@ mod fallback_impl {
         // 3. The blocking thread only accesses the iovec structures during the readv call
         // 4. We wait for completion before returning
         // Note: We capture raw_fd and pointers by value, not buf_vec itself
-        let result = crate::blocking::unblock(move || {
-            unsafe {
-                let nread = libc::readv(raw_fd, iovec_ptr, iovec_len as _);
-                if nread < 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(nread as usize)
-                }
+        let result = crate::blocking::unblock(move || unsafe {
+            let nread = libc::readv(raw_fd, iovec_ptr, iovec_len as _);
+            if nread < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(nread as usize)
             }
-        }).await;
+        })
+        .await;
 
         match result {
             Ok(n) => {
@@ -254,16 +253,15 @@ mod fallback_impl {
         // 3. The blocking thread only accesses the iovec structures during the writev call
         // 4. We wait for completion before returning
         // Note: We capture raw_fd and pointers by value, not buf_vec itself
-        let result = crate::blocking::unblock(move || {
-            unsafe {
-                let nwritten = libc::writev(raw_fd, iovec_ptr as *const libc::iovec, iovec_len as _);
-                if nwritten < 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(nwritten as usize)
-                }
+        let result = crate::blocking::unblock(move || unsafe {
+            let nwritten = libc::writev(raw_fd, iovec_ptr as *const libc::iovec, iovec_len as _);
+            if nwritten < 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(nwritten as usize)
             }
-        }).await;
+        })
+        .await;
 
         (result, buf_vec)
     }

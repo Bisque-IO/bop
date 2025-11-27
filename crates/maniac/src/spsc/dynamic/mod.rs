@@ -41,6 +41,8 @@ use crate::{PopError, PushError};
 
 use super::SignalSchedule;
 
+pub mod unbounded;
+
 /// Configuration for a dynamically-sized SPSC queue.
 ///
 /// This struct holds the runtime-determined parameters that would
@@ -113,7 +115,11 @@ impl DynSpscConfig {
     }
 
     #[inline]
-    pub fn with_capacity(page_size: usize, num_segments: usize, max_pooled_segments: usize) -> Self {
+    pub fn with_capacity(
+        page_size: usize,
+        num_segments: usize,
+        max_pooled_segments: usize,
+    ) -> Self {
         let page_size = page_size.min(16).next_power_of_two();
         let num_segments = num_segments.min(1).next_power_of_two();
         let max_pooled_segments = max_pooled_segments.min(num_segments);
@@ -437,10 +443,7 @@ impl<T, S: SignalSchedule> DynSpsc<T, S> {
     ///
     /// * `config` - Runtime configuration for segment size and directory size
     /// * `signal` - Signal scheduler for executor integration
-    pub fn new_with_config(
-        config: DynSpscConfig,
-        signal: S,
-    ) -> (Sender<T, S>, Receiver<T, S>) {
+    pub fn new_with_config(config: DynSpscConfig, signal: S) -> (Sender<T, S>, Receiver<T, S>) {
         let queue = Arc::new(unsafe { Self::new_unsafe(config, signal) });
         (
             Sender {
@@ -1051,7 +1054,8 @@ mod tests {
 
     #[test]
     fn basic_push_pop() {
-        let (sender, receiver) = DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
         for i in 0..200u64 {
             sender.try_push(i).unwrap();
         }
@@ -1063,7 +1067,8 @@ mod tests {
 
     #[test]
     fn zero_copy_consume_in_place() {
-        let (sender, receiver) = DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
         let n = 64 * 3 + 5;
         for i in 0..n as u64 {
             sender.try_push(i).unwrap();
@@ -1096,7 +1101,8 @@ mod tests {
 
     #[test]
     fn test_new_queue_is_empty() {
-        let (sender, receiver) = DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
         assert!(sender.is_empty());
         assert!(receiver.is_empty());
         assert!(!sender.is_full());
@@ -1105,7 +1111,8 @@ mod tests {
 
     #[test]
     fn test_single_item_operations() {
-        let (sender, receiver) = DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
         assert!(sender.is_empty());
 
         assert!(sender.try_push(42).is_ok());
@@ -1119,7 +1126,8 @@ mod tests {
 
     #[test]
     fn test_push_pop_order() {
-        let (sender, receiver) = DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
         let items = [1, 2, 3, 4, 5];
 
         for &item in &items {
@@ -1133,7 +1141,8 @@ mod tests {
 
     #[test]
     fn test_try_push_n() {
-        let (sender, receiver) = DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
         let items = [10, 20, 30, 40, 50];
 
         let pushed = sender.try_push_n(&items).unwrap();
@@ -1147,7 +1156,8 @@ mod tests {
 
     #[test]
     fn test_try_pop_n() {
-        let (sender, receiver) = DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
         let items = [1, 2, 3, 4, 5, 6, 7, 8];
 
         for &item in &items {
@@ -1241,7 +1251,8 @@ mod tests {
 
     #[test]
     fn test_queue_reuse_after_drain() {
-        let (sender, receiver) = DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
 
         for i in 0..1000 {
             sender.try_push(i as u64).unwrap();
@@ -1271,7 +1282,8 @@ mod tests {
         }
 
         let config = DynSpscConfig::new(5, 6);
-        let (sender, receiver) = DynSpsc::<TestStruct, NoOpSignal>::new_with_config(config, NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<TestStruct, NoOpSignal>::new_with_config(config, NoOpSignal);
 
         let item1 = TestStruct { a: 1, b: -1 };
         let item2 = TestStruct { a: 2, b: -2 };
@@ -1286,7 +1298,8 @@ mod tests {
 
     #[test]
     fn test_close_semantics() {
-        let (sender, receiver) = DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(test_config(), NoOpSignal);
 
         sender.try_push(1).unwrap();
         sender.try_push(2).unwrap();
@@ -1303,7 +1316,8 @@ mod tests {
     fn test_different_configurations() {
         // Small queue
         let small_config = DynSpscConfig::new(4, 2); // 16 items/seg, 4 segs = 63 capacity
-        let (sender, receiver) = DynSpsc::<u64, NoOpSignal>::new_with_config(small_config, NoOpSignal);
+        let (sender, receiver) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(small_config, NoOpSignal);
         assert_eq!(sender.capacity(), 63);
 
         for i in 0..63u64 {
@@ -1317,7 +1331,8 @@ mod tests {
 
         // Large queue
         let large_config = DynSpscConfig::new(10, 4); // 1024 items/seg, 16 segs = 16383 capacity
-        let (sender2, receiver2) = DynSpsc::<u64, NoOpSignal>::new_with_config(large_config, NoOpSignal);
+        let (sender2, receiver2) =
+            DynSpsc::<u64, NoOpSignal>::new_with_config(large_config, NoOpSignal);
         assert_eq!(sender2.capacity(), 16383);
 
         for i in 0..1000u64 {

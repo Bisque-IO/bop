@@ -1,6 +1,6 @@
 //! A measurement of a monotonically nondecreasing clock.
 
-use std::{fmt, ops, time::Duration};
+use std::{fmt, ops, time::Duration, time::SystemTime};
 
 /// A measurement of a monotonically nondecreasing clock.
 ///
@@ -19,7 +19,7 @@ pub struct Instant {
 }
 
 impl Instant {
-    /// Returns an instant corresponding to "now".
+        /// Returns an instant corresponding to "now".
     ///
     /// # Examples
     ///
@@ -29,6 +29,28 @@ impl Instant {
     /// let now = Instant::now();
     /// ```
     pub fn now() -> Self {
+        // let now_ns = crate::runtime::worker::current_worker_now_ns();
+        // let epoch_ns = std::time::UNIX_EPOCH + Duration::from_nanos(now_ns);
+        // SystemTime::now();
+        // let duration = std::time::UNIX_EPOCH.duration_since(Duration::from_nanos(now_ns));
+        
+        // let instant = std::time::Instant::from(duration);
+        // Self {
+        //     inner: std::time::Instant::from(std::time::UNIX_EPOCH + Duration::from_nanos(now_ns)),
+        // }
+        Self::now_high_frequency()
+    }
+
+    /// Returns an instant corresponding to "now".
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use maniac::time::Instant;
+    ///
+    /// let now = Instant::now_high_frequency();
+    /// ```
+    pub fn now_high_frequency() -> Self {
         Self {
             inner: std::time::Instant::now(),
         }
@@ -159,4 +181,3 @@ impl fmt::Debug for Instant {
         self.inner.fmt(f)
     }
 }
-

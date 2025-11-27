@@ -2,8 +2,8 @@
 
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::future::event::Event;
 
@@ -130,14 +130,6 @@ impl<T> Mutex<T> {
     }
 }
 
-// impl<T> Clone for Mutex<T> {
-//     fn clone(&self) -> Self {
-//         Self {
-//             inner: Arc::clone(&self.inner),
-//         }
-//     }
-// }
-
 unsafe impl<T: Send> Send for Mutex<T> {}
 unsafe impl<T: Send> Sync for Mutex<T> {}
 
@@ -168,11 +160,13 @@ impl<'a, T> std::ops::DerefMut for MutexGuard<'a, T> {
 impl<'a, T> Drop for MutexGuard<'a, T> {
     fn drop(&mut self) {
         // Release the lock
-        if !unsafe { &*self.mutex }.locked.swap(false, Ordering::Release) {
+        if !unsafe { &*self.mutex }
+            .locked
+            .swap(false, Ordering::Release)
+        {
             panic!("mutex poisoned");
         }
         // Notify waiters
         unsafe { &*self.mutex }.event.notify_one();
     }
 }
-

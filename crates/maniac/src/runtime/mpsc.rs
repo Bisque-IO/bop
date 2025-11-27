@@ -1098,7 +1098,7 @@ mod tests {
 
     #[test]
     fn receiver_count_tracking() {
-        let (tx1, mut rx) = new_with_sender::<u64, 6, 8>();
+        let (tx1, rx) = new_with_sender::<u64, 6, 8>();
         assert_eq!(rx.producer_count(), 1);
 
         let tx2 = tx1.clone();

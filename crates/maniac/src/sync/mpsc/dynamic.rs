@@ -34,8 +34,8 @@ use rand::RngCore;
 
 use crate::future::waker::DiatomicWaker;
 use crate::parking::{Parker, Unparker};
-use crate::spsc::dynamic::DynSpscConfig;
 use crate::spsc::NoOpSignal;
+use crate::spsc::dynamic::DynSpscConfig;
 use crate::sync::signal::{AsyncSignalWaker, Signal};
 use crate::utils::CachePadded;
 use crate::{PopError, PushError};
@@ -818,10 +818,14 @@ impl<T> Drop for DynUnboundedReceiverInner<T> {
 /// sender.send(42).unwrap();
 /// assert_eq!(receiver.recv().await, Some(42));
 /// ```
-pub fn dyn_unbounded_channel<T>(config: DynMpscConfig) -> (DynUnboundedSender<T>, DynUnboundedReceiver<T>) {
+pub fn dyn_unbounded_channel<T>(
+    config: DynMpscConfig,
+) -> (DynUnboundedSender<T>, DynUnboundedReceiver<T>) {
     let inner = Arc::new(DynUnboundedInner::new(config));
     let receiver_inner = DynUnboundedReceiverInner::new(Arc::clone(&inner));
-    let sender_inner = inner.create_sender().expect("fatal: cannot create initial sender");
+    let sender_inner = inner
+        .create_sender()
+        .expect("fatal: cannot create initial sender");
 
     (
         DynUnboundedSender {
@@ -937,7 +941,9 @@ impl<T> Clone for WeakDynUnboundedSender<T> {
 impl<T> WeakDynUnboundedSender<T> {
     /// Attempts to upgrade the weak reference to a strong reference.
     pub fn upgrade(&self) -> Option<DynUnboundedSender<T>> {
-        self.inner.upgrade().map(|inner| DynUnboundedSender { inner })
+        self.inner
+            .upgrade()
+            .map(|inner| DynUnboundedSender { inner })
     }
 }
 
@@ -1089,6 +1095,710 @@ pub enum DynTryRecvError {
     Disconnected,
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// Unbounded Module - Async and Blocking adapters (without Mutex wrapping)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Unbounded Dynamic MPSC with async and blocking adapters.
+///
+/// This module provides high-performance async and blocking MPSC channels
+/// that don't use Mutex wrapping. Instead, they use the lock-free
+/// `DynUnboundedSenderInner` and `DynUnboundedReceiverInner` directly.
+///
+/// # Variants
+///
+/// - `async_dyn_unbounded_mpsc()` - Both senders and receiver are async
+/// - `blocking_dyn_unbounded_mpsc()` - Both senders and receiver are blocking
+/// - `blocking_async_dyn_unbounded_mpsc()` - Blocking senders, async receiver
+/// - `async_blocking_dyn_unbounded_mpsc()` - Async senders, blocking receiver
+///
+/// # Example
+///
+/// ```ignore
+/// use maniac::sync::mpsc::dynamic::unbounded;
+///
+/// // Create async unbounded MPSC
+/// let config = DynMpscConfig::default();
+/// let (mut sender, mut receiver) = unbounded::async_dyn_unbounded_mpsc::<u64>(config);
+///
+/// // Send from async context
+/// sender.send(42).await.unwrap();
+///
+/// // Receive from async context
+/// let value = receiver.recv().await.unwrap();
+/// ```
+pub mod unbounded {
+    use super::*;
+    use crate::future::waker::WaitUntil;
+    use futures::{Sink, Stream};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// Shared state for async dynamic unbounded MPSC coordination.
+    ///
+    /// Provides receiver-side waker management. Producer-side space wakers are stored
+    /// per-producer in the underlying `DynUnboundedNode`.
+    struct DynUnboundedAsyncShared<T> {
+        receiver_waiter: CachePadded<DiatomicWaker>,
+        inner: Arc<DynUnboundedInner<T>>,
+    }
+
+    impl<T> DynUnboundedAsyncShared<T> {
+        fn new(inner: Arc<DynUnboundedInner<T>>) -> Self {
+            Self {
+                receiver_waiter: CachePadded::new(DiatomicWaker::new()),
+                inner,
+            }
+        }
+
+        #[inline]
+        fn notify_receiver(&self) {
+            self.receiver_waiter.notify();
+        }
+
+        #[inline]
+        unsafe fn wait_for_items<Pred, R>(&self, predicate: Pred) -> WaitUntil<'_, Pred, R>
+        where
+            Pred: FnMut() -> Option<R>,
+        {
+            unsafe { self.receiver_waiter.wait_until(predicate) }
+        }
+
+        #[inline]
+        unsafe fn register_receiver(&self, waker: &Waker) {
+            unsafe { self.receiver_waiter.register(waker) };
+        }
+    }
+
+    /// Async sender for dynamic unbounded MPSC.
+    ///
+    /// This sender does not use Mutex wrapping, providing higher performance
+    /// for async contexts.
+    pub struct AsyncDynUnboundedMpscSender<T> {
+        sender: DynUnboundedSenderInner<T>,
+        shared: Arc<DynUnboundedAsyncShared<T>>,
+    }
+
+    impl<T> AsyncDynUnboundedMpscSender<T> {
+        fn new(sender: DynUnboundedSenderInner<T>, shared: Arc<DynUnboundedAsyncShared<T>>) -> Self {
+            Self { sender, shared }
+        }
+
+        /// Try to send without blocking.
+        ///
+        /// Since this is unbounded, this will never return `PushError::Full`.
+        #[inline]
+        pub fn try_send(&self, value: T) -> Result<(), PushError<T>> {
+            match self.sender.try_push(value) {
+                Ok(()) => {
+                    self.shared.notify_receiver();
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
+        }
+
+        /// Send a value asynchronously.
+        ///
+        /// Since this is unbounded, this completes immediately unless the channel is closed.
+        pub async fn send(&self, value: T) -> Result<(), PushError<T>> {
+            match self.try_send(value) {
+                Ok(()) => Ok(()),
+                Err(PushError::Full(item)) => Err(PushError::Full(item)), // Unbounded never fills
+                Err(PushError::Closed(item)) => Err(PushError::Closed(item)),
+            }
+        }
+
+        /// Send multiple values from a Vec, draining successfully pushed items.
+        ///
+        /// Returns the number of items sent. Since this is unbounded, all items
+        /// will be sent unless the channel is closed.
+        pub fn send_batch(&self, values: &mut Vec<T>) -> Result<usize, PushError<()>> {
+            match self.sender.try_push_n(values) {
+                Ok(count) => {
+                    if count > 0 {
+                        self.shared.notify_receiver();
+                    }
+                    Ok(count)
+                }
+                Err(err) => Err(err),
+            }
+        }
+
+        /// Close the channel.
+        pub fn close(&self) -> bool {
+            self.sender.close()
+        }
+
+        /// Check if the channel is closed.
+        pub fn is_closed(&self) -> bool {
+            self.sender.is_closed()
+        }
+
+        /// Get the number of active producers.
+        pub fn producer_count(&self) -> usize {
+            self.shared.inner.producer_count()
+        }
+
+        /// Create a blocking sender that shares the same queue.
+        pub fn create_blocking_sender(&self) -> BlockingDynUnboundedMpscSender<T> {
+            let sender = self.sender.clone();
+            BlockingDynUnboundedMpscSender::new(sender, Arc::clone(&self.shared))
+        }
+    }
+
+    impl<T> Clone for AsyncDynUnboundedMpscSender<T> {
+        fn clone(&self) -> Self {
+            let sender = self.sender.clone();
+            Self::new(sender, Arc::clone(&self.shared))
+        }
+    }
+
+    impl<T> Drop for AsyncDynUnboundedMpscSender<T> {
+        fn drop(&mut self) {
+            self.shared.notify_receiver();
+        }
+    }
+
+    impl<T> Sink<T> for AsyncDynUnboundedMpscSender<T> {
+        type Error = PushError<T>;
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            // Unbounded is always ready
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
+            self.try_send(item)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.close();
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Async receiver for dynamic unbounded MPSC.
+    ///
+    /// This receiver does not use Mutex wrapping, providing higher performance
+    /// for async contexts.
+    pub struct AsyncDynUnboundedMpscReceiver<T> {
+        receiver: DynUnboundedReceiverInner<T>,
+        shared: Arc<DynUnboundedAsyncShared<T>>,
+    }
+
+    impl<T> AsyncDynUnboundedMpscReceiver<T> {
+        fn new(
+            receiver: DynUnboundedReceiverInner<T>,
+            shared: Arc<DynUnboundedAsyncShared<T>>,
+        ) -> Self {
+            Self { receiver, shared }
+        }
+
+        /// Get the number of active producers.
+        pub fn producer_count(&self) -> usize {
+            self.receiver.producer_count()
+        }
+
+        /// Check if the channel is closed.
+        pub fn is_closed(&self) -> bool {
+            self.receiver.is_closed()
+        }
+
+        /// Try to receive without blocking.
+        #[inline]
+        pub fn try_recv(&mut self) -> Result<T, PopError> {
+            self.receiver.try_pop()
+        }
+
+        /// Try to receive multiple values without blocking.
+        pub fn try_recv_batch(&mut self, dst: &mut [T]) -> Result<usize, PopError> {
+            self.receiver.try_pop_n(dst)
+        }
+
+        /// Receive a value asynchronously.
+        pub async fn recv(&mut self) -> Result<T, PopError> {
+            match self.try_recv() {
+                Ok(value) => Ok(value),
+                Err(PopError::Empty) | Err(PopError::Timeout) => {
+                    let shared = Arc::clone(&self.shared);
+                    let receiver = &mut self.receiver;
+                    unsafe {
+                        shared
+                            .wait_for_items(|| match receiver.try_pop() {
+                                Ok(value) => Some(Ok(value)),
+                                Err(PopError::Empty) | Err(PopError::Timeout) => None,
+                                Err(PopError::Closed) => Some(Err(PopError::Closed)),
+                            })
+                            .await
+                    }
+                }
+                Err(PopError::Closed) => Err(PopError::Closed),
+            }
+        }
+
+        /// Receive multiple values asynchronously.
+        ///
+        /// Returns when at least one item is available or the channel is closed.
+        pub async fn recv_batch(&mut self, dst: &mut [T]) -> Result<usize, PopError> {
+            if dst.is_empty() {
+                return Ok(0);
+            }
+
+            match self.try_recv_batch(dst) {
+                Ok(count) if count > 0 => Ok(count),
+                Ok(_) => {
+                    // No items, need to wait
+                    let shared = Arc::clone(&self.shared);
+                    let receiver = &mut self.receiver;
+                    unsafe {
+                        shared
+                            .wait_for_items(|| match receiver.try_pop_n(dst) {
+                                Ok(count) if count > 0 => Some(Ok(count)),
+                                Ok(_) => None,
+                                Err(PopError::Empty) | Err(PopError::Timeout) => None,
+                                Err(PopError::Closed) => Some(Err(PopError::Closed)),
+                            })
+                            .await
+                    }
+                }
+                Err(PopError::Empty) | Err(PopError::Timeout) => {
+                    let shared = Arc::clone(&self.shared);
+                    let receiver = &mut self.receiver;
+                    unsafe {
+                        shared
+                            .wait_for_items(|| match receiver.try_pop_n(dst) {
+                                Ok(count) if count > 0 => Some(Ok(count)),
+                                Ok(_) => None,
+                                Err(PopError::Empty) | Err(PopError::Timeout) => None,
+                                Err(PopError::Closed) => Some(Err(PopError::Closed)),
+                            })
+                            .await
+                    }
+                }
+                Err(PopError::Closed) => Err(PopError::Closed),
+            }
+        }
+
+        /// Create a sender for this channel.
+        pub fn create_sender(&self) -> Result<AsyncDynUnboundedMpscSender<T>, PushError<()>> {
+            let sender = self.receiver.create_sender()?;
+            Ok(AsyncDynUnboundedMpscSender::new(
+                sender,
+                Arc::clone(&self.shared),
+            ))
+        }
+    }
+
+    impl<T> Stream for AsyncDynUnboundedMpscReceiver<T> {
+        type Item = T;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = unsafe { self.get_unchecked_mut() };
+            match this.try_recv() {
+                Ok(value) => Poll::Ready(Some(value)),
+                Err(PopError::Closed) => Poll::Ready(None),
+                Err(PopError::Empty) | Err(PopError::Timeout) => {
+                    unsafe {
+                        this.shared.register_receiver(cx.waker());
+                    }
+                    match this.try_recv() {
+                        Ok(value) => Poll::Ready(Some(value)),
+                        Err(PopError::Closed) => Poll::Ready(None),
+                        Err(PopError::Empty) | Err(PopError::Timeout) => Poll::Pending,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Blocking sender for dynamic unbounded MPSC.
+    ///
+    /// This sender uses thread parking for blocking operations.
+    pub struct BlockingDynUnboundedMpscSender<T> {
+        sender: DynUnboundedSenderInner<T>,
+        shared: Arc<DynUnboundedAsyncShared<T>>,
+        parker: Parker,
+        parker_waker: Arc<ThreadUnparker>,
+    }
+
+    impl<T> BlockingDynUnboundedMpscSender<T> {
+        fn new(sender: DynUnboundedSenderInner<T>, shared: Arc<DynUnboundedAsyncShared<T>>) -> Self {
+            let parker = Parker::new();
+            let parker_waker = Arc::new(ThreadUnparker {
+                unparker: parker.unparker(),
+            });
+            Self {
+                sender,
+                shared,
+                parker,
+                parker_waker,
+            }
+        }
+
+        /// Try to send without blocking.
+        ///
+        /// Since this is unbounded, this will never return `PushError::Full`.
+        #[inline]
+        pub fn try_send(&self, value: T) -> Result<(), PushError<T>> {
+            match self.sender.try_push(value) {
+                Ok(()) => {
+                    self.shared.notify_receiver();
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
+        }
+
+        /// Send a value, blocking if needed.
+        ///
+        /// Since this is unbounded, this completes immediately unless the channel is closed.
+        pub fn send(&self, value: T) -> Result<(), PushError<T>> {
+            // For unbounded, we never fill, so this is just try_send
+            self.try_send(value)
+        }
+
+        /// Send multiple values from a Vec, draining successfully pushed items.
+        ///
+        /// Returns the number of items sent. Since this is unbounded, all items
+        /// will be sent unless the channel is closed.
+        pub fn send_batch(&self, values: &mut Vec<T>) -> Result<usize, PushError<()>> {
+            match self.sender.try_push_n(values) {
+                Ok(count) => {
+                    if count > 0 {
+                        self.shared.notify_receiver();
+                    }
+                    Ok(count)
+                }
+                Err(err) => Err(err),
+            }
+        }
+
+        /// Close the channel.
+        pub fn close(&self) -> bool {
+            self.sender.close()
+        }
+
+        /// Check if the channel is closed.
+        pub fn is_closed(&self) -> bool {
+            self.sender.is_closed()
+        }
+
+        /// Get the number of active producers.
+        pub fn producer_count(&self) -> usize {
+            self.shared.inner.producer_count()
+        }
+
+        /// Create an async sender that shares the same queue.
+        pub fn create_async_sender(&self) -> AsyncDynUnboundedMpscSender<T> {
+            let sender = self.sender.clone();
+            AsyncDynUnboundedMpscSender::new(sender, Arc::clone(&self.shared))
+        }
+    }
+
+    impl<T> Clone for BlockingDynUnboundedMpscSender<T> {
+        fn clone(&self) -> Self {
+            let sender = self.sender.clone();
+            Self::new(sender, Arc::clone(&self.shared))
+        }
+    }
+
+    impl<T> Drop for BlockingDynUnboundedMpscSender<T> {
+        fn drop(&mut self) {
+            self.shared.notify_receiver();
+        }
+    }
+
+    /// Blocking receiver for dynamic unbounded MPSC.
+    ///
+    /// This receiver uses thread parking for blocking operations.
+    pub struct BlockingDynUnboundedMpscReceiver<T> {
+        receiver: DynUnboundedReceiverInner<T>,
+        shared: Arc<DynUnboundedAsyncShared<T>>,
+    }
+
+    impl<T> BlockingDynUnboundedMpscReceiver<T> {
+        fn new(
+            receiver: DynUnboundedReceiverInner<T>,
+            shared: Arc<DynUnboundedAsyncShared<T>>,
+        ) -> Self {
+            Self { receiver, shared }
+        }
+
+        /// Get the number of active producers.
+        pub fn producer_count(&self) -> usize {
+            self.receiver.producer_count()
+        }
+
+        /// Check if the channel is closed.
+        pub fn is_closed(&self) -> bool {
+            self.receiver.is_closed()
+        }
+
+        /// Try to receive without blocking.
+        #[inline]
+        pub fn try_recv(&mut self) -> Result<T, PopError> {
+            self.receiver.try_pop()
+        }
+
+        /// Try to receive multiple values without blocking.
+        pub fn try_recv_batch(&mut self, dst: &mut [T]) -> Result<usize, PopError> {
+            self.receiver.try_pop_n(dst)
+        }
+
+        /// Receive a value, blocking until one is available.
+        pub fn recv(&mut self) -> Result<T, PopError> {
+            match self.try_recv() {
+                Ok(value) => return Ok(value),
+                Err(PopError::Closed) => return Err(PopError::Closed),
+                Err(PopError::Empty) | Err(PopError::Timeout) => {}
+            }
+
+            let parker = Parker::new();
+            let unparker = parker.unparker();
+            let waker = Waker::from(Arc::new(ThreadUnparker { unparker }));
+
+            loop {
+                unsafe {
+                    self.shared.register_receiver(&waker);
+                }
+
+                match self.receiver.try_pop() {
+                    Ok(value) => return Ok(value),
+                    Err(PopError::Closed) => return Err(PopError::Closed),
+                    Err(PopError::Empty) | Err(PopError::Timeout) => {
+                        parker.park();
+                    }
+                }
+            }
+        }
+
+        /// Receive multiple values, blocking until at least one is available.
+        pub fn recv_batch(&mut self, dst: &mut [T]) -> Result<usize, PopError> {
+            if dst.is_empty() {
+                return Ok(0);
+            }
+
+            match self.try_recv_batch(dst) {
+                Ok(count) if count > 0 => return Ok(count),
+                Ok(_) => {}
+                Err(PopError::Closed) => return Err(PopError::Closed),
+                Err(PopError::Empty) | Err(PopError::Timeout) => {}
+            }
+
+            let parker = Parker::new();
+            let unparker = parker.unparker();
+            let waker = Waker::from(Arc::new(ThreadUnparker { unparker }));
+
+            loop {
+                unsafe {
+                    self.shared.register_receiver(&waker);
+                }
+
+                match self.receiver.try_pop_n(dst) {
+                    Ok(count) if count > 0 => return Ok(count),
+                    Ok(_) => {
+                        parker.park();
+                    }
+                    Err(PopError::Closed) => return Err(PopError::Closed),
+                    Err(PopError::Empty) | Err(PopError::Timeout) => {
+                        parker.park();
+                    }
+                }
+            }
+        }
+
+        /// Create a sender for this channel.
+        pub fn create_sender(&self) -> Result<BlockingDynUnboundedMpscSender<T>, PushError<()>> {
+            let sender = self.receiver.create_sender()?;
+            Ok(BlockingDynUnboundedMpscSender::new(
+                sender,
+                Arc::clone(&self.shared),
+            ))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Factory Functions
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Create a new async dynamic unbounded MPSC channel.
+    ///
+    /// Both sender and receiver are async. The sender uses `send().await` and
+    /// the receiver uses `recv().await`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = DynMpscConfig::default();
+    /// let (mut sender, mut receiver) = async_dyn_unbounded_mpsc::<u64>(config);
+    ///
+    /// sender.send(42).await.unwrap();
+    /// assert_eq!(receiver.recv().await.unwrap(), 42);
+    /// ```
+    pub fn async_dyn_unbounded_mpsc<T>(
+        config: DynMpscConfig,
+    ) -> (
+        AsyncDynUnboundedMpscSender<T>,
+        AsyncDynUnboundedMpscReceiver<T>,
+    ) {
+        let inner = Arc::new(DynUnboundedInner::new(config));
+        let receiver_inner = DynUnboundedReceiverInner::new(Arc::clone(&inner));
+        let sender_inner = inner
+            .create_sender()
+            .expect("fatal: cannot create initial sender");
+
+        let shared = Arc::new(DynUnboundedAsyncShared::new(inner));
+        let async_sender = AsyncDynUnboundedMpscSender::new(sender_inner, Arc::clone(&shared));
+        let async_receiver = AsyncDynUnboundedMpscReceiver::new(receiver_inner, shared);
+        (async_sender, async_receiver)
+    }
+
+    /// Create a new async dynamic unbounded MPSC channel with default configuration.
+    pub fn async_dyn_unbounded_mpsc_default<T>() -> (
+        AsyncDynUnboundedMpscSender<T>,
+        AsyncDynUnboundedMpscReceiver<T>,
+    ) {
+        async_dyn_unbounded_mpsc(DynMpscConfig::default())
+    }
+
+    /// Create a new blocking dynamic unbounded MPSC channel.
+    ///
+    /// Both sender and receiver are blocking. The sender uses `send()` and
+    /// the receiver uses `recv()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = DynMpscConfig::default();
+    /// let (sender, mut receiver) = blocking_dyn_unbounded_mpsc::<u64>(config);
+    ///
+    /// sender.send(42).unwrap();
+    /// assert_eq!(receiver.recv().unwrap(), 42);
+    /// ```
+    pub fn blocking_dyn_unbounded_mpsc<T>(
+        config: DynMpscConfig,
+    ) -> (
+        BlockingDynUnboundedMpscSender<T>,
+        BlockingDynUnboundedMpscReceiver<T>,
+    ) {
+        let inner = Arc::new(DynUnboundedInner::new(config));
+        let receiver_inner = DynUnboundedReceiverInner::new(Arc::clone(&inner));
+        let sender_inner = inner
+            .create_sender()
+            .expect("fatal: cannot create initial sender");
+
+        let shared = Arc::new(DynUnboundedAsyncShared::new(inner));
+        let blocking_sender = BlockingDynUnboundedMpscSender::new(sender_inner, Arc::clone(&shared));
+        let blocking_receiver = BlockingDynUnboundedMpscReceiver::new(receiver_inner, shared);
+        (blocking_sender, blocking_receiver)
+    }
+
+    /// Create a new blocking dynamic unbounded MPSC channel with default configuration.
+    pub fn blocking_dyn_unbounded_mpsc_default<T>() -> (
+        BlockingDynUnboundedMpscSender<T>,
+        BlockingDynUnboundedMpscReceiver<T>,
+    ) {
+        blocking_dyn_unbounded_mpsc(DynMpscConfig::default())
+    }
+
+    /// Create a mixed dynamic unbounded MPSC with blocking senders and async receiver.
+    ///
+    /// This is useful when you have blocking threads that need to send data to an async task.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = DynMpscConfig::default();
+    /// let (sender, mut receiver) = blocking_async_dyn_unbounded_mpsc::<u64>(config);
+    ///
+    /// // Blocking sender
+    /// std::thread::spawn(move || {
+    ///     sender.send(42).unwrap();
+    /// });
+    ///
+    /// // Async receiver
+    /// let value = receiver.recv().await.unwrap();
+    /// ```
+    pub fn blocking_async_dyn_unbounded_mpsc<T>(
+        config: DynMpscConfig,
+    ) -> (
+        BlockingDynUnboundedMpscSender<T>,
+        AsyncDynUnboundedMpscReceiver<T>,
+    ) {
+        let inner = Arc::new(DynUnboundedInner::new(config));
+        let receiver_inner = DynUnboundedReceiverInner::new(Arc::clone(&inner));
+        let sender_inner = inner
+            .create_sender()
+            .expect("fatal: cannot create initial sender");
+
+        let shared = Arc::new(DynUnboundedAsyncShared::new(inner));
+        let blocking_sender = BlockingDynUnboundedMpscSender::new(sender_inner, Arc::clone(&shared));
+        let async_receiver = AsyncDynUnboundedMpscReceiver::new(receiver_inner, shared);
+        (blocking_sender, async_receiver)
+    }
+
+    /// Create a mixed dynamic unbounded MPSC with blocking senders and async receiver
+    /// using default configuration.
+    pub fn blocking_async_dyn_unbounded_mpsc_default<T>() -> (
+        BlockingDynUnboundedMpscSender<T>,
+        AsyncDynUnboundedMpscReceiver<T>,
+    ) {
+        blocking_async_dyn_unbounded_mpsc(DynMpscConfig::default())
+    }
+
+    /// Create a mixed dynamic unbounded MPSC with async senders and blocking receiver.
+    ///
+    /// This is useful when you have async tasks that need to send data to a blocking thread.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let config = DynMpscConfig::default();
+    /// let (mut sender, receiver) = async_blocking_dyn_unbounded_mpsc::<u64>(config);
+    ///
+    /// // Async sender
+    /// tokio::spawn(async move {
+    ///     sender.send(42).await.unwrap();
+    /// });
+    ///
+    /// // Blocking receiver
+    /// std::thread::spawn(move || {
+    ///     let value = receiver.recv().unwrap();
+    /// });
+    /// ```
+    pub fn async_blocking_dyn_unbounded_mpsc<T>(
+        config: DynMpscConfig,
+    ) -> (
+        AsyncDynUnboundedMpscSender<T>,
+        BlockingDynUnboundedMpscReceiver<T>,
+    ) {
+        let inner = Arc::new(DynUnboundedInner::new(config));
+        let receiver_inner = DynUnboundedReceiverInner::new(Arc::clone(&inner));
+        let sender_inner = inner
+            .create_sender()
+            .expect("fatal: cannot create initial sender");
+
+        let shared = Arc::new(DynUnboundedAsyncShared::new(inner));
+        let async_sender = AsyncDynUnboundedMpscSender::new(sender_inner, Arc::clone(&shared));
+        let blocking_receiver = BlockingDynUnboundedMpscReceiver::new(receiver_inner, shared);
+        (async_sender, blocking_receiver)
+    }
+
+    /// Create a mixed dynamic unbounded MPSC with async senders and blocking receiver
+    /// using default configuration.
+    pub fn async_blocking_dyn_unbounded_mpsc_default<T>() -> (
+        AsyncDynUnboundedMpscSender<T>,
+        BlockingDynUnboundedMpscReceiver<T>,
+    ) {
+        async_blocking_dyn_unbounded_mpsc(DynMpscConfig::default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1147,7 +1857,10 @@ mod tests {
         drop(sender);
 
         assert_eq!(receiver.try_recv().unwrap(), 1);
-        assert!(matches!(receiver.try_recv(), Err(DynTryRecvError::Disconnected)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(DynTryRecvError::Disconnected)
+        ));
     }
 
     #[test]
@@ -1226,7 +1939,10 @@ mod tests {
         }
 
         // Should be empty now
-        assert!(matches!(receiver.try_recv_batch(&mut buffer), Err(DynTryRecvError::Empty)));
+        assert!(matches!(
+            receiver.try_recv_batch(&mut buffer),
+            Err(DynTryRecvError::Empty)
+        ));
     }
 
     #[test]

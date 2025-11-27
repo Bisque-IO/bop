@@ -131,7 +131,7 @@ impl crate::io::stream::Stream for Interval {
     async fn next(&mut self) -> Option<Self::Item> {
         // Wait for the sleep to complete
         (&mut self.sleep).await;
-        
+
         let now = Instant::now();
         let next_tick = match self.missed_tick_behavior {
             MissedTickBehavior::Burst => {
@@ -144,7 +144,10 @@ impl crate::io::stream::Stream for Interval {
                 let elapsed_periods = elapsed.as_nanos() / self.period.as_nanos();
                 let next_period = elapsed_periods + 1;
                 let next_period_duration = Duration::from_nanos(
-                    self.period.as_nanos().saturating_mul(next_period).min(u64::MAX as u128) as u64
+                    self.period
+                        .as_nanos()
+                        .saturating_mul(next_period)
+                        .min(u64::MAX as u128) as u64,
                 );
                 self.start + next_period_duration
             }
@@ -197,4 +200,3 @@ pub fn interval(period: Duration) -> Interval {
 pub fn interval_at(start: Instant, period: Duration) -> Interval {
     Interval::new_at(start, period)
 }
-

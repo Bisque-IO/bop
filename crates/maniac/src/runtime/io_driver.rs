@@ -60,7 +60,7 @@ impl IoDriver {
     /// Only use this when calling from within a `with_context()` block.
     #[inline]
     pub unsafe fn poll_once_unchecked(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
-        self.runtime.poll_once_unchecked(timeout)?;
+        unsafe { self.runtime.poll_once_unchecked(timeout)?; }
         Ok(1)
     }
 

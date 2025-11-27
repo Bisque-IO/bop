@@ -119,7 +119,7 @@ pub use l2::{LayeredReceiver, LayeredSender, LayeredSpsc};
 pub mod unbounded;
 pub use unbounded::{UnboundedReceiver, UnboundedSender, UnboundedSpsc};
 pub mod dynamic;
-pub use dynamic::{Receiver, Sender, DynSpsc, DynSpscConfig};
+// pub use dynamic::{DynSpsc, DynSpscConfig, Receiver as DynReceiver, Sender as DynSender};
 
 /// Trait for types that can schedule queue execution.
 ///

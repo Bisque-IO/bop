@@ -25,9 +25,10 @@ impl BuilderInner {
                     builder.mode(mode);
                 }
                 builder.create(&path)
-            }).await
+            })
+            .await
         }
-        
+
         #[cfg(all(target_os = "linux", feature = "iouring"))]
         {
             // For io_uring systems, use the existing Op machinery

@@ -96,7 +96,7 @@ use std::time::Duration;
 use std::env;
 
 #[cfg(unix)]
-use libc::{pthread_kill, pthread_self, pthread_t, SIGUSR1};
+use libc::{SIGUSR1, pthread_kill, pthread_self, pthread_t};
 #[cfg(unix)]
 use std::os::unix::io::{FromRawFd, IntoRawFd};
 
@@ -113,7 +113,7 @@ use crate::io::stream::iter;
 
 mod multishot;
 
-pub use multishot::{channel, Receiver, Recv, RecvError, Sender};
+pub use multishot::{Receiver, Recv, RecvError, Sender, channel};
 
 #[cfg(unix)]
 fn install_signal_handler() {
@@ -229,7 +229,9 @@ impl<T> Drop for Task<T> {
                             if iteration == 0 {
                                 std::thread::sleep(Duration::from_micros(100));
                             } else {
-                                std::thread::sleep(Duration::from_millis(iteration.min(max_cancels)));
+                                std::thread::sleep(Duration::from_millis(
+                                    iteration.min(max_cancels),
+                                ));
                             }
                             rx = rx_back;
                         }

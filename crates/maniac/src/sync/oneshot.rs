@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 
 use crate::future::event::Event;
 
-pub use super::multishot::{Receiver, RecvError, Recv, Sender};
+pub use super::multishot::{Receiver, Recv, RecvError, Sender};
 
 /// Creates a new oneshot channel.
 ///

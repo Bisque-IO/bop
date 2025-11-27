@@ -900,7 +900,8 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
                 {
                     tracing::trace!(
                         "[Supervisor] WARNING: Worker {} appears stuck (no update for {}ns)",
-                        worker_id, time_since_update
+                        worker_id,
+                        time_since_update
                     );
                 }
             }
@@ -1848,16 +1849,13 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         //     self.inner.worker_id,
         //     self.inner.io.socket_count()
         // );
-        match self
-            .inner
-            .io
-            .poll_once(Some(std::time::Duration::ZERO))
-        {
+        match self.inner.io.poll_once(Some(std::time::Duration::ZERO)) {
             Ok(num_events) => {
                 if num_events > 0 {
                     tracing::trace!(
                         "[Worker {}] Poll got {} events",
-                        self.inner.worker_id, num_events
+                        self.inner.worker_id,
+                        num_events
                     );
                 }
                 num_events
@@ -2532,7 +2530,11 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                     }
                 } else {
                     // Cancel timer on other worker.
-                    self.inner.bus.post_cancel_message(self.inner.worker_id, worker_id, timer.timer_id());
+                    self.inner.bus.post_cancel_message(
+                        self.inner.worker_id,
+                        worker_id,
+                        timer.timer_id(),
+                    );
                 }
             }
         }
@@ -2584,11 +2586,10 @@ pub fn schedule_timer_for_task(_cx: &Context<'_>, timer: &Timer, delay: Duration
             } else {
                 // Cross-worker cancellation: send message to the worker that owns the timer
                 let existing_id = timer.timer_id();
-                if worker.bus.post_cancel_message(
-                    worker_id,
-                    existing_worker_id,
-                    existing_id,
-                ) {
+                if worker
+                    .bus
+                    .post_cancel_message(worker_id, existing_worker_id, existing_id)
+                {
                     timer.reset();
                 }
             }

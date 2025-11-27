@@ -61,7 +61,7 @@ impl<T: Clone> Sender<T> {
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
         *self.inner.value.write().unwrap() = value;
         *self.inner.version.lock().unwrap() += 1;
-        
+
         // Wake all receivers
         let wakers = self.inner.wakers.lock().unwrap();
         for waker in wakers.iter() {
@@ -79,7 +79,7 @@ impl<T: Clone> Sender<T> {
         if modify(&mut guard) {
             drop(guard);
             *self.inner.version.lock().unwrap() += 1;
-            
+
             // Wake all receivers
             let wakers = self.inner.wakers.lock().unwrap();
             for waker in wakers.iter() {
@@ -173,4 +173,3 @@ impl<'a, T> Deref for Ref<'a, T> {
         &*self.inner
     }
 }
-

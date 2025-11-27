@@ -1,7 +1,11 @@
 mod unix;
 mod windows;
 
-use std::{os::unix::fs::MetadataExt, path::{Path, PathBuf}, time::SystemTime};
+use std::{
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use super::{file_type::FileType, permissions::Permissions};
 use crate::driver::op::Op;
@@ -44,13 +48,13 @@ pub async fn metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metadata> {
         // For non-io_uring systems, use blocking thread pool to avoid blocking the async runtime
         let path = path.as_ref().to_path_buf();
         let std_metadata = crate::blocking::unblock(move || std::fs::metadata(&path)).await?;
-        
+
         #[cfg(target_os = "linux")]
         {
             // Convert std::fs::Metadata to libc::stat64, then to FileAttr
             use std::os::unix::fs::MetadataExt;
             let mut stat: libc::stat64 = unsafe { std::mem::zeroed() };
-            
+
             stat.st_dev = std_metadata.dev() as _;
             stat.st_ino = std_metadata.ino() as libc::ino64_t;
             stat.st_nlink = std_metadata.nlink() as libc::nlink_t;
@@ -61,11 +65,14 @@ pub async fn metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metadata> {
             stat.st_size = std_metadata.size() as libc::off64_t;
             stat.st_blksize = std_metadata.blksize() as libc::blksize_t;
             stat.st_blocks = std_metadata.blocks() as libc::blkcnt64_t;
-            
+
             let atime = std_metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
             let mtime = std_metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let ctime = std_metadata.created().or_else(|_| std_metadata.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-            
+            let ctime = std_metadata
+                .created()
+                .or_else(|_| std_metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+
             if let Ok(duration) = atime.duration_since(SystemTime::UNIX_EPOCH) {
                 stat.st_atime = duration.as_secs() as libc::time_t;
                 stat.st_atime_nsec = duration.subsec_nanos() as _;
@@ -78,7 +85,7 @@ pub async fn metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metadata> {
                 stat.st_ctime = duration.as_secs() as libc::time_t;
                 stat.st_ctime_nsec = duration.subsec_nanos() as _;
             }
-            
+
             // Note: statx_extra_fields will be None since we don't have statx data
             let file_attr = FileAttr {
                 stat,
@@ -86,14 +93,14 @@ pub async fn metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metadata> {
             };
             Ok(Metadata(file_attr))
         }
-        
+
         #[cfg(all(unix, not(target_os = "linux")))]
         {
             // Convert std::fs::Metadata to libc::stat, then to FileAttr
             // This covers macOS, FreeBSD, and other Unix-like systems
             use std::os::unix::fs::MetadataExt;
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-            
+
             stat.st_dev = std_metadata.dev() as _;
             stat.st_ino = std_metadata.ino() as libc::ino_t;
             stat.st_nlink = std_metadata.nlink() as libc::nlink_t;
@@ -104,11 +111,14 @@ pub async fn metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metadata> {
             stat.st_size = std_metadata.size() as libc::off_t;
             stat.st_blksize = std_metadata.blksize() as libc::blksize_t;
             stat.st_blocks = std_metadata.blocks() as libc::blkcnt_t;
-            
+
             let atime = std_metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
             let mtime = std_metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let ctime = std_metadata.created().or_else(|_| std_metadata.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-            
+            let ctime = std_metadata
+                .created()
+                .or_else(|_| std_metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+
             if let Ok(duration) = atime.duration_since(SystemTime::UNIX_EPOCH) {
                 stat.st_atime = duration.as_secs() as libc::time_t;
                 stat.st_atime_nsec = duration.subsec_nanos() as _;
@@ -121,12 +131,12 @@ pub async fn metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metadata> {
                 stat.st_ctime = duration.as_secs() as libc::time_t;
                 stat.st_ctime_nsec = duration.subsec_nanos() as _;
             }
-            
+
             let file_attr = FileAttr::from(stat);
             Ok(Metadata(file_attr))
         }
     }
-    
+
     #[cfg(all(target_os = "linux", feature = "iouring"))]
     {
         // For io_uring systems, use the existing Op machinery
@@ -168,14 +178,15 @@ pub async fn symlink_metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metada
     {
         // For non-io_uring systems, use blocking thread pool to avoid blocking the async runtime
         let path = path.as_ref().to_path_buf();
-        let std_metadata = crate::blocking::unblock(move || std::fs::symlink_metadata(&path)).await?;
-        
+        let std_metadata =
+            crate::blocking::unblock(move || std::fs::symlink_metadata(&path)).await?;
+
         #[cfg(target_os = "linux")]
         {
             // Convert std::fs::Metadata to libc::stat64, then to FileAttr
             use std::os::unix::fs::MetadataExt;
             let mut stat: libc::stat64 = unsafe { std::mem::zeroed() };
-            
+
             stat.st_dev = std_metadata.dev() as _;
             stat.st_ino = std_metadata.ino() as libc::ino64_t;
             stat.st_nlink = std_metadata.nlink() as libc::nlink_t;
@@ -186,11 +197,14 @@ pub async fn symlink_metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metada
             stat.st_size = std_metadata.size() as libc::off64_t;
             stat.st_blksize = std_metadata.blksize() as libc::blksize_t;
             stat.st_blocks = std_metadata.blocks() as libc::blkcnt64_t;
-            
+
             let atime = std_metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
             let mtime = std_metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let ctime = std_metadata.created().or_else(|_| std_metadata.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-            
+            let ctime = std_metadata
+                .created()
+                .or_else(|_| std_metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+
             if let Ok(duration) = atime.duration_since(SystemTime::UNIX_EPOCH) {
                 stat.st_atime = duration.as_secs() as libc::time_t;
                 stat.st_atime_nsec = duration.subsec_nanos() as _;
@@ -203,7 +217,7 @@ pub async fn symlink_metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metada
                 stat.st_ctime = duration.as_secs() as libc::time_t;
                 stat.st_ctime_nsec = duration.subsec_nanos() as _;
             }
-            
+
             // Note: statx_extra_fields will be None since we don't have statx data
             let file_attr = FileAttr {
                 stat,
@@ -211,14 +225,14 @@ pub async fn symlink_metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metada
             };
             Ok(Metadata(file_attr))
         }
-        
+
         #[cfg(all(unix, not(target_os = "linux")))]
         {
             // Convert std::fs::Metadata to libc::stat, then to FileAttr
             // This covers macOS, FreeBSD, and other Unix-like systems
             use std::os::unix::fs::MetadataExt;
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-            
+
             stat.st_dev = std_metadata.dev() as _;
             stat.st_ino = std_metadata.ino() as libc::ino_t;
             stat.st_nlink = std_metadata.nlink() as libc::nlink_t;
@@ -229,11 +243,14 @@ pub async fn symlink_metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metada
             stat.st_size = std_metadata.size() as libc::off_t;
             stat.st_blksize = std_metadata.blksize() as libc::blksize_t;
             stat.st_blocks = std_metadata.blocks() as libc::blkcnt_t;
-            
+
             let atime = std_metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
             let mtime = std_metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let ctime = std_metadata.created().or_else(|_| std_metadata.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-            
+            let ctime = std_metadata
+                .created()
+                .or_else(|_| std_metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+
             if let Ok(duration) = atime.duration_since(SystemTime::UNIX_EPOCH) {
                 stat.st_atime = duration.as_secs() as libc::time_t;
                 stat.st_atime_nsec = duration.subsec_nanos() as _;
@@ -246,12 +263,12 @@ pub async fn symlink_metadata<P: AsRef<Path>>(path: P) -> std::io::Result<Metada
                 stat.st_ctime = duration.as_secs() as libc::time_t;
                 stat.st_ctime_nsec = duration.subsec_nanos() as _;
             }
-            
+
             let file_attr = FileAttr::from(stat);
             Ok(Metadata(file_attr))
         }
     }
-    
+
     #[cfg(all(target_os = "linux", feature = "iouring"))]
     {
         // For io_uring systems, use the existing Op machinery

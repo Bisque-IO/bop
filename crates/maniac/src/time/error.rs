@@ -26,4 +26,3 @@ impl Default for Elapsed {
         Self::new()
     }
 }
-

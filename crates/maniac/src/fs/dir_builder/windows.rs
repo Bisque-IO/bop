@@ -14,7 +14,7 @@ impl BuilderInner {
             let path = path.to_path_buf();
             crate::blocking::unblock(move || std::fs::create_dir(&path)).await
         }
-        
+
         #[cfg(all(target_os = "linux", feature = "iouring"))]
         {
             // For io_uring systems, use the existing Op machinery

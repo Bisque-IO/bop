@@ -152,6 +152,8 @@ impl DirBuilderExt for DirBuilder {
 // when the statx is merge
 async fn is_dir(path: &Path) -> bool {
     let path = path.to_path_buf();
-    crate::blocking::unblock(move || std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()))
-        .await
+    crate::blocking::unblock(move || {
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir())
+    })
+    .await
 }

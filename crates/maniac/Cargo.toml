@@ -84,6 +84,7 @@ core_affinity = { workspace = true }
 crossbeam = { workspace = true }
 crossbeam-epoch = { workspace = true }
 crossbeam-utils = { workspace = true }
+parking_lot = { workspace = true }
 dashmap = { workspace = true }
 derive_more = { workspace = true, features = ["full"] }
 flume = { workspace = true }

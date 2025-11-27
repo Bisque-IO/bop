@@ -38,9 +38,9 @@ pub mod net;
 pub mod runtime;
 mod spsc;
 pub mod sync;
+pub mod time;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub mod tls;
-pub mod time;
 pub mod utils;
 
 #[cfg(feature = "raft")]

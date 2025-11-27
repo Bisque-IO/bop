@@ -54,11 +54,11 @@ impl Sleep {
     pub fn new(duration: Duration) -> Self {
         let timer = Timer::new();
         let delay = timer.delay(duration);
-        
+
         // SAFETY: We own the Timer, so it will live as long as Sleep.
         // We extend the lifetime to 'static because Timer is owned and won't be dropped.
         let delay = unsafe { std::mem::transmute::<TimerDelay<'_>, TimerDelay<'static>>(delay) };
-        
+
         Self {
             timer,
             delay: Some(delay),
@@ -114,10 +114,10 @@ impl Sleep {
         } else {
             deadline - now
         };
-        
+
         // Cancel the existing timer
         let _ = self.timer.cancel();
-        
+
         // Create a new delay
         let delay = self.timer.delay(duration);
         let delay = unsafe { std::mem::transmute::<TimerDelay<'_>, TimerDelay<'static>>(delay) };
@@ -148,7 +148,14 @@ impl std::fmt::Debug for Sleep {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sleep")
             .field("timer", &self.timer)
-            .field("delay", if self.delay.is_some() { &"Some" } else { &"None" })
+            .field(
+                "delay",
+                if self.delay.is_some() {
+                    &"Some"
+                } else {
+                    &"None"
+                },
+            )
             .finish()
     }
 }
@@ -193,4 +200,3 @@ pub fn sleep(duration: Duration) -> Sleep {
 pub fn sleep_until(deadline: Instant) -> Sleep {
     Sleep::new_timeout(deadline)
 }
-

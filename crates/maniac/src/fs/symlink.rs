@@ -12,9 +12,10 @@ pub async fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dst: Q) -> io::Resu
         crate::blocking::unblock(move || {
             use std::os::unix::fs::symlink as unix_symlink;
             unix_symlink(&src, &dst)
-        }).await
+        })
+        .await
     }
-    
+
     #[cfg(all(target_os = "linux", feature = "iouring"))]
     {
         // For io_uring systems, use the existing Op machinery

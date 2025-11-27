@@ -5,14 +5,14 @@
 //! [`Timeout`]: struct@Timeout
 
 use std::{
-	future::Future,
-	pin::Pin,
-	task::{self, Poll},
+    future::Future,
+    pin::Pin,
+    task::{self, Poll},
 };
 
 use pin_project_lite::pin_project;
 
-use crate::time::{error::Elapsed, sleep_until, Duration, Instant, Sleep};
+use crate::time::{Duration, Instant, Sleep, error::Elapsed, sleep_until};
 
 /// Require a `Future` to complete before the specified duration has elapsed.
 ///
@@ -29,14 +29,14 @@ use crate::time::{error::Elapsed, sleep_until, Duration, Instant, Sleep};
 /// consumes the `Timeout`.
 pub fn timeout<T>(duration: Duration, future: T) -> Timeout<T>
 where
-		T: Future,
+    T: Future,
 {
-	let deadline = Instant::now().checked_add(duration);
-	let delay = match deadline {
-		Some(deadline) => Sleep::new_timeout(deadline),
-		None => Sleep::far_future(),
-	};
-	Timeout::new_with_delay(future, delay)
+    let deadline = Instant::now().checked_add(duration);
+    let delay = match deadline {
+        Some(deadline) => Sleep::new_timeout(deadline),
+        None => Sleep::far_future(),
+    };
+    Timeout::new_with_delay(future, delay)
 }
 
 /// Require a `Future` to complete before the specified instant in time.
@@ -53,14 +53,14 @@ where
 /// consumes the `Timeout`.
 pub fn timeout_at<T>(deadline: Instant, future: T) -> Timeout<T>
 where
-		T: Future,
+    T: Future,
 {
-	let delay = sleep_until(deadline);
+    let delay = sleep_until(deadline);
 
-	Timeout {
-		value: future,
-		delay,
-	}
+    Timeout {
+        value: future,
+        delay,
+    }
 }
 
 pin_project! {
@@ -76,44 +76,44 @@ pin_project! {
 }
 
 impl<T> Timeout<T> {
-	pub(crate) fn new_with_delay(value: T, delay: Sleep) -> Timeout<T> {
-		Timeout { value, delay }
-	}
+    pub(crate) fn new_with_delay(value: T, delay: Sleep) -> Timeout<T> {
+        Timeout { value, delay }
+    }
 
-	/// Gets a reference to the underlying value in this timeout.
-	pub fn get_ref(&self) -> &T {
-		&self.value
-	}
+    /// Gets a reference to the underlying value in this timeout.
+    pub fn get_ref(&self) -> &T {
+        &self.value
+    }
 
-	/// Gets a mutable reference to the underlying value in this timeout.
-	pub fn get_mut(&mut self) -> &mut T {
-		&mut self.value
-	}
+    /// Gets a mutable reference to the underlying value in this timeout.
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
 
-	/// Consumes this timeout, returning the underlying value.
-	pub fn into_inner(self) -> T {
-		self.value
-	}
+    /// Consumes this timeout, returning the underlying value.
+    pub fn into_inner(self) -> T {
+        self.value
+    }
 }
 
 impl<T> Future for Timeout<T>
 where
-		T: Future,
+    T: Future,
 {
-	type Output = Result<T::Output, Elapsed>;
+    type Output = Result<T::Output, Elapsed>;
 
-	fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-		let me = self.project();
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        let me = self.project();
 
-		// First, try polling the future
-		if let Poll::Ready(v) = me.value.poll(cx) {
-			return Poll::Ready(Ok(v));
-		}
+        // First, try polling the future
+        if let Poll::Ready(v) = me.value.poll(cx) {
+            return Poll::Ready(Ok(v));
+        }
 
-		// Now check the timer
-		match me.delay.poll(cx) {
-			Poll::Ready(()) => Poll::Ready(Err(Elapsed::new())),
-			Poll::Pending => Poll::Pending,
-		}
-	}
+        // Now check the timer
+        match me.delay.poll(cx) {
+            Poll::Ready(()) => Poll::Ready(Err(Elapsed::new())),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
