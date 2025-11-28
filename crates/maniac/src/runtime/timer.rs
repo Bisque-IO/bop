@@ -175,6 +175,7 @@ impl Timer {
 // we manually implement Send to allow Timer to be moved between threads
 // during task migration (which only happens when no thread is accessing it).
 unsafe impl Send for Timer {}
+unsafe impl Sync for Timer {}
 
 impl Default for Timer {
     fn default() -> Self {

@@ -35,8 +35,10 @@ pub mod generator;
 pub mod io;
 mod loom_exports;
 pub mod net;
+pub mod process;
 pub mod runtime;
 mod spsc;
+pub mod signal;
 pub mod sync;
 pub mod time;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
