@@ -44,22 +44,6 @@ const MESSAGE_BATCH_SIZE: usize = 4096;
 /// Trait for cross-worker operations that don't depend on const parameters
 pub(crate) trait WorkerBus: Send + Sync {
     fn post_cancel_message(&self, from_worker_id: u32, to_worker_id: u32, timer_id: u64) -> bool;
-
-    fn post_remote_read(
-        &self,
-        from_worker_id: u32,
-        to_worker_id: u32,
-        token: usize,
-        waker: Waker,
-    ) -> bool;
-
-    fn post_remote_write(
-        &self,
-        from_worker_id: u32,
-        to_worker_id: u32,
-        token: usize,
-        waker: Waker,
-    ) -> bool;
 }
 
 pub struct WorkerTLS {}
@@ -178,11 +162,18 @@ pub extern "C" fn rust_preemption_helper() {
     }
 }
 
-/// Request that the current generator be pinned to the current task.
+/// Request that the current task receive its own dedicated generator (stackful coroutine).
 ///
 /// This MUST be called from within a task that is executing inside a Worker's generator.
-/// When called, it signals the Worker to transfer ownership of the current generator
-/// to the task, allowing the task to have its own stackful coroutine execution context.
+/// When called, it signals the Worker that after the current poll returns, the task
+/// should receive its own dedicated poll-mode generator instead of sharing the worker's.
+///
+/// **Important**: This does NOT capture the current stack state. It simply marks that
+/// the task wants a dedicated generator. The worker will create a new generator for
+/// the task after the current poll completes.
+///
+/// For preemption (capturing the current stack mid-execution), use the signal-based
+/// preemption mechanism instead (which uses Switch mode).
 ///
 /// # Returns
 /// `true` if the pin request was successfully registered, `false` if not in a task context.
@@ -193,10 +184,9 @@ pub extern "C" fn rust_preemption_helper() {
 ///
 /// // Inside an async task running on a worker:
 /// async {
-///     // Request to pin the current generator
+///     // Request a dedicated generator for this task
 ///     if pin_stack() {
-///         // Generator will be pinned after this returns
-///         // Task will continue execution with its own generator
+///         // Task will receive its own generator after this poll returns
 ///     }
 /// }
 /// ```
@@ -207,13 +197,16 @@ pub fn pin_stack() -> bool {
             return false;
         }
         let task = unsafe { &mut *task };
-        let scope = worker.current_scope;
-        assert!(!scope.is_null());
         if !task.has_pinned_generator() {
+            // Mark the task as wanting a dedicated generator.
+            // We use a null pointer as a sentinel value - the worker will detect this
+            // and create a proper poll-mode generator for the task.
+            // The Owned ownership indicates we need to CREATE a generator, not that
+            // we're capturing the worker's generator.
             unsafe {
                 task.pin_generator(
-                    scope as *mut usize,
-                    GeneratorOwnership::Worker,
+                    std::ptr::null_mut(),
+                    GeneratorOwnership::Owned,
                     GeneratorRunMode::Poll,
                 )
             };
@@ -316,19 +309,6 @@ pub enum WorkerMessage {
 
     /// Immediate shutdown
     Shutdown,
-
-    // ────────────────────────────────────────────────────────────────────────────
-    // SOCKET I/O MESSAGES (for async networking)
-    // ────────────────────────────────────────────────────────────────────────────
-    // Remote I/O operations for stolen tasks
-    RemoteRead {
-        token: usize, // Using token/fd index to identify socket on remote worker
-        waker: Waker,
-    },
-    RemoteWrite {
-        token: usize,
-        waker: Waker,
-    },
 
     Noop,
 }
@@ -810,10 +790,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             return;
         }
 
-        #[cfg(debug_assertions)]
-        {
-            tracing::trace!("[WorkerService] Shutdown initiated, sending shutdown messages...");
-        }
+        tracing::trace!("[WorkerService] Shutdown initiated, sending shutdown messages...");
 
         // Send shutdown messages to all active workers
         let worker_count = self.config.worker_count;
@@ -828,23 +805,14 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             }
         }
 
-        #[cfg(debug_assertions)]
-        {
-            tracing::trace!("[WorkerService] Joining worker threads...");
-        }
+        tracing::trace!("[WorkerService] Joining worker threads...");
 
         // Join all worker threads
         for (idx, worker_thread) in self.worker_threads.iter().enumerate() {
             if let Some(handle) = worker_thread.lock().unwrap().take() {
-                #[cfg(debug_assertions)]
-                {
-                    tracing::trace!("[WorkerService] Joining worker thread {}...", idx);
-                }
+                tracing::trace!("[WorkerService] Joining worker thread {}...", idx);
                 let _ = handle.join();
-                #[cfg(debug_assertions)]
-                {
-                    tracing::trace!("[Worker Service] Worker thread {} joined", idx);
-                }
+                tracing::trace!("[Worker Service] Worker thread {} joined", idx);
             }
         }
 
@@ -855,10 +823,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             let _ = thread_handle_mutex.lock().unwrap().take();
         }
 
-        #[cfg(debug_assertions)]
-        {
-            tracing::trace!("[WorkerService] Shutdown complete");
-        }
+        tracing::trace!("[WorkerService] Shutdown complete");
     }
 
     /// Returns the current worker count
@@ -921,10 +886,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         let _ = self.tick_registration.lock().unwrap().take();
         let worker_count = self.config.worker_count;
 
-        #[cfg(debug_assertions)]
-        {
-            tracing::trace!("[Supervisor] Shutting down, worker_count={}", worker_count);
-        }
+        tracing::trace!("[Supervisor] Shutting down, worker_count={}", worker_count);
 
         // Send graceful shutdown to all active workers
         for worker_id in 0..worker_count {
@@ -947,10 +909,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             }
         }
 
-        #[cfg(debug_assertions)]
-        {
-            tracing::trace!("[Supervisor] Sent graceful shutdown to all workers");
-        }
+        tracing::trace!("[Supervisor] Sent graceful shutdown to all workers");
 
         // Wait for workers to finish (with timeout)
         let shutdown_timeout = std::time::Duration::from_secs(5);
@@ -1042,59 +1001,6 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerBus for WorkerService<P, NU
                 worker_id: to_worker_id,
                 timer_id,
             },
-        )
-        .is_ok()
-    }
-
-    fn post_remote_read(
-        &self,
-        from_worker_id: u32,
-        to_worker_id: u32,
-        token: usize,
-        waker: Waker,
-    ) -> bool {
-        self.post_remote_read_impl(from_worker_id, to_worker_id, token, waker)
-    }
-
-    fn post_remote_write(
-        &self,
-        from_worker_id: u32,
-        to_worker_id: u32,
-        token: usize,
-        waker: Waker,
-    ) -> bool {
-        self.post_remote_write_impl(from_worker_id, to_worker_id, token, waker)
-    }
-}
-
-impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
-    // Helper method for CrossWorkerOps implementation
-    fn post_remote_read_impl(
-        &self,
-        from_worker_id: u32,
-        to_worker_id: u32,
-        token: usize,
-        waker: Waker,
-    ) -> bool {
-        self.post_message(
-            from_worker_id,
-            to_worker_id,
-            WorkerMessage::RemoteRead { token, waker },
-        )
-        .is_ok()
-    }
-
-    fn post_remote_write_impl(
-        &self,
-        from_worker_id: u32,
-        to_worker_id: u32,
-        token: usize,
-        waker: Waker,
-    ) -> bool {
-        self.post_message(
-            from_worker_id,
-            to_worker_id,
-            WorkerMessage::RemoteWrite { token, waker },
         )
         .is_ok()
     }
@@ -1299,9 +1205,79 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Drop for Worker<'a, P, NUM_SE
     }
 }
 
+/// Reason why a generator was pinned to a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinReason {
+    /// Explicit `pin_stack()` call from task code.
+    Explicit,
+    /// Signal-based preemption (Unix signal or Windows APC).
+    Preempted,
+}
+
+/// Context tracking generator state during worker execution.
+///
+/// This struct captures whether the worker's generator was pinned to a task
+/// and provides information needed for proper cleanup and error handling.
+///
+/// Note: Panic handling is delegated to the generator's own mechanism (context.err).
+/// We don't use catch_unwind around generator.resume() because it interferes with
+/// the generator's context switching. Panics inside generators will propagate up
+/// through the generator's error handling.
 struct RunContext {
+    /// Generator was pinned to a task - worker must create new generator.
     pinned: bool,
-    done: bool,
+
+    /// How the generator was pinned (if `pinned` is true).
+    pin_reason: Option<PinReason>,
+
+    /// Task completed while generator was pinned (vs still pending).
+    /// When true, the pinned generator can be cleaned up immediately.
+    /// When false, the task will continue with its pinned generator.
+    task_completed: bool,
+}
+
+impl RunContext {
+    fn new() -> Self {
+        Self {
+            pinned: false,
+            pin_reason: None,
+            task_completed: false,
+        }
+    }
+
+    /// Reset context for next iteration (when not pinned).
+    #[inline]
+    fn reset(&mut self) {
+        self.pinned = false;
+        self.pin_reason = None;
+        self.task_completed = false;
+    }
+
+    /// Mark that the generator was pinned due to preemption.
+    #[inline]
+    fn mark_preempted(&mut self) {
+        self.pinned = true;
+        self.pin_reason = Some(PinReason::Preempted);
+    }
+
+    /// Mark that the generator was pinned explicitly via `pin_stack()`.
+    #[inline]
+    fn mark_explicit_pin(&mut self) {
+        self.pinned = true;
+        self.pin_reason = Some(PinReason::Explicit);
+    }
+
+    /// Mark that the task completed while pinned.
+    #[inline]
+    fn mark_task_completed(&mut self) {
+        self.task_completed = true;
+    }
+
+    /// Check if we should exit the generator loop.
+    #[inline]
+    fn should_exit_generator(&self) -> bool {
+        self.pinned
+    }
 }
 
 impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
@@ -1364,7 +1340,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         if yielded > 0 {
             did_work = true;
         }
-        if run_ctx.pinned {
+        if run_ctx.should_exit_generator() {
             return did_work;
         }
 
@@ -1372,7 +1348,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         if self.try_partition_random(run_ctx) {
             did_work = true;
         }
-        if run_ctx.pinned {
+        if run_ctx.should_exit_generator() {
             return did_work;
         }
 
@@ -1389,7 +1365,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             if self.try_any_partition_random(run_ctx, leaf_count) {
                 did_work = true;
             }
-            if run_ctx.pinned {
+            if run_ctx.should_exit_generator() {
                 return did_work;
             }
             // else if self.try_any_partition_linear(leaf_count) {
@@ -1401,7 +1377,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             if self.poll_yield(run_ctx, self.inner.yield_queue.len() as usize) > 0 {
                 did_work = true;
             }
-            if run_ctx.pinned {
+            if run_ctx.should_exit_generator() {
                 return did_work;
             }
 
@@ -1431,7 +1407,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         if yielded > 0 {
             did_work = true;
         }
-        if run_ctx.pinned {
+        if run_ctx.should_exit_generator() {
             return did_work;
         }
 
@@ -1439,7 +1415,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         if self.try_partition_random(run_ctx) {
             did_work = true;
         }
-        if run_ctx.pinned {
+        if run_ctx.should_exit_generator() {
             return did_work;
         }
 
@@ -1448,11 +1424,9 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         } else if self.try_partition_linear(run_ctx) {
             did_work = true;
         }
-        if run_ctx.pinned {
+        if run_ctx.should_exit_generator() {
             return did_work;
         }
-
-        let rand = self.next_u64();
 
         if !did_work {
             let leaf_count = self.service.arena().leaf_count();
@@ -1461,7 +1435,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             } else if self.try_any_partition_linear(run_ctx, leaf_count) {
                 did_work = true;
             }
-            if run_ctx.pinned {
+            if run_ctx.should_exit_generator() {
                 return did_work;
             }
         }
@@ -1470,13 +1444,13 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
             if self.poll_yield(run_ctx, self.inner.yield_queue.len() as usize) > 0 {
                 did_work = true;
             }
-            if run_ctx.pinned {
+            if run_ctx.should_exit_generator() {
                 return did_work;
             }
             if self.poll_yield_steal(run_ctx, 1) > 0 {
                 did_work = true;
             }
-            if run_ctx.pinned {
+            if run_ctx.should_exit_generator() {
                 return did_work;
             }
         }
@@ -1517,16 +1491,12 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                         // Store in thread-local for signal handler
                         worker.inner.current_scope = scope_ptr;
 
-                        let mut run_ctx = RunContext {
-                            pinned: false,
-                            done: false,
-                        };
+                        let mut run_ctx = RunContext::new();
 
                         // Inner loop: runs inside generator context
                         loop {
                             // Check for shutdown
                             if worker.inner.shutdown.load(Ordering::Relaxed) {
-                                // tracing::trace!("Worker {} received shutdown flag", self.inner.worker_id);
                                 worker.inner.current_scope = core::ptr::null_mut();
                                 return 0;
                             }
@@ -1534,12 +1504,32 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                             // Process one iteration of work
                             let mut progress = worker.run_once(&mut run_ctx);
 
-                            if run_ctx.pinned {
+                            // Check if we need to exit the generator
+                            if run_ctx.should_exit_generator() {
                                 worker.inner.current_scope = core::ptr::null_mut();
-                                scope.yield_(
+
+                                // Log pin reason for debugging
+                                #[cfg(debug_assertions)]
+                                {
+                                    if let Some(reason) = run_ctx.pin_reason {
+                                        tracing::trace!(
+                                            "[Worker {}] Generator pinned: reason={:?}, task_completed={}",
+                                            worker.inner.worker_id,
+                                            reason,
+                                            run_ctx.task_completed
+                                        );
+                                    }
+                                }
+
+                                // Yield with appropriate reason based on how we got here
+                                let yield_reason = if run_ctx.pin_reason == Some(PinReason::Preempted) {
+                                    crate::runtime::preemption::GeneratorYieldReason::Preempted
+                                } else {
                                     crate::runtime::preemption::GeneratorYieldReason::Cooperative
-                                        .as_usize(),
-                                );
+                                };
+                                scope.yield_(yield_reason.as_usize());
+
+                                // Return 0 for normal exit (pinned or shutdown)
                                 return 0;
                             }
 
@@ -1598,69 +1588,68 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
                     match result {
                         Ok(r) => r,
-                        Err(_) => 0,
+                        Err(panic_payload) => {
+                            // Log the panic for debugging
+                            #[cfg(debug_assertions)]
+                            {
+                                if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                    tracing::error!("Worker generator panicked: {}", s);
+                                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                                    tracing::error!("Worker generator panicked: {}", s);
+                                } else {
+                                    tracing::error!("Worker generator panicked with unknown payload");
+                                }
+                            }
+                            // Return 2 to indicate panic occurred
+                            2
+                        }
                     }
                 });
 
-            // Drive the generator with monoio context
-            // Drive the generator with monoio context (already set by outer wrapper)
+            // Drive the generator - it will run until:
+            // 1. Shutdown is requested
+            // 2. A task's generator gets pinned (run_ctx.pinned becomes true)
+            // 3. Preemption occurs (signal handler pins generator and yields)
             generator.resume();
 
-            // Drive the generator until completion or until a task needs to be pinned
-            // The generator will yield and set GENERATOR_PIN_TASK if pinning is needed
-            // for _ in &mut generator {
-            //     // Just consume yields - the generator handles pin detection internally
-            // }
+            // After resume returns, check if preemption occurred.
+            //
+            // current_task is only non-null here if preemption happened:
+            // - Normal exit: ActiveTaskGuard clears current_task when poll returns
+            // - Cooperative pin: poll completes, guard clears current_task, then yields
+            // - Preemption: signal fires mid-poll, yields BEFORE poll returns, guard hasn't run
+            //
+            // rust_preemption_helper already pinned the generator (scope pointer) to the task.
+            // We just need to:
+            // 1. Forget our generator variable (so it doesn't get dropped - task owns it now)
+            // 2. Re-enqueue the task to the yield queue
+            let task_ptr = self.inner.current_task;
+            if !task_ptr.is_null() {
+                // Preemption occurred - task owns the generator now
+                let task = unsafe { &*task_ptr };
+                std::mem::forget(generator);
 
-            // Check if a task captured the generator for pinning
-            // This is set inside the generator loop when preemption/manual pin is detected
-            // let task_ptr = GENERATOR_PIN_TASK.with(|cell| {
-            //     let ptr = cell.get();
-            //     if !ptr.is_null() {
-            //         cell.set(ptr::null_mut()); // Clear for next time
-            //     }
-            //     ptr
-            // });
+                // Re-enqueue the preempted task to the yield queue
+                // Preempted tasks are "hot" and should run again soon
+                task.mark_yielded();
+                task.record_yield();
+                let handle = TaskHandle::from_task(task);
+                self.inner.yield_queue.push(handle);
+                self.service.wakers[self.inner.worker_id as usize].mark_yield();
+                self.inner.stats.yielded_count += 1;
 
-            // if !task_ptr.is_null() {
-            //     // A task requested to pin this generator
-            //     // Transfer generator ownership to the task
-            //     // SAFETY: task_ptr is valid - it was captured during task execution
-            //     let task = unsafe { &*task_ptr };
+                #[cfg(debug_assertions)]
+                tracing::trace!(
+                    "[Worker {}] Preempted task re-enqueued to yield queue",
+                    self.inner.worker_id
+                );
 
-            //     // // Convert generator to a boxed iterator
-            //     // // SAFETY: The generator's lifetime is tied to the Worker which outlives the task
-            //     // let boxed_iter: Box<dyn Iterator<Item = usize> + 'static> = unsafe {
-            //     //     std::mem::transmute(Box::new(generator) as Box<dyn Iterator<Item = usize>>)
-            //     //     // };
+                // Clear current_task since we've handled it
+                self.inner.current_task = ptr::null_mut();
 
-            //     //     // Pin with Switch mode - this generator has interrupted poll on stack
-            //     //     unsafe {
-            //     //         task.pin_generator(
-            //     //             generator.into_raw(),
-            //     //             GeneratorOwnership::Worker,
-            //     //             GeneratorRunMode::Switch,
-            //     //         );
-            //     //     }
-            //
-            //     //     // Re-schedule the preempted task in the yield queue for work-stealing
-            //     //     // Preempted tasks are "hot" (CPU-bound) and should be treated like yields
-            //     //     if let Some(slot) = task.slot() {
-            //     //         let handle = TaskHandle::from_task(task);
-            //
-            //     //         // Mark as yielded so it stays in EXECUTING state
-            //     //         task.mark_yielded();
-            //     //         task.record_yield();
-            //
-            //     //         // Enqueue to yield queue - enables work stealing!
-            //     //         self.enqueue_yield(handle);
-            //
-            //     //         // Update stats
-            //     //         self.inner.stats.yielded_count += 1;
-            //     //     }
-            //
-            //     //     // Continue outer loop to create a new generator
-            //     // }
+                // Continue to create a new generator for the worker
+                continue;
+            }
         }
 
         tracing::trace!("Worker is done running: {}", self.inner.worker_id);
@@ -1744,8 +1733,6 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 self.inner.shutdown.store(true, Ordering::Release);
                 true
             }
-            WorkerMessage::RemoteRead { token, waker } => self.handle_remote_read(token, waker),
-            WorkerMessage::RemoteWrite { token, waker } => self.handle_remote_write(token, waker),
             WorkerMessage::Noop => true,
         }
     }
@@ -1773,18 +1760,15 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
         // For now, just log the health snapshot
         // TODO: Send this back to supervisor via a response channel
-        #[cfg(debug_assertions)]
-        {
-            tracing::trace!(
-                "[Worker {}] Health: tasks_polled={}, yield_queue={}, mpsc_queue={}, partitions={:?}, has_work={}",
-                snapshot.worker_id,
-                snapshot.stats.tasks_polled,
-                snapshot.yield_queue_len,
-                snapshot.mpsc_queue_len,
-                snapshot.active_leaf_partitions,
-                snapshot.has_work
-            );
-        }
+        tracing::trace!(
+            "[Worker {}] Health: tasks_polled={}, yield_queue={}, mpsc_queue={}, partitions={:?}, has_work={}",
+            snapshot.worker_id,
+            snapshot.stats.tasks_polled,
+            snapshot.yield_queue_len,
+            snapshot.mpsc_queue_len,
+            snapshot.active_leaf_partitions,
+            snapshot.has_work
+        );
         let _ = snapshot; // Suppress unused warning in release builds
     }
 
@@ -1820,26 +1804,6 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         {
             tracing::trace!("[Worker {}] Set shutdown flag", self.inner.worker_id);
         }
-    }
-
-    // ────────────────────────────────────────────────────────────────────────────
-    // SOCKET I/O MESSAGE HANDLERS
-    // ────────────────────────────────────────────────────────────────────────────
-
-    #[inline]
-    fn handle_remote_read(&mut self, _token: usize, waker: Waker) -> bool {
-        // DEPRECATED: Remote ops now register wakers directly via SharedFd::reader_waker()
-        // This handler is dead code but kept for compatibility with existing WorkerMessage enum
-        waker.wake();
-        true
-    }
-
-    #[inline]
-    fn handle_remote_write(&mut self, _token: usize, waker: Waker) -> bool {
-        // DEPRECATED: Remote ops now register wakers directly via SharedFd::writer_waker()
-        // This handler is dead code but kept for compatibility with existing WorkerMessage enum
-        waker.wake();
-        true
     }
 
     #[inline]
@@ -2273,7 +2237,10 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         self.poll_task(run_ctx, handle, task);
     }
 
-    /// Poll a task that has a pinned generator
+    /// Poll a task that has a pinned generator (or wants one).
+    ///
+    /// If the generator pointer is null but mode is Poll, we need to create a new
+    /// poll-mode generator for the task. This happens when pin_stack() was called.
     fn poll_task_with_pinned_generator(
         &mut self,
         run_ctx: &mut RunContext,
@@ -2297,6 +2264,19 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
         let mode = task.generator_run_mode();
 
+        // Check if we need to create a generator (null pointer with Poll mode)
+        // This happens when pin_stack() was called - it sets mode to Poll but leaves
+        // the pointer null as a signal that we need to create a dedicated generator.
+        let mut guard = unsafe { task.get_pinned_generator() };
+        let has_actual_generator = guard.generator().is_some();
+        drop(guard); // Release the guard before proceeding
+
+        if !has_actual_generator && mode == GeneratorRunMode::Poll {
+            // Need to create a poll-mode generator for this task
+            self.create_poll_mode_generator(run_ctx, handle, task);
+            return;
+        }
+
         match mode {
             GeneratorRunMode::Switch => {
                 // Switch mode: Generator has interrupted poll on stack
@@ -2318,8 +2298,20 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
     }
 
     /// Handle Switch mode: resume generator once to complete interrupted poll,
-    /// then transition to Poll mode or finish task
+    /// then transition to Poll mode or finish task.
+    ///
+    /// Switch mode means the generator was captured mid-poll (via preemption signal).
+    /// We resume once to let the interrupted poll complete, then either:
+    /// - Task completes: clean up generator
+    /// - Task still pending: transition to Poll mode with a new task-owned generator
+    ///
+    /// Note: We don't use catch_unwind here because generators have their own panic
+    /// handling mechanism via context.err that propagates panics correctly. Using
+    /// catch_unwind interferes with the generator's context switching.
     fn poll_task_switch_mode(&mut self, run_ctx: &mut RunContext, handle: TaskHandle, task: &Task) {
+        // Mark that we're handling a preempted generator
+        run_ctx.mark_preempted();
+
         let mut guard = unsafe { task.get_pinned_generator() };
         if let Some(generator) = guard.generator() {
             // Resume generator once - this completes the interrupted poll
@@ -2335,6 +2327,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                         task.finish();
                         self.inner.stats.completed_count =
                             self.inner.stats.completed_count.saturating_add(1);
+                        run_ctx.mark_task_completed();
                     } else {
                         // Task still pending - transition to Poll mode
                         // Discard the worker generator and create a task-specific Poll mode generator
@@ -2347,17 +2340,35 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                     task.finish();
                     self.inner.stats.completed_count =
                         self.inner.stats.completed_count.saturating_add(1);
+                    run_ctx.mark_task_completed();
                 }
             }
         } else {
             // Generator lost, treat as error
             task.finish();
             self.inner.stats.completed_count = self.inner.stats.completed_count.saturating_add(1);
+            run_ctx.mark_task_completed();
+
+            #[cfg(debug_assertions)]
+            tracing::warn!(
+                "[Worker {}] Switch mode task had no generator",
+                self.inner.worker_id
+            );
         }
     }
 
-    /// Handle Poll mode: generator contains poll loop, resume to continue task
+    /// Handle Poll mode: generator contains poll loop, resume to continue task.
+    ///
+    /// Poll mode means the task has its own dedicated generator with a poll loop.
+    /// Each resume polls the future once and yields the result.
+    ///
+    /// Note: We don't use catch_unwind here because generators have their own panic
+    /// handling mechanism via context.err that propagates panics correctly. Using
+    /// catch_unwind interferes with the generator's context switching.
     fn poll_task_poll_mode(&mut self, run_ctx: &mut RunContext, handle: TaskHandle, task: &Task) {
+        // Mark that we're handling an explicitly pinned generator
+        run_ctx.mark_explicit_pin();
+
         let mut guard = unsafe { task.get_pinned_generator() };
         if let Some(generator) = guard.generator() {
             // Resume generator - it will poll once and yield the result
@@ -2371,16 +2382,19 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                         task.finish();
                         self.inner.stats.completed_count =
                             self.inner.stats.completed_count.saturating_add(1);
+                        run_ctx.mark_task_completed();
                     } else if task.is_yielded() {
                         // Task yielded, re-enqueue
                         task.record_yield();
                         self.inner.stats.yielded_count += 1;
                         self.enqueue_yield(handle);
+                        // Task still running, don't mark completed
                     } else {
                         // Task returned Pending, waiting for wake
                         // Don't re-enqueue, task will be woken when ready
                         self.inner.stats.waiting_count += 1;
                         task.finish();
+                        // Task is waiting, not completed in the "done" sense
                     }
                 }
                 None => {
@@ -2389,12 +2403,20 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                     task.finish();
                     self.inner.stats.completed_count =
                         self.inner.stats.completed_count.saturating_add(1);
+                    run_ctx.mark_task_completed();
                 }
             }
         } else {
             // Generator lost
             task.finish();
             self.inner.stats.completed_count = self.inner.stats.completed_count.saturating_add(1);
+            run_ctx.mark_task_completed();
+
+            #[cfg(debug_assertions)]
+            tracing::warn!(
+                "[Worker {}] Poll mode task had no generator",
+                self.inner.worker_id
+            );
         }
     }
 
@@ -2467,20 +2489,36 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 task.finish();
                 self.inner.stats.completed_count =
                     self.inner.stats.completed_count.saturating_add(1);
+
+                // Check if generator was pinned during poll (e.g., via pin_stack() call)
                 if task.has_pinned_generator() {
-                    run_ctx.pinned = true;
-                    run_ctx.done = true;
+                    // Determine pin reason based on generator run mode
+                    let mode = task.generator_run_mode();
+                    match mode {
+                        GeneratorRunMode::Switch => run_ctx.mark_preempted(),
+                        GeneratorRunMode::Poll => run_ctx.mark_explicit_pin(),
+                        GeneratorRunMode::None => {} // Shouldn't happen
+                    }
+                    run_ctx.mark_task_completed();
                 }
+
                 self.inner.current_task = core::ptr::null_mut();
                 if let Some(ptr) = task.take_future() {
                     unsafe { FutureAllocator::drop_boxed(ptr) };
                 }
             }
             Some(Poll::Pending) => {
+                // Check if generator was pinned during poll
                 if task.has_pinned_generator() {
-                    run_ctx.pinned = true;
-                    run_ctx.done = true;
+                    let mode = task.generator_run_mode();
+                    match mode {
+                        GeneratorRunMode::Switch => run_ctx.mark_preempted(),
+                        GeneratorRunMode::Poll => run_ctx.mark_explicit_pin(),
+                        GeneratorRunMode::None => {}
+                    }
+                    // Task is still pending, not completed
                 }
+
                 if task.is_yielded() {
                     task.record_yield();
                     self.inner.stats.yielded_count += 1;
@@ -2494,9 +2532,15 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 }
             }
             None => {
+                // Future is gone - task completed or was cancelled
                 if task.has_pinned_generator() {
-                    run_ctx.pinned = true;
-                    run_ctx.done = true;
+                    let mode = task.generator_run_mode();
+                    match mode {
+                        GeneratorRunMode::Switch => run_ctx.mark_preempted(),
+                        GeneratorRunMode::Poll => run_ctx.mark_explicit_pin(),
+                        GeneratorRunMode::None => {}
+                    }
+                    run_ctx.mark_task_completed();
                 }
                 self.inner.stats.completed_count += 1;
                 task.finish();
@@ -2556,7 +2600,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 }
 
 /// Schedules a timer for the task currently being polled by the active worker.
-pub fn schedule_timer_for_task(_cx: &Context<'_>, timer: &Timer, delay: Duration) -> Option<u64> {
+pub(crate) fn schedule_timer_for_task(_cx: &Context<'_>, timer: &Timer, delay: Duration) -> Option<u64> {
     let worker = current_worker();
     if worker.is_none() {
         return None;
@@ -2615,7 +2659,7 @@ pub fn schedule_timer_for_task(_cx: &Context<'_>, timer: &Timer, delay: Duration
 }
 
 /// Cancels a timer owned by the task currently being polled by the active worker.
-pub fn cancel_timer_for_current_task(timer: &Timer) -> bool {
+pub(crate) fn cancel_timer_for_current_task(timer: &Timer) -> bool {
     if !timer.is_scheduled() {
         return false;
     }

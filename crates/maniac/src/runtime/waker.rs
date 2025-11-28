@@ -682,40 +682,6 @@ impl WorkerWaker {
                 self.sleepers.fetch_sub(1, Ordering::Relaxed);
                 return true;
             }
-
-            // Check if we woke up due to I/O
-            // If we have pending I/O events, return false to let the worker process them
-            // Note: poll_once returns number of events, but we don't capture it here
-            // Ideally we'd check if any non-waker events occurred
-            // For now, we assume that if we woke up and didn't get a permit, it might be I/O
-            // The caller loop typically processes I/O after acquire returns
-            // But wait - the caller calls acquire() which BLOCKS.
-            // If we return false, the caller (poll_blocking) continues its loop.
-            // The worker loop needs to know if it should process I/O.
-            // In the new design, poll_once processes events internally via callbacks/handlers.
-            // So if we return false, it just means "no permit acquired".
-            // But we should loop if we just woke up spuriously or for I/O that was handled internally.
-
-            // Actually, if poll_once processed events, those events might have pushed work to queues.
-            // So we should loop and check try_acquire again.
-            // If we are here, try_acquire failed.
-
-            // Wait, if poll_once returned, it means some event happened.
-            // If it was a Waker event (from release()), we should retry acquiring.
-            // If it was an I/O event, the handler ran. The handler might have woken a task.
-            // Waking a task pushes it to a queue and calls mark_active/release.
-            // So permits would increase.
-
-            // So: simply looping is correct. We only return true if we got a permit.
-            // BUT: what if we want to break to process something else?
-            // The worker loop structure is:
-            // run_once() -> check queues
-            // if no work -> poll_blocking()
-            // poll_blocking calls acquire_with_io
-            //
-            // If acquire_with_io blocks indefinitely, it handles I/O events internally in poll_once.
-            // So we don't need to return to let the worker handle I/O.
-            // We only return when we have a permit (Task work available).
         }
     }
 

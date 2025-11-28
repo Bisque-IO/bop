@@ -36,9 +36,8 @@ impl Drop for TickHandlerRegistration {
     }
 }
 
-// SAFETY: TickHandlerRegistration only contains thread-safe types
-unsafe impl Send for TickHandlerRegistration {}
-unsafe impl Sync for TickHandlerRegistration {}
+// Note: TickHandlerRegistration is automatically Send + Sync because it only contains
+// Weak<TickService> and u64, both of which are Send + Sync.
 
 /// Trait for services that need to be notified on each tick.
 pub trait TickHandler: Send + Sync {
@@ -177,8 +176,6 @@ impl TickService {
         })
     }
 
-    /// Register a handler to be called on each tick.
-    /// Returns a registration guard that will automatically unregister the handler when dropped.
     /// Recalculates the base tick duration and all handler intervals.
     /// This is called when handlers are added or removed to maintain optimal timing.
     ///
@@ -222,12 +219,17 @@ impl TickService {
                 state.tick_interval = if h_duration_ns <= min_handler_duration_ns {
                     1
                 } else {
-                    (h_duration_ns + min_handler_duration_ns - 1) / min_handler_duration_ns
+                    // Use saturating_add to prevent overflow when h_duration_ns is near u64::MAX
+                    h_duration_ns.saturating_add(min_handler_duration_ns - 1) / min_handler_duration_ns
                 };
             }
         }
     }
 
+    /// Register a handler to be called on each tick.
+    /// Returns a registration guard that will automatically unregister the handler when dropped.
+    /// The registration guard must be kept alive to maintain the handler registration.
+    #[must_use = "the registration guard must be stored to keep the handler registered"]
     pub fn register(
         self: &Arc<Self>,
         handler: Arc<dyn TickHandler>,
@@ -247,7 +249,8 @@ impl TickService {
         let tick_interval = if handler_duration_ns <= current_base_ns {
             1 // Call on every tick
         } else {
-            (handler_duration_ns + current_base_ns - 1) / current_base_ns // Round up
+            // Use saturating_add to prevent overflow when handler_duration_ns is near u64::MAX
+            handler_duration_ns.saturating_add(current_base_ns - 1) / current_base_ns // Round up
         };
 
         let handler_id = self.next_handler_id.fetch_add(1, Ordering::Relaxed);
@@ -307,16 +310,15 @@ impl TickService {
                 // Calculate target time for this tick to maintain precise timing
                 // We calculate based on the next tick to know when to wake up
                 let next_tick = tick_count.wrapping_add(1);
-                let target_time =
-                    if let Some(target_duration) = tick_duration.checked_mul(next_tick as u32) {
-                        start.checked_add(target_duration).unwrap_or_else(|| {
-                            // If we overflow Instant, just use now + tick_duration as fallback
-                            Instant::now() + tick_duration
-                        })
-                    } else {
-                        // tick_count is too large to multiply, use incremental approach
+                // Use saturating_mul to avoid overflow - at u64::MAX ticks this saturates
+                // but that's ~584 years at 1ns tick rate, so practically unreachable
+                let target_ns = tick_duration_ns.saturating_mul(next_tick);
+                let target_time = start
+                    .checked_add(Duration::from_nanos(target_ns))
+                    .unwrap_or_else(|| {
+                        // If we overflow Instant, just use now + tick_duration as fallback
                         Instant::now() + tick_duration
-                    };
+                    });
 
                 if service.shutdown.load(Ordering::Acquire) {
                     // Graceful shutdown: notify all handlers with timeout
@@ -335,13 +337,15 @@ impl TickService {
 
                         // Call on_shutdown with panic isolation
                         if let Some(handler) = state.handler.upgrade() {
+                            let handler_id = state.handler_id;
                             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
                                 handler.on_shutdown();
                             }));
                             if service.log_handler_panics.load(Ordering::Relaxed) && result.is_err()
                             {
                                 eprintln!(
-                                    "Warning: Handler on_shutdown() panicked during shutdown"
+                                    "Warning: Handler {} on_shutdown() panicked during shutdown",
+                                    handler_id
                                 );
                                 service.error_count.fetch_add(1, Ordering::Relaxed);
                             }
@@ -353,9 +357,9 @@ impl TickService {
                 // Calculate current time
                 let now_ns = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
 
-                // Collect handlers to call and release lock before calling them
-                // Pre-allocate vectors with estimated capacity to reduce allocations
-                let (handlers_to_call, dead_handler_ids): (Vec<_>, Vec<_>) = {
+                // Collect handlers to call, clean up dead handlers, and release lock before calling them
+                // This combines collection and cleanup in a single lock acquisition to reduce contention
+                let handlers_to_call: Vec<_> = {
                     let mut handlers = service.handlers.lock().expect("handlers lock poisoned");
                     let estimated_handlers = handlers.len();
                     let mut calls = Vec::with_capacity(estimated_handlers);
@@ -378,6 +382,8 @@ impl TickService {
                         if tick_count % state.tick_interval == 0 {
                             if let Some(handler) = handler_alive {
                                 calls.push((handler, state.handler_tick_count, *handler_id));
+                                // wrapping_add is safe here: overflow after 2^64 ticks is not a
+                                // practical concern (~584 years at 1ns tick rate)
                                 state.handler_tick_count = state.handler_tick_count.wrapping_add(1);
                             }
                         } else {
@@ -385,19 +391,18 @@ impl TickService {
                             state.stats.missed_ticks.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    (calls, dead_ids)
-                }; // Lock released here
 
-                // Clean up dead handlers if any
-                if !dead_handler_ids.is_empty() {
-                    let mut handlers = service.handlers.lock().expect("handlers lock poisoned");
-                    for dead_id in dead_handler_ids {
-                        handlers.remove(&dead_id);
+                    // Clean up dead handlers while we still hold the lock
+                    if !dead_ids.is_empty() {
+                        for dead_id in dead_ids {
+                            handlers.remove(&dead_id);
+                        }
+                        // Recalculate tick duration and intervals after removing dead handlers
+                        service.recalculate_tick_duration(&mut handlers);
                     }
 
-                    // Use the shared recalculation method to update tick duration and intervals
-                    service.recalculate_tick_duration(&mut handlers);
-                }
+                    calls
+                }; // Lock released here
 
                 // Call handlers outside the lock to prevent deadlocks
                 // Process handlers and collect stats updates to minimize lock contention
@@ -411,8 +416,8 @@ impl TickService {
                     }));
                     if service.log_handler_panics.load(Ordering::Relaxed) && result.is_err() {
                         eprintln!(
-                            "Warning: Handler on_tick() panicked for tick {}",
-                            tick_count
+                            "Warning: Handler {} on_tick() panicked for tick {}",
+                            handler_id, tick_count
                         );
                         service.error_count.fetch_add(1, Ordering::Relaxed);
                     }
@@ -424,11 +429,11 @@ impl TickService {
                     stats_updates.push((handler_id, handler_duration_ns));
                 }
 
-                // Batch update handler statistics to minimize lock contention
+                // Batch update handler statistics in a single lock acquisition
                 if !stats_updates.is_empty() {
-                    let mut handlers = service.handlers.lock().expect("handlers lock poisoned");
+                    let handlers = service.handlers.lock().expect("handlers lock poisoned");
                     for (handler_id, handler_duration_ns) in stats_updates {
-                        if let Some(state) = handlers.get_mut(&handler_id) {
+                        if let Some(state) = handlers.get(&handler_id) {
                             let prev_total =
                                 state.stats.total_ticks.fetch_add(1, Ordering::Relaxed);
                             let new_total = prev_total + 1;
@@ -454,6 +459,8 @@ impl TickService {
                     }
                 }
 
+                // wrapping_add is safe here: overflow after 2^64 ticks is not a
+                // practical concern (~584 years at 1ns tick rate)
                 tick_count = tick_count.wrapping_add(1);
 
                 // Measure tick loop processing duration
@@ -586,11 +593,13 @@ impl TickService {
     }
 
     /// Returns a snapshot of the current tick thread statistics
+    #[must_use]
     pub fn tick_stats(&self) -> TickStatsSnapshot {
         self.tick_stats.snapshot()
     }
 
     /// Returns the current tick duration in nanoseconds
+    #[must_use]
     pub fn current_tick_duration_ns(&self) -> u64 {
         self.tick_duration_ns.load(Ordering::Acquire)
     }
@@ -603,6 +612,7 @@ impl TickService {
     }
 
     /// Get error statistics for the tick service
+    #[must_use]
     pub fn error_stats(&self) -> (u64, TickStatsSnapshot) {
         (
             self.error_count.load(Ordering::Relaxed),
@@ -616,11 +626,13 @@ impl TickService {
     }
 
     /// Check if panic logging is enabled
+    #[must_use]
     pub fn is_panic_logging_enabled(&self) -> bool {
         self.log_handler_panics.load(Ordering::Relaxed)
     }
 
     /// Returns a vector of tick statistics for each registered handler
+    #[must_use]
     pub fn handler_stats(&self) -> Vec<TickStatsSnapshot> {
         let handlers = self.handlers.lock().expect("handlers lock poisoned");
         handlers
