@@ -8,6 +8,7 @@ use std::time::Duration;
 use pin_project_lite::pin_project;
 
 use crate::runtime::timer::{Timer, TimerDelay};
+use crate::runtime::worker::{current_worker_now_ns, schedule_timer_for_task};
 use crate::time::Instant;
 
 /// A future that completes after a specified duration.
@@ -28,7 +29,8 @@ use crate::time::Instant;
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Sleep {
     timer: Timer,
-    delay: Option<TimerDelay<'static>>,
+    delay: Duration,
+    scheduled: bool,
 }
 
 // SAFETY: Sleep contains TimerDelay which has a lifetime parameter, but we ensure
@@ -53,15 +55,11 @@ impl Sleep {
     /// ```
     pub fn new(duration: Duration) -> Self {
         let timer = Timer::new();
-        let delay = timer.delay(duration);
-
-        // SAFETY: We own the Timer, so it will live as long as Sleep.
-        // We extend the lifetime to 'static because Timer is owned and won't be dropped.
-        let delay = unsafe { std::mem::transmute::<TimerDelay<'_>, TimerDelay<'static>>(delay) };
 
         Self {
             timer,
-            delay: Some(delay),
+            delay: duration,
+            scheduled: false,
         }
     }
 
@@ -115,13 +113,13 @@ impl Sleep {
             deadline - now
         };
 
-        // Cancel the existing timer
-        let _ = self.timer.cancel();
+        if self.scheduled {
+            // Cancel the existing timer
+            let _ = self.timer.cancel();
+        }
 
         // Create a new delay
-        let delay = self.timer.delay(duration);
-        let delay = unsafe { std::mem::transmute::<TimerDelay<'_>, TimerDelay<'static>>(delay) };
-        self.delay = Some(delay);
+        self.delay = duration;
     }
 }
 
@@ -129,18 +127,24 @@ impl Future for Sleep {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(ref mut delay) = self.delay {
-            match Pin::new(delay).poll(cx) {
-                Poll::Ready(()) => {
-                    self.delay = None;
-                    Poll::Ready(())
-                }
-                Poll::Pending => Poll::Pending,
+        if !self.scheduled {
+            if schedule_timer_for_task(cx, &self.timer, self.delay).is_some() {
+                self.scheduled = true;
             }
-        } else {
-            // Already completed
-            Poll::Ready(())
+            return Poll::Pending;
         }
+
+        // Check timer deadline using the worker's time source (same as timer wheel)
+        // rather than Instant::now() which may use a different clock on some platforms
+        let deadline = self.timer.deadline_ns();
+        let now_ns = current_worker_now_ns();
+        if now_ns >= deadline {
+            self.timer.reset();
+            self.scheduled = false;
+            return Poll::Ready(());
+        }
+
+        Poll::Pending
     }
 }
 
@@ -148,15 +152,16 @@ impl std::fmt::Debug for Sleep {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sleep")
             .field("timer", &self.timer)
-            .field(
-                "delay",
-                if self.delay.is_some() {
-                    &"Some"
-                } else {
-                    &"None"
-                },
-            )
+            .field("delay", &self.delay)
             .finish()
+    }
+}
+
+impl Drop for Sleep {
+    fn drop(&mut self) {
+        if self.scheduled {
+            let _ = self.timer.cancel();
+        }
     }
 }
 

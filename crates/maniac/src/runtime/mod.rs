@@ -58,10 +58,11 @@ use std::io;
 use std::panic::Location;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
+use parking_lot::Mutex;
 use task::{
     FutureAllocator, SpawnError, TaskArena, TaskArenaConfig, TaskArenaOptions, TaskArenaStats,
     TaskHandle,
@@ -88,24 +89,22 @@ pub fn new_single_threaded() -> io::Result<DefaultRuntime> {
 }
 
 pub fn new_multi_threaded(
-    worker_count: usize,
+    mut worker_count: usize,
     mut max_tasks: usize,
-    blocking_worker_count: usize,
-    mut max_blocking_tasks: usize,
 ) -> io::Result<DefaultRuntime> {
-    let worker_count = worker_count.max(1);
+    worker_count = worker_count.max(0);
+    if worker_count == 0 {
+        worker_count = crate::utils::cpu_cores().len();
+        if worker_count > 1 {
+            worker_count = worker_count - 1;
+        }
+    }
     if max_tasks == 0 {
         max_tasks = worker_count * 4096;
     }
     max_tasks = max_tasks.next_power_of_two();
     let config = ExecutorConfig::with_max_tasks(worker_count, max_tasks)?;
 
-    let blocking_worker_count = blocking_worker_count.max(1);
-    if max_blocking_tasks == 0 {
-        max_blocking_tasks = blocking_worker_count * 4096;
-    }
-    let blocking_config =
-        ExecutorConfig::with_max_tasks(blocking_worker_count, max_blocking_tasks)?;
     let tick_service = TickService::new(Duration::from_millis(1));
     tick_service.start();
 
@@ -739,7 +738,7 @@ impl<T> JoinShared<T> {
     /// This method is idempotent - calling it multiple times is safe but only
     /// the first call will have an effect.
     fn complete(&self, value: T) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
 
         // Idempotency check: if result already exists, don't overwrite it
         if state.result.is_some() {
@@ -779,7 +778,7 @@ impl<T> JoinShared<T> {
     fn poll(&self, cx: &mut Context<'_>) -> Poll<T> {
         // Fast path: check atomic flag first (avoid mutex if already ready)
         if self.ready.load(Ordering::Acquire) {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             if let Some(value) = state.result.take() {
                 return Poll::Ready(value);
             }
@@ -787,7 +786,7 @@ impl<T> JoinShared<T> {
 
         // Slow path: acquire lock and check again (handles race condition)
         // Also register waker if task is still pending
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
 
         // Double-check: result might have been set between the atomic check and lock acquisition
         if let Some(value) = state.result.take() {

@@ -1,5 +1,5 @@
 use maniac::future::block_on;
-use maniac::runtime::{new_multi_threaded, new_single_threaded};
+use maniac::runtime::{new_multi_threaded as new_with_config, new_single_threaded};
 use maniac::sync::Semaphore;
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,7 +70,7 @@ fn test_acquire_owned() {
 
 #[test]
 fn test_semaphore_contention() {
-    let rt = new_multi_threaded(2, 0, 1, 0).unwrap();
+    let rt = new_with_config(2, 0).unwrap();
 
     let sem = Arc::new(Semaphore::new(1));
     let sem_clone = sem.clone();
@@ -79,7 +79,6 @@ fn test_semaphore_contention() {
         .spawn(async move {
             let _p = sem_clone.acquire().await;
             maniac::time::sleep(Duration::from_millis(50)).await;
-            // std::thread::sleep(Duration::from_millis(50));
         })
         .unwrap();
 

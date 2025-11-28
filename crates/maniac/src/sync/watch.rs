@@ -1,8 +1,10 @@
 //! Watch channel for broadcasting the latest value to multiple receivers.
 
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::task::Waker;
+
+use parking_lot::{Mutex, RwLock};
 
 /// Error returned when trying to receive from a closed watch channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,11 +61,11 @@ pub struct Sender<T> {
 impl<T: Clone> Sender<T> {
     /// Sends a new value through the channel.
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
-        *self.inner.value.write().unwrap() = value;
-        *self.inner.version.lock().unwrap() += 1;
+        *self.inner.value.write() = value;
+        *self.inner.version.lock() += 1;
 
         // Wake all receivers
-        let wakers = self.inner.wakers.lock().unwrap();
+        let wakers = self.inner.wakers.lock();
         for waker in wakers.iter() {
             waker.wake_by_ref();
         }
@@ -75,13 +77,13 @@ impl<T: Clone> Sender<T> {
     where
         F: FnOnce(&mut T) -> bool,
     {
-        let mut guard = self.inner.value.write().unwrap();
+        let mut guard = self.inner.value.write();
         if modify(&mut guard) {
             drop(guard);
-            *self.inner.version.lock().unwrap() += 1;
+            *self.inner.version.lock() += 1;
 
             // Wake all receivers
-            let wakers = self.inner.wakers.lock().unwrap();
+            let wakers = self.inner.wakers.lock();
             for waker in wakers.iter() {
                 waker.wake_by_ref();
             }
@@ -94,7 +96,7 @@ impl<T: Clone> Sender<T> {
     /// Returns a reference to the current value.
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
-            inner: self.inner.value.read().unwrap(),
+            inner: self.inner.value.read(),
         }
     }
 }
@@ -128,14 +130,14 @@ impl<T: Clone> Receiver<T> {
             type Output = Result<(), RecvError>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                let current_version = *self.receiver.inner.version.lock().unwrap();
+                let current_version = *self.receiver.inner.version.lock();
                 if current_version != self.receiver.last_version {
                     self.receiver.last_version = current_version;
                     return Poll::Ready(Ok(()));
                 }
 
                 // Register waker
-                let mut wakers = self.receiver.inner.wakers.lock().unwrap();
+                let mut wakers = self.receiver.inner.wakers.lock();
                 wakers.push(cx.waker().clone());
                 Poll::Pending
             }
@@ -147,7 +149,7 @@ impl<T: Clone> Receiver<T> {
     /// Returns a reference to the current value.
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
-            inner: self.inner.value.read().unwrap(),
+            inner: self.inner.value.read(),
         }
     }
 }
@@ -163,7 +165,7 @@ impl<T> Clone for Receiver<T> {
 
 /// A reference to the current value in a watch channel.
 pub struct Ref<'a, T> {
-    inner: std::sync::RwLockReadGuard<'a, T>,
+    inner: parking_lot::RwLockReadGuard<'a, T>,
 }
 
 impl<'a, T> Deref for Ref<'a, T> {

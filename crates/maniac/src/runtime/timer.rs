@@ -2,30 +2,18 @@ use super::task::TaskSlot;
 use super::worker::{
     cancel_timer_for_current_task, current_worker_now_ns, schedule_timer_for_task,
 };
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
-use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::ptr::NonNull;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimerState {
-    Idle = 0,
-    Scheduled = 1,
-    Cancelled = 2,
-}
-
-impl From<u8> for TimerState {
-    fn from(val: u8) -> Self {
-        match val {
-            0 => TimerState::Idle,
-            1 => TimerState::Scheduled,
-            2 => TimerState::Cancelled,
-            _ => TimerState::Idle, // Should not happen with correct usage
-        }
-    }
+    Idle,
+    Scheduled,
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,23 +66,23 @@ unsafe impl Sync for TimerHandle {}
 
 #[derive(Debug)]
 pub struct Timer {
-    state: AtomicU8,
-    deadline_ns: AtomicU64,
-    task_slot: AtomicPtr<TaskSlot>,
-    task_id: AtomicU32,
-    worker_id: AtomicU32,
-    timer_id: AtomicU64,
+    state: Cell<TimerState>,
+    deadline_ns: Cell<u64>,
+    task_slot: Cell<Option<NonNull<TaskSlot>>>,
+    task_id: Cell<u32>,
+    worker_id: Cell<Option<u32>>,
+    timer_id: Cell<u64>,
 }
 
 impl Timer {
     pub const fn new() -> Self {
         Self {
-            state: AtomicU8::new(TimerState::Idle as u8),
-            deadline_ns: AtomicU64::new(0),
-            task_slot: AtomicPtr::new(ptr::null_mut()),
-            task_id: AtomicU32::new(0),
-            worker_id: AtomicU32::new(u32::MAX),
-            timer_id: AtomicU64::new(0),
+            state: Cell::new(TimerState::Idle),
+            deadline_ns: Cell::new(0),
+            task_slot: Cell::new(None),
+            task_id: Cell::new(0),
+            worker_id: Cell::new(None),
+            timer_id: Cell::new(0),
         }
     }
 
@@ -105,12 +93,12 @@ impl Timer {
 
     #[inline(always)]
     pub fn state(&self) -> TimerState {
-        self.state.load(Ordering::Relaxed).into()
+        self.state.get()
     }
 
     #[inline(always)]
     pub fn deadline_ns(&self) -> u64 {
-        self.deadline_ns.load(Ordering::Relaxed)
+        self.deadline_ns.get()
     }
 
     #[inline(always)]
@@ -130,66 +118,63 @@ impl Timer {
         task_id: u32,
         worker_id: u32,
     ) -> TimerHandle {
-        self.task_slot.store(task_slot.as_ptr(), Ordering::Relaxed);
-        self.task_id.store(task_id, Ordering::Relaxed);
-        self.worker_id.store(worker_id, Ordering::Relaxed);
-        self.timer_id.store(0, Ordering::Relaxed);
-        self.deadline_ns.store(0, Ordering::Relaxed);
-        self.state.store(TimerState::Idle as u8, Ordering::Relaxed);
+        self.task_slot.set(Some(task_slot));
+        self.task_id.set(task_id);
+        self.worker_id.set(Some(worker_id));
+        self.timer_id.set(0);
+        self.deadline_ns.set(0);
+        self.state.set(TimerState::Idle);
 
         TimerHandle::new(task_slot, task_id, worker_id, 0)
     }
 
     #[inline(always)]
     pub(crate) fn commit_schedule(&self, timer_id: u64, deadline_ns: u64) {
-        self.timer_id.store(timer_id, Ordering::Relaxed);
-        self.deadline_ns.store(deadline_ns, Ordering::Relaxed);
-        self.state
-            .store(TimerState::Scheduled as u8, Ordering::Relaxed);
+        self.timer_id.set(timer_id);
+        self.deadline_ns.set(deadline_ns);
+        self.state.set(TimerState::Scheduled);
     }
 
     #[inline(always)]
     pub(crate) fn mark_cancelled(&self, timer_id: u64) -> bool {
-        if self.timer_id.load(Ordering::Relaxed) != timer_id {
+        if self.timer_id.get() != timer_id {
             return false;
         }
-        self.state
-            .store(TimerState::Cancelled as u8, Ordering::Relaxed);
+        self.state.set(TimerState::Cancelled);
         self.clear_identity();
         true
     }
 
     #[inline(always)]
     pub(crate) fn reset(&self) {
-        self.state.store(TimerState::Idle as u8, Ordering::Relaxed);
+        self.state.set(TimerState::Idle);
         self.clear_identity();
     }
 
     #[inline(always)]
     pub(crate) fn worker_id(&self) -> Option<u32> {
-        match self.worker_id.load(Ordering::Relaxed) {
-            id if id == u32::MAX => None,
-            id => Some(id),
-        }
+        self.worker_id.get()
     }
 
     #[inline(always)]
     pub(crate) fn timer_id(&self) -> u64 {
-        self.timer_id.load(Ordering::Relaxed)
+        self.timer_id.get()
     }
 
     #[inline(always)]
     fn clear_identity(&self) {
-        self.deadline_ns.store(0, Ordering::Relaxed);
-        self.timer_id.store(0, Ordering::Relaxed);
-        self.worker_id.store(u32::MAX, Ordering::Relaxed);
-        self.task_slot.store(ptr::null_mut(), Ordering::Relaxed);
+        self.deadline_ns.set(0);
+        self.timer_id.set(0);
+        self.worker_id.set(None);
+        self.task_slot.set(None);
     }
 }
 
-// Timer is now naturally Sync because Atomic types are Sync
+// SAFETY: Timer is only accessed by a single worker thread at a time,
+// as guaranteed by the scheduler. The Cell fields are not Sync, but
+// we manually implement Send to allow Timer to be moved between threads
+// during task migration (which only happens when no thread is accessing it).
 unsafe impl Send for Timer {}
-// unsafe impl Sync for Timer {}
 
 impl Default for Timer {
     fn default() -> Self {

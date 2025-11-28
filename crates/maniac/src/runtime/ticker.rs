@@ -2,12 +2,16 @@ use std::{
     collections::HashMap,
     panic,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
 };
+
+use parking_lot::Mutex;
+
+use core_affinity::CoreId;
 
 // Note: Panic logging is now per-instance, configured via TickService::new_with_config()
 // or TickService::set_panic_logging()
@@ -234,7 +238,7 @@ impl TickService {
         self: &Arc<Self>,
         handler: Arc<dyn TickHandler>,
     ) -> Option<TickHandlerRegistration> {
-        let mut handlers = self.handlers.lock().expect("handlers lock poisoned");
+        let mut handlers = self.handlers.lock();
 
         let handler_duration_ns = handler.tick_duration().as_nanos();
         debug_assert!(
@@ -275,7 +279,7 @@ impl TickService {
     /// Internal method to unregister a handler by ID.
     /// Returns true if a handler was found and removed.
     fn unregister(&self, handler_id: u64) -> bool {
-        let mut handlers = self.handlers.lock().expect("handlers lock poisoned");
+        let mut handlers = self.handlers.lock();
 
         let removed = handlers.remove(&handler_id).is_some();
 
@@ -287,9 +291,18 @@ impl TickService {
         removed
     }
 
-    /// Start the tick thread if not already started.
     pub fn start(self: &Arc<Self>) {
-        let mut tick_thread_guard = self.tick_thread.lock().expect("tick_thread lock poisoned");
+        let cpu_cores = crate::utils::cpu_cores();
+        if cpu_cores.len() > 0 {
+            self.start_with_core(Some(cpu_cores[0]));
+        } else {
+            self.start_with_core(None);
+        }
+    }
+
+    /// Start the tick thread if not already started.
+    pub fn start_with_core(self: &Arc<Self>, core_id: Option<CoreId>) {
+        let mut tick_thread_guard = self.tick_thread.lock();
         if tick_thread_guard.is_some() {
             return; // Already started
         }
@@ -297,6 +310,10 @@ impl TickService {
         let service = Arc::clone(self);
 
         let handle = thread::spawn(move || {
+            if let Some(core_id) = core_id {
+                core_affinity::set_for_current(core_id);
+            }
+
             let start = Instant::now();
             let mut tick_count: u64 = 0;
 
@@ -322,7 +339,7 @@ impl TickService {
 
                 if service.shutdown.load(Ordering::Acquire) {
                     // Graceful shutdown: notify all handlers with timeout
-                    let handlers = service.handlers.lock().expect("handlers lock poisoned");
+                    let handlers = service.handlers.lock();
                     let shutdown_start = Instant::now();
 
                     for (_handler_id, state) in handlers.iter() {
@@ -360,7 +377,7 @@ impl TickService {
                 // Collect handlers to call, clean up dead handlers, and release lock before calling them
                 // This combines collection and cleanup in a single lock acquisition to reduce contention
                 let handlers_to_call: Vec<_> = {
-                    let mut handlers = service.handlers.lock().expect("handlers lock poisoned");
+                    let mut handlers = service.handlers.lock();
                     let estimated_handlers = handlers.len();
                     let mut calls = Vec::with_capacity(estimated_handlers);
                     let mut dead_ids = Vec::new(); // Usually empty, so no pre-allocation
@@ -431,7 +448,7 @@ impl TickService {
 
                 // Batch update handler statistics in a single lock acquisition
                 if !stats_updates.is_empty() {
-                    let handlers = service.handlers.lock().expect("handlers lock poisoned");
+                    let handlers = service.handlers.lock();
                     for (handler_id, handler_duration_ns) in stats_updates {
                         if let Some(state) = handlers.get(&handler_id) {
                             let prev_total =
@@ -585,7 +602,6 @@ impl TickService {
         if let Some(handle) = self
             .tick_thread
             .lock()
-            .expect("tick_thread lock poisoned")
             .take()
         {
             let _ = handle.join();
@@ -634,7 +650,7 @@ impl TickService {
     /// Returns a vector of tick statistics for each registered handler
     #[must_use]
     pub fn handler_stats(&self) -> Vec<TickStatsSnapshot> {
-        let handlers = self.handlers.lock().expect("handlers lock poisoned");
+        let handlers = self.handlers.lock();
         handlers
             .values()
             .map(|state| state.stats.snapshot())
