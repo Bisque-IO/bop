@@ -34,8 +34,8 @@ use rand::RngCore;
 
 use crate::future::waker::DiatomicWaker;
 use crate::parking::{Parker, Unparker};
-use crate::spsc::NoOpSignal;
-use crate::spsc::dynamic::DynSpscConfig;
+use crate::detail::spsc::NoOpSignal;
+use crate::detail::spsc::dynamic::DynSpscConfig;
 use crate::sync::signal::{AsyncSignalWaker, Signal};
 use crate::utils::CachePadded;
 use crate::{PopError, PushError};

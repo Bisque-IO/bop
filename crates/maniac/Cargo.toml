@@ -22,6 +22,8 @@ default = [
     "utils",
     "async-cancel",
     "tls-rustls",
+    "hyper-compat",
+    "tokio-compat",
     "tracing",
     "unlinkat",
     "renameat",

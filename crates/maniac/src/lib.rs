@@ -27,6 +27,8 @@ pub mod blocking;
 pub mod buf;
 #[cfg(feature = "tokio-compat")]
 pub mod compat;
+
+mod detail;
 #[macro_use]
 pub mod driver;
 pub mod fs;
@@ -37,7 +39,7 @@ mod loom_exports;
 pub mod net;
 pub mod process;
 pub mod runtime;
-mod spsc;
+
 pub mod signal;
 pub mod sync;
 pub mod time;

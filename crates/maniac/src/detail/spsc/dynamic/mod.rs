@@ -1046,7 +1046,7 @@ unsafe fn free_segment<T>(ptr_base: *mut MaybeUninit<T>, seg_size: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spsc::NoOpSignal;
+    use crate::detail::spsc::NoOpSignal;
 
     fn test_config() -> DynSpscConfig {
         DynSpscConfig::new(6, 8) // 64 items/segment, 256 segments

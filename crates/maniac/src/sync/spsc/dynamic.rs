@@ -53,7 +53,7 @@ use crate::utils::CachePadded;
 
 use crate::sync::signal::AsyncSignalGate;
 
-use crate::spsc::dynamic::{DynSpsc, DynSpscConfig, Receiver, Sender};
+use crate::detail::spsc::dynamic::{DynSpsc, DynSpscConfig, Receiver, Sender};
 use crate::{PopError, PushError};
 
 use std::pin::Pin;
@@ -873,7 +873,7 @@ pub fn new_async_blocking_with_config<T>(
 // Unbounded Dynamic SPSC Variants
 // ══════════════════════════════════════════════════════════════════════════════
 
-use crate::spsc::dynamic::unbounded::{
+use crate::detail::spsc::dynamic::unbounded::{
     DynUnboundedReceiver as DynUnboundedReceiver_, DynUnboundedSender as DynUnboundedSender_,
     DynUnboundedSpsc,
 };

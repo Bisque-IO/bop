@@ -1238,7 +1238,7 @@ impl AsyncSignalGate {
     }
 }
 
-impl crate::spsc::SignalSchedule for AsyncSignalGate {
+impl crate::detail::spsc::SignalSchedule for AsyncSignalGate {
     fn schedule(&self) -> bool {
         self.schedule()
     }

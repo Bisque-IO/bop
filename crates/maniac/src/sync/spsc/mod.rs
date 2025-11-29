@@ -230,13 +230,13 @@ impl AsyncSpscShared {
 
 /// Asynchronous producer façade for [`SegSpsc`].
 pub struct AsyncSpscProducer<T, const P: usize, const NUM_SEGS_P2: usize> {
-    sender: crate::spsc::Sender<T, P, NUM_SEGS_P2, AsyncSignalGate>,
+    sender: crate::detail::spsc::Sender<T, P, NUM_SEGS_P2, AsyncSignalGate>,
     shared: Arc<AsyncSpscShared>,
 }
 
 impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncSpscProducer<T, P, NUM_SEGS_P2> {
     fn new(
-        sender: crate::spsc::Sender<T, P, NUM_SEGS_P2, AsyncSignalGate>,
+        sender: crate::detail::spsc::Sender<T, P, NUM_SEGS_P2, AsyncSignalGate>,
         shared: Arc<AsyncSpscShared>,
     ) -> Self {
         Self { sender, shared }
@@ -245,7 +245,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncSpscProducer<T, P, NUM_SE
     /// Capacity of the underlying queue.
     #[inline]
     pub fn capacity(&self) -> usize {
-        crate::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::capacity()
+        crate::detail::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::capacity()
     }
 
     /// Fast-path send without suspension.
@@ -473,13 +473,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Sink<T> for AsyncSpscProducer<
 
 /// Asynchronous consumer façade for [`SegSpsc`].
 pub struct AsyncSpscConsumer<T, const P: usize, const NUM_SEGS_P2: usize> {
-    receiver: crate::spsc::Receiver<T, P, NUM_SEGS_P2, AsyncSignalGate>,
+    receiver: crate::detail::spsc::Receiver<T, P, NUM_SEGS_P2, AsyncSignalGate>,
     shared: Arc<AsyncSpscShared>,
 }
 
 impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncSpscConsumer<T, P, NUM_SEGS_P2> {
     fn new(
-        receiver: crate::spsc::Receiver<T, P, NUM_SEGS_P2, AsyncSignalGate>,
+        receiver: crate::detail::spsc::Receiver<T, P, NUM_SEGS_P2, AsyncSignalGate>,
         shared: Arc<AsyncSpscShared>,
     ) -> Self {
         Self { receiver, shared }
@@ -488,7 +488,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncSpscConsumer<T, P, NUM_SE
     /// Capacity of the underlying queue.
     #[inline]
     pub fn capacity(&self) -> usize {
-        crate::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::capacity()
+        crate::detail::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::capacity()
     }
 
     /// Attempts to receive without awaiting.
@@ -710,13 +710,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Stream for AsyncSpscConsumer<T
 /// });
 /// ```
 pub struct BlockingSpscProducer<T, const P: usize, const NUM_SEGS_P2: usize> {
-    sender: crate::spsc::Sender<T, P, NUM_SEGS_P2, AsyncSignalGate>,
+    sender: crate::detail::spsc::Sender<T, P, NUM_SEGS_P2, AsyncSignalGate>,
     shared: Arc<AsyncSpscShared>,
 }
 
 impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingSpscProducer<T, P, NUM_SEGS_P2> {
     fn new(
-        sender: crate::spsc::Sender<T, P, NUM_SEGS_P2, AsyncSignalGate>,
+        sender: crate::detail::spsc::Sender<T, P, NUM_SEGS_P2, AsyncSignalGate>,
         shared: Arc<AsyncSpscShared>,
     ) -> Self {
         Self { sender, shared }
@@ -725,7 +725,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingSpscProducer<T, P, NUM
     /// Capacity of the underlying queue.
     #[inline]
     pub fn capacity(&self) -> usize {
-        crate::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::capacity()
+        crate::detail::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::capacity()
     }
 
     /// Fast-path send without blocking.
@@ -898,13 +898,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingSpscProducer<T, P, NUM
 /// });
 /// ```
 pub struct BlockingSpscConsumer<T, const P: usize, const NUM_SEGS_P2: usize> {
-    receiver: crate::spsc::Receiver<T, P, NUM_SEGS_P2, AsyncSignalGate>,
+    receiver: crate::detail::spsc::Receiver<T, P, NUM_SEGS_P2, AsyncSignalGate>,
     shared: Arc<AsyncSpscShared>,
 }
 
 impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingSpscConsumer<T, P, NUM_SEGS_P2> {
     fn new(
-        receiver: crate::spsc::Receiver<T, P, NUM_SEGS_P2, AsyncSignalGate>,
+        receiver: crate::detail::spsc::Receiver<T, P, NUM_SEGS_P2, AsyncSignalGate>,
         shared: Arc<AsyncSpscShared>,
     ) -> Self {
         Self { receiver, shared }
@@ -913,7 +913,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingSpscConsumer<T, P, NUM
     /// Capacity of the underlying queue.
     #[inline]
     pub fn capacity(&self) -> usize {
-        crate::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::capacity()
+        crate::detail::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::capacity()
     }
 
     /// Fast-path receive without blocking.
@@ -1081,7 +1081,7 @@ pub fn new_async_with_config<T, const P: usize, const NUM_SEGS_P2: usize>(
 ) {
     let shared = Arc::new(AsyncSpscShared::new());
     let (sender, receiver) =
-        crate::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::new_with_gate_and_config(
+        crate::detail::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::new_with_gate_and_config(
             signal,
             max_pooled_segments,
         );
@@ -1129,7 +1129,7 @@ pub fn new_blocking_with_config<T, const P: usize, const NUM_SEGS_P2: usize>(
 ) {
     let shared = Arc::new(AsyncSpscShared::new());
     let (sender, receiver) =
-        crate::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::new_with_gate_and_config(
+        crate::detail::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::new_with_gate_and_config(
             signal,
             max_pooled_segments,
         );
@@ -1182,7 +1182,7 @@ pub fn new_blocking_async_with_config<T, const P: usize, const NUM_SEGS_P2: usiz
 ) {
     let shared = Arc::new(AsyncSpscShared::new());
     let (sender, receiver) =
-        crate::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::new_with_gate_and_config(
+        crate::detail::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::new_with_gate_and_config(
             signal,
             max_pooled_segments,
         );
@@ -1235,7 +1235,7 @@ pub fn new_async_blocking_with_config<T, const P: usize, const NUM_SEGS_P2: usiz
 ) {
     let shared = Arc::new(AsyncSpscShared::new());
     let (sender, receiver) =
-        crate::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::new_with_gate_and_config(
+        crate::detail::spsc::Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::new_with_gate_and_config(
             signal,
             max_pooled_segments,
         );
@@ -1255,13 +1255,13 @@ pub fn new_async_blocking_with_config<T, const P: usize, const NUM_SEGS_P2: usiz
 /// expands by creating new segments as needed. Never blocks on full queue since the
 /// queue grows dynamically.
 pub struct AsyncUnboundedSpscProducer<T, const P: usize, const NUM_SEGS_P2: usize> {
-    sender: crate::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+    sender: crate::detail::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
     shared: Arc<AsyncSpscShared>,
 }
 
 impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncUnboundedSpscProducer<T, P, NUM_SEGS_P2> {
     fn new(
-        sender: crate::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+        sender: crate::detail::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
         shared: Arc<AsyncSpscShared>,
     ) -> Self {
         Self { sender, shared }
@@ -1364,13 +1364,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Sink<T>
 
 /// Asynchronous consumer for unbounded SPSC queue.
 pub struct AsyncUnboundedSpscConsumer<T, const P: usize, const NUM_SEGS_P2: usize> {
-    receiver: crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+    receiver: crate::detail::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
     shared: Arc<AsyncSpscShared>,
 }
 
 impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncUnboundedSpscConsumer<T, P, NUM_SEGS_P2> {
     fn new(
-        receiver: crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+        receiver: crate::detail::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
         shared: Arc<AsyncSpscShared>,
     ) -> Self {
         Self { receiver, shared }
@@ -1528,13 +1528,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Stream
 
 /// Blocking producer for unbounded SPSC queue.
 pub struct BlockingUnboundedSpscProducer<T, const P: usize, const NUM_SEGS_P2: usize> {
-    sender: crate::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+    sender: crate::detail::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
     shared: Arc<AsyncSpscShared>,
 }
 
 impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingUnboundedSpscProducer<T, P, NUM_SEGS_P2> {
     fn new(
-        sender: crate::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+        sender: crate::detail::spsc::UnboundedSender<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
         shared: Arc<AsyncSpscShared>,
     ) -> Self {
         Self { sender, shared }
@@ -1599,13 +1599,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingUnboundedSpscProducer<
 
 /// Blocking consumer for unbounded SPSC queue.
 pub struct BlockingUnboundedSpscConsumer<T, const P: usize, const NUM_SEGS_P2: usize> {
-    receiver: crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+    receiver: crate::detail::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
     shared: Arc<AsyncSpscShared>,
 }
 
 impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingUnboundedSpscConsumer<T, P, NUM_SEGS_P2> {
     fn new(
-        receiver: crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
+        receiver: crate::detail::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>,
         shared: Arc<AsyncSpscShared>,
     ) -> Self {
         Self { receiver, shared }
@@ -1763,7 +1763,7 @@ pub fn new_async_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: usize>(
     let shared = Arc::new(AsyncSpscShared::new());
     let signal_arc = Arc::new(signal);
     let (sender, receiver) =
-        crate::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
+        crate::detail::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
             signal_arc,
         );
     (
@@ -1801,7 +1801,7 @@ pub fn new_blocking_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: usize>(
     let shared = Arc::new(AsyncSpscShared::new());
     let signal_arc = Arc::new(signal);
     let (sender, receiver) =
-        crate::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
+        crate::detail::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
             signal_arc,
         );
     (
@@ -1836,7 +1836,7 @@ pub fn new_blocking_async_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: u
     let shared = Arc::new(AsyncSpscShared::new());
     let signal_arc = Arc::new(signal);
     let (sender, receiver) =
-        crate::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
+        crate::detail::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
             signal_arc,
         );
     (
@@ -1871,7 +1871,7 @@ pub fn new_async_blocking_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: u
     let shared = Arc::new(AsyncSpscShared::new());
     let signal_arc = Arc::new(signal);
     let (sender, receiver) =
-        crate::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
+        crate::detail::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
             signal_arc,
         );
     (

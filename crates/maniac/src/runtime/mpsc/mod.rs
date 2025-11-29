@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::thread;
 
-use crate::spsc::{UnboundedSender, UnboundedSpsc};
+use crate::detail::spsc::{UnboundedSender, UnboundedSpsc};
 use rand::RngCore;
 
 /// Create a new blocking MPSC queue
@@ -720,7 +720,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
         &mut self,
     ) -> Option<(
         usize,
-        crate::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<SignalGate>>,
+        crate::detail::spsc::UnboundedReceiver<T, P, NUM_SEGS_P2, Arc<SignalGate>>,
     )> {
         let random = self.next() as usize;
         // Try selecting signal index from summary hint

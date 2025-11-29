@@ -52,8 +52,8 @@
 //! }
 //! ```
 
-use crate::spsc::dynamic::{DynSpsc, DynSpscConfig};
-use crate::spsc::{NoOpSignal, PopError, PushError, SignalSchedule};
+use crate::detail::spsc::dynamic::{DynSpsc, DynSpscConfig};
+use crate::detail::spsc::{NoOpSignal, PopError, PushError, SignalSchedule};
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use std::sync::Arc;

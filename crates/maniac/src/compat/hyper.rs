@@ -10,38 +10,39 @@ use hyper::rt::{Executor, Sleep, Timer};
 use pin_project_lite::pin_project;
 
 #[derive(Clone, Copy, Debug)]
-pub struct MonoioExecutor;
-impl<F> Executor<F> for MonoioExecutor
+pub struct ManiacExecutor;
+impl<F> Executor<F> for ManiacExecutor
 where
     F: std::future::Future + 'static,
     F::Output: 'static,
 {
     #[inline]
     fn execute(&self, fut: F) {
-        crate::runtime::io_runtime::spawn(fut);
+        let worker = crate::runtime::worker::current_worker().expect("not on a maniac worker thread");
+        
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct MonoioTimer;
-impl Timer for MonoioTimer {
+pub struct ManiacTimer;
+impl Timer for ManiacTimer {
     #[inline]
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Sleep>> {
-        Box::pin(MonoioSleep {
+        Box::pin(ManiacSleep {
             inner: crate::time::sleep(duration),
         })
     }
 
     #[inline]
     fn sleep_until(&self, deadline: Instant) -> Pin<Box<dyn Sleep>> {
-        Box::pin(MonoioSleep {
+        Box::pin(ManiacSleep {
             inner: crate::time::sleep_until(deadline.into()),
         })
     }
 
     #[inline]
     fn reset(&self, sleep: &mut Pin<Box<dyn Sleep>>, new_deadline: Instant) {
-        if let Some(sleep) = sleep.as_mut().downcast_mut_pin::<MonoioSleep>() {
+        if let Some(sleep) = sleep.as_mut().downcast_mut_pin::<ManiacSleep>() {
             sleep.reset(new_deadline)
         }
     }
@@ -49,13 +50,13 @@ impl Timer for MonoioTimer {
 
 pin_project! {
     #[derive(Debug)]
-    struct MonoioSleep {
+    struct ManiacSleep {
         #[pin]
         inner: crate::time::Sleep,
     }
 }
 
-impl Future for MonoioSleep {
+impl Future for ManiacSleep {
     type Output = ();
 
     #[inline]
@@ -64,11 +65,11 @@ impl Future for MonoioSleep {
     }
 }
 
-impl Sleep for MonoioSleep {}
-unsafe impl Send for MonoioSleep {}
-unsafe impl Sync for MonoioSleep {}
+impl Sleep for ManiacSleep {}
+unsafe impl Send for ManiacSleep {}
+unsafe impl Sync for ManiacSleep {}
 
-impl MonoioSleep {
+impl ManiacSleep {
     #[inline]
     pub fn reset(self: Pin<&mut Self>, deadline: Instant) {
         self.project().inner.as_mut().reset(deadline.into());
@@ -77,13 +78,13 @@ impl MonoioSleep {
 
 pin_project! {
     #[derive(Debug)]
-    pub struct MonoioIo<T> {
+    pub struct ManiacIo<T> {
         #[pin]
         inner: T,
     }
 }
 
-impl<T> MonoioIo<T> {
+impl<T> ManiacIo<T> {
     pub const fn new(inner: T) -> Self {
         Self { inner }
     }
@@ -93,7 +94,8 @@ impl<T> MonoioIo<T> {
         self.inner
     }
 }
-impl<T> Deref for MonoioIo<T> {
+
+impl<T> Deref for ManiacIo<T> {
     type Target = T;
 
     #[inline]
@@ -101,13 +103,15 @@ impl<T> Deref for MonoioIo<T> {
         &self.inner
     }
 }
-impl<T> DerefMut for MonoioIo<T> {
+
+impl<T> DerefMut for ManiacIo<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
-impl<T> hyper::rt::Read for MonoioIo<T>
+
+impl<T> hyper::rt::Read for ManiacIo<T>
 where
     T: crate::io::poll_io::AsyncRead,
 {
@@ -132,7 +136,7 @@ where
     }
 }
 
-impl<T> hyper::rt::Write for MonoioIo<T>
+impl<T> hyper::rt::Write for ManiacIo<T>
 where
     T: crate::io::poll_io::AsyncWrite,
 {
@@ -173,7 +177,7 @@ where
     }
 }
 
-impl<T> tokio::io::AsyncRead for MonoioIo<T>
+impl<T> tokio::io::AsyncRead for ManiacIo<T>
 where
     T: hyper::rt::Read,
 {
@@ -205,7 +209,7 @@ where
     }
 }
 
-impl<T> tokio::io::AsyncWrite for MonoioIo<T>
+impl<T> tokio::io::AsyncWrite for ManiacIo<T>
 where
     T: hyper::rt::Write,
 {

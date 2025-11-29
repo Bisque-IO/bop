@@ -15,8 +15,8 @@
 use super::signal::AsyncSignalGate;
 use super::signal::AsyncSignalWaker;
 use crate::CachePadded;
-use crate::spsc::Spsc;
-use crate::spsc::UnboundedSpsc;
+use crate::detail::spsc::Spsc;
+use crate::detail::spsc::UnboundedSpsc;
 use crate::sync::signal::Signal;
 use crate::utils::bits::find_nearest;
 use crate::{PopError, PushError};
@@ -1776,8 +1776,8 @@ pub fn async_blocking_mpsc_from_parts<T, const P: usize, const NUM_SEGS_P2: usiz
 /// ```
 pub mod unbounded {
     use super::*;
-    use crate::spsc::NoOpSignal;
-    use crate::spsc::unbounded::{
+    use crate::detail::spsc::NoOpSignal;
+    use crate::detail::spsc::unbounded::{
         UnboundedReceiver as UnboundedReceiver_, UnboundedSender as UnboundedSender_,
     };
 

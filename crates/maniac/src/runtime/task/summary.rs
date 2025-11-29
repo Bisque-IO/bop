@@ -610,7 +610,7 @@ impl Summary {
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::waker::WorkerWaker;
+    use crate::runtime::worker::waker::WorkerWaker;
 
     use super::*;
     use std::collections::HashSet;

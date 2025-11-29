@@ -14,7 +14,7 @@ mod tcp_unsafe;
 #[cfg(feature = "tokio-compat")]
 mod tokio_wrapper;
 
-#[cfg(feature = "hyper")]
+#[cfg(feature = "hyper-compat")]
 pub mod hyper;
 
 #[cfg(feature = "tokio-compat")]
