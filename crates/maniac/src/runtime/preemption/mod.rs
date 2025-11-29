@@ -29,6 +29,9 @@
 //! This ensures full safety: the actual preemption logic (checking flags, yielding) runs
 //! as normal thread code, not in an interrupt context.
 
+#[cfg(test)]
+mod tests;
+
 use crate::generator;
 use crate::runtime::worker::rust_preemption_helper;
 use std::cell::Cell;

@@ -1,4 +1,4 @@
-use super::waker::WorkerWaker;
+use crate::runtime::worker::waker::WorkerWaker;
 use crate::utils::CachePadded;
 use crate::utils::bits;
 use std::marker::PhantomData;

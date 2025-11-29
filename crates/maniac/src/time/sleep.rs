@@ -8,7 +8,7 @@ use std::time::Duration;
 use pin_project_lite::pin_project;
 
 use crate::runtime::timer::{Timer, TimerDelay};
-use crate::runtime::worker::{current_worker_now_ns, schedule_timer_for_task};
+use crate::runtime::worker::{current_worker_now_ns, reschedule_timer_for_task, schedule_timer_for_task};
 use crate::time::Instant;
 
 /// A future that completes after a specified duration.
@@ -30,7 +30,6 @@ use crate::time::Instant;
 pub struct Sleep {
     timer: Timer,
     delay: Duration,
-    scheduled: bool,
 }
 
 // SAFETY: Sleep contains TimerDelay which has a lifetime parameter, but we ensure
@@ -59,7 +58,6 @@ impl Sleep {
         Self {
             timer,
             delay: duration,
-            scheduled: false,
         }
     }
 
@@ -85,6 +83,16 @@ impl Sleep {
         } else {
             Self::new(deadline - now)
         }
+    }
+
+    /// Returns whether the sleep timer has been scheduled.
+    ///
+    /// This method returns `true` if the timer has been registered with the
+    /// runtime's timer wheel, and `false` otherwise. A sleep timer becomes
+    /// scheduled when it is first polled.
+    #[inline]
+    pub fn is_scheduled(&self) -> bool {
+        self.timer.is_scheduled()
     }
 
     /// Creates a new `Sleep` that will never complete.
@@ -113,7 +121,7 @@ impl Sleep {
             deadline - now
         };
 
-        if self.scheduled {
+        if self.timer.is_scheduled() {
             // Cancel the existing timer
             let _ = self.timer.cancel();
         }
@@ -126,22 +134,31 @@ impl Sleep {
 impl Future for Sleep {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if !self.scheduled {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if !self.timer.is_scheduled() {
             if schedule_timer_for_task(cx, &self.timer, self.delay).is_some() {
-                self.scheduled = true;
             }
             return Poll::Pending;
         }
 
-        // Check timer deadline using the worker's time source (same as timer wheel)
-        // rather than Instant::now() which may use a different clock on some platforms
-        let deadline = self.timer.deadline_ns();
         let now_ns = current_worker_now_ns();
-        if now_ns >= deadline {
+        // Check if we've reached the target deadline
+        let target_deadline = self.timer.target_deadline_ns();
+        if now_ns >= target_deadline {
             self.timer.reset();
-            self.scheduled = false;
             return Poll::Ready(());
+        }
+
+        // Check if the wheel timer fired but we haven't reached target yet (cascading)
+        // This happens for long timers that exceed a single wheel's coverage
+        if self.timer.needs_reschedule(now_ns) {
+            // Reschedule for the remaining time
+            if reschedule_timer_for_task(cx, &self.timer) {
+                // Successfully rescheduled, stay pending
+                return Poll::Pending;
+            }
+            // Reschedule failed - this shouldn't happen normally
+            // Fall through and check target again
         }
 
         Poll::Pending
@@ -154,14 +171,6 @@ impl std::fmt::Debug for Sleep {
             .field("timer", &self.timer)
             .field("delay", &self.delay)
             .finish()
-    }
-}
-
-impl Drop for Sleep {
-    fn drop(&mut self) {
-        if self.scheduled {
-            let _ = self.timer.cancel();
-        }
     }
 }
 

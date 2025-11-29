@@ -16,17 +16,10 @@ pub mod deque;
 pub mod io_driver;
 pub mod mpsc;
 pub mod preemption;
-#[cfg(test)]
-mod preemption_tests;
-pub mod signal;
-pub mod summary;
+
 pub mod task;
-pub mod ticker;
-#[cfg(test)]
-mod ticker_tests;
+
 pub mod timer;
-pub mod timer_wheel;
-pub mod waker;
 pub mod worker;
 
 pub use crate::{join, select, try_join};
@@ -67,7 +60,7 @@ use task::{
     FutureAllocator, SpawnError, TaskArena, TaskArenaConfig, TaskArenaOptions, TaskArenaStats,
     TaskHandle,
 };
-use ticker::TickService;
+use timer::ticker::TickService;
 use worker::{WorkerService, WorkerServiceConfig};
 
 use crate::num_cpus;

@@ -1,5 +1,5 @@
-use super::signal::{SIGNAL_MASK, Signal, SignalGate};
-use super::waker::{STATUS_SUMMARY_WORDS, WorkerWaker};
+use super::task::signal::{SIGNAL_MASK, Signal, SignalGate};
+use super::worker::waker::{STATUS_SUMMARY_WORDS, WorkerWaker};
 use crate::utils::CachePadded;
 use crate::utils::bits::find_nearest;
 use crate::{PopError, PushError};

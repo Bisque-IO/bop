@@ -1,14 +1,16 @@
+pub mod waker;
+
 use super::deque::{Stealer, Worker as YieldWorker};
-use super::summary::Summary;
+use super::task::summary::Summary;
 use super::task::{FutureAllocator, GeneratorRunMode, Task, TaskArena, TaskHandle, TaskSlot};
 use super::timer::{Timer, TimerHandle};
-use super::timer_wheel::TimerWheel;
-use super::waker::WorkerWaker;
+use super::timer::wheel::TimerWheel;
+use waker::WorkerWaker;
 use crate::PopError;
 use crate::runtime::io_driver::IoDriver;
 use crate::runtime::preemption::GeneratorYieldReason;
 use crate::runtime::task::GeneratorOwnership;
-use crate::runtime::ticker::{TickHandler, TickHandlerRegistration};
+use crate::runtime::timer::ticker::{TickHandler, TickHandlerRegistration};
 use crate::runtime::{mpsc, preemption};
 use crate::{PushError, utils};
 use std::cell::{Cell, UnsafeCell};
@@ -382,7 +384,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     pub fn start(
         arena: TaskArena,
         config: WorkerServiceConfig,
-        tick_service: &Arc<super::ticker::TickService>,
+        tick_service: &Arc<super::timer::ticker::TickService>,
     ) -> Arc<Self> {
         let tick_duration = config.tick_duration;
         let tick_duration_ns = normalize_tick_duration_ns(config.tick_duration);
@@ -470,7 +472,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         }
         let mut timers = Vec::with_capacity(worker_count_val);
         for worker_id in 0..worker_count_val {
-            timers.push(UnsafeCell::new(TimerWheel::new(
+            timers.push(UnsafeCell::new(TimerWheel::from_duration(
                 tick_duration,
                 TIMER_TICKS_PER_WHEEL,
                 worker_id as u32,
@@ -1831,9 +1833,27 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
         }
     }
 
+    /// Schedule a timer directly at the given deadline (for cross-worker messages)
     fn enqueue_timer_entry(&mut self, deadline_ns: u64, handle: TimerHandle) -> Option<u64> {
         match self.inner.timer_wheel.schedule_timer(deadline_ns, handle) {
             Ok(timer_id) => Some(timer_id),
+            Err(_) => None, // Log error in debug mode
+        }
+    }
+
+    /// Schedule a timer using best-fit strategy
+    /// Returns (timer_id, wheel_deadline_ns) if successful
+    fn enqueue_timer_entry_best_fit(
+        &mut self,
+        target_deadline_ns: u64,
+        handle: TimerHandle,
+    ) -> Option<(u64, u64)> {
+        match self
+            .inner
+            .timer_wheel
+            .schedule_timer_best_fit(target_deadline_ns, handle)
+        {
+            Ok((timer_id, wheel_deadline_ns)) => Some((timer_id, wheel_deadline_ns)),
             Err(_) => None, // Log error in debug mode
         }
     }
@@ -1926,8 +1946,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                 .inner
                 .timer_wheel
                 .cancel_timer(timer_id)
-                .unwrap_or(None)
-                .is_some()
+                .is_ok()
             {
                 timer.mark_cancelled(timer_id);
                 return true;
@@ -2567,8 +2586,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                         .inner
                         .timer_wheel
                         .cancel_timer(existing_id)
-                        .unwrap_or(None)
-                        .is_some()
+                        .is_ok()
                     {
                         timer.reset();
                     }
@@ -2585,13 +2603,15 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
         let delay_ns = delay.as_nanos().min(u128::from(u64::MAX)) as u64;
         let now = self.inner.timer_wheel.now_ns();
-        let deadline_ns = now.saturating_add(delay_ns);
+        let target_deadline_ns = now.saturating_add(delay_ns);
 
         let handle = timer.prepare(slot, task.global_id(), self.inner.worker_id);
 
-        if let Some(timer_id) = self.enqueue_timer_entry(deadline_ns, handle) {
-            timer.commit_schedule(timer_id, deadline_ns);
-            Some(deadline_ns)
+        if let Some((timer_id, wheel_deadline_ns)) =
+            self.enqueue_timer_entry_best_fit(target_deadline_ns, handle)
+        {
+            timer.commit_schedule(timer_id, target_deadline_ns, wheel_deadline_ns);
+            Some(target_deadline_ns)
         } else {
             timer.reset();
             None
@@ -2600,7 +2620,15 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 }
 
 /// Schedules a timer for the task currently being polled by the active worker.
-pub(crate) fn schedule_timer_for_task(_cx: &Context<'_>, timer: &Timer, delay: Duration) -> Option<u64> {
+///
+/// Uses best-fit scheduling to support arbitrarily long timers via cascading.
+/// The timer wheel will schedule at the largest wheel that fits, and TimerDelay
+/// will reschedule when the wheel fires if the target hasn't been reached yet.
+pub(crate) fn schedule_timer_for_task(
+    _cx: &Context<'_>,
+    timer: &Timer,
+    delay: Duration,
+) -> Option<u64> {
     let worker = current_worker();
     if worker.is_none() {
         return None;
@@ -2619,12 +2647,7 @@ pub(crate) fn schedule_timer_for_task(_cx: &Context<'_>, timer: &Timer, delay: D
         if let Some(existing_worker_id) = timer.worker_id() {
             if existing_worker_id == worker_id {
                 let existing_id = timer.timer_id();
-                if worker
-                    .timer_wheel
-                    .cancel_timer(existing_id)
-                    .unwrap_or(None)
-                    .is_some()
-                {
+                if worker.timer_wheel.cancel_timer(existing_id).is_ok() {
                     timer.reset();
                 }
             } else {
@@ -2642,19 +2665,67 @@ pub(crate) fn schedule_timer_for_task(_cx: &Context<'_>, timer: &Timer, delay: D
 
     let delay_ns = delay.as_nanos().min(u128::from(u64::MAX)) as u64;
     let now = worker.timer_wheel.now_ns();
-    let deadline_ns = now.saturating_add(delay_ns);
+    let target_deadline_ns = now.saturating_add(delay_ns);
 
     let handle = timer.prepare(slot, task.global_id(), worker_id);
 
-    match worker.timer_wheel.schedule_timer(deadline_ns, handle) {
-        Ok(timer_id) => {
-            timer.commit_schedule(timer_id, deadline_ns);
-            Some(deadline_ns)
+    // Use best-fit scheduling for cascading support
+    match worker
+        .timer_wheel
+        .schedule_timer_best_fit(target_deadline_ns, handle)
+    {
+        Ok((timer_id, wheel_deadline_ns)) => {
+            timer.commit_schedule(timer_id, target_deadline_ns, wheel_deadline_ns);
+            Some(target_deadline_ns)
         }
         Err(_) => {
             timer.reset();
             None
         }
+    }
+}
+
+/// Reschedules a timer for the remaining time to reach its target deadline.
+///
+/// Called by TimerDelay when the wheel timer fires but the target deadline
+/// hasn't been reached yet (cascading for long timers).
+pub(crate) fn reschedule_timer_for_task(_cx: &Context<'_>, timer: &Timer) -> bool {
+    let worker = current_worker();
+    if worker.is_none() {
+        return false;
+    }
+    let worker = worker.unwrap();
+    let worker_id = worker.worker_id;
+    let task = worker.current_task;
+    if task.is_null() {
+        return false;
+    }
+    let task = unsafe { &mut *task };
+    let Some(slot) = task.slot() else {
+        return false;
+    };
+
+    // Verify the timer is scheduled on this worker
+    let Some(timer_worker_id) = timer.worker_id() else {
+        return false;
+    };
+    if timer_worker_id != worker_id {
+        return false;
+    }
+
+    let target_deadline_ns = timer.target_deadline_ns();
+    let handle = TimerHandle::new(slot, task.global_id(), worker_id, 0);
+
+    // Schedule for the remaining time using best-fit
+    match worker
+        .timer_wheel
+        .schedule_timer_best_fit(target_deadline_ns, handle)
+    {
+        Ok((timer_id, wheel_deadline_ns)) => {
+            timer.commit_reschedule(timer_id, wheel_deadline_ns);
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -2689,8 +2760,7 @@ pub(crate) fn cancel_timer_for_current_task(timer: &Timer) -> bool {
         if worker
             .timer_wheel
             .cancel_timer(timer_id)
-            .unwrap_or(None)
-            .is_some()
+            .is_ok()
         {
             timer.mark_cancelled(timer_id);
             return true;

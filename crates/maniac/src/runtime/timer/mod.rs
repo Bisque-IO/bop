@@ -1,6 +1,12 @@
+pub mod ticker;
+#[cfg(test)]
+mod ticker_tests;
+pub mod wheel;
+
 use super::task::TaskSlot;
 use super::worker::{
-    cancel_timer_for_current_task, current_worker_now_ns, schedule_timer_for_task,
+    cancel_timer_for_current_task, current_worker_now_ns, reschedule_timer_for_task,
+    schedule_timer_for_task,
 };
 use std::cell::Cell;
 use std::future::Future;
@@ -67,7 +73,10 @@ unsafe impl Sync for TimerHandle {}
 #[derive(Debug)]
 pub struct Timer {
     state: Cell<TimerState>,
-    deadline_ns: Cell<u64>,
+    /// The user's target deadline (true expiry time)
+    target_deadline_ns: Cell<u64>,
+    /// The wheel's scheduled deadline (may be earlier than target for cascading)
+    wheel_deadline_ns: Cell<u64>,
     task_slot: Cell<Option<NonNull<TaskSlot>>>,
     task_id: Cell<u32>,
     worker_id: Cell<Option<u32>>,
@@ -78,7 +87,8 @@ impl Timer {
     pub const fn new() -> Self {
         Self {
             state: Cell::new(TimerState::Idle),
-            deadline_ns: Cell::new(0),
+            target_deadline_ns: Cell::new(0),
+            wheel_deadline_ns: Cell::new(0),
             task_slot: Cell::new(None),
             task_id: Cell::new(0),
             worker_id: Cell::new(None),
@@ -96,14 +106,35 @@ impl Timer {
         self.state.get()
     }
 
+    /// Get the user's target deadline (true expiry time)
+    #[inline(always)]
+    pub fn target_deadline_ns(&self) -> u64 {
+        self.target_deadline_ns.get()
+    }
+
+    /// Get the wheel's scheduled deadline (may be earlier than target for cascading)
+    #[inline(always)]
+    pub fn wheel_deadline_ns(&self) -> u64 {
+        self.wheel_deadline_ns.get()
+    }
+
+    /// Backwards compatibility alias for wheel_deadline_ns
     #[inline(always)]
     pub fn deadline_ns(&self) -> u64 {
-        self.deadline_ns.get()
+        self.wheel_deadline_ns.get()
     }
 
     #[inline(always)]
     pub fn is_scheduled(&self) -> bool {
         self.state() == TimerState::Scheduled
+    }
+
+    /// Check if this timer needs to cascade (wheel fired but target not reached)
+    #[inline(always)]
+    pub fn needs_reschedule(&self, now_ns: u64) -> bool {
+        self.is_scheduled()
+            && now_ns >= self.wheel_deadline_ns.get()
+            && now_ns < self.target_deadline_ns.get()
     }
 
     #[inline(always)]
@@ -122,17 +153,33 @@ impl Timer {
         self.task_id.set(task_id);
         self.worker_id.set(Some(worker_id));
         self.timer_id.set(0);
-        self.deadline_ns.set(0);
+        self.target_deadline_ns.set(0);
+        self.wheel_deadline_ns.set(0);
         self.state.set(TimerState::Idle);
 
         TimerHandle::new(task_slot, task_id, worker_id, 0)
     }
 
     #[inline(always)]
-    pub(crate) fn commit_schedule(&self, timer_id: u64, deadline_ns: u64) {
+    pub(crate) fn commit_schedule(
+        &self,
+        timer_id: u64,
+        target_deadline_ns: u64,
+        wheel_deadline_ns: u64,
+    ) {
         self.timer_id.set(timer_id);
-        self.deadline_ns.set(deadline_ns);
+        self.target_deadline_ns.set(target_deadline_ns);
+        self.wheel_deadline_ns.set(wheel_deadline_ns);
         self.state.set(TimerState::Scheduled);
+    }
+
+    /// Update timer after a reschedule (same target, new wheel deadline)
+    #[inline(always)]
+    pub(crate) fn commit_reschedule(&self, timer_id: u64, wheel_deadline_ns: u64) {
+        self.timer_id.set(timer_id);
+        self.wheel_deadline_ns.set(wheel_deadline_ns);
+        // target_deadline_ns stays the same
+        // state stays Scheduled
     }
 
     #[inline(always)]
@@ -163,7 +210,8 @@ impl Timer {
 
     #[inline(always)]
     fn clear_identity(&self) {
-        self.deadline_ns.set(0);
+        self.target_deadline_ns.set(0);
+        self.wheel_deadline_ns.set(0);
         self.timer_id.set(0);
         self.worker_id.set(None);
         self.task_slot.set(None);
@@ -180,6 +228,14 @@ unsafe impl Sync for Timer {}
 impl Default for Timer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        if self.is_scheduled() {
+            self.cancel();
+        }
     }
 }
 
@@ -203,22 +259,31 @@ impl<'a> TimerDelay<'a> {
 impl<'a> Future for TimerDelay<'a> {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if !self.scheduled {
-            if schedule_timer_for_task(cx, self.timer, self.delay).is_some() {
-                self.scheduled = true;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if !self.timer.is_scheduled() {
+            if schedule_timer_for_task(cx, &self.timer, self.delay).is_some() {
             }
             return Poll::Pending;
         }
 
-        // Check timer deadline using the worker's time source (same as timer wheel)
-        // rather than Instant::now() which may use a different clock on some platforms
-        let deadline = self.timer.deadline_ns();
         let now_ns = current_worker_now_ns();
-        if now_ns >= deadline {
+        // Check if we've reached the target deadline
+        let target_deadline = self.timer.target_deadline_ns();
+        if now_ns >= target_deadline {
             self.timer.reset();
-            self.scheduled = false;
             return Poll::Ready(());
+        }
+
+        // Check if the wheel timer fired but we haven't reached target yet (cascading)
+        // This happens for long timers that exceed a single wheel's coverage
+        if self.timer.needs_reschedule(now_ns) {
+            // Reschedule for the remaining time
+            if reschedule_timer_for_task(cx, self.timer) {
+                // Successfully rescheduled, stay pending
+                return Poll::Pending;
+            }
+            // Reschedule failed - this shouldn't happen normally
+            // Fall through and check target again
         }
 
         Poll::Pending

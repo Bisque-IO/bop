@@ -1,4 +1,7 @@
-use super::summary::Summary;
+pub mod signal;
+pub mod summary;
+
+use summary::Summary;
 use super::timer::TimerHandle;
 use super::worker::Worker;
 use crate::generator::Generator;

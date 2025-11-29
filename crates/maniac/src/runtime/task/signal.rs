@@ -49,7 +49,7 @@
 //!
 //! The design is optimized for x86_64 cache line sizes and common executor configurations.
 
-use super::waker::{STATUS_SUMMARY_WORDS, WorkerWaker};
+use crate::runtime::worker::waker::{STATUS_SUMMARY_WORDS, WorkerWaker};
 use crate::spsc::SignalSchedule;
 use crate::utils::CachePadded;
 use std::sync::Arc;
