@@ -64,7 +64,8 @@
       "Bash(fi)",
       "Bash(powershell:*)",
       "Bash(RUST_BACKTRACE=1 cargo test:*)",
-      "Bash(rustfmt:*)"
+      "Bash(rustfmt:*)",
+      "Bash(findstr:*)"
     ],
     "deny": [],
     "ask": []

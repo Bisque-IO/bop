@@ -689,5 +689,5 @@ fn drop_uring_poller(fd: RawFd, idx: Option<usize>) {
     #[cfg(unix)]
     let _ = unsafe { std::fs::File::from_raw_fd(fd) };
     #[cfg(windows)]
-    let _ = unsafe { OwnedSocket::from_raw_socket(fd.socket) };
+    let _ = unsafe { OwnedSocket::from_raw_socket(fd) };
 }

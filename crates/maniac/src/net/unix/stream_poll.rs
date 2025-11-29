@@ -1,6 +1,6 @@
 //! This module provide a poll-io style interface for UnixStream.
 
-use std::{io, os::fd::AsRawFd};
+use std::{io, os::fd::AsRawFd, task::ready};
 
 use super::{SocketAddr, UnixStream};
 use crate::driver::op::Op;
@@ -64,7 +64,7 @@ impl tokio::io::AsyncRead for UnixStreamPoll {
             let mut recv = Op::recv_raw(&self.0.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_io(&mut recv, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| {
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| {
                 let n = n.into_inner();
                 buf.assume_init(n as usize);
                 buf.advance(n as usize);
@@ -85,7 +85,7 @@ impl tokio::io::AsyncWrite for UnixStreamPoll {
             let mut send = Op::send_raw(&self.0.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_io(&mut send, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
         }
     }
 
@@ -122,7 +122,7 @@ impl tokio::io::AsyncWrite for UnixStreamPoll {
             let mut writev = Op::writev_raw(&self.0.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_io(&mut writev, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
         }
     }
 

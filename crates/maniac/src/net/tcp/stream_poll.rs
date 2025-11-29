@@ -1,6 +1,6 @@
 //! This module provide a poll-io style interface for TcpStream.
 
-use std::{io, net::SocketAddr, time::Duration};
+use std::{io, net::SocketAddr, task::ready, time::Duration};
 
 #[cfg(unix)]
 use {
@@ -75,7 +75,7 @@ impl tokio::io::AsyncRead for TcpStreamPoll {
             let mut recv = Op::recv_raw(&self.0.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_io(&mut recv, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| {
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| {
                 let n = n.into_inner();
                 buf.assume_init(n as usize);
                 buf.advance(n as usize);
@@ -96,7 +96,7 @@ impl tokio::io::AsyncWrite for TcpStreamPoll {
             let mut send = Op::send_raw(&self.0.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_io(&mut send, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
         }
     }
 
@@ -135,7 +135,7 @@ impl tokio::io::AsyncWrite for TcpStreamPoll {
             let mut writev = Op::writev_raw(&self.0.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_io(&mut writev, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
         }
     }
 

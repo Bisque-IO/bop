@@ -3,6 +3,7 @@ use std::{
     future::Future,
     io,
     net::{SocketAddr, ToSocketAddrs},
+    task::ready,
     time::Duration,
 };
 
@@ -977,7 +978,11 @@ impl tokio::io::AsyncRead for TcpStream {
                 };
 
                 // Remote read: use direct syscall
-                let slice = buf.unfilled_mut();
+                let slice = unsafe { buf.unfilled_mut() };
+                // SAFETY: MaybeUninit<u8> has the same layout as u8, and we're writing to the buffer
+                let slice = unsafe {
+                    std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u8, slice.len())
+                };
 
                 let res = std::io::Read::read(&mut stream, slice);
                 std::mem::forget(stream);
@@ -1004,7 +1009,7 @@ impl tokio::io::AsyncRead for TcpStream {
             let mut recv = Op::recv_raw(&self.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_legacy(&mut recv, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| {
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| {
                 let n = n.into_inner();
                 buf.assume_init(n as usize);
                 buf.advance(n as usize);
@@ -1058,7 +1063,7 @@ impl tokio::io::AsyncWrite for TcpStream {
             let mut send = Op::send_raw(&self.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_legacy(&mut send, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
         }
     }
 
@@ -1124,12 +1129,11 @@ impl tokio::io::AsyncWrite for TcpStream {
         }
         // Local writev: use standard Op (or iouring path on Linux with iouring)
         unsafe {
-            let raw_buf =
-                crate::buf::RawBufVectored::new(bufs.as_ptr() as *const libc::iovec, bufs.len());
+            let raw_buf = crate::buf::RawBufVectored::new(bufs.as_ptr() as _, bufs.len());
             let mut writev = Op::writev_raw(&self.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_legacy(&mut writev, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
         }
     }
 

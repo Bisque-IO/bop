@@ -2,18 +2,22 @@ pub mod waker;
 
 use super::deque::{Stealer, Worker as YieldWorker};
 use super::task::summary::Summary;
-use super::task::{FutureAllocator, GeneratorRunMode, Task, TaskArena, TaskHandle, TaskSlot};
+use super::task::{GeneratorRunMode, Task, TaskArena, TaskHandle, TaskSlot};
 use super::timer::{Timer, TimerHandle};
 use super::timer::wheel::TimerWheel;
 use waker::WorkerWaker;
 use crate::PopError;
+use crate::future::waker::DiatomicWaker;
 use crate::runtime::io_driver::IoDriver;
 use crate::runtime::preemption::GeneratorYieldReason;
-use crate::runtime::task::GeneratorOwnership;
+use crate::runtime::task::{GeneratorOwnership, SpawnError};
 use crate::runtime::timer::ticker::{TickHandler, TickHandlerRegistration};
 use crate::runtime::{mpsc, preemption};
 use crate::{PushError, utils};
+use std::any::TypeId;
 use std::cell::{Cell, UnsafeCell};
+use std::panic::Location;
+use std::pin::Pin;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,8 +31,6 @@ use rand::RngCore;
 #[cfg(unix)]
 use libc;
 
-const DEFAULT_QUEUE_SEG_SHIFT: usize = 10;
-const DEFAULT_QUEUE_NUM_SEGS_SHIFT: usize = 8;
 const MAX_WORKER_LIMIT: usize = 512;
 
 const DEFAULT_WAKE_BURST: usize = 4;
@@ -54,6 +56,10 @@ pub enum RunOnceError {
     StackPinned,
 
     Raised(Box<dyn std::error::Error>),
+}
+
+thread_local! {
+    pub(crate) static CURRENT: Cell<*mut Worker<'static>> = Cell::new(core::ptr::null_mut());
 }
 
 #[inline]
@@ -219,6 +225,257 @@ pub fn pin_stack() -> bool {
     }
 }
 
+/// Type-erased header for futures stored in tasks.
+/// Contains function pointers for polling and dropping without knowing the concrete type.
+#[repr(C)]
+struct FutureHeader {
+    /// Function to poll the future. Takes pointer to the header (start of allocation).
+    poll_fn: unsafe fn(*mut FutureHeader, &mut Context<'_>) -> Poll<()>,
+    /// Function to drop the future. Takes pointer to the header (start of allocation).
+    drop_fn: unsafe fn(*mut FutureHeader),
+}
+
+/// Join state header - the type-erased portion of JoinableFuture that JoinHandle accesses.
+///
+/// This struct contains only the synchronization state needed for joining,
+/// without the future type. It must be at the start of JoinableFuture (same layout).
+#[repr(C)]
+pub struct JoinState<T> {
+    /// Waker for join notification. Uses DiatomicWaker for lock-free inline storage.
+    waker: DiatomicWaker,
+    /// Atomic flag indicating the task has completed and result is ready.
+    ready: AtomicBool,
+    /// The result value, written once when the future completes.
+    result: UnsafeCell<std::mem::MaybeUninit<T>>,
+}
+
+impl<T> JoinState<T> {
+    /// Stores the result and marks as ready. Wakes any waiting JoinHandle.
+    #[inline]
+    pub fn complete(&self, value: T) {
+        unsafe {
+            (*self.result.get()).write(value);
+        }
+        self.ready.store(true, Ordering::Release);
+        self.waker.notify();
+    }
+
+    /// Registers a waker to be notified when the future completes.
+    ///
+    /// # Safety
+    /// Only one task should register wakers at a time (single consumer).
+    #[inline]
+    pub unsafe fn register_waker(&self, waker: &Waker) {
+        unsafe { self.waker.register(waker) };
+    }
+
+    /// Checks if the result is ready.
+    #[inline]
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    /// Takes the result.
+    ///
+    /// # Safety
+    /// Must only be called once after is_ready() returns true.
+    #[inline]
+    pub unsafe fn take_result(&self) -> T {
+        unsafe { (*self.result.get()).assume_init_read() }
+    }
+}
+
+/// A future combined with its join state in a single allocation.
+///
+/// Layout (repr(C)):
+/// 1. FutureHeader - poll/drop function pointers for type erasure
+/// 2. JoinState<T> - join synchronization (waker, ready, result)
+/// 3. F - the future stored inline
+///
+/// This is a **single allocation** for header, join state, and future.
+#[repr(C)]
+pub struct JoinableFuture<T, F> {
+    /// Function pointers for type-erased polling and dropping.
+    header: FutureHeader,
+    /// Join state (waker, ready, result).
+    join: JoinState<T>,
+    /// The future stored inline (not boxed).
+    future: F,
+}
+
+// Safety: JoinableFuture is Send if T and F are Send.
+unsafe impl<T: Send, F: Send> Send for JoinableFuture<T, F> {}
+// Safety: JoinableFuture is Sync - DiatomicWaker handles concurrent access,
+// AtomicBool is atomic, and result is only written once then read once.
+unsafe impl<T: Send, F: Send> Sync for JoinableFuture<T, F> {}
+
+impl<T, F: Future<Output = ()> + Send + 'static> JoinableFuture<T, F> {
+    /// Creates a new joinable future with the future stored inline.
+    #[inline]
+    pub fn new(future: F) -> Self {
+        Self {
+            header: FutureHeader {
+                poll_fn: Self::poll_erased,
+                drop_fn: Self::drop_erased,
+            },
+            join: JoinState {
+                waker: DiatomicWaker::new(),
+                ready: AtomicBool::new(false),
+                result: UnsafeCell::new(std::mem::MaybeUninit::uninit()),
+            },
+            future,
+        }
+    }
+
+    /// Type-erased poll function called via function pointer.
+    unsafe fn poll_erased(ptr: *mut FutureHeader, cx: &mut Context<'_>) -> Poll<()> {
+        let this = ptr as *mut Self;
+        // Safety: ptr points to a valid pinned JoinableFuture
+        let future = unsafe { Pin::new_unchecked(&mut (*this).future) };
+        future.poll(cx)
+    }
+
+    /// Type-erased drop function called via function pointer.
+    unsafe fn drop_erased(ptr: *mut FutureHeader) {
+        let this = ptr as *mut Self;
+        // Safety: ptr points to a valid boxed JoinableFuture
+        unsafe { drop(Box::from_raw(this)) };
+    }
+
+    /// Returns a reference to the join state.
+    #[inline]
+    pub fn join_state(&self) -> &JoinState<T> {
+        &self.join
+    }
+}
+
+/// Polls a type-erased future via its header.
+///
+/// # Safety
+/// `ptr` must point to a valid `JoinableFuture` that was created via `Box::pin`.
+#[inline]
+pub(crate) unsafe fn poll_future(ptr: *mut (), cx: &mut Context<'_>) -> Poll<()> {
+    let header = ptr as *mut FutureHeader;
+    unsafe { ((*header).poll_fn)(header, cx) }
+}
+
+/// Drops a type-erased future via its header.
+///
+/// # Safety
+/// `ptr` must point to a valid `JoinableFuture` that was created via `Box::pin`.
+/// Must only be called once.
+#[inline]
+pub(crate) unsafe fn drop_future(ptr: *mut ()) {
+    if ptr.is_null() {
+        return;
+    }
+    let header = ptr as *mut FutureHeader;
+    unsafe { ((*header).drop_fn)(header) };
+}
+
+/// Awaitable join handle returned from [`Executor::spawn`].
+///
+/// This handle points directly to the `JoinableFuture<T>` allocation which contains
+/// both the user's future and the join synchronization state (waker, ready flag, result).
+/// This avoids any separate allocation for join state.
+///
+/// The generation number ensures that if a task slot is reused before the
+/// JoinHandle is awaited, polling will return Pending forever rather than
+/// accessing incorrect results.
+///
+/// # Example
+///
+/// ```no_run
+/// # use maniac::runtime::Executor;
+/// # use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+/// # let executor = Executor::new(
+/// #     TaskArenaConfig::new(1, 8).unwrap(),
+/// #     TaskArenaOptions::default(),
+/// #     1,
+/// # ).unwrap();
+/// let handle = executor.spawn(async { 42 })?;
+///
+/// // Await the result
+/// let result = handle.await;
+/// # Ok::<(), maniac::runtime::task::SpawnError>(())
+/// ```
+pub struct JoinHandle<T> {
+    /// Pointer to the JoinState<T> (which is at the start of JoinableFuture<T, F>).
+    /// This allows type-erased access to the join state without knowing F.
+    /// The JoinableFuture box is kept alive until the result is taken.
+    join_state_ptr: *const JoinState<T>,
+    /// Prevents the executor/arena from being deallocated while this handle exists.
+    /// This ensures the JoinableFuture storage remains valid.
+    _guard: Arc<WorkerService>,
+}
+
+impl<T> JoinHandle<T> {
+    /// Creates a new join handle.
+    ///
+    /// # Arguments
+    /// * `join_state_ptr` - Pointer to the JoinState<T> at the start of JoinableFuture
+    /// * `guard` - Arc that keeps the executor/arena alive while this handle exists
+    #[inline]
+    pub fn new(join_state_ptr: *const JoinState<T>, guard: Arc<WorkerService>) -> Self {
+        Self {
+            join_state_ptr,
+            _guard: guard,
+        }
+    }
+
+    /// Returns `true` if the task has completed.
+    ///
+    /// This is a non-blocking check. Note that even if `is_finished()` returns
+    /// `true`, the result may have already been consumed by a previous await.
+    #[inline]
+    pub fn is_finished(&self) -> bool {
+        unsafe { (*self.join_state_ptr).is_ready() }
+    }
+
+    #[inline]
+    fn join_state(&self) -> &JoinState<T> {
+        unsafe { &*self.join_state_ptr }
+    }
+}
+
+// JoinHandle is Send if T is Send (the result will be sent across threads)
+unsafe impl<T: Send> Send for JoinHandle<T> {}
+// JoinHandle is Sync if T is Send (multiple threads can poll it)
+unsafe impl<T: Send> Sync for JoinHandle<T> {}
+
+impl<T: Send + 'static> Future for JoinHandle<T> {
+    type Output = T;
+
+    /// Polls the join handle for completion.
+    ///
+    /// This method:
+    /// - Returns `Poll::Ready(T)` if the task has completed
+    /// - Returns `Poll::Pending` if the task is still running
+    /// - Registers a waker to be notified when the task completes
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let join_state = self.join_state();
+
+        // Fast path: check if already ready
+        if join_state.is_ready() {
+            // Safety: result is ready, and we only take it once
+            return Poll::Ready(unsafe { join_state.take_result() });
+        }
+
+        // Register waker and check again
+        // Safety: JoinHandle is the single consumer
+        unsafe { join_state.register_waker(cx.waker()) };
+
+        // Double-check after registration
+        if join_state.is_ready() {
+            // Safety: result is ready, and we only take it once
+            return Poll::Ready(unsafe { join_state.take_result() });
+        }
+
+        Poll::Pending
+    }
+}
+
 /// Remote scheduling request for a timer.
 #[derive(Clone, Copy, Debug)]
 pub struct TimerSchedule {
@@ -333,10 +590,7 @@ impl Default for WorkerServiceConfig {
     }
 }
 
-pub struct WorkerService<
-    const P: usize = DEFAULT_QUEUE_SEG_SHIFT,
-    const NUM_SEGS_P2: usize = DEFAULT_QUEUE_NUM_SEGS_SHIFT,
-> {
+pub struct WorkerService {
     // Core ownership - WorkerService owns the arena and coordinates work via SummaryTree
     arena: TaskArena,
     summary_tree: Summary,
@@ -359,9 +613,9 @@ pub struct WorkerService<
     worker_thread_handles: Box<[Mutex<Option<crate::runtime::preemption::WorkerThreadHandle>>]>,
     worker_stats: Box<[WorkerStats]>,
     worker_count: Arc<AtomicUsize>,
-    receivers: Box<[UnsafeCell<mpsc::Receiver<WorkerMessage, P, NUM_SEGS_P2>>]>,
-    senders: Box<[mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>]>,
-    tick_senders: Box<[mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>]>,
+    receivers: Box<[UnsafeCell<mpsc::Receiver<WorkerMessage>>]>,
+    senders: Box<[mpsc::Sender<WorkerMessage>]>,
+    tick_senders: Box<[mpsc::Sender<WorkerMessage>]>,
     yield_queues: Box<[YieldWorker<TaskHandle>]>,
     yield_stealers: Box<[Stealer<TaskHandle>]>,
     timers: Box<[UnsafeCell<TimerWheel<TimerHandle>>]>,
@@ -373,14 +627,14 @@ pub struct WorkerService<
     tick_health_check_interval: u64,
 }
 
-unsafe impl<const P: usize, const NUM_SEGS_P2: usize> Send for WorkerService<P, NUM_SEGS_P2> {}
+unsafe impl Send for WorkerService {}
 
 // SAFETY: WorkerService contains UnsafeCells for receivers and timers, but each worker
 // has exclusive access to its own index. The Arc-wrapped WorkerService is shared between
 // threads, but the UnsafeCell data is partitioned by worker_id.
-unsafe impl<const P: usize, const NUM_SEGS_P2: usize> Sync for WorkerService<P, NUM_SEGS_P2> {}
+unsafe impl Sync for WorkerService {}
 
-impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
+impl WorkerService {
     pub fn start(
         arena: TaskArena,
         config: WorkerServiceConfig,
@@ -434,7 +688,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         }
 
         let mut receivers = Vec::with_capacity(worker_count_val);
-        let mut senders = Vec::<mpsc::Sender<WorkerMessage, P, NUM_SEGS_P2>>::with_capacity(
+        let mut senders = Vec::<mpsc::Sender<WorkerMessage>>::with_capacity(
             worker_count_val * worker_count_val,
         );
         for worker_id in 0..worker_count_val {
@@ -539,7 +793,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
         // 2. No other thread has access to this service yet
         // 3. We're only writing to _tick_registration once during construction
         unsafe {
-            let service_ptr = Arc::as_ptr(&service) as *mut WorkerService<P, NUM_SEGS_P2>;
+            let service_ptr = Arc::as_ptr(&service) as *mut WorkerService;
             *(*service_ptr).tick_registration.lock().unwrap() = Some(registration);
         }
 
@@ -736,6 +990,115 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
             .expect("worker_threads lock poisoned") = Some(join);
 
         Ok(())
+    }
+
+    /// Spawns a new async task on the executor.
+    ///
+    /// This method performs the following steps:
+    /// 1. Validates that the executor is not shutting down and the arena is open
+    /// 2. Reserves a task slot from the worker service
+    /// 3. Initializes the task in the arena with its global ID
+    /// 4. Wraps the user's future in a join future that handles completion and cleanup
+    /// 5. Attaches the future to the task and schedules it for execution
+    ///
+    /// # Arguments
+    ///
+    /// * `future`: The future to execute. Must implement `IntoFuture` and be `Send + 'static`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(JoinHandle<T>)`: A join handle that can be awaited to get the task's result
+    /// * `Err(SpawnError)`: Error if spawning fails (closed executor, no capacity, or attach failed)
+    ///
+    /// # Errors
+    ///
+    /// - `SpawnError::Closed`: Executor is shutting down or arena is closed
+    /// - `SpawnError::NoCapacity`: No available task slots in the arena
+    /// - `SpawnError::AttachFailed`: Failed to attach the future to the task
+    pub fn spawn<F, T>(
+        self: &Arc<Self>,
+        _type_id: TypeId,
+        _location: &'static Location,
+        future: F,
+    ) -> Result<JoinHandle<T>, SpawnError>
+    where
+        F: IntoFuture<Output = T> + Send + 'static,
+        F::IntoFuture: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let arena = self.arena();
+
+        // Early return if executor is shutting down or arena is closed
+        // This prevents spawning new tasks during shutdown
+        if self.shutdown.load(Ordering::Acquire) || arena.is_closed() {
+            return Err(SpawnError::Closed);
+        }
+
+        // Reserve a task slot from the worker service
+        // Returns None if no capacity is available
+        let Some(handle) = self.reserve_task() else {
+            return Err(if arena.is_closed() {
+                SpawnError::Closed
+            } else {
+                SpawnError::NoCapacity
+            });
+        };
+
+        // Calculate the global task ID and initialize the task in the arena
+        // The summary pointer is used for task tracking and statistics
+        let global_id = handle.global_id(arena.tasks_per_leaf());
+        arena.init_task(global_id, self.summary() as *const _);
+
+        // Get the task reference and prepare handles for cleanup
+        let task = handle.task();
+        let task_handle = TaskHandle::from_non_null(handle.as_non_null());
+
+        // Create pointer for the JoinableFuture (will be set after allocation)
+        let service_for_future = Arc::clone(self);
+        let release_handle = task_handle;
+
+        // Create the wrapper future that:
+        // 1. Awaits the user's future
+        // 2. Stores result via JoinState::complete()
+        // 3. Releases the task handle back to the worker service
+        let user_future = future.into_future();
+        let wrapper_future = async move {
+            let result = user_future.await;
+            // The JoinableFuture pointer is stored in the task's future_ptr.
+            // JoinState is at offset sizeof(FutureHeader) from the start.
+            let task = release_handle.task();
+            let base_ptr = task.future_ptr() as *const u8;
+            let join_state_ptr = unsafe {
+                base_ptr.add(std::mem::size_of::<FutureHeader>()) as *const JoinState<T>
+            };
+            // Safety: We know this points to a JoinState<T> after the header
+            unsafe { (*join_state_ptr).complete(result) };
+            service_for_future.release_task(release_handle);
+        };
+
+        // Single allocation: Box::pin the entire JoinableFuture (join state + future inline)
+        let joinable = Box::pin(JoinableFuture::new(wrapper_future));
+
+        // Get the pointer to the join state (at the start of the pinned allocation)
+        let join_state_ptr = joinable.join_state() as *const JoinState<T>;
+
+        // Convert to raw pointer for storage in task
+        // Safety: We're unpinning to get the raw pointer, but the data stays pinned in memory
+        let future_ptr = unsafe { Box::into_raw(Pin::into_inner_unchecked(joinable)) as *mut () };
+
+        // Attach the future to the task
+        // If attachment fails, clean up the allocated future and release the task handle
+        if task.attach_future(future_ptr).is_err() {
+            unsafe { drop_future(future_ptr) };
+            self.release_task(task_handle);
+            return Err(SpawnError::AttachFailed);
+        }
+
+        // Schedule the task for execution by worker threads
+        task.schedule();
+
+        // Return a join handle that points to the JoinState
+        Ok(JoinHandle::new(join_state_ptr, Arc::clone(self)))
     }
 
     pub(crate) fn post_message(
@@ -994,7 +1357,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerService<P, NUM_SEGS_P2> {
     }
 }
 
-impl<const P: usize, const NUM_SEGS_P2: usize> WorkerBus for WorkerService<P, NUM_SEGS_P2> {
+impl WorkerBus for WorkerService {
     fn post_cancel_message(&self, from_worker_id: u32, to_worker_id: u32, timer_id: u64) -> bool {
         self.post_message(
             from_worker_id,
@@ -1008,7 +1371,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> WorkerBus for WorkerService<P, NU
     }
 }
 
-impl<const P: usize, const NUM_SEGS_P2: usize> TickHandler for WorkerService<P, NUM_SEGS_P2> {
+impl TickHandler for WorkerService {
     fn tick_duration(&self) -> Duration {
         self.tick_duration
     }
@@ -1043,7 +1406,7 @@ impl<const P: usize, const NUM_SEGS_P2: usize> TickHandler for WorkerService<P, 
     }
 }
 
-impl<const P: usize, const NUM_SEGS_P2: usize> Drop for WorkerService<P, NUM_SEGS_P2> {
+impl Drop for WorkerService {
     fn drop(&mut self) {
         *self.tick_registration.lock().expect("lock poisoned") = None;
         if !self.shutdown.load(Ordering::Acquire) {
@@ -1184,17 +1547,13 @@ pub struct WorkerInner<'a> {
     io_budget: usize,
 }
 
-pub struct Worker<
-    'a,
-    const P: usize = DEFAULT_QUEUE_SEG_SHIFT,
-    const NUM_SEGS_P2: usize = DEFAULT_QUEUE_NUM_SEGS_SHIFT,
-> {
-    service: Arc<WorkerService<P, NUM_SEGS_P2>>,
-    receiver: &'a mut mpsc::Receiver<WorkerMessage, P, NUM_SEGS_P2>,
+pub struct Worker<'a> {
+    service: Arc<WorkerService>,
+    receiver: &'a mut mpsc::Receiver<WorkerMessage>,
     inner: WorkerInner<'a>,
 }
 
-impl<'a, const P: usize, const NUM_SEGS_P2: usize> Drop for Worker<'a, P, NUM_SEGS_P2> {
+impl Drop for Worker<'_> {
     /// Cleans up the worker when it goes out of scope.
     ///
     /// The EventLoop owns its Waker, so proper drop order is ensured:
@@ -1282,7 +1641,7 @@ impl RunContext {
     }
 }
 
-impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
+impl<'a> Worker<'a> {
     #[inline]
     pub fn stats(&self) -> &WorkerStats {
         &self.inner.stats
@@ -1483,7 +1842,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
                     // Wrap in catch_unwind to ensure clean stack behavior
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         // SAFETY: worker_addr is the address of a valid Worker that lives for the generator's lifetime
-                        let worker = unsafe { &mut *(worker_addr as *mut Worker<P, NUM_SEGS_P2>) };
+                        let worker = unsafe { &mut *(worker_addr as *mut Worker<'_>) };
                         let mut spin_count = 0;
                         let waker_id = worker.inner.worker_id as usize;
 
@@ -2523,7 +2882,7 @@ impl<'a, const P: usize, const NUM_SEGS_P2: usize> Worker<'a, P, NUM_SEGS_P2> {
 
                 self.inner.current_task = core::ptr::null_mut();
                 if let Some(ptr) = task.take_future() {
-                    unsafe { FutureAllocator::drop_boxed(ptr) };
+                    unsafe { drop_future(ptr) };
                 }
             }
             Some(Poll::Pending) => {

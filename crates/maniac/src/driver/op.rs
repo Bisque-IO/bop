@@ -168,9 +168,9 @@ impl<T: OpAble> PollLegacy for T {
     #[cfg(feature = "poll")]
     #[inline]
     fn poll_legacy(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<CompletionMeta> {
-        #[cfg(all(feature = "iouring", feature = "tokio-compat"))]
+        #[cfg(all(target_os = "linux", feature = "iouring", feature = "tokio-compat"))]
         unsafe {
-            extern "C" {
+            unsafe extern "C" {
                 #[link_name = "tokio-compat can only be enabled when poll feature is enabled and \
                                iouring is not"]
                 fn trigger() -> !;
@@ -178,7 +178,7 @@ impl<T: OpAble> PollLegacy for T {
             trigger()
         }
 
-        #[cfg(not(all(feature = "iouring", feature = "tokio-compat")))]
+        #[cfg(not(all(target_os = "linux", feature = "iouring", feature = "tokio-compat")))]
         driver::CURRENT.with(|this| this.poll_op(self, 0, _cx))
     }
 

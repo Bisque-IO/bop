@@ -13,8 +13,13 @@ use std::thread;
 use crate::detail::spsc::{UnboundedSender, UnboundedSpsc};
 use rand::RngCore;
 
+/// Segment size power (1024 items per segment)
+const P: usize = 10;
+/// Number of segments power (256 segments)
+const NUM_SEGS_P2: usize = 8;
+
 /// Create a new blocking MPSC queue
-pub fn new<T, const P: usize, const NUM_SEGS_P2: usize>() -> Receiver<T, P, NUM_SEGS_P2> {
+pub fn new<T>() -> Receiver<T> {
     new_with_waker(Arc::new(WorkerWaker::new()))
 }
 
@@ -37,9 +42,9 @@ pub fn new<T, const P: usize, const NUM_SEGS_P2: usize>() -> Receiver<T, P, NUM_
 /// }))));
 /// let receiver = mpsc::new_with_waker(waker);
 /// ```
-pub fn new_with_waker<T, const P: usize, const NUM_SEGS_P2: usize>(
+pub fn new_with_waker<T>(
     waker: Arc<WorkerWaker>,
-) -> Receiver<T, P, NUM_SEGS_P2> {
+) -> Receiver<T> {
     // Create sparse array of AtomicPtr, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
     for _ in 0..MAX_QUEUES {
@@ -66,8 +71,7 @@ pub fn new_with_waker<T, const P: usize, const NUM_SEGS_P2: usize>(
     }
 }
 
-pub fn new_with_sender<T, const P: usize, const NUM_SEGS_P2: usize>()
--> (Sender<T, P, NUM_SEGS_P2>, Receiver<T, P, NUM_SEGS_P2>) {
+pub fn new_with_sender<T>() -> (Sender<T>, Receiver<T>) {
     let waker = Arc::new(WorkerWaker::new());
     // Create sparse array of AtomicPtr, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
@@ -118,7 +122,7 @@ const SIGNAL_WORDS: usize = STATUS_SUMMARY_WORDS;
 type CloseFn = Box<dyn FnOnce()>;
 
 /// The shared state of the blocking MPSC queue
-struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
+struct Inner<T> {
     /// Sparse array of producer queues - always MAX_PRODUCERS size
     /// Each slot is an AtomicPtr for thread-safe registration and access
     queues: Box<[AtomicPtr<UnboundedSpsc<T, P, NUM_SEGS_P2, Arc<SignalGate>>>]>,
@@ -133,7 +137,7 @@ struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
     signals: Arc<[Signal; SIGNAL_WORDS]>,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
+impl<T> Inner<T> {
     /// Check if the queue is closed
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
@@ -144,7 +148,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
         self.producer_count.load(Ordering::Relaxed)
     }
 
-    pub fn create_sender(self: &Arc<Self>) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
+    pub fn create_sender(self: &Arc<Self>) -> Result<Sender<T>, PushError<()>> {
         self.create_sender_with_config(0)
     }
 
@@ -181,7 +185,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
     pub fn create_sender_with_config(
         self: &Arc<Self>,
         max_pooled_segments: usize,
-    ) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
+    ) -> Result<Sender<T>, PushError<()>> {
         if self.is_closed() {
             return Err(PushError::Closed(()));
         }
@@ -326,8 +330,6 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
 ///
 /// # Type Parameters
 /// - `T`: The type of elements stored in the queue (must be Copy)
-/// - `P`: log2 of segment size (default 8 = 256 items/segment)
-/// - `NUM_SEGS_P2`: log2 of number of segments (default 2 = 4 segments, total capacity ~1024)
 ///
 /// # Examples
 ///
@@ -349,13 +351,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
 /// let value = mpsc.pop_blocking().unwrap();
 /// assert_eq!(value, 42);
 /// ```ignore
-pub struct Sender<T, const P: usize, const NUM_SEGS_P2: usize> {
-    inner: Arc<Inner<T, P, NUM_SEGS_P2>>,
+pub struct Sender<T> {
+    inner: Arc<Inner<T>>,
     sender: UnboundedSender<T, P, NUM_SEGS_P2, Arc<SignalGate>>,
     producer_id: usize,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
+impl<T> Sender<T> {
     /// Check if the queue is closed
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Acquire)
@@ -413,25 +415,25 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for Sender<T, P, NUM_SEGS_P2> {
+impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.inner.create_sender().expect("too many senders")
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS_P2> {
+impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         self.sender.close_channel();
     }
 }
 
-pub struct Receiver<T, const P: usize, const NUM_SEGS_P2: usize> {
-    inner: Arc<Inner<T, P, NUM_SEGS_P2>>,
+pub struct Receiver<T> {
+    inner: Arc<Inner<T>>,
     misses: u64,
     seed: u64,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
+impl<T> Receiver<T> {
     pub fn next(&mut self) -> u64 {
         let old_seed = self.seed;
         let next_seed = (old_seed
@@ -462,7 +464,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
         self.inner.producer_count.load(Ordering::Relaxed)
     }
 
-    pub fn create_sender(&self) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
+    pub fn create_sender(&self) -> Result<Sender<T>, PushError<()>> {
         self.create_sender_with_config(0)
     }
 
@@ -499,7 +501,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
     pub fn create_sender_with_config(
         &self,
         max_pooled_segments: usize,
-    ) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
+    ) -> Result<Sender<T>, PushError<()>> {
         self.inner.create_sender_with_config(max_pooled_segments)
     }
 
@@ -793,23 +795,20 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Receiver<T, P, NUM_SEGS_P2> {
+impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.inner.close();
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Inner<T, P, NUM_SEGS_P2> {
+impl<T> Drop for Inner<T> {
     fn drop(&mut self) {
         self.close();
     }
 }
 
-unsafe impl<T: Send, const P: usize, const NUM_SEGS_P2: usize> Send for Sender<T, P, NUM_SEGS_P2> {}
-unsafe impl<T: Send, const P: usize, const NUM_SEGS_P2: usize> Send
-    for Receiver<T, P, NUM_SEGS_P2>
-{
-}
+unsafe impl<T: Send> Send for Sender<T> {}
+unsafe impl<T: Send> Send for Receiver<T> {}
 
 #[cfg(test)]
 mod tests {
@@ -818,7 +817,7 @@ mod tests {
 
     #[test]
     fn try_pop_drains_and_reports_closed() {
-        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        let (mut tx, mut rx) = new_with_sender::<u64>();
 
         tx.try_push(42).unwrap();
         assert_eq!(rx.try_pop().unwrap(), 42);
@@ -830,7 +829,7 @@ mod tests {
 
     #[test]
     fn dropping_local_sender_clears_producer_slot() {
-        let (tx, rx) = new_with_sender::<u64, 6, 8>();
+        let (tx, rx) = new_with_sender::<u64>();
         assert_eq!(tx.producer_count(), 1);
 
         drop(tx);
@@ -843,7 +842,7 @@ mod tests {
 
     #[test]
     fn single_producer_multiple_items() {
-        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        let (mut tx, mut rx) = new_with_sender::<u64>();
 
         // Push multiple items
         for i in 0..100 {
@@ -864,7 +863,7 @@ mod tests {
     fn multiple_producers_single_consumer() {
         use std::thread;
 
-        let (tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        let (tx, mut rx) = new_with_sender::<u64>();
         let mut received = vec![false; 30]; // Track which items we received
 
         // Spawn 3 producer threads, each pushing 10 items
@@ -906,7 +905,7 @@ mod tests {
 
     #[test]
     fn unbounded_growth_with_large_batches() {
-        let (mut tx, mut rx) = new_with_sender::<u64, 2, 2>(); // Small segments for growth testing
+        let (mut tx, mut rx) = new_with_sender::<u64>();
 
         // Push many items, causing growth
         let mut items_to_push: Vec<u64> = (0..1000).collect();
@@ -926,7 +925,7 @@ mod tests {
 
     #[test]
     fn close_stops_receives() {
-        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        let (mut tx, mut rx) = new_with_sender::<u64>();
 
         tx.try_push(42).unwrap();
         assert_eq!(rx.try_pop().unwrap(), 42);
@@ -943,7 +942,7 @@ mod tests {
 
     #[test]
     fn multiple_senders_cloning() {
-        let (tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        let (tx, mut rx) = new_with_sender::<u64>();
         assert_eq!(tx.producer_count(), 1);
 
         let mut tx2 = tx.clone();
@@ -971,7 +970,7 @@ mod tests {
 
     #[test]
     fn interleaved_push_pop() {
-        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        let (mut tx, mut rx) = new_with_sender::<u64>();
 
         // Push and pop interleaved
         let mut received = Vec::new();
@@ -1001,7 +1000,7 @@ mod tests {
 
     #[test]
     fn batch_push_pop() {
-        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        let (mut tx, mut rx) = new_with_sender::<u64>();
 
         // Push batch
         let mut items: Vec<u64> = (0..50).collect();
@@ -1026,7 +1025,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         use std::thread;
 
-        let (tx, rx) = new_with_sender::<u64, 6, 8>();
+        let (tx, rx) = new_with_sender::<u64>();
         let counter = Arc::new(AtomicUsize::new(0));
 
         let rx = Arc::new(Mutex::new(rx));
@@ -1069,7 +1068,7 @@ mod tests {
 
     #[test]
     fn stress_test_unbounded_expansion() {
-        let (mut tx, mut rx) = new_with_sender::<u64, 2, 2>(); // Very small segments
+        let (mut tx, mut rx) = new_with_sender::<u64>();
 
         // Push 10000 items to force significant expansion
         let mut items: Vec<u64> = (0..10000).collect();
@@ -1086,7 +1085,7 @@ mod tests {
 
     #[test]
     fn producer_id_uniqueness() {
-        let (tx1, _rx) = new_with_sender::<u64, 6, 8>();
+        let (tx1, _rx) = new_with_sender::<u64>();
         let tx2 = tx1.clone();
         let tx3 = tx1.clone();
 
@@ -1098,7 +1097,7 @@ mod tests {
 
     #[test]
     fn receiver_count_tracking() {
-        let (tx1, rx) = new_with_sender::<u64, 6, 8>();
+        let (tx1, rx) = new_with_sender::<u64>();
         assert_eq!(rx.producer_count(), 1);
 
         let tx2 = tx1.clone();

@@ -1,7 +1,7 @@
 use std::{
     io,
     ops::{Deref, DerefMut},
-    task::Context,
+    task::{Context, ready},
     time::Duration,
 };
 
@@ -117,15 +117,6 @@ impl Deref for Poll {
 
     fn deref(&self) -> &Self::Target {
         &self.poll
-    }
-}
-
-#[cfg(windows)]
-impl std::os::windows::io::AsRawHandle for Poll {
-    #[inline]
-    fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
-        use std::os::windows::io::AsRawHandle;
-        self.poll.as_raw_handle()
     }
 }
 

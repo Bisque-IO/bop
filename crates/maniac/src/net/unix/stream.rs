@@ -3,6 +3,7 @@ use std::{
     io::{self},
     os::unix::prelude::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
     path::Path,
+    task::ready,
 };
 
 use super::{
@@ -323,7 +324,7 @@ impl tokio::io::AsyncRead for UnixStream {
             let mut recv = Op::recv_raw(&self.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_legacy(&mut recv, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| {
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| {
                 let n = n.into_inner();
                 buf.assume_init(n as usize);
                 buf.advance(n as usize);
@@ -344,7 +345,7 @@ impl tokio::io::AsyncWrite for UnixStream {
             let mut send = Op::send_raw(&self.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_legacy(&mut send, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n| n.into_inner() as usize))
+            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
         }
     }
 

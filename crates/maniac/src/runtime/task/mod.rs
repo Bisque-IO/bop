@@ -3,7 +3,8 @@ pub mod summary;
 
 use summary::Summary;
 use super::timer::TimerHandle;
-use super::worker::Worker;
+use super::worker::{Worker, poll_future as worker_poll_future, drop_future as worker_drop_future};
+use crate::future::waker::DiatomicWaker;
 use crate::generator::Generator;
 use crate::utils::bits;
 use std::cell::UnsafeCell;
@@ -12,6 +13,7 @@ use std::future::{Future, IntoFuture};
 use std::io;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
@@ -327,40 +329,6 @@ impl ArenaLayout {
             task_offset,
             total_size: offset,
             signals_per_leaf,
-        }
-    }
-}
-
-pub(crate) struct FutureAllocator;
-
-impl FutureAllocator {
-    #[inline(always)]
-    pub fn box_future<F>(future: F) -> *mut ()
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let boxed: BoxFuture = Box::pin(future);
-        Box::into_raw(Box::new(boxed)) as *mut ()
-    }
-
-    #[inline(always)]
-    pub unsafe fn drop_boxed(ptr: *mut ()) {
-        if ptr.is_null() {
-            return;
-        }
-        unsafe {
-            drop(Box::from_raw(ptr as *mut BoxFuture));
-        }
-    }
-
-    #[inline(always)]
-    pub unsafe fn poll_boxed(ptr: *mut (), cx: &mut Context<'_>) -> Option<Poll<()>> {
-        if ptr.is_null() {
-            return None;
-        }
-        unsafe {
-            let future = &mut *(ptr as *mut BoxFuture);
-            Some(future.as_mut().poll(cx))
         }
     }
 }
@@ -901,12 +869,18 @@ impl Task {
         self.record_poll();
         if self.cpu_time_enabled.load(Ordering::Relaxed) {
             let start = Instant::now();
-            let result = unsafe { FutureAllocator::poll_boxed(ptr, cx) };
+            let result = unsafe { worker_poll_future(ptr, cx) };
             self.record_cpu_time(start.elapsed());
-            result
+            Some(result)
         } else {
-            unsafe { FutureAllocator::poll_boxed(ptr, cx) }
+            Some(unsafe { worker_poll_future(ptr, cx) })
         }
+    }
+
+    /// Gets the current future pointer.
+    #[inline(always)]
+    pub fn future_ptr(&self) -> *mut () {
+        self.future_ptr.load(Ordering::Acquire)
     }
 
     #[inline(always)]
@@ -1036,7 +1010,7 @@ impl Task {
     /// Safety: Only call from the worker thread that owns this task
     #[inline(always)]
     pub unsafe fn clear_pinned_generator(&self) {
-        let ptr = self
+        let _ptr = self
             .pinned_generator_ptr
             .swap(ptr::null_mut(), Ordering::AcqRel);
     }
@@ -1715,20 +1689,6 @@ mod tests {
     }
 
     #[test]
-    fn future_helpers_drop_boxed_accepts_null() {
-        unsafe {
-            FutureAllocator::drop_boxed(ptr::null_mut());
-        }
-    }
-
-    #[test]
-    fn future_helpers_poll_boxed_accepts_null() {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        assert!(unsafe { FutureAllocator::poll_boxed(ptr::null_mut(), &mut cx) }.is_none());
-    }
-
-    #[test]
     #[cfg(feature = "disabled_tests")] // References old Task fields (slot_idx)
     fn task_construct_initializes_fields() {
         let mut storage = MaybeUninit::<Task>::uninit();
@@ -1925,48 +1885,7 @@ mod tests {
             arena.release_task(handle);
         }
 
-        #[test]
-        #[ignore = "Needs WorkerService helper - uses reserve_task()"]
-        fn task_attach_future_rejects_second_future() {
-            let arena = setup_arena(1, 64);
-            let handle = arena.reserve_task().expect("reserve task");
-            let global = handle.global_id(arena.tasks_per_leaf());
-            arena.init_task(global);
-            let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
-            let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
-
-            let first_ptr = FutureAllocator::box_future(async {});
-            task.attach_future(first_ptr).unwrap();
-            let second_ptr = FutureAllocator::box_future(async {});
-            let existing = task.attach_future(second_ptr).unwrap_err();
-            assert_eq!(existing, first_ptr);
-            unsafe { FutureAllocator::drop_boxed(second_ptr) };
-
-            let ptr = task.take_future().unwrap();
-            unsafe { FutureAllocator::drop_boxed(ptr) };
-            arena.release_task(handle);
-        }
-
-        #[test]
-        #[ignore = "Needs WorkerService helper - uses reserve_task()"]
-        fn task_take_future_clears_pointer() {
-            let arena = setup_arena(1, 64);
-            let handle = arena.reserve_task().expect("reserve task");
-            let global = handle.global_id(arena.tasks_per_leaf());
-            arena.init_task(global);
-            let slot_idx = handle.signal_idx() * 64 + handle.bit_idx() as usize;
-            let task = unsafe { arena.task(handle.leaf_idx(), slot_idx) };
-
-            let future_ptr = FutureAllocator::box_future(async {});
-            task.attach_future(future_ptr).unwrap();
-            let returned = task.take_future().unwrap();
-            assert_eq!(returned, future_ptr);
-            assert!(task.take_future().is_none());
-            unsafe { FutureAllocator::drop_boxed(returned) };
-            arena.release_task(handle);
-        }
-
-        // TODO: These tests need to be updated to use WorkerService instead of direct Worker construction
+        // TODO: These tests need to be updated to use WorkerService and JoinableFuture instead of FutureAllocator
         // #[test]
         // fn arena_spawn_executes_future() {
         //     let arena = setup_arena(1, 8);
