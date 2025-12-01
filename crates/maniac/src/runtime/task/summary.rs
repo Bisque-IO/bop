@@ -8,6 +8,18 @@ use std::time::Duration;
 
 const TASK_SLOTS_PER_SIGNAL: usize = u64::BITS as usize;
 
+/// Returns true if `n` is a power of two (and non-zero).
+#[inline(always)]
+const fn is_power_of_two(n: usize) -> bool {
+    n > 0 && (n & (n - 1)) == 0
+}
+
+/// Returns the number of trailing zeros, which equals log2 for powers of two.
+#[inline(always)]
+const fn log2_of_power_of_two(n: usize) -> u32 {
+    n.trailing_zeros()
+}
+
 /// Single-level summary tree for task work-stealing.
 ///
 /// This tree tracks ONLY task signals - no yield or worker state.
@@ -32,10 +44,17 @@ pub struct Summary {
     pub(crate) leaf_words: Box<[AtomicU64]>, // Pub for Worker access
     task_reservations: Box<[AtomicU64]>,
 
-    // Configuration
+    // Configuration (power-of-2 enforced)
     leaf_count: usize,
     signals_per_leaf: usize,
     leaf_summary_mask: u64,
+
+    // Precomputed shifts/masks for fast arithmetic (power-of-2 optimization)
+    // leaf_count and signals_per_leaf must be powers of 2
+    leaf_count_shift: u32,        // log2(leaf_count) for fast division
+    leaf_count_mask: usize,       // leaf_count - 1 for fast modulo
+    signals_per_leaf_shift: u32,  // log2(signals_per_leaf) for fast multiply/divide
+    signals_per_leaf_mask: usize, // signals_per_leaf - 1 for fast modulo
 
     // Round-robin cursors for allocation
     // CachePadded to prevent false sharing between CPU cores
@@ -45,8 +64,8 @@ pub struct Summary {
     // Raw pointer to WorkerService.wakers array (lifetime guaranteed by WorkerService ownership)
     wakers: *const Arc<WorkerWaker>,
     wakers_len: usize,
-    // Shared reference to worker_count - keeps it alive
-    worker_count: Arc<AtomicUsize>,
+    // Fixed worker count (set at initialization, never changes)
+    worker_count: usize,
 
     // Provenance tracking for raw pointers
     _marker: PhantomData<&'static WorkerWaker>,
@@ -59,14 +78,17 @@ impl Summary {
     /// Creates a new Summary with the specified dimensions.
     ///
     /// # Arguments
-    /// * `leaf_count` - Number of leaf nodes (typically matches worker partition count)
-    /// * `signals_per_leaf` - Number of task signal words per leaf (typically tasks_per_leaf / 64)
+    /// * `leaf_count` - Number of leaf nodes (must be power of 2, typically matches worker partition count)
+    /// * `signals_per_leaf` - Number of task signal words per leaf (must be power of 2, max 64)
     /// * `wakers` - Slice of SignalWakers for partition owner notification
-    /// * `worker_count` - Reference to WorkerService's worker_count atomic (single source of truth)
+    /// * `worker_count` - Fixed number of workers (set at initialization)
+    ///
+    /// # Panics
+    /// Panics if `leaf_count` or `signals_per_leaf` are not powers of 2.
     ///
     /// # Safety
-    /// The wakers slice and worker_count reference must remain valid for the lifetime of this Summary.
-    /// This is guaranteed when Summary is owned by WorkerService which also owns the wakers and worker_count.
+    /// The wakers slice must remain valid for the lifetime of this Summary.
+    /// This is guaranteed when Summary is owned by WorkerService which also owns the wakers.
     ///
     /// # Memory Allocation
     /// Allocates `leaf_count * signals_per_leaf * 8` bytes for reservations plus overhead for leaf words and cursors.
@@ -74,14 +96,31 @@ impl Summary {
         leaf_count: usize,
         signals_per_leaf: usize,
         wakers: &[Arc<WorkerWaker>],
-        worker_count: &Arc<AtomicUsize>,
+        worker_count: usize,
     ) -> Self {
         assert!(leaf_count > 0, "leaf_count must be > 0");
+        assert!(
+            is_power_of_two(leaf_count),
+            "leaf_count must be a power of 2, got {}",
+            leaf_count
+        );
         assert!(signals_per_leaf > 0, "signals_per_leaf must be > 0");
+        assert!(
+            is_power_of_two(signals_per_leaf),
+            "signals_per_leaf must be a power of 2, got {}",
+            signals_per_leaf
+        );
         assert!(signals_per_leaf <= 64, "signals_per_leaf must be <= 64");
         assert!(!wakers.is_empty(), "wakers must not be empty");
+        assert!(worker_count > 0, "worker_count must be > 0");
 
-        let task_word_count = leaf_count * signals_per_leaf;
+        // Precompute shifts and masks for fast arithmetic
+        let leaf_count_shift = log2_of_power_of_two(leaf_count);
+        let leaf_count_mask = leaf_count - 1;
+        let signals_per_leaf_shift = log2_of_power_of_two(signals_per_leaf);
+        let signals_per_leaf_mask = signals_per_leaf - 1;
+
+        let task_word_count = leaf_count << signals_per_leaf_shift; // leaf_count * signals_per_leaf
 
         // Initialize leaf words (all signals initially inactive)
         let leaf_words = (0..leaf_count)
@@ -96,6 +135,7 @@ impl Summary {
             .into_boxed_slice();
 
         // Create mask for valid signal bits in each leaf
+        // For signals_per_leaf=4, mask should be 0b1111 = (1 << 4) - 1 = 15
         let leaf_summary_mask = if signals_per_leaf >= 64 {
             u64::MAX
         } else {
@@ -108,24 +148,18 @@ impl Summary {
             leaf_count,
             signals_per_leaf,
             leaf_summary_mask,
+            leaf_count_shift,
+            leaf_count_mask,
+            signals_per_leaf_shift,
+            signals_per_leaf_mask,
             next_partition: CachePadded::new(AtomicUsize::new(0)),
             wakers: wakers.as_ptr(),
             wakers_len: wakers.len(),
-            worker_count: Arc::clone(worker_count),
+            worker_count,
             _marker: PhantomData,
         }
     }
 
-    /// Get the current worker count from WorkerService.
-    /// Reads directly from the single source of truth.
-    ///
-    /// # Atomic Semantics
-    /// Uses `Relaxed` ordering since this is only used for informational purposes
-    /// and doesn't require synchronization with other memory operations.
-    #[inline]
-    pub fn get_worker_count(&self) -> usize {
-        self.worker_count.load(Ordering::Relaxed)
-    }
 
     #[inline(always)]
     fn leaf_word(&self, idx: usize) -> &AtomicU64 {
@@ -134,7 +168,8 @@ impl Summary {
 
     #[inline(always)]
     fn reservation_index(&self, leaf_idx: usize, signal_idx: usize) -> usize {
-        leaf_idx * self.signals_per_leaf + signal_idx
+        // Fast arithmetic using shift instead of multiply (signals_per_leaf is power of 2)
+        (leaf_idx << self.signals_per_leaf_shift) | signal_idx
     }
 
     #[inline(always)]
@@ -162,80 +197,52 @@ impl Summary {
     }
 
     /// Notify the partition owner's SignalWaker that a leaf in their partition became active.
-    ///
-    /// # Atomic Semantics
-    /// This function reads the worker count with Acquire ordering to ensure visibility
-    /// of prior worker service state changes. It includes validation to handle the case
-    /// where worker count changes between loading and using it (TOCTOU race).
-    ///
-    /// # Race Condition Mitigation
-    /// - Validates worker_count against wakers_len to prevent out-of-bounds access
-    /// - Validates owner_id against current worker_count to handle worker shutdown
-    /// - These checks ensure safe operation even if worker configuration changes
     #[inline(always)]
     fn notify_partition_owner_active(&self, leaf_idx: usize) {
-        let worker_count = self.worker_count.load(Ordering::Acquire);
-        // Validate worker count to prevent out-of-bounds access
-        if worker_count == 0 || worker_count > self.wakers_len {
+        let owner_id = self.compute_partition_owner(leaf_idx, self.worker_count);
+        
+        // Validate owner_id against wakers_len to prevent out-of-bounds access
+        if owner_id >= self.wakers_len {
             return;
         }
 
-        let owner_id = self.compute_partition_owner(leaf_idx, worker_count);
-        // Additional validation: owner_id must be within current worker count
-        // This handles the case where worker count decreases after we loaded it
-        if owner_id >= worker_count {
-            return;
-        }
+        // SAFETY: wakers pointer is valid for the lifetime of Summary
+        // because WorkerService owns both
+        let waker = unsafe { &*self.wakers.add(owner_id) };
 
-        if owner_id < self.wakers_len {
-            // SAFETY: wakers pointer is valid for the lifetime of Summary
-            // because WorkerService owns both
-            let waker = unsafe { &*self.wakers.add(owner_id) };
-
-            // Compute local leaf index within owner's partition
-            if let Some(local_idx) = self.global_to_local_leaf_idx(leaf_idx, owner_id, worker_count)
-            {
-                waker.mark_partition_leaf_active(local_idx);
+        // Compute local leaf index within owner's partition
+        if let Some(local_idx) = self.global_to_local_leaf_idx(leaf_idx, owner_id, self.worker_count)
+        {
+            // Fast path: if partition is already active, just set the bit without wakeup overhead
+            let mask = 1u64 << local_idx;
+            if waker.partition_summary() != 0 {
+                // Partition already has work - atomically set the bit but skip wakeup logic
+                waker.partition_summary_fetch_or(mask);
+                return;
             }
+            // Slow path: partition was empty, need full wakeup sequence
+            waker.mark_partition_leaf_active(local_idx);
         }
     }
 
     /// Notify the partition owner's SignalWaker that a leaf in their partition became inactive.
-    ///
-    /// # Atomic Semantics
-    /// This function reads the worker count with Acquire ordering to ensure visibility
-    /// of prior worker service state changes. It includes validation to handle the case
-    /// where worker count changes between loading and using it (TOCTOU race).
-    ///
-    /// # Race Condition Mitigation
-    /// - Validates worker_count against wakers_len to prevent out-of-bounds access
-    /// - Validates owner_id against current worker_count to handle worker shutdown
-    /// - These checks ensure safe operation even if worker configuration changes
     #[inline(always)]
     fn notify_partition_owner_inactive(&self, leaf_idx: usize) {
-        let worker_count = self.worker_count.load(Ordering::Acquire);
-        // Validate worker count to prevent out-of-bounds access
-        if worker_count == 0 || worker_count > self.wakers_len {
+        let owner_id = self.compute_partition_owner(leaf_idx, self.worker_count);
+        
+        // Validate owner_id against wakers_len to prevent out-of-bounds access
+        if owner_id >= self.wakers_len {
             return;
         }
 
-        let owner_id = self.compute_partition_owner(leaf_idx, worker_count);
-        // Additional validation: owner_id must be within current worker count
-        // This handles the case where worker count decreases after we loaded it
-        if owner_id >= worker_count {
-            return;
-        }
+        // SAFETY: wakers pointer is valid for the lifetime of Summary
+        // because WorkerService owns both
+        let waker = unsafe { &*self.wakers.add(owner_id) };
 
-        if owner_id < self.wakers_len {
-            // SAFETY: wakers pointer is valid for the lifetime of Summary
-            // because WorkerService owns both
-            let waker = unsafe { &*self.wakers.add(owner_id) };
-
-            // Compute local leaf index within owner's partition
-            if let Some(local_idx) = self.global_to_local_leaf_idx(leaf_idx, owner_id, worker_count)
-            {
-                waker.clear_partition_leaf(local_idx);
-            }
+        // Compute local leaf index within owner's partition
+        if let Some(local_idx) = self.global_to_local_leaf_idx(leaf_idx, owner_id, self.worker_count)
+        {
+            waker.clear_partition_leaf(local_idx);
         }
     }
 
@@ -292,6 +299,7 @@ impl Summary {
     /// # Atomic Semantics
     /// Uses `fetch_or` with `AcqRel` ordering to atomically set bits and get previous state.
     /// Notifies the partition owner if new bits were added.
+    #[inline]
     pub fn mark_signal_active(&self, leaf_idx: usize, signal_idx: usize) -> bool {
         if leaf_idx >= self.leaf_count || signal_idx >= self.signals_per_leaf {
             return false;
@@ -299,6 +307,29 @@ impl Summary {
         debug_assert!(signal_idx < self.signals_per_leaf);
         let mask = 1u64 << signal_idx;
         self.mark_leaf_bits(leaf_idx, mask)
+    }
+
+    /// Batch version: mark multiple signals active in a leaf at once.
+    ///
+    /// More efficient than calling `mark_signal_active` in a loop when multiple
+    /// signals become active simultaneously.
+    ///
+    /// # Arguments
+    /// * `leaf_idx` - Leaf index
+    /// * `signal_mask` - Bitmap of signals to mark active (bit i = signal i)
+    ///
+    /// # Returns
+    /// `true` if the leaf was empty before setting these signals
+    ///
+    /// # Atomic Semantics
+    /// Uses a single `fetch_or` with `AcqRel` ordering.
+    #[inline]
+    pub fn mark_signals_active_mask(&self, leaf_idx: usize, signal_mask: u64) -> bool {
+        if leaf_idx >= self.leaf_count || signal_mask == 0 {
+            return false;
+        }
+        let masked = signal_mask & self.leaf_summary_mask;
+        self.mark_leaf_bits(leaf_idx, masked)
     }
 
     /// Clears the summary bit for a task signal.
@@ -309,6 +340,7 @@ impl Summary {
     /// # Atomic Semantics
     /// Uses `fetch_and` with `AcqRel` ordering to atomically clear bits and get previous state.
     /// Notifies the partition owner if the leaf became empty.
+    #[inline]
     pub fn mark_signal_inactive(&self, leaf_idx: usize, signal_idx: usize) -> bool {
         if leaf_idx >= self.leaf_count || signal_idx >= self.signals_per_leaf {
             return false;
@@ -349,7 +381,8 @@ impl Summary {
             }
             let bit = free.trailing_zeros() as u8;
             let mask = 1u64 << bit;
-            match reservations.compare_exchange(
+            // Use compare_exchange_weak for better performance on ARM/LL-SC architectures
+            match reservations.compare_exchange_weak(
                 current,
                 current | mask,
                 Ordering::AcqRel,
@@ -395,9 +428,9 @@ impl Summary {
         // Exhaustively scan partitions one by one. Each partition represents a worker's slice of
         // leaves, so rotating by partition keeps contention localized while still guaranteeing we
         // eventually visit every leaf if the partition has no free slots.
-        let worker_count = self.get_worker_count();
-        let partition_count = worker_count.max(1);
-        let start_partition = self.next_partition.fetch_add(1, Ordering::SeqCst) % partition_count;
+        let partition_count = self.worker_count;
+        // Relaxed suffices - this is just for load distribution, not synchronization
+        let start_partition = self.next_partition.fetch_add(1, Ordering::Relaxed) % partition_count;
 
         for partition_offset in 0..partition_count {
             let worker_id = (start_partition + partition_offset) % partition_count;
@@ -623,21 +656,19 @@ mod tests {
     fn setup_tree(
         leaf_count: usize,
         signals_per_leaf: usize,
-    ) -> (Summary, Vec<Arc<WorkerWaker>>, Arc<AtomicUsize>) {
+    ) -> (Summary, Vec<Arc<WorkerWaker>>) {
         // Create dummy wakers for testing
-        // SAFETY: The returned Arc<AtomicUsize> must outlive the Summary instance
-        // to prevent dangling pointer access via Summary.worker_count
         let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
-        let worker_count = Arc::new(AtomicUsize::new(4));
-        let tree = Summary::new(leaf_count, signals_per_leaf, &wakers, &worker_count);
-        (tree, wakers, worker_count)
+        let worker_count = 4;
+        let tree = Summary::new(leaf_count, signals_per_leaf, &wakers, worker_count);
+        (tree, wakers)
     }
 
     /// Test that marking a signal active updates the leaf word correctly
     /// and that duplicate marking returns false (idempotent behavior)
     #[test]
     fn mark_signal_active_updates_root_and_leaf() {
-        let (tree, _wakers, _worker_count) = setup_tree(4, 4);
+        let (tree, _wakers) = setup_tree(4, 4);
 
         // First activation should return true (leaf was empty)
         assert!(tree.mark_signal_active(1, 1));
@@ -655,7 +686,7 @@ mod tests {
     /// This tests the race-prone mark_signal_inactive_if_empty function
     #[test]
     fn mark_signal_inactive_if_empty_clears_summary() {
-        let (tree, _wakers, _worker_count) = setup_tree(1, 2);
+        let (tree, _wakers) = setup_tree(1, 2);
 
         // Activate a signal
         assert!(tree.mark_signal_active(0, 1));
@@ -672,7 +703,7 @@ mod tests {
     /// Validates the CAS loop implementation and bit manipulation
     #[test]
     fn reserve_task_in_leaf_exhausts_all_bits() {
-        let (tree, _wakers, _worker_count) = setup_tree(1, 1);
+        let (tree, _wakers) = setup_tree(1, 1);
         let mut bits = Vec::with_capacity(64);
 
         // Reserve all 64 bits
@@ -701,7 +732,7 @@ mod tests {
     /// Validates that reserve_task can visit all leaves
     #[test]
     fn reserve_task_round_robin_visits_all_leaves() {
-        let (tree, _wakers, _worker_count) = setup_tree(4, 1);
+        let (tree, _wakers) = setup_tree(4, 1);
         let mut observed = Vec::with_capacity(16);
 
         // Reserve multiple tasks to ensure we visit different leaves
@@ -722,7 +753,7 @@ mod tests {
     /// Tests atomicity of CAS loop under high contention
     #[test]
     fn concurrent_reservations_are_unique() {
-        let (tree, _wakers, _worker_count) = setup_tree(4, 1);
+        let (tree, _wakers) = setup_tree(4, 1);
         let tree = Arc::new(tree);
         let threads = 8;
         let reservations_per_thread = 8;
@@ -777,7 +808,7 @@ mod tests {
     /// Validates atomic visibility of changes
     #[test]
     fn reserve_and_release_task_updates_reservations() {
-        let (tree, _wakers, _worker_count) = setup_tree(4, 1);
+        let (tree, _wakers) = setup_tree(4, 1);
 
         // Reserve a task
         let handle = tree.reserve_task().expect("task handle");
@@ -811,7 +842,7 @@ mod tests {
     /// Validates that fetch_or/fetch_and operations are truly atomic
     #[test]
     fn atomic_bit_operations_are_atomic() {
-        let (tree, _wakers, _worker_count) = setup_tree(2, 2);
+        let (tree, _wakers) = setup_tree(2, 2);
         let tree = Arc::new(tree);
         let threads = 4;
         let barrier = Arc::new(Barrier::new(threads));
@@ -852,7 +883,7 @@ mod tests {
     /// Test that mark_signal_inactive properly clears only specified bits
     #[test]
     fn clear_leaf_bits_clears_specific_bits() {
-        let (tree, _wakers, _worker_count) = setup_tree(1, 3);
+        let (tree, _wakers) = setup_tree(1, 4); // Power of 2
 
         // Set multiple bits
         tree.mark_signal_active(0, 0);
@@ -876,7 +907,7 @@ mod tests {
     /// Test idempotency of bit operations
     #[test]
     fn bit_operations_are_idempotent() {
-        let (tree, _wakers, _worker_count) = setup_tree(1, 1);
+        let (tree, _wakers) = setup_tree(1, 1);
 
         // First activation should return true
         assert!(tree.mark_signal_active(0, 0));
@@ -903,7 +934,7 @@ mod tests {
     /// Validates that the compare_exchange loop properly handles contention
     #[test]
     fn cas_loop_handles_concurrent_contention() {
-        let (tree, _wakers, _worker_count) = setup_tree(1, 1);
+        let (tree, _wakers) = setup_tree(1, 1);
         let tree = Arc::new(tree);
         let threads = 8;
         let barrier = Arc::new(Barrier::new(threads));
@@ -953,7 +984,7 @@ mod tests {
     /// Test reservation bitmap exhaustion and wraparound
     #[test]
     fn reservation_exhaustion_and_wraparound() {
-        let (tree, _wakers, _worker_count) = setup_tree(1, 1);
+        let (tree, _wakers) = setup_tree(1, 1);
 
         // Exhaust all 64 bits
         let mut reservations = Vec::new();
@@ -1014,7 +1045,7 @@ mod tests {
     /// Test signal distribution across a leaf
     #[test]
     fn round_robin_signal_distribution() {
-        let (tree, _wakers, _worker_count) = setup_tree(1, 4);
+        let (tree, _wakers) = setup_tree(1, 4);
         let mut observed_signals = Vec::new();
 
         // Reserve tasks and track signal distribution
@@ -1038,25 +1069,25 @@ mod tests {
     /// Test partition owner computation with various worker counts
     #[test]
     fn compute_partition_owner_distribution() {
-        let (tree, _wakers, _worker_count) = setup_tree(10, 1);
+        let (tree, _wakers) = setup_tree(16, 1); // Power of 2
 
-        // Test with 3 workers
-        for leaf_idx in 0..10 {
-            let owner = tree.compute_partition_owner(leaf_idx, 3);
-            assert!(owner < 3, "Owner {} should be < 3", owner);
+        // Test with 4 workers
+        for leaf_idx in 0..16 {
+            let owner = tree.compute_partition_owner(leaf_idx, 4);
+            assert!(owner < 4, "Owner {} should be < 4", owner);
         }
 
         // Test with 1 worker (all leaves belong to worker 0)
-        for leaf_idx in 0..10 {
+        for leaf_idx in 0..16 {
             let owner = tree.compute_partition_owner(leaf_idx, 1);
             assert_eq!(owner, 0, "All leaves should belong to worker 0");
         }
 
         // Test with equal workers and leaves (perfect distribution)
-        // Create a tree with 5 leaves for this test
-        let (tree5, _, _) = setup_tree(5, 1);
-        for leaf_idx in 0..5 {
-            let owner = tree5.compute_partition_owner(leaf_idx, 5);
+        // Create a tree with 4 leaves for this test (power of 2)
+        let (tree4, _) = setup_tree(4, 1);
+        for leaf_idx in 0..4 {
+            let owner = tree4.compute_partition_owner(leaf_idx, 4);
             assert_eq!(owner, leaf_idx, "Each leaf should have unique owner");
         }
     }
@@ -1064,43 +1095,49 @@ mod tests {
     /// Test partition boundaries are correct
     #[test]
     fn partition_boundaries_are_correct() {
-        let (tree, _wakers, _worker_count) = setup_tree(7, 1); // 7 leaves, 3 workers
+        let (tree, _wakers) = setup_tree(8, 1); // 8 leaves (power of 2), 4 workers
 
-        // Worker 0: leaves 0, 1, 2 (3 leaves) - gets extra leaf
-        assert_eq!(tree.partition_start_for_worker(0, 3), 0);
-        assert_eq!(tree.partition_end_for_worker(0, 3), 3);
+        // Worker 0: leaves 0, 1 (2 leaves)
+        assert_eq!(tree.partition_start_for_worker(0, 4), 0);
+        assert_eq!(tree.partition_end_for_worker(0, 4), 2);
 
-        // Worker 1: leaves 3, 4 (2 leaves)
-        assert_eq!(tree.partition_start_for_worker(1, 3), 3);
-        assert_eq!(tree.partition_end_for_worker(1, 3), 5);
+        // Worker 1: leaves 2, 3 (2 leaves)
+        assert_eq!(tree.partition_start_for_worker(1, 4), 2);
+        assert_eq!(tree.partition_end_for_worker(1, 4), 4);
 
-        // Worker 2: leaves 5, 6 (2 leaves)
-        assert_eq!(tree.partition_start_for_worker(2, 3), 5);
-        assert_eq!(tree.partition_end_for_worker(2, 3), 7);
+        // Worker 2: leaves 4, 5 (2 leaves)
+        assert_eq!(tree.partition_start_for_worker(2, 4), 4);
+        assert_eq!(tree.partition_end_for_worker(2, 4), 6);
+
+        // Worker 3: leaves 6, 7 (2 leaves)
+        assert_eq!(tree.partition_start_for_worker(3, 4), 6);
+        assert_eq!(tree.partition_end_for_worker(3, 4), 8);
     }
 
     /// Test global to local leaf index conversion
     #[test]
     fn global_to_local_leaf_conversion() {
-        let (tree, _wakers, _worker_count) = setup_tree(6, 2); // 6 leaves, 2 workers
+        let (tree, _wakers) = setup_tree(8, 2); // 8 leaves (power of 2), 2 workers
 
-        // Worker 0: leaves 0, 1, 2
+        // Worker 0: leaves 0, 1, 2, 3
         assert_eq!(tree.global_to_local_leaf_idx(0, 0, 2), Some(0));
         assert_eq!(tree.global_to_local_leaf_idx(1, 0, 2), Some(1));
         assert_eq!(tree.global_to_local_leaf_idx(2, 0, 2), Some(2));
-        assert_eq!(tree.global_to_local_leaf_idx(3, 0, 2), None); // Not in partition
+        assert_eq!(tree.global_to_local_leaf_idx(3, 0, 2), Some(3));
+        assert_eq!(tree.global_to_local_leaf_idx(4, 0, 2), None); // Not in partition
 
-        // Worker 1: leaves 3, 4, 5
-        assert_eq!(tree.global_to_local_leaf_idx(3, 1, 2), Some(0));
-        assert_eq!(tree.global_to_local_leaf_idx(4, 1, 2), Some(1));
-        assert_eq!(tree.global_to_local_leaf_idx(5, 1, 2), Some(2));
-        assert_eq!(tree.global_to_local_leaf_idx(2, 1, 2), None); // Not in partition
+        // Worker 1: leaves 4, 5, 6, 7
+        assert_eq!(tree.global_to_local_leaf_idx(4, 1, 2), Some(0));
+        assert_eq!(tree.global_to_local_leaf_idx(5, 1, 2), Some(1));
+        assert_eq!(tree.global_to_local_leaf_idx(6, 1, 2), Some(2));
+        assert_eq!(tree.global_to_local_leaf_idx(7, 1, 2), Some(3));
+        assert_eq!(tree.global_to_local_leaf_idx(3, 1, 2), None); // Not in partition
     }
 
     /// Test partition computation with edge cases
     #[test]
     fn partition_computation_edge_cases() {
-        let (tree, _wakers, _worker_count) = setup_tree(1, 1);
+        let (tree, _wakers) = setup_tree(1, 1);
 
         // Single leaf, single worker
         assert_eq!(tree.compute_partition_owner(0, 1), 0);
@@ -1121,7 +1158,7 @@ mod tests {
     /// Test that Acquire ordering ensures visibility of prior writes
     #[test]
     fn acquire_ordering_ensures_visibility() {
-        let (tree, _wakers, _worker_count) = setup_tree(1, 1);
+        let (tree, _wakers) = setup_tree(1, 1);
         let tree = Arc::new(tree);
         let tree_ = Arc::clone(&tree);
         let flag = Arc::new(AtomicU64::new(0));
@@ -1148,7 +1185,7 @@ mod tests {
     /// Test that Relaxed ordering doesn't provide synchronization
     #[test]
     fn relaxed_ordering_no_synchronization() {
-        let (tree, _wakers, _worker_count) = setup_tree(1, 1);
+        let (tree, _wakers) = setup_tree(1, 1);
         let tree = Arc::new(tree);
         let tree_ = Arc::clone(&tree);
         let data = Arc::new(AtomicU64::new(0));
@@ -1184,7 +1221,7 @@ mod tests {
     /// Test boundary conditions for indices
     #[test]
     fn boundary_conditions_for_indices() {
-        let (tree, _wakers, _worker_count) = setup_tree(2, 3);
+        let (tree, _wakers) = setup_tree(2, 4); // Power of 2
 
         // Valid indices should work
         assert!(tree.mark_signal_active(0, 0));
@@ -1198,9 +1235,9 @@ mod tests {
         assert!(tree.reserve_task_in_leaf(2, 0).is_none());
 
         // Invalid signal index should return None/false
-        assert!(!tree.mark_signal_active(0, 3)); // signal_idx >= signals_per_leaf
-        assert!(!tree.mark_signal_inactive(0, 3));
-        assert!(tree.reserve_task_in_leaf(0, 3).is_none());
+        assert!(!tree.mark_signal_active(0, 4)); // signal_idx >= signals_per_leaf
+        assert!(!tree.mark_signal_inactive(0, 4));
+        assert!(tree.reserve_task_in_leaf(0, 4).is_none());
     }
 
     /// Test zero signals per leaf
@@ -1210,11 +1247,32 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             let wakers: Vec<Arc<WorkerWaker>> =
                 (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
-            let worker_count = Arc::new(AtomicUsize::new(2));
-            Summary::new(2, 0, &wakers, &worker_count);
+            Summary::new(2, 0, &wakers, 2);
         });
 
         assert!(result.is_err());
+    }
+
+    /// Test non-power-of-2 leaf_count panics
+    #[test]
+    fn non_power_of_two_leaf_count_panics() {
+        let result = std::panic::catch_unwind(|| {
+            let wakers: Vec<Arc<WorkerWaker>> =
+                (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
+            Summary::new(3, 2, &wakers, 2); // 3 is not power of 2
+        });
+        assert!(result.is_err(), "Non-power-of-2 leaf_count should panic");
+    }
+
+    /// Test non-power-of-2 signals_per_leaf panics
+    #[test]
+    fn non_power_of_two_signals_per_leaf_panics() {
+        let result = std::panic::catch_unwind(|| {
+            let wakers: Vec<Arc<WorkerWaker>> =
+                (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
+            Summary::new(4, 3, &wakers, 2); // 3 is not power of 2
+        });
+        assert!(result.is_err(), "Non-power-of-2 signals_per_leaf should panic");
     }
 
     /// Test empty wakers array
@@ -1223,8 +1281,7 @@ mod tests {
         // This should panic during creation
         let result = std::panic::catch_unwind(|| {
             let wakers: Vec<Arc<WorkerWaker>> = Vec::new();
-            let worker_count = Arc::new(AtomicUsize::new(0));
-            Summary::new(2, 2, &wakers, &worker_count);
+            Summary::new(2, 2, &wakers, 0);
         });
 
         assert!(result.is_err());
@@ -1237,8 +1294,7 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             let wakers: Vec<Arc<WorkerWaker>> =
                 (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
-            let worker_count = Arc::new(AtomicUsize::new(2));
-            Summary::new(0, 1, &wakers, &worker_count)
+            Summary::new(0, 1, &wakers, 2)
         });
         assert!(result.is_err(), "Empty tree should panic during creation");
 
@@ -1246,8 +1302,7 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             let wakers: Vec<Arc<WorkerWaker>> =
                 (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
-            let worker_count = Arc::new(AtomicUsize::new(2));
-            Summary::new(2, 0, &wakers, &worker_count)
+            Summary::new(2, 0, &wakers, 2)
         });
         assert!(result.is_err());
     }
@@ -1259,7 +1314,7 @@ mod tests {
     /// High contention stress test for signal activation/deactivation
     #[test]
     fn stress_test_signal_activation_deactivation() {
-        let (tree, _wakers, _worker_count) = setup_tree(4, 2);
+        let (tree, _wakers) = setup_tree(4, 2);
         let tree = Arc::new(tree);
         let threads = 12;
         let iterations = 100;
@@ -1297,27 +1352,22 @@ mod tests {
         }
     }
 
-    /// Stress test for partition owner computation with changing worker count
+    /// Stress test for partition owner computation with fixed worker count
     #[test]
-    fn stress_test_partition_owner_with_changing_workers() {
-        let (tree, _wakers, worker_count) = setup_tree(20, 1);
+    fn stress_test_partition_owner_with_fixed_workers() {
+        let (tree, _wakers) = setup_tree(16, 1); // Power of 2
         let tree = Arc::new(tree);
 
         let handles: Vec<_> = (0..8)
-            .map(|i| {
+            .map(|_| {
                 let tree = Arc::clone(&tree);
-                let worker_count = Arc::clone(&worker_count);
                 thread::spawn(move || {
-                    // Each thread uses different worker counts
-                    let test_counts = [1, 2, 4, 5, 10];
-                    for &count in &test_counts {
-                        worker_count.store(count, Ordering::Relaxed);
-
-                        // Compute partition owners for all leaves
-                        for leaf_idx in 0..20 {
-                            let owner = tree.compute_partition_owner(leaf_idx, count);
-                            assert!(owner < count, "Invalid owner {} for count {}", owner, count);
-                        }
+                    // Test with fixed worker count of 4 (from setup_tree)
+                    let worker_count = 4;
+                    // Compute partition owners for all leaves
+                    for leaf_idx in 0..16 {
+                        let owner = tree.compute_partition_owner(leaf_idx, worker_count);
+                        assert!(owner < worker_count, "Invalid owner {} for count {}", owner, worker_count);
                     }
                 })
             })
@@ -1331,7 +1381,7 @@ mod tests {
     /// Test for task reservation system to verify no duplicate reservations by checking the bitmap
     #[test]
     fn stress_test_task_reservation_system() {
-        let (tree, _wakers, _worker_count) = setup_tree(4, 4); // Increase size to reduce contention
+        let (tree, _wakers) = setup_tree(4, 4); // Increase size to reduce contention
         let tree = Arc::new(tree);
         let threads = 16; // Reduce threads to reduce contention
         let iterations = 200; // Reduce iterations
@@ -1395,30 +1445,20 @@ mod tests {
         );
     }
 
-    /// Test TOCTOU race condition mitigation in notification system
+    /// Test partition owner notification system with fixed worker count
     #[test]
-    fn test_toctou_race_mitigation() {
-        let (tree, wakers_, worker_count) = setup_tree(4, 2);
+    fn test_partition_owner_notification() {
+        let (tree, _wakers) = setup_tree(4, 2);
         let tree = Arc::new(tree);
         let tree_ = Arc::clone(&tree);
 
-        // Start with 2 workers
-        worker_count.store(2, Ordering::Relaxed);
-
         let handle = thread::spawn(move || {
             let tree = tree_;
-            // Simulate rapid worker count changes
-            for count in [1, 3, 0, 2, 4] {
-                worker_count.store(count, Ordering::Relaxed);
-
-                // Try to trigger notifications - should not panic
-                for leaf_idx in 0..4 {
-                    // These calls should handle the changing worker count safely
-                    tree.notify_partition_owner_active(leaf_idx);
-                    tree.notify_partition_owner_inactive(leaf_idx);
-                }
-
-                thread::yield_now();
+            // Test notifications with fixed worker count
+            for leaf_idx in 0..4 {
+                // These calls should work correctly with fixed worker count
+                tree.notify_partition_owner_active(leaf_idx);
+                tree.notify_partition_owner_inactive(leaf_idx);
             }
         });
 

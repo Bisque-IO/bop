@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 use futures_lite::future::{block_on, yield_now};
 use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
-use maniac::runtime::{DefaultExecutor, Executor};
+use maniac::runtime::Executor;
 
 const DEFAULT_LEAVES: usize = 64;
-const DEFAULT_TASKS_PER_LEAF: usize = 2048;
+const DEFAULT_TASKS_PER_LEAF: usize = 4096;
 
 #[derive(Debug)]
 struct BenchmarkConfig {
@@ -39,9 +39,9 @@ const BENCHMARKS: &[BenchmarkConfig] = &[
     //     yields_per_task: 100_000, // 51.2M yields total
     // },
     BenchmarkConfig {
-        worker_count: 8,
+        worker_count: 16,
         total_tasks: 1024,
-        yields_per_task: 100_000, // 51.2M yields total
+        yields_per_task: 10_000, // 51.2M yields total
     },
 ];
 
@@ -60,19 +60,18 @@ fn run_benchmark(config: &BenchmarkConfig) {
 
     let arena_config =
         TaskArenaConfig::new(DEFAULT_LEAVES, DEFAULT_TASKS_PER_LEAF).expect("arena config");
-    let runtime = DefaultExecutor::new(
-        arena_config,
-        TaskArenaOptions::default(),
-        config.worker_count,
-        config.worker_count,
-    )
+    let runtime = maniac::runtime::new_multi_threaded(config.worker_count, (config.worker_count * 16) * 4096)
     .expect("runtime");
-    let completion_counter = Arc::new(AtomicUsize::new(0));
+
+    let mut completion_counters = Vec::with_capacity(config.total_tasks);
+    for _ in 0..config.total_tasks {
+        completion_counters.push(Arc::new(AtomicUsize::new(0)));
+    }
 
     let start = Instant::now();
     let mut handles = Vec::with_capacity(config.total_tasks);
-    for _ in 0..config.total_tasks {
-        let counter = Arc::clone(&completion_counter);
+    for i in 0..config.total_tasks {
+        let counter = Arc::clone(&completion_counters[i]);
         let yields = config.yields_per_task;
         let task = async move {
             yield_n_times(yields).await;
@@ -89,12 +88,24 @@ fn run_benchmark(config: &BenchmarkConfig) {
     }
 
     let elapsed = start.elapsed();
-    summarize(config, elapsed, completion_counter.load(Ordering::Relaxed));
-    drop(runtime);
+    let completed: usize = completion_counters.iter().map(|a| a.load(Ordering::Acquire)).sum();
+    
+    // Keep a reference to the service to collect stats after workers drop
+    let service = std::sync::Arc::clone(runtime.service());
+    drop(runtime); // This drops workers, which copy their stats to the service
+    
+    // Now collect stats after workers have exited
+    let stats = service.aggregate_stats();
+    summarize(config, elapsed, completed, stats);
     println!();
 }
 
-fn summarize(config: &BenchmarkConfig, duration: Duration, completed: usize) {
+fn summarize(
+    config: &BenchmarkConfig,
+    duration: Duration,
+    completed: usize,
+    stats: maniac::runtime::WorkerServiceStats,
+) {
     let duration_secs = duration.as_secs_f64().max(f64::EPSILON);
     let task_throughput = completed as f64 / duration_secs;
 
@@ -110,6 +121,8 @@ fn summarize(config: &BenchmarkConfig, duration: Duration, completed: usize) {
         total_yields,
         yield_throughput / 1_000_000.0
     );
+    println!();
+    println!("    {}", stats);
 }
 
 fn main() {

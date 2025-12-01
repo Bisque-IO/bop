@@ -867,14 +867,15 @@ impl Task {
             return None;
         }
         self.record_poll();
-        if self.cpu_time_enabled.load(Ordering::Relaxed) {
-            let start = Instant::now();
-            let result = unsafe { worker_poll_future(ptr, cx) };
-            self.record_cpu_time(start.elapsed());
-            Some(result)
-        } else {
-            Some(unsafe { worker_poll_future(ptr, cx) })
-        }
+        Some(unsafe { worker_poll_future(ptr, cx) })
+        // if self.cpu_time_enabled.load(Ordering::Relaxed) {
+        //     let start = Instant::now();
+        //     let result = unsafe { worker_poll_future(ptr, cx) };
+        //     self.record_cpu_time(start.elapsed());
+        //     Some(result)
+        // } else {
+        //     Some(unsafe { worker_poll_future(ptr, cx) })
+        // }
     }
 
     /// Gets the current future pointer.

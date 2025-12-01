@@ -64,6 +64,7 @@ use worker::{WorkerService, WorkerServiceConfig};
 use crate::{num_cpus, runtime::worker::JoinHandle};
 
 pub use crate::blocking::unblock;
+pub use worker::{WorkerServiceStats, WorkerSnapshot, WorkerStats};
 
 pub fn new_single_threaded() -> io::Result<DefaultRuntime> {
     let tick_service = TickService::new(Duration::from_millis(1));
@@ -118,6 +119,13 @@ pub struct Runtime {
 pub type DefaultRuntime = Runtime;
 
 impl Runtime {
+    /// Returns a reference to the underlying worker service.
+    ///
+    /// This allows access to worker service operations and statistics.
+    pub fn service(&self) -> &Arc<WorkerService> {
+        self.executor.service()
+    }
+
     /// Spawns an asynchronous task on the executor, returning an awaitable join handle.
     ///
     /// This is the primary method for scheduling async work on the executor.

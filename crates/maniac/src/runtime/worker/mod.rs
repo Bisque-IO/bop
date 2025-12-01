@@ -2,10 +2,9 @@ pub mod waker;
 
 use super::deque::{Stealer, Worker as YieldWorker};
 use super::task::summary::Summary;
-use super::task::{GeneratorRunMode, Task, TaskArena, TaskHandle, TaskSlot};
-use super::timer::{Timer, TimerHandle};
+use super::task::{GeneratorRunMode, Task, TaskArena, TaskArenaStats, TaskHandle, TaskSlot};
 use super::timer::wheel::TimerWheel;
-use waker::WorkerWaker;
+use super::timer::{Timer, TimerHandle};
 use crate::PopError;
 use crate::future::waker::DiatomicWaker;
 use crate::runtime::io_driver::IoDriver;
@@ -24,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
+use waker::WorkerWaker;
 
 use crate::utils::bits;
 use rand::RngCore;
@@ -611,8 +611,8 @@ pub struct WorkerService {
     worker_shutdowns: Box<[AtomicBool]>,
     worker_threads: Box<[Mutex<Option<thread::JoinHandle<()>>>]>,
     worker_thread_handles: Box<[Mutex<Option<crate::runtime::preemption::WorkerThreadHandle>>]>,
-    worker_stats: Box<[WorkerStats]>,
-    worker_count: Arc<AtomicUsize>,
+    worker_stats: Box<[Mutex<WorkerStats>]>,
+    worker_count: usize,
     receivers: Box<[UnsafeCell<mpsc::Receiver<WorkerMessage>>]>,
     senders: Box<[mpsc::Sender<WorkerMessage>]>,
     tick_senders: Box<[mpsc::Sender<WorkerMessage>]>,
@@ -651,15 +651,12 @@ impl WorkerService {
         }
         let wakers = wakers.into_boxed_slice();
 
-        // Create worker_count early so we can pass it to SummaryTree (single source of truth)
-        let worker_count = Arc::new(AtomicUsize::new(worker_count_val));
-
-        // Create SummaryTree with reference to wakers and worker_count
+        // Create SummaryTree with wakers and fixed worker_count
         let summary_tree = Summary::new(
             arena.config().leaf_count,
             arena.layout().signals_per_leaf,
             &wakers,
-            &worker_count,
+            worker_count_val,
         );
 
         let mut worker_actives = Vec::with_capacity(worker_count_val);
@@ -684,13 +681,12 @@ impl WorkerService {
         }
         let mut worker_stats = Vec::with_capacity(worker_count_val);
         for _ in 0..worker_count_val {
-            worker_stats.push(WorkerStats::default());
+            worker_stats.push(Mutex::new(WorkerStats::default()));
         }
 
         let mut receivers = Vec::with_capacity(worker_count_val);
-        let mut senders = Vec::<mpsc::Sender<WorkerMessage>>::with_capacity(
-            worker_count_val * worker_count_val,
-        );
+        let mut senders =
+            Vec::<mpsc::Sender<WorkerMessage>>::with_capacity(worker_count_val * worker_count_val);
         for worker_id in 0..worker_count_val {
             // Use the worker's WorkerWaker for mpsc queue
             let rx = mpsc::new_with_waker(Arc::clone(&wakers[worker_id]));
@@ -747,7 +743,7 @@ impl WorkerService {
             worker_threads: worker_threads.into_boxed_slice(),
             worker_thread_handles: worker_thread_handles.into_boxed_slice(),
             worker_stats: worker_stats.into_boxed_slice(),
-            worker_count,
+            worker_count: worker_count_val,
             receivers: receivers.into_boxed_slice(),
             senders: senders.into_boxed_slice(),
             tick_senders: tick_senders.into_boxed_slice(),
@@ -812,6 +808,32 @@ impl WorkerService {
         &self.summary_tree
     }
 
+    /// Returns aggregate statistics across all workers and the arena.
+    ///
+    /// This includes waker stats (permits, sleepers, partition summaries)
+    /// and worker stats (tasks_polled, completed, yielded, etc.) for each worker,
+    /// plus arena-level stats.
+    pub fn aggregate_stats(&self) -> WorkerServiceStats {
+        let mut per_worker = Vec::with_capacity(self.worker_count);
+        for i in 0..self.worker_count {
+            let waker = &self.wakers[i];
+            let stats = self.worker_stats[i].lock().ok().map(|g| g.clone()).unwrap_or_default();
+            per_worker.push(WorkerSnapshot {
+                worker_id: i,
+                permits: waker.permits(),
+                sleepers: waker.sleepers(),
+                status: waker.status(),
+                partition_summary: waker.partition_summary(),
+                stats,
+            });
+        }
+        WorkerServiceStats {
+            worker_count: self.worker_count,
+            arena_stats: self.arena.stats(),
+            per_worker,
+        }
+    }
+
     /// Reserve a task slot using the SummaryTree.
     #[inline]
     pub fn reserve_task(&self) -> Option<TaskHandle> {
@@ -857,18 +879,15 @@ impl WorkerService {
         self.worker_actives[worker_id].store(1, Ordering::SeqCst);
         self.worker_now_ns[worker_id].store(now_ns, Ordering::SeqCst);
 
-        // Initialize partition cache in summary tree for this worker
-        self.wakers[worker_id].sync_partition_summary(
-            partition_start,
-            partition_end,
-            &self.summary_tree.leaf_words,
-        );
-
         let service_clone = Arc::clone(service);
         let timer_resolution_ns = self.tick_duration().as_nanos().max(1) as u64;
         let partition_len = partition_end.saturating_sub(partition_start);
 
         let join = std::thread::spawn(move || {
+            let core_ids = crate::utils::cpu_cores();
+            let core_id = worker_id + 1;
+            core_affinity::set_for_current(core_ids[core_id % core_ids.len()]);
+
             let task_slot = TaskSlot::new(std::ptr::null_mut());
             let task_slot_ptr = &task_slot as *const _ as *mut TaskSlot;
             let mut timer_output = Vec::with_capacity(MESSAGE_BATCH_SIZE);
@@ -913,7 +932,7 @@ impl WorkerService {
                     partition_start,
                     partition_end,
                     partition_len,
-                    cached_worker_count: service_clone.worker_count.load(Ordering::Relaxed),
+                    cached_worker_count: service_clone.worker_count,
                     wake_burst_limit: DEFAULT_WAKE_BURST,
                     worker_id: worker_id as u32,
                     timer_resolution_ns,
@@ -1068,9 +1087,8 @@ impl WorkerService {
             // JoinState is at offset sizeof(FutureHeader) from the start.
             let task = release_handle.task();
             let base_ptr = task.future_ptr() as *const u8;
-            let join_state_ptr = unsafe {
-                base_ptr.add(std::mem::size_of::<FutureHeader>()) as *const JoinState<T>
-            };
+            let join_state_ptr =
+                unsafe { base_ptr.add(std::mem::size_of::<FutureHeader>()) as *const JoinState<T> };
             // Safety: We know this points to a JoinState<T> after the header
             unsafe { (*join_state_ptr).complete(result) };
             service_for_future.release_task(release_handle);
@@ -1420,6 +1438,91 @@ fn normalize_tick_duration_ns(duration: Duration) -> u64 {
     nanos.next_power_of_two()
 }
 
+/// Snapshot of a single worker's state including waker and execution stats.
+#[derive(Debug, Clone)]
+pub struct WorkerSnapshot {
+    pub worker_id: usize,
+    pub permits: u64,
+    pub sleepers: usize,
+    pub status: u64,
+    pub partition_summary: u64,
+    pub stats: WorkerStats,
+}
+
+/// Aggregate statistics for the entire WorkerService.
+#[derive(Debug, Clone)]
+pub struct WorkerServiceStats {
+    pub worker_count: usize,
+    pub arena_stats: TaskArenaStats,
+    pub per_worker: Vec<WorkerSnapshot>,
+}
+
+impl WorkerServiceStats {
+    /// Returns aggregate totals across all workers.
+    pub fn totals(&self) -> WorkerStats {
+        let mut totals = WorkerStats::default();
+        for w in &self.per_worker {
+            totals.tasks_polled += w.stats.tasks_polled;
+            totals.completed_count += w.stats.completed_count;
+            totals.yielded_count += w.stats.yielded_count;
+            totals.waiting_count += w.stats.waiting_count;
+            totals.cas_failures += w.stats.cas_failures;
+            totals.empty_scans += w.stats.empty_scans;
+            totals.yield_queue_polls += w.stats.yield_queue_polls;
+            totals.signal_polls += w.stats.signal_polls;
+            totals.steal_attempts += w.stats.steal_attempts;
+            totals.steal_successes += w.stats.steal_successes;
+            totals.leaf_summary_checks += w.stats.leaf_summary_checks;
+            totals.leaf_summary_hits += w.stats.leaf_summary_hits;
+            totals.leaf_steal_attempts += w.stats.leaf_steal_attempts;
+            totals.leaf_steal_successes += w.stats.leaf_steal_successes;
+            totals.timer_fires += w.stats.timer_fires;
+        }
+        totals
+    }
+}
+
+impl std::fmt::Display for WorkerServiceStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "WorkerService Stats:")?;
+        writeln!(f, "  Workers: {}", self.worker_count)?;
+        writeln!(f, "  Arena:")?;
+        writeln!(f, "    Total capacity: {}", self.arena_stats.total_capacity)?;
+        writeln!(f, "    Active tasks: {}", self.arena_stats.active_tasks)?;
+        
+        // Aggregate totals
+        let totals = self.totals();
+        writeln!(f, "  Totals:")?;
+        writeln!(f, "    Tasks polled: {}", totals.tasks_polled)?;
+        writeln!(f, "    Completed: {}", totals.completed_count)?;
+        writeln!(f, "    Yielded: {}", totals.yielded_count)?;
+        writeln!(f, "    Waiting: {}", totals.waiting_count)?;
+        writeln!(f, "    CAS failures: {}", totals.cas_failures)?;
+        writeln!(f, "    Empty scans: {}", totals.empty_scans)?;
+        writeln!(f, "    Yield queue polls: {}", totals.yield_queue_polls)?;
+        writeln!(f, "    Signal polls: {}", totals.signal_polls)?;
+        writeln!(f, "    Steal attempts: {} (successes: {})", totals.steal_attempts, totals.steal_successes)?;
+        writeln!(f, "    Leaf summary checks: {} (hits: {})", totals.leaf_summary_checks, totals.leaf_summary_hits)?;
+        writeln!(f, "    Leaf steal attempts: {} (successes: {})", totals.leaf_steal_attempts, totals.leaf_steal_successes)?;
+        writeln!(f, "    Timer fires: {}", totals.timer_fires)?;
+        
+        writeln!(f, "  Per-worker:")?;
+        for w in &self.per_worker {
+            writeln!(
+                f,
+                "    [{}] polled={} completed={} yielded={} steals={}/{}",
+                w.worker_id,
+                w.stats.tasks_polled,
+                w.stats.completed_count,
+                w.stats.yielded_count,
+                w.stats.steal_successes,
+                w.stats.steal_attempts
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// Comprehensive statistics for fast worker.
 #[derive(Debug, Default, Clone)]
 pub struct WorkerStats {
@@ -1556,12 +1659,19 @@ pub struct Worker<'a> {
 impl Drop for Worker<'_> {
     /// Cleans up the worker when it goes out of scope.
     ///
+    /// Copies worker stats back to the service for later retrieval.
     /// The EventLoop owns its Waker, so proper drop order is ensured:
     /// Waker drops before Poll when EventLoop drops.
     fn drop(&mut self) {
+        // Copy stats back to the service
+        let worker_id = self.inner.worker_id as usize;
+        if let Ok(mut guard) = self.service.worker_stats[worker_id].lock() {
+            *guard = self.inner.stats.clone();
+        }
+
         #[cfg(debug_assertions)]
         {
-            tracing::trace!("[Worker {}] Dropped", self.inner.worker_id);
+            tracing::trace!("[Worker {}] Dropped with stats: {:?}", self.inner.worker_id, self.inner.stats);
         }
     }
 }
@@ -1680,38 +1790,248 @@ impl<'a> Worker<'a> {
     }
 
     #[inline(always)]
+    pub fn now_ns(&self) -> u64 {
+        self.inner.timer_wheel.now_ns()
+    }
+
+    #[inline(always)]
+    fn poll_system_tasks(&mut self, run_ctx: &mut RunContext) -> usize {
+        let mut count = self.poll_io();
+
+        if self.poll_timers() {
+            count += 1;
+        }
+
+        if self.process_messages() {
+            count += 1;
+        }
+        count
+    }
+
+    #[inline(always)]
+    fn poll_tasks(&mut self, run_ctx: &mut RunContext) -> usize {
+        let mut now = self.now_ns();
+        let mut ticks = 0u64;
+        let mut count = 0usize;
+        let mut miss_count = 0usize;
+        let leaf_count = self.service.arena.leaf_count();
+        const CONSECUTIVE_MISSES: usize = 100000;
+
+        count += self.poll_system_tasks(run_ctx);
+
+        for _ in 0..1000000 {
+            if self.try_partition_random(run_ctx) {
+            // if self.try_any_partition_random(run_ctx, leaf_count) {
+                count += 1;
+                miss_count = 0;
+                if run_ctx.should_exit_generator() {
+                    return count;
+                }
+            } else {
+                miss_count += 1;
+                // core::hint::spin_loop();
+            }
+            if CONSECUTIVE_MISSES >= miss_count {
+                break;
+            }
+            let next_now = self.now_ns();
+            if now != next_now {
+                now = next_now;
+                if self.inner.shutdown.load(Ordering::Relaxed) {
+                    self.inner.current_scope = core::ptr::null_mut();
+                    return count;
+                }
+                ticks += 1;
+                count += self.poll_system_tasks(run_ctx);
+                // count += self.poll_yield(run_ctx, self.inner.yield_queue.len());
+                // count += self.poll_yield(run_ctx, 1024*1024);
+                // if run_ctx.should_exit_generator() {
+                //     return count;
+                // }
+            }
+        }
+
+        count += self.poll_system_tasks(run_ctx);
+        // count += self.poll_yield(run_ctx, self.inner.yield_queue.len());
+
+        count
+    }
+
+    #[inline(always)]
     fn run_once(&mut self, run_ctx: &mut RunContext) -> bool {
         let mut did_work = false;
 
-        if self.poll_io() > 0 {
+        if self.poll_system_tasks(run_ctx) > 0 {
+            if run_ctx.should_exit_generator() {
+                return true;
+            }
             did_work = true;
         }
 
-        if self.poll_timers() {
+        let leaf_count = self.service.arena.leaf_count();
+        let worker_count = self.service.worker_count;
+        let partition_len = leaf_count / worker_count;
+        let partition_start = self.inner.worker_id as usize * partition_len;
+        let mut now = self.inner.timer_wheel.now_ns();
+        let mut ticks = 0u64;
+        let start_idx = self.next_u64();
+        let mut empty_tries = 0u64;
+        let mut full_empty_tries = 0u64;
+        const MAX_EMPTY_TRIES: u64 = 1024;
+        const ALLOW_WORK_STEALING: bool = true;
+        // let partition_start = self.inner.partition_start;
+        // let partition_len = self.inner.partition_len.min(1);
+        for i in 0..(MAX_EMPTY_TRIES*MAX_EMPTY_TRIES) {
+            let next_idx = self.next_u64() as usize;
+            if self.process_leaf(run_ctx, partition_start + (next_idx % partition_len)) {
+            // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
+            // if self.process_leaf(run_ctx, i % leaf_count) {
+                did_work = true;
+                // self.inner.stats.leaf_steal_successes += 1;
+                if run_ctx.should_exit_generator() {
+                    return did_work;
+                }
+
+                empty_tries = 0;
+            } else {
+                empty_tries += 1;
+            }
+
+            if ALLOW_WORK_STEALING {
+                if next_idx & 127 == 0 {
+                    if self.inner.shutdown.load(Ordering::Relaxed) {
+                        self.inner.current_scope = core::ptr::null_mut();
+                        return did_work;
+                    }
+
+                    for x in 0..4 {
+                        self.inner.stats.steal_attempts += 1;
+                        if self.process_leaf(run_ctx, next_idx % leaf_count) {
+                            self.inner.stats.steal_successes += 1;
+                        // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
+                        // if self.process_leaf(run_ctx, i % leaf_count) {
+                            did_work = true;
+                            // self.inner.stats.leaf_steal_successes += 1;
+                            if run_ctx.should_exit_generator() {
+                                return did_work;
+                            }
+
+                            full_empty_tries = 0;
+                            break;
+                        } else {
+                            full_empty_tries += 1;
+                        }
+                    }
+                }
+            }
+
+            if next_idx & 2047 == 0 {
+                if self.poll_system_tasks(run_ctx) > 0 {
+                    if run_ctx.should_exit_generator() {
+                        return true;
+                    }
+                    did_work = true;
+                }
+
+                if self.inner.shutdown.load(Ordering::Relaxed) {
+                    self.inner.current_scope = core::ptr::null_mut();
+                    return did_work;
+                }
+            }
+
+            if ALLOW_WORK_STEALING {
+                if empty_tries >= MAX_EMPTY_TRIES {
+                    for x in 0..MAX_EMPTY_TRIES {
+                        self.inner.stats.steal_attempts += 1;
+                        if self.process_leaf(run_ctx, next_idx % leaf_count) {
+                            self.inner.stats.steal_successes += 1;
+                            // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
+                            // if self.process_leaf(run_ctx, i % leaf_count) {
+                            did_work = true;
+                            // self.inner.stats.leaf_steal_successes += 1;
+                            if run_ctx.should_exit_generator() {
+                                return did_work;
+                            }
+        
+                            full_empty_tries = 0;
+                        } else {
+                            full_empty_tries += 1;
+                        }
+                    }
+
+                    if full_empty_tries >= MAX_EMPTY_TRIES {
+                        break;
+                    }
+                }
+            }
+
+            // // if self.try_partition_random(run_ctx) {
+            // if self.try_any_partition_random(run_ctx, self.service.arena.leaf_count()) {
+            //     did_work = true;
+            // }
+            
+
+            // Ensure we give system tasks and work stealing some CPU on tick boundaries
+            let next_now = self.inner.timer_wheel.now_ns();
+            if now != next_now {
+                now = next_now;
+
+                if self.inner.shutdown.load(Ordering::Relaxed) {
+                    self.inner.current_scope = core::ptr::null_mut();
+                    return did_work;
+                }
+
+                if self.poll_system_tasks(run_ctx) > 0 {
+                    if run_ctx.should_exit_generator() {
+                        return true;
+                    }
+                    did_work = true;
+                }
+
+                if ALLOW_WORK_STEALING {
+                    for x in 0..8 {
+                        let next_idx = self.next_u64() as usize;
+                        self.inner.stats.steal_attempts += 1;
+                        if self.process_leaf(run_ctx, next_idx % leaf_count) {
+                            self.inner.stats.steal_successes += 1;
+                        // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
+                        // if self.process_leaf(run_ctx, i % leaf_count) {
+                            did_work = true;
+                            // self.inner.stats.leaf_steal_successes += 1;
+                            if run_ctx.should_exit_generator() {
+                                return did_work;
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // let yielded = self.poll_yield(run_ctx, self.inner.yield_queue.len());
+                // // let yielded = self.poll_yield(run_ctx, 1024*32);
+                // if yielded > 0 {
+                //     did_work = true;
+                // }
+                // if run_ctx.should_exit_generator() {
+                //     return did_work;
+                // }
+            }
+        }
+
+        if self.poll_system_tasks(run_ctx) > 0 {
+            if run_ctx.should_exit_generator() {
+                return true;
+            }
             did_work = true;
         }
 
-        // Process messages first (including shutdown signals)
-        if self.process_messages() {
-            did_work = true;
-        }
-
-        // Poll all yielded tasks first - they're ready to run
-        let yielded = self.poll_yield(run_ctx, self.inner.yield_queue.len());
-        if yielded > 0 {
-            did_work = true;
-        }
-        if run_ctx.should_exit_generator() {
-            return did_work;
-        }
-
-        // Partition assignment is handled by WorkerService via RebalancePartitions message
-        if self.try_partition_random(run_ctx) {
-            did_work = true;
-        }
-        if run_ctx.should_exit_generator() {
-            return did_work;
-        }
+        // let yielded = self.poll_yield(run_ctx, 1024*4096);
+        // // let yielded = self.poll_yield(run_ctx, 1024*32);
+        // if yielded > 0 {
+        //     did_work = true;
+        // }
+        // if run_ctx.should_exit_generator() {
+        //     return did_work;
+        // }
 
         // if self.try_partition_random(leaf_count) {
         //     did_work = true;
@@ -1721,28 +2041,28 @@ impl<'a> Worker<'a> {
 
         let rand = self.next_u64();
 
-        if !did_work && rand & FULL_SUMMARY_SCAN_CADENCE_MASK == 0 {
-            let leaf_count = self.service.arena().leaf_count();
-            if self.try_any_partition_random(run_ctx, leaf_count) {
-                did_work = true;
-            }
-            if run_ctx.should_exit_generator() {
-                return did_work;
-            }
-            // else if self.try_any_partition_linear(leaf_count) {
-            // did_work = true;
-            // }
-        }
+        // if !did_work && rand & FULL_SUMMARY_SCAN_CADENCE_MASK == 0 {
+        //     let leaf_count = self.service.arena().leaf_count();
+        //     if self.try_any_partition_random(run_ctx, leaf_count) {
+        //         did_work = true;
+        //     }
+        //     if run_ctx.should_exit_generator() {
+        //         return did_work;
+        //     }
+        //     // else if self.try_any_partition_linear(leaf_count) {
+        //     // did_work = true;
+        //     // }
+        // }
 
         if !did_work {
-            if self.poll_yield(run_ctx, self.inner.yield_queue.len() as usize) > 0 {
-                did_work = true;
-            }
-            if run_ctx.should_exit_generator() {
-                return did_work;
-            }
+            // if self.poll_yield(run_ctx, self.inner.yield_queue.len() as usize) > 0 {
+            //     did_work = true;
+            // }
+            // if run_ctx.should_exit_generator() {
+            //     return did_work;
+            // }
 
-            // if self.poll_yield_steal(1) > 0 {
+            // if self.poll_yield_steal(run_ctx, 256) > 0 {
             //     did_work = true;
             // }
         }
@@ -1772,7 +2092,6 @@ impl<'a> Worker<'a> {
             return did_work;
         }
 
-        // Partition assignment is handled by WorkerService via RebalancePartitions message
         if self.try_partition_random(run_ctx) {
             did_work = true;
         }
@@ -1837,8 +2156,9 @@ impl<'a> Worker<'a> {
             // This is safe because Worker is single-threaded and we never actually send across threads
             let worker_addr = worker_ptr as usize;
 
-            let mut generator =
-                crate::generator::Gn::<()>::new_scoped_opt(STACK_SIZE, move |mut scope| -> usize {
+            let mut generator = crate::generator::Gn::<()>::new_scoped_opt(
+                STACK_SIZE,
+                move |mut scope| -> usize {
                     // Wrap in catch_unwind to ensure clean stack behavior
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         // SAFETY: worker_addr is the address of a valid Worker that lives for the generator's lifetime
@@ -1854,6 +2174,8 @@ impl<'a> Worker<'a> {
 
                         let mut run_ctx = RunContext::new();
 
+                        let mut iteration = 0u64;
+
                         // Inner loop: runs inside generator context
                         loop {
                             // Check for shutdown
@@ -1862,7 +2184,16 @@ impl<'a> Worker<'a> {
                                 return 0;
                             }
 
+                            // for _ in 0..128 {
+                            //     let yielded =
+                            //         worker.poll_yield(&mut run_ctx, worker.inner.yield_queue.len());
+                            //     if yielded == 0 {
+                            //         break;
+                            //     }
+                            // }
+
                             // Process one iteration of work
+                            // let mut progress = worker.poll_tasks(&mut run_ctx) > 0;
                             let mut progress = worker.run_once(&mut run_ctx);
 
                             // Check if we need to exit the generator
@@ -1870,20 +2201,19 @@ impl<'a> Worker<'a> {
                                 worker.inner.current_scope = core::ptr::null_mut();
 
                                 // Log pin reason for debugging
-                                #[cfg(debug_assertions)]
-                                {
-                                    if let Some(reason) = run_ctx.pin_reason {
-                                        tracing::trace!(
-                                            "[Worker {}] Generator pinned: reason={:?}, task_completed={}",
-                                            worker.inner.worker_id,
-                                            reason,
-                                            run_ctx.task_completed
-                                        );
-                                    }
+                                if let Some(reason) = run_ctx.pin_reason {
+                                    tracing::trace!(
+                                        "[Worker {}] Generator pinned: reason={:?}, task_completed={}",
+                                        worker.inner.worker_id,
+                                        reason,
+                                        run_ctx.task_completed
+                                    );
                                 }
 
                                 // Yield with appropriate reason based on how we got here
-                                let yield_reason = if run_ctx.pin_reason == Some(PinReason::Preempted) {
+                                let yield_reason = if run_ctx.pin_reason
+                                    == Some(PinReason::Preempted)
+                                {
                                     crate::runtime::preemption::GeneratorYieldReason::Preempted
                                 } else {
                                     crate::runtime::preemption::GeneratorYieldReason::Cooperative
@@ -1914,13 +2244,6 @@ impl<'a> Worker<'a> {
                                 // Calculate park duration considering timer deadlines
                                 let park_duration = worker.calculate_park_duration();
 
-                                // Sync partition summary from SummaryTree before parking
-                                worker.service.wakers[waker_id].sync_partition_summary(
-                                    worker.inner.partition_start,
-                                    worker.inner.partition_end,
-                                    &worker.service.summary().leaf_words,
-                                );
-
                                 // Park on WorkerWaker with timer-aware timeout
                                 // On Windows, also use alertable wait for APC-based preemption
                                 match park_duration {
@@ -1944,6 +2267,8 @@ impl<'a> Worker<'a> {
                             } else {
                                 spin_count = 0;
                             }
+
+                            iteration += 1;
                         }
                     }));
 
@@ -1958,14 +2283,17 @@ impl<'a> Worker<'a> {
                                 } else if let Some(s) = panic_payload.downcast_ref::<String>() {
                                     tracing::error!("Worker generator panicked: {}", s);
                                 } else {
-                                    tracing::error!("Worker generator panicked with unknown payload");
+                                    tracing::error!(
+                                        "Worker generator panicked with unknown payload"
+                                    );
                                 }
                             }
                             // Return 2 to indicate panic occurred
                             2
                         }
                     }
-                });
+                },
+            );
 
             // Drive the generator - it will run until:
             // 1. Shutdown is requested
@@ -2301,12 +2629,7 @@ impl<'a> Worker<'a> {
         }
 
         if worker_id == self.inner.worker_id {
-            if self
-                .inner
-                .timer_wheel
-                .cancel_timer(timer_id)
-                .is_ok()
-            {
+            if self.inner.timer_wheel.cancel_timer(timer_id).is_ok() {
                 timer.mark_cancelled(timer_id);
                 return true;
             }
@@ -2334,13 +2657,30 @@ impl<'a> Worker<'a> {
 
     #[inline(always)]
     fn poll_yield(&mut self, run_ctx: &mut RunContext, max: usize) -> usize {
+        // let max = 1024*8;
         let mut count = 0;
+        let mut now = self.inner.timer_wheel.now_ns();
         while let Some(handle) = self.try_acquire_local_yield() {
             self.inner.stats.yield_queue_polls += 1;
             self.poll_handle(run_ctx, handle);
             count += 1;
             if count >= max || run_ctx.pinned {
+            // if count >= max {
                 break;
+            }
+
+            let next_now = self.inner.timer_wheel.now_ns();
+
+            if now != next_now {
+                now = next_now;
+                self.poll_system_tasks(run_ctx);
+
+                if self.try_partition_random(run_ctx) {
+                    count += 1;
+                }
+                if run_ctx.should_exit_generator() {
+                    return count;
+                }
             }
         }
         count
@@ -2383,15 +2723,24 @@ impl<'a> Worker<'a> {
         }
         self.inner.stats.leaf_summary_hits = self.inner.stats.leaf_summary_hits.saturating_add(1);
 
-        let signals = self.service.arena().active_signals(leaf_idx);
-        let mut attempts = signals_per_leaf;
+        // let mut attempts = signals_per_leaf;
+        let mut attempts = 2;
 
         while available != 0 && attempts > 0 {
             let start = (self.next_u64() as usize) % signals_per_leaf;
 
-            let (signal_idx, signal) = loop {
+            // Inner loop to find a signal with available tasks.
+            // Returns Some((signal_idx, signal)) if found, None if exhausted.
+            let found = loop {
+                // Check attempts at the start of each inner loop iteration
+                // to prevent infinite spinning under contention.
+                if attempts == 0 {
+                    break None;
+                }
+
                 let candidate = bits::find_nearest(available, start as u64);
                 if candidate >= 64 {
+                    // No bits set in local `available` - reload from atomic
                     self.inner.stats.leaf_summary_checks =
                         self.inner.stats.leaf_summary_checks.saturating_add(1);
                     available =
@@ -2403,20 +2752,30 @@ impl<'a> Worker<'a> {
                     }
                     self.inner.stats.leaf_summary_hits =
                         self.inner.stats.leaf_summary_hits.saturating_add(1);
+                    // Decrement attempts on reload to bound total iterations
+                    attempts -= 1;
                     continue;
                 }
                 let bit_index = candidate as usize;
                 let sig = unsafe { &*self.service.arena().task_signal_ptr(leaf_idx, bit_index) };
                 let bits = sig.load(Ordering::Acquire);
                 if bits == 0 {
+                    // Don't call mark_signal_inactive here - there's a TOCTOU race:
+                    // A task might have just set the signal bit after we loaded.
+                    // We only clear from local `available` to skip this signal for now.
+                    // The summary bit will be properly cleared when remaining == 0
+                    // after a successful acquire (see below).
                     available &= !(1u64 << bit_index);
-                    self.service
-                        .summary()
-                        .mark_signal_inactive(leaf_idx, bit_index);
                     attempts -= 1;
                     continue;
                 }
-                break (bit_index, sig);
+                break Some((bit_index, sig));
+            };
+
+            // If inner loop exhausted attempts without finding a valid signal, exit
+            let (signal_idx, signal) = match found {
+                Some(result) => result,
+                None => break,
             };
 
             let bits = signal.load(Ordering::Acquire);
@@ -2443,6 +2802,14 @@ impl<'a> Worker<'a> {
                 self.service
                     .summary()
                     .mark_signal_inactive(leaf_idx, signal_idx);
+                // Re-check: A task might have set a bit between our CAS and
+                // mark_signal_inactive. If so, re-activate the summary bit.
+                let recheck = signal.load(Ordering::Acquire);
+                if recheck != 0 {
+                    self.service
+                        .summary()
+                        .mark_signal_active(leaf_idx, signal_idx);
+                }
             }
 
             self.inner.stats.signal_polls = self.inner.stats.signal_polls.saturating_add(1);
@@ -2762,10 +3129,12 @@ impl<'a> Worker<'a> {
                             self.inner.stats.completed_count.saturating_add(1);
                         run_ctx.mark_task_completed();
                     } else if task.is_yielded() {
+                        task.clear_yielded();
+                        task.finish_and_schedule();
                         // Task yielded, re-enqueue
-                        task.record_yield();
+                        // task.record_yield();
                         self.inner.stats.yielded_count += 1;
-                        self.enqueue_yield(handle);
+                        // self.enqueue_yield(handle);
                         // Task still running, don't mark completed
                     } else {
                         // Task returned Pending, waiting for wake
@@ -2806,7 +3175,7 @@ impl<'a> Worker<'a> {
         handle: TaskHandle,
         task: &Task,
     ) {
-        const STACK_SIZE: usize = 512 * 1024; // 512KB stack
+        const STACK_SIZE: usize = 1024 * 1024; // 512KB stack
 
         // Capture task pointer as usize for Send safety
         let task_addr = task as *const Task as usize;
@@ -2898,12 +3267,15 @@ impl<'a> Worker<'a> {
                 }
 
                 if task.is_yielded() {
-                    task.record_yield();
+                    task.clear_yielded();
+                    // task.record_yield();
                     self.inner.stats.yielded_count += 1;
+                    task.finish_and_schedule();
+                    // task.schedule();
                     // Yielded Tasks stay in EXECUTING state with yielded set to true
                     // without resetting the signal. All attempts to set the signal
                     // will not set it since it is guaranteed to run via the yield queue.
-                    self.enqueue_yield(handle);
+                    // self.enqueue_yield(handle);
                 } else {
                     self.inner.stats.waiting_count += 1;
                     task.finish();
@@ -2941,12 +3313,7 @@ impl<'a> Worker<'a> {
             if let Some(worker_id) = timer.worker_id() {
                 if worker_id == self.inner.worker_id {
                     let existing_id = timer.timer_id();
-                    if self
-                        .inner
-                        .timer_wheel
-                        .cancel_timer(existing_id)
-                        .is_ok()
-                    {
+                    if self.inner.timer_wheel.cancel_timer(existing_id).is_ok() {
                         timer.reset();
                     }
                 } else {
@@ -3116,11 +3483,7 @@ pub(crate) fn cancel_timer_for_current_task(timer: &Timer) -> bool {
     let task = unsafe { &mut *task };
 
     if timer_worker_id == worker_id {
-        if worker
-            .timer_wheel
-            .cancel_timer(timer_id)
-            .is_ok()
-        {
+        if worker.timer_wheel.cancel_timer(timer_id).is_ok() {
             timer.mark_cancelled(timer_id);
             return true;
         }

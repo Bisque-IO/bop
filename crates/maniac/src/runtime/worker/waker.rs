@@ -145,16 +145,6 @@ pub struct WorkerWaker {
     /// - Under-estimate: Permits accumulate, future wakeups succeed
     sleepers: CachePadded<AtomicUsize>,
 
-    /// **Active worker count**: Total number of FastTaskWorker threads currently running.
-    ///
-    /// Updated when workers start (register_worker) and stop (unregister_worker).
-    /// Workers periodically check this to reconfigure their signal partitions for
-    /// optimal load distribution with minimal contention.
-    ///
-    /// Uses `Relaxed` ordering since workers can tolerate slightly stale values
-    /// and will eventually reconfigure on the next periodic check.
-    worker_count: CachePadded<AtomicUsize>,
-
     /// **Partition summary**: Bitmap tracking which leafs in this worker's SummaryTree partition
     /// have active tasks (up to 64 leafs per partition).
     ///
@@ -181,7 +171,6 @@ impl WorkerWaker {
             status: CachePadded::new(AtomicU64::new(0)),
             permits: CachePadded::new(AtomicU64::new(0)),
             sleepers: CachePadded::new(AtomicUsize::new(0)),
-            worker_count: CachePadded::new(AtomicUsize::new(0)),
             partition_summary: CachePadded::new(AtomicU64::new(0)),
         }
     }
@@ -265,49 +254,24 @@ impl WorkerWaker {
     /// This function is used to indicate that the current worker should stop yielding,
     /// i.e., it is no longer in a yielded state and is eligible to process new work.
     /// The yield bit is typically set to signal a worker to yield and released to
-    /// allow the worker to resume normal operation. Clearing this bit is a
-    /// coordinated operation to avoid spurious lost work or premature reactivation.
+    /// allow the worker to resume normal operation.
     ///
     /// # Concurrency
     ///
-    /// The method uses a loop with atomic compare-and-exchange to guarantee that the
-    /// yield bit is only cleared if it was previously set, handling concurrent attempts
-    /// to manipulate this bit. In case there is a race and the bit has already been
-    /// cleared by another thread, this function will exit quietly and make no changes.
+    /// Uses `fetch_and` for atomic bit clearing. If the bit is already clear,
+    /// returns immediately without touching atomics. Safe for concurrent use.
     ///
     /// # Behavior
     ///
-    /// - If the yield bit is already clear, the function returns immediately.
-    /// - Otherwise, it performs a compare-and-exchange to clear the bit. If this
-    ///   succeeds, it exits; if not, it reloads the word and repeats the process,
-    ///   only trying again if the yield bit is still set.
+    /// - If the yield bit is already clear, the function returns immediately (fast path).
+    /// - Otherwise, atomically clears the bit via `fetch_and`.
     #[inline]
     pub fn try_unmark_yield(&self) {
-        loop {
-            // Load the current status word with Acquire ordering to observe the latest status.
-            let snapshot = self.status.load(Ordering::Acquire);
-            // If the yield bit is not set, no action is needed.
-            if snapshot & STATUS_BIT_YIELD == 0 {
-                return;
-            }
-
-            // Attempt to clear the yield bit atomically while preserving other bits.
-            match self.status.compare_exchange(
-                snapshot,
-                snapshot & !STATUS_BIT_YIELD,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                // If successful, the yield bit was cleared; return.
-                Ok(_) => return,
-                // If status changed in the meantime, reload and retry if the yield bit is still set.
-                Err(actual) => {
-                    if actual & STATUS_BIT_YIELD == 0 {
-                        return;
-                    }
-                }
-            }
+        // Fast path: already clear
+        if self.status.load(Ordering::Relaxed) & STATUS_BIT_YIELD == 0 {
+            return;
         }
+        self.status.fetch_and(!STATUS_BIT_YIELD, Ordering::AcqRel);
     }
 
     /// Marks the partition bit as active, indicating there is work in the partition.
@@ -344,36 +308,23 @@ impl WorkerWaker {
     ///
     /// # Concurrency
     ///
-    /// Uses a loop with atomic compare-and-exchange to ensure the bit is only cleared if no other
-    /// thread has concurrently set it again. If racing with a producer, the bit will be re-armed as needed to
-    /// prevent missing new work.
+    /// Uses `fetch_and` for atomic bit clearing (no CAS loop needed). If racing with a producer,
+    /// the bit will be re-armed as needed to prevent missing new work.
     #[inline]
     pub fn try_unmark_tasks(&self) {
-        loop {
-            let snapshot = self.status.load(Ordering::Relaxed);
-            if snapshot & STATUS_BIT_PARTITION == 0 {
-                return;
-            }
+        let snapshot = self.status.load(Ordering::Relaxed);
+        if snapshot & STATUS_BIT_PARTITION == 0 {
+            return;
+        }
 
-            match self.status.compare_exchange(
-                snapshot,
-                snapshot & !STATUS_BIT_PARTITION,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    // If new partition work arrived concurrently, re-arm the bit
-                    if self.partition_summary.load(Ordering::Acquire) != 0 {
-                        self.mark_tasks();
-                    }
-                    return;
-                }
-                Err(actual) => {
-                    if actual & STATUS_BIT_PARTITION == 0 {
-                        return;
-                    }
-                }
-            }
+        let prev = self.status.fetch_and(!STATUS_BIT_PARTITION, Ordering::AcqRel);
+        if prev & STATUS_BIT_PARTITION == 0 {
+            return;
+        }
+
+        // If new partition work arrived concurrently, re-arm the bit
+        if self.partition_summary.load(Ordering::Acquire) != 0 {
+            self.mark_tasks();
         }
     }
 
@@ -410,10 +361,11 @@ impl WorkerWaker {
             STATUS_SUMMARY_BITS
         );
         let mask = 1u64 << index;
+        // Fast path: Relaxed suffices for optimization check; real sync is via fetch_or
         if self.status.load(Ordering::Relaxed) & mask != 0 {
             return;
         }
-        let prev = self.status.fetch_or(mask, Ordering::Relaxed);
+        let prev = self.status.fetch_or(mask, Ordering::AcqRel);
         if prev & mask == 0 {
             self.release(1);
         }
@@ -452,7 +404,7 @@ impl WorkerWaker {
         if summary_mask == 0 {
             return;
         }
-        let prev = self.status.fetch_or(summary_mask, Ordering::Relaxed);
+        let prev = self.status.fetch_or(summary_mask, Ordering::AcqRel);
         let newly = (!prev) & summary_mask;
         let k = newly.count_ones() as usize;
         if k > 0 {
@@ -465,6 +417,9 @@ impl WorkerWaker {
     /// This is **lazy cleanup** - consumers call this after draining a word to prevent
     /// false positives in future `snapshot_summary()` calls. However, it's safe to skip
     /// this; the system remains correct with stale summary bits.
+    ///
+    /// Uses `fetch_and` for atomic bit clearing (no CAS loop needed). If work arrives
+    /// concurrently after clearing, the bit is re-armed via `mark_active()`.
     ///
     /// # Arguments
     ///
@@ -485,37 +440,23 @@ impl WorkerWaker {
             bit_index,
             STATUS_SUMMARY_BITS
         );
+
+        // Fast path: signal has work, don't bother clearing
+        if signal.load(Ordering::Acquire) != 0 {
+            return;
+        }
+
         let mask = 1u64 << bit_index;
+        let prev = self.status.fetch_and(!mask, Ordering::AcqRel);
 
-        loop {
-            if signal.load(Ordering::Acquire) != 0 {
-                return;
-            }
+        // If bit wasn't set, nothing changed
+        if prev & mask == 0 {
+            return;
+        }
 
-            let snapshot = self.status.load(Ordering::Relaxed);
-            if snapshot & mask == 0 {
-                return;
-            }
-
-            match self.status.compare_exchange(
-                snapshot,
-                snapshot & !mask,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    if signal.load(Ordering::Acquire) != 0 {
-                        // Re-arm summary and release if work arrived concurrently.
-                        self.mark_active(bit_index);
-                    }
-                    return;
-                }
-                Err(actual) => {
-                    if actual & mask == 0 {
-                        return;
-                    }
-                }
-            }
+        // Re-arm if work arrived concurrently
+        if signal.load(Ordering::Acquire) != 0 {
+            self.mark_active(bit_index);
         }
     }
 
@@ -536,9 +477,9 @@ impl WorkerWaker {
             STATUS_SUMMARY_BITS
         );
         let mask = 1u64 << bit_index;
+        // Relaxed suffices for optimization check; real sync is via fetch_and
         if self.status.load(Ordering::Relaxed) & mask != 0 {
-            self.status
-                .fetch_and(!(1u64 << bit_index), Ordering::Relaxed);
+            self.status.fetch_and(!mask, Ordering::AcqRel);
         }
     }
 
@@ -573,7 +514,7 @@ impl WorkerWaker {
     /// ```
     #[inline]
     pub fn snapshot_summary(&self) -> u64 {
-        self.status.load(Ordering::Relaxed) & STATUS_SUMMARY_MASK
+        self.status.load(Ordering::Acquire) & STATUS_SUMMARY_MASK
     }
 
     /// Finds the nearest set bit to `nearest_to_index` in the summary.
@@ -600,7 +541,7 @@ impl WorkerWaker {
     /// ```
     #[inline]
     pub fn summary_select(&self, nearest_to_index: u64) -> u64 {
-        let summary = self.status.load(Ordering::Relaxed) & STATUS_SUMMARY_MASK;
+        let summary = self.status.load(Ordering::Acquire) & STATUS_SUMMARY_MASK;
         crate::bits::find_nearest(summary, nearest_to_index)
     }
 
@@ -634,9 +575,23 @@ impl WorkerWaker {
     /// ```
     #[inline]
     pub fn try_acquire(&self) -> bool {
-        self.permits
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |p| p.checked_sub(1))
-            .is_ok()
+        // Hand-rolled CAS loop with compare_exchange_weak for better performance
+        // on ARM/LL-SC architectures vs fetch_update's closure overhead
+        let mut current = self.permits.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return false;
+            }
+            match self.permits.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Blocking acquire: parks the thread in the event loop until a permit becomes available
@@ -750,10 +705,8 @@ impl WorkerWaker {
             return;
         }
         self.permits.fetch_add(n as u64, Ordering::Release);
-        let to_wake = n.min(self.sleepers.load(Ordering::Relaxed));
-
-        // No event loop waker needed anymore - the waker is stored in EventLoop itself
-        // and will be called directly when needed
+        // Wakeup is handled externally via EventLoop's waker mechanism.
+        // Permits accumulate here; sleeping threads wake via I/O polling.
     }
 
     // ────────────────────────────────────────────────────────────────────────────
@@ -829,201 +782,8 @@ impl WorkerWaker {
     }
 
     // ────────────────────────────────────────────────────────────────────────────
-    // WORKER MANAGEMENT API
-    // ────────────────────────────────────────────────────────────────────────────
-
-    /// Registers a new worker thread and returns the new total worker count.
-    ///
-    /// Should be called when a FastTaskWorker thread starts. Workers use this
-    /// count to partition the signal space for optimal load distribution.
-    ///
-    /// # Returns
-    ///
-    /// The new total worker count after registration.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let waker = arena.waker();
-    /// let total_workers = unsafe { (*waker).register_worker() };
-    /// println!("Now have {} workers", total_workers);
-    /// ```
-    #[inline]
-    pub fn register_worker(&self) -> usize {
-        self.worker_count.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    /// Unregisters a worker thread and returns the new total worker count.
-    ///
-    /// Should be called when a FastTaskWorker thread stops. This allows
-    /// remaining workers to reconfigure their partitions.
-    ///
-    /// # Returns
-    ///
-    /// The new total worker count after unregistration.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Worker stopping
-    /// let waker = arena.waker();
-    /// let remaining_workers = unsafe { (*waker).unregister_worker() };
-    /// println!("{} workers remaining", remaining_workers);
-    /// ```
-    #[inline]
-    pub fn unregister_worker(&self) -> usize {
-        self.worker_count
-            .fetch_sub(1, Ordering::Relaxed)
-            .saturating_sub(1)
-    }
-
-    /// Returns the current number of active worker threads.
-    ///
-    /// Workers periodically check this value to detect when the worker count
-    /// has changed and reconfigure their signal partitions accordingly.
-    ///
-    /// Uses Relaxed ordering since workers can tolerate slightly stale values
-    /// and will eventually see the update on their next check.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let waker = arena.waker();
-    /// let count = unsafe { (*waker).get_worker_count() };
-    /// if count != cached_count {
-    ///     // Reconfigure partition
-    /// }
-    /// ```
-    #[inline]
-    pub fn get_worker_count(&self) -> usize {
-        self.worker_count.load(Ordering::Relaxed)
-    }
-
-    // ────────────────────────────────────────────────────────────────────────────
     // PARTITION SUMMARY MANAGEMENT
     // ────────────────────────────────────────────────────────────────────────────
-
-    /// Synchronize partition summary from SummaryTree leaf range.
-    ///
-    /// Samples the worker's assigned partition of the SummaryTree and updates
-    /// the local `partition_summary` bitmap. When the partition transitions from
-    /// empty to non-empty, sets `STATUS_BIT_PARTITION` and adds a permit to wake
-    /// the worker.
-    ///
-    /// This should be called before parking to ensure the worker doesn't sleep
-    /// when tasks are available in its partition.
-    ///
-    /// # Arguments
-    ///
-    /// * `partition_start` - First leaf index in this worker's partition
-    /// * `partition_end` - One past the last leaf index (exclusive)
-    /// * `leaf_words` - Slice of AtomicU64 leaf words from SummaryTree
-    ///
-    /// # Returns
-    ///
-    /// `true` if the partition currently has work, `false` otherwise
-    ///
-    /// # Panics
-    ///
-    /// Panics in debug mode if partition is larger than 64 leafs
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Before parking, sync partition status
-    /// let waker = &service.wakers[worker_id];
-    /// let has_work = waker.sync_partition_summary(
-    ///     self.partition_start,
-    ///     self.partition_end,
-    ///     &self.arena.active_tree().leaf_words,
-    /// );
-    /// ```
-    pub fn sync_partition_summary(
-        &self,
-        partition_start: usize,
-        partition_end: usize,
-        leaf_words: &[AtomicU64],
-    ) -> bool {
-        debug_assert!(
-            partition_end >= partition_start,
-            "partition_end ({}) must be >= partition_start ({})",
-            partition_end,
-            partition_start
-        );
-
-        let partition_len = partition_end.saturating_sub(partition_start);
-        if partition_len == 0 {
-            let prev = self.partition_summary.swap(0, Ordering::AcqRel);
-            if prev != 0 {
-                self.try_unmark_tasks();
-            }
-            return false;
-        }
-
-        debug_assert!(
-            partition_len <= 64,
-            "partition size {} exceeds 64-bit bitmap capacity",
-            partition_len
-        );
-
-        let partition_mask = if partition_len >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << partition_len) - 1
-        };
-
-        loop {
-            let mut new_summary = 0u64;
-
-            for (offset, leaf_idx) in (partition_start..partition_end).enumerate() {
-                if let Some(leaf_word) = leaf_words.get(leaf_idx) {
-                    if leaf_word.load(Ordering::Acquire) != 0 {
-                        new_summary |= 1u64 << offset;
-                    }
-                }
-            }
-
-            let prev = self.partition_summary.load(Ordering::Acquire);
-            let prev_masked = prev & partition_mask;
-
-            if prev_masked != 0 {
-                let mut to_clear = prev_masked & !new_summary;
-                while to_clear != 0 {
-                    let bit = to_clear.trailing_zeros() as usize;
-                    let leaf_idx = partition_start + bit;
-                    if let Some(leaf_word) = leaf_words.get(leaf_idx) {
-                        if leaf_word.load(Ordering::Acquire) != 0 {
-                            new_summary |= 1u64 << bit;
-                        }
-                    }
-                    to_clear &= to_clear - 1;
-                }
-            }
-
-            let desired = (prev & !partition_mask) | new_summary;
-
-            match self.partition_summary.compare_exchange(
-                prev,
-                desired,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    let had_work = prev_masked != 0;
-                    let has_work = (desired & partition_mask) != 0;
-
-                    if has_work && !had_work {
-                        self.mark_tasks();
-                    } else if !has_work && had_work {
-                        self.try_unmark_tasks();
-                    }
-
-                    return has_work;
-                }
-                Err(_) => continue,
-            }
-        }
-    }
 
     /// Get current partition summary bitmap.
     ///
@@ -1067,6 +827,20 @@ impl WorkerWaker {
         );
         let summary = self.partition_summary.load(Ordering::Relaxed);
         summary & (1u64 << local_leaf_idx) != 0
+    }
+
+    /// Atomically OR a mask into the partition summary without triggering wakeup logic.
+    ///
+    /// This is a low-level primitive for when the caller knows the partition is already
+    /// active and just needs to update the bitmap without the overhead of checking for
+    /// 0→non-zero transitions.
+    ///
+    /// # Arguments
+    ///
+    /// * `mask` - Bit mask to OR into the partition summary
+    #[inline]
+    pub fn partition_summary_fetch_or(&self, mask: u64) {
+        self.partition_summary.fetch_or(mask, Ordering::Relaxed);
     }
 
     /// Directly update partition summary for a specific leaf.
@@ -1146,7 +920,6 @@ mod tests {
         assert_eq!(waker.status(), 0);
         assert_eq!(waker.permits(), 0);
         assert_eq!(waker.sleepers(), 0);
-        assert_eq!(waker.get_worker_count(), 0);
     }
 
     #[test]
@@ -1194,26 +967,38 @@ mod tests {
     }
 
     #[test]
-    fn test_integration_with_event_loop() {
+    fn test_acquire_timeout_with_event_loop() {
         let waker = Arc::new(WorkerWaker::new());
         let mut event_loop = IoDriver::new().unwrap();
-        let io_waker = event_loop.waker().unwrap();
 
-        // Thread to wake us up
-        let waker_clone = waker.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(50));
-            waker_clone.mark_active(0);
-        });
-
-        // Should block and then return true when work arrives
-        // Note: This blocks the test thread, which is fine
-        assert!(waker.acquire_with_io(&mut event_loop));
-        assert_eq!(waker.permits(), 0);
-
-        // Try timeout version
+        // Test timeout behavior - should return false after timeout when no permits
         let start = std::time::Instant::now();
         assert!(!waker.acquire_timeout_with_io(&mut event_loop, Duration::from_millis(50)));
         assert!(start.elapsed() >= Duration::from_millis(50));
+
+        // Add a permit and verify immediate acquisition
+        waker.mark_active(0);
+        assert_eq!(waker.permits(), 1);
+        assert!(waker.acquire_timeout_with_io(&mut event_loop, Duration::from_millis(50)));
+        assert_eq!(waker.permits(), 0);
+    }
+
+    #[test]
+    fn test_try_acquire_basic() {
+        let waker = WorkerWaker::new();
+
+        // No permits - should fail
+        assert!(!waker.try_acquire());
+
+        // Add permit via release
+        waker.release(1);
+        assert_eq!(waker.permits(), 1);
+
+        // Should succeed now
+        assert!(waker.try_acquire());
+        assert_eq!(waker.permits(), 0);
+
+        // Should fail again
+        assert!(!waker.try_acquire());
     }
 }
