@@ -39,7 +39,8 @@ where
         }
 
         'w: loop {
-            let (write_res, buf_) = writer.write_all(buf_read).await;
+            let (write_res, buf_): (std::io::Result<usize>, Vec<u8>) =
+                writer.write_all(buf_read).await;
             match write_res {
                 Ok(0) => {
                     // write closed

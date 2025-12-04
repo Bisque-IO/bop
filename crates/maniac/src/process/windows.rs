@@ -8,15 +8,15 @@ use std::process::ExitStatus as StdExitStatus;
 use std::task::{Context, Poll};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
-    ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF,
+    CloseHandle, ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, GetLastError, HANDLE, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 
-use crate::buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut};
 use crate::BufResult;
+use crate::buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut};
 
 use super::child::ExitStatus;
 
@@ -37,7 +37,7 @@ impl ChildStdinInner {
 
     pub(crate) fn write<T: IoBuf>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
         let handle = self.handle as HANDLE;
-        
+
         async move {
             // Synchronous write - pipes typically don't block for writes
             let mut bytes_written: u32 = 0;
@@ -50,7 +50,7 @@ impl ChildStdinInner {
                     std::ptr::null_mut(),
                 )
             };
-            
+
             if success == 0 {
                 let err = unsafe { GetLastError() };
                 (Err(io::Error::from_raw_os_error(err as i32)), buf)
@@ -65,18 +65,18 @@ impl ChildStdinInner {
         buf_vec: T,
     ) -> impl Future<Output = BufResult<usize, T>> {
         let handle = self.handle as HANDLE;
-        
+
         async move {
             let wsabuf_len = buf_vec.read_wsabuf_len();
             if wsabuf_len == 0 {
                 return (Ok(0), buf_vec);
             }
-            
+
             let wsabuf_ptr = buf_vec.read_wsabuf_ptr();
             if wsabuf_ptr.is_null() {
                 return (Ok(0), buf_vec);
             }
-            
+
             let wsabuf = unsafe { &*wsabuf_ptr };
             let mut bytes_written: u32 = 0;
             let success = unsafe {
@@ -88,7 +88,7 @@ impl ChildStdinInner {
                     std::ptr::null_mut(),
                 )
             };
-            
+
             if success == 0 {
                 let err = unsafe { GetLastError() };
                 (Err(io::Error::from_raw_os_error(err as i32)), buf_vec)
@@ -135,7 +135,10 @@ impl ChildStdoutInner {
         Ok(Self { handle })
     }
 
-    pub(crate) fn read<T: IoBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    pub(crate) fn read<T: IoBufMut>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> {
         PipeReadFuture {
             handle: self.handle as usize,
             buf: Some(buf),
@@ -181,7 +184,10 @@ impl ChildStderrInner {
         Ok(Self { handle })
     }
 
-    pub(crate) fn read<T: IoBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    pub(crate) fn read<T: IoBufMut>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> {
         PipeReadFuture {
             handle: self.handle as usize,
             buf: Some(buf),
@@ -250,7 +256,10 @@ impl<T: IoBufMut> Future for PipeReadFuture<T> {
             if err == ERROR_BROKEN_PIPE {
                 return Poll::Ready((Ok(0), self.buf.take().unwrap()));
             }
-            return Poll::Ready((Err(io::Error::from_raw_os_error(err as i32)), self.buf.take().unwrap()));
+            return Poll::Ready((
+                Err(io::Error::from_raw_os_error(err as i32)),
+                self.buf.take().unwrap(),
+            ));
         }
 
         if bytes_available == 0 {
@@ -303,7 +312,7 @@ impl<T: IoVecBufMut> Future for PipeReadVecFuture<T> {
         let handle = self.handle as HANDLE;
         let buf = self.buf.as_mut().unwrap();
         let wsabuf_len = buf.write_wsabuf_len();
-        
+
         if wsabuf_len == 0 {
             return Poll::Ready((Ok(0), self.buf.take().unwrap()));
         }
@@ -335,7 +344,10 @@ impl<T: IoVecBufMut> Future for PipeReadVecFuture<T> {
             if err == ERROR_BROKEN_PIPE {
                 return Poll::Ready((Ok(0), self.buf.take().unwrap()));
             }
-            return Poll::Ready((Err(io::Error::from_raw_os_error(err as i32)), self.buf.take().unwrap()));
+            return Poll::Ready((
+                Err(io::Error::from_raw_os_error(err as i32)),
+                self.buf.take().unwrap(),
+            ));
         }
 
         if bytes_available == 0 {
@@ -392,19 +404,19 @@ impl<'a> Future for WaitFuture<'a> {
             }
             Ok(None) => {
                 let handle = self.child.as_raw_handle() as HANDLE;
-                
+
                 // Wait with 0 timeout
                 let wait_result = unsafe { WaitForSingleObject(handle, 0) };
-                
+
                 if wait_result == WAIT_OBJECT_0 {
                     let mut exit_code: u32 = 0;
                     let success = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
-                    
+
                     if success == 0 {
                         let err = unsafe { GetLastError() };
                         return Poll::Ready(Err(io::Error::from_raw_os_error(err as i32)));
                     }
-                    
+
                     let status = std::os::windows::process::ExitStatusExt::from_raw(exit_code);
                     return Poll::Ready(Ok(ExitStatus::new(status)));
                 } else if wait_result == WAIT_TIMEOUT {

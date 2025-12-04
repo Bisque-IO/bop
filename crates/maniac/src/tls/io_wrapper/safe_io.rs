@@ -228,7 +228,7 @@ impl SafeWrite {
         // # Safety
         // We have already checked it is not None.
         let buffer = unsafe { self.buffer.take().unwrap_unchecked() };
-        let (result, buffer) = io.write_all(buffer).await;
+        let (result, buffer): (std::io::Result<usize>, Buffer) = io.write_all(buffer).await;
         self.buffer = Some(buffer);
         match result {
             Ok(written_len) => {

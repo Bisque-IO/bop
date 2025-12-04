@@ -3,14 +3,15 @@
 //! Spawns a configurable number of cooperative tasks that repeatedly yield.
 //! The runtime executes them on a configurable worker pool and we report simple
 //! throughput statistics for each configuration.
+//!
+//! Includes a Tokio variant for side-by-side comparison.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use futures_lite::future::{block_on, yield_now};
-use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
-use maniac::runtime::Executor;
+use futures_lite::future::block_on;
+use maniac::runtime::task::TaskArenaConfig;
 
 const DEFAULT_LEAVES: usize = 64;
 const DEFAULT_TASKS_PER_LEAF: usize = 4096;
@@ -39,29 +40,38 @@ const BENCHMARKS: &[BenchmarkConfig] = &[
     //     yields_per_task: 100_000, // 51.2M yields total
     // },
     BenchmarkConfig {
-        worker_count: 16,
+        worker_count: 32,
         total_tasks: 1024,
         yields_per_task: 10_000, // 51.2M yields total
     },
 ];
 
-async fn yield_n_times(mut remaining: usize) {
+async fn yield_n_times_maniac(mut remaining: usize) {
     while remaining > 0 {
-        yield_now().await;
+        futures_lite::future::yield_now().await;
         remaining -= 1;
     }
 }
 
-fn run_benchmark(config: &BenchmarkConfig) {
+async fn yield_n_times_tokio(mut remaining: usize) {
+    while remaining > 0 {
+        tokio::task::yield_now().await;
+        // futures_lite::future::yield_now().await;
+        remaining -= 1;
+    }
+}
+
+fn run_maniac_benchmark(config: &BenchmarkConfig) {
     println!(
-        "> workers={} tasks={} yields/task={}",
+        "  [maniac] workers={} tasks={} yields/task={}",
         config.worker_count, config.total_tasks, config.yields_per_task
     );
 
-    let arena_config =
+    let _arena_config =
         TaskArenaConfig::new(DEFAULT_LEAVES, DEFAULT_TASKS_PER_LEAF).expect("arena config");
-    let runtime = maniac::runtime::new_multi_threaded(config.worker_count, (config.worker_count * 16) * 4096)
-    .expect("runtime");
+    let runtime =
+        maniac::runtime::new_multi_threaded(config.worker_count, (config.worker_count * 8) * 4096)
+            .expect("runtime");
 
     let mut completion_counters = Vec::with_capacity(config.total_tasks);
     for _ in 0..config.total_tasks {
@@ -74,37 +84,82 @@ fn run_benchmark(config: &BenchmarkConfig) {
         let counter = Arc::clone(&completion_counters[i]);
         let yields = config.yields_per_task;
         let task = async move {
-            yield_n_times(yields).await;
+            yield_n_times_maniac(yields).await;
             counter.fetch_add(1, Ordering::Relaxed);
         };
         handles.push(runtime.spawn(task).expect("spawn task for benchmark"));
     }
 
-    for (_, handle) in handles.into_iter().enumerate() {
+    for handle in handles {
         block_on(handle);
-        // if (idx + 1) % 10 == 0 || idx + 1 == config.total_tasks {
-        //     println!("    joined {}/{} tasks", idx + 1, config.total_tasks);
-        // }
     }
 
     let elapsed = start.elapsed();
-    let completed: usize = completion_counters.iter().map(|a| a.load(Ordering::Acquire)).sum();
-    
+    let completed: usize = completion_counters
+        .iter()
+        .map(|a| a.load(Ordering::Acquire))
+        .sum();
+
     // Keep a reference to the service to collect stats after workers drop
     let service = std::sync::Arc::clone(runtime.service());
     drop(runtime); // This drops workers, which copy their stats to the service
-    
+
     // Now collect stats after workers have exited
     let stats = service.aggregate_stats();
-    summarize(config, elapsed, completed, stats);
-    println!();
+    summarize_maniac(config, elapsed, completed, Some(stats));
 }
 
-fn summarize(
+fn run_tokio_benchmark(config: &BenchmarkConfig) {
+    println!(
+        "  [tokio]  workers={} tasks={} yields/task={}",
+        config.worker_count, config.total_tasks, config.yields_per_task
+    );
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.worker_count)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    let mut completion_counters = Vec::with_capacity(config.total_tasks);
+    for _ in 0..config.total_tasks {
+        completion_counters.push(Arc::new(AtomicUsize::new(0)));
+    }
+
+    let start = Instant::now();
+    let mut handles = Vec::with_capacity(config.total_tasks);
+    for i in 0..config.total_tasks {
+        let counter = Arc::clone(&completion_counters[i]);
+        let yields = config.yields_per_task;
+        let task = async move {
+            yield_n_times_tokio(yields).await;
+            counter.fetch_add(1, Ordering::Relaxed);
+        };
+        handles.push(runtime.spawn(task));
+    }
+
+    runtime.block_on(async {
+        for handle in handles {
+            let _ = handle.await;
+        }
+    });
+
+    let elapsed = start.elapsed();
+    let completed: usize = completion_counters
+        .iter()
+        .map(|a| a.load(Ordering::Acquire))
+        .sum();
+
+    drop(runtime);
+
+    summarize_maniac(config, elapsed, completed, None);
+}
+
+fn summarize_maniac(
     config: &BenchmarkConfig,
     duration: Duration,
     completed: usize,
-    stats: maniac::runtime::WorkerServiceStats,
+    stats: Option<maniac::runtime::SchedulerStats>,
 ) {
     let duration_secs = duration.as_secs_f64().max(f64::EPSILON);
     let task_throughput = completed as f64 / duration_secs;
@@ -121,13 +176,27 @@ fn summarize(
         total_yields,
         yield_throughput / 1_000_000.0
     );
-    println!();
-    println!("    {}", stats);
+    if let Some(stats) = stats {
+        println!();
+        println!("    {}", stats);
+    }
 }
 
 fn main() {
     println!("Worker executor benchmark (multi-threaded).");
+    println!("=========================================\n");
+
     for config in BENCHMARKS {
-        run_benchmark(config);
+        println!(
+            "Config: workers={} tasks={} yields/task={}\n",
+            config.worker_count, config.total_tasks, config.yields_per_task
+        );
+
+        run_tokio_benchmark(config);
+        println!();
+        run_maniac_benchmark(config);
+        println!();
+
+        println!("-----------------------------------------\n");
     }
 }

@@ -36,6 +36,8 @@ impl RawBuf {
     }
 }
 
+unsafe impl Send for RawBuf {}
+
 unsafe impl IoBuf for RawBuf {
     #[inline]
     fn read_ptr(&self) -> *const u8 {
@@ -142,6 +144,8 @@ impl RawBufVectored {
         Self { ptr, len }
     }
 }
+
+unsafe impl Send for RawBufVectored {}
 
 unsafe impl IoVecBuf for RawBufVectored {
     #[cfg(unix)]

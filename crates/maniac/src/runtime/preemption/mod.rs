@@ -461,7 +461,7 @@ mod impl_x64 {
             unsafe {
                 let mut sa = MaybeUninit::<libc::sigaction>::uninit();
                 let sa_ptr = sa.as_mut_ptr();
-                (*sa_ptr).sa_sigaction = sigalrm_handler as usize;
+                (*sa_ptr).sa_sigaction = sigalrm_handler as *const () as usize;
                 libc::sigemptyset(&mut (*sa_ptr).sa_mask);
                 // Block SIGVTALRM during handler execution to prevent reentrancy
                 libc::sigaddset(&mut (*sa_ptr).sa_mask, libc::SIGVTALRM);

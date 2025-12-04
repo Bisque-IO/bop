@@ -161,6 +161,8 @@ impl IoVecMeta {
     }
 }
 
+unsafe impl Send for IoVecMeta {}
+
 unsafe impl IoVecBuf for IoVecMeta {
     #[cfg(unix)]
     fn read_iovec_ptr(&self) -> *const libc::iovec {

@@ -13,7 +13,6 @@
 //! - `JoinHandle`: Future that resolves when a spawned task completes
 //!
 pub mod deque;
-pub mod io_driver;
 pub mod mpsc;
 pub mod preemption;
 pub mod task;
@@ -22,10 +21,6 @@ pub mod worker;
 
 pub use crate::{join, select, try_join};
 
-pub(crate) mod io_builder;
-#[allow(dead_code)]
-pub(crate) mod io_runtime;
-
 use std::future::{Future, IntoFuture};
 
 pub use crate::driver::Driver;
@@ -33,38 +28,35 @@ pub use crate::driver::Driver;
 pub use crate::driver::IoUringDriver;
 #[cfg(feature = "poll")]
 pub use crate::driver::PollerDriver;
-pub use io_builder::{Buildable, RuntimeBuilder};
+pub use worker::io::{Buildable, RuntimeBuilder};
 
 // pub use runtime::{spawn, Runtime};
-pub use io_runtime::IoRuntime;
+pub use worker::io::IoRuntime;
 #[cfg(any(all(target_os = "linux", feature = "iouring"), feature = "poll"))]
-pub use {io_builder::FusionDriver, io_runtime::FusionRuntime};
+pub use worker::io::{FusionDriver, FusionRuntime};
 
 /// A specialized `Result` type for `io-uring` operations with buffers.
 pub use crate::buf::BufResult;
 
 use std::any::TypeId;
 
+use parking_lot::Mutex;
 use std::io;
 use std::panic::Location;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
-use parking_lot::Mutex;
-use task::{
-    SpawnError, TaskArena, TaskArenaConfig, TaskArenaOptions, TaskArenaStats,
-    TaskHandle,
-};
+use task::{SpawnError, TaskArena, TaskArenaConfig, TaskArenaOptions, TaskArenaStats, TaskHandle};
 use timer::ticker::TickService;
-use worker::{WorkerService, WorkerServiceConfig};
+use worker::{Scheduler, SchedulerConfig};
 
 use crate::{num_cpus, runtime::worker::JoinHandle};
 
 pub use crate::blocking::unblock;
-pub use worker::{WorkerServiceStats, WorkerSnapshot, WorkerStats};
+pub use worker::{SchedulerStats, WorkerSnapshot, WorkerStats};
 
 pub fn new_single_threaded() -> io::Result<DefaultRuntime> {
     let tick_service = TickService::new(Duration::from_millis(1));
@@ -122,7 +114,7 @@ impl Runtime {
     /// Returns a reference to the underlying worker service.
     ///
     /// This allows access to worker service operations and statistics.
-    pub fn service(&self) -> &Arc<WorkerService> {
+    pub fn service(&self) -> &Arc<Scheduler> {
         self.executor.service()
     }
 
@@ -281,7 +273,7 @@ struct ExecutorInner {
     /// Shared tick service for time-based operations across worker services.
     tick_service: Arc<TickService>,
     /// Worker service that manages task scheduling, worker threads, and task execution.
-    service: Arc<WorkerService>,
+    service: Arc<Scheduler>,
 }
 
 impl ExecutorInner {
@@ -384,7 +376,7 @@ impl Executor {
         options: TaskArenaOptions,
         worker_count: usize,
     ) -> io::Result<Self> {
-        let worker_config = WorkerServiceConfig::default();
+        let worker_config = SchedulerConfig::default();
         // Create shared tick service for time-based operations
         // This allows multiple worker services to share a single tick thread
         let tick_service = TickService::new(worker_config.tick_duration);
@@ -443,14 +435,14 @@ impl Executor {
         // Set min_workers to the desired count to ensure workers start immediately
         // Set max_workers to at least the desired count (or CPU count, whichever is higher)
         // This ensures workers start immediately on WorkerService::start()
-        let worker_config = WorkerServiceConfig {
+        let worker_config = SchedulerConfig {
             worker_count,
-            ..WorkerServiceConfig::default()
+            ..SchedulerConfig::default()
         };
 
         // Start the worker service with the arena and configuration
         // This spawns worker threads that will execute tasks
-        let service = WorkerService::start(arena, worker_config, &tick_service);
+        let service = Scheduler::start(arena, worker_config, &tick_service);
 
         // Initialize shutdown flag to false (executor is active)
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -537,7 +529,7 @@ impl Executor {
     /// # Returns
     ///
     /// An `Arc` to the `WorkerService` managing this executor's workers
-    pub fn service(&self) -> &Arc<WorkerService> {
+    pub fn service(&self) -> &Arc<Scheduler> {
         &self.inner.service
     }
 }
@@ -576,8 +568,6 @@ impl Drop for Executor {
         // }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

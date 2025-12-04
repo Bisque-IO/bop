@@ -32,10 +32,10 @@ use std::sync::{Arc, Mutex, Weak};
 
 use rand::RngCore;
 
-use crate::future::waker::DiatomicWaker;
-use crate::parking::{Parker, Unparker};
 use crate::detail::spsc::NoOpSignal;
 use crate::detail::spsc::dynamic::DynSpscConfig;
+use crate::future::waker::DiatomicWaker;
+use crate::parking::{Parker, Unparker};
 use crate::sync::signal::{AsyncSignalWaker, Signal};
 use crate::utils::CachePadded;
 use crate::{PopError, PushError};
@@ -857,7 +857,7 @@ impl<T> Clone for DynUnboundedSender<T> {
     }
 }
 
-impl<T: Send + 'static> DynUnboundedSender<T> {
+impl<T> DynUnboundedSender<T> {
     /// Sends a value through the channel (synchronous, never blocks for unbounded).
     pub fn send(&self, value: T) -> Result<(), DynSendError<T>> {
         let guard = self.inner.lock().unwrap();
@@ -1180,7 +1180,10 @@ pub mod unbounded {
     }
 
     impl<T> AsyncDynUnboundedMpscSender<T> {
-        fn new(sender: DynUnboundedSenderInner<T>, shared: Arc<DynUnboundedAsyncShared<T>>) -> Self {
+        fn new(
+            sender: DynUnboundedSenderInner<T>,
+            shared: Arc<DynUnboundedAsyncShared<T>>,
+        ) -> Self {
             Self { sender, shared }
         }
 
@@ -1263,7 +1266,10 @@ pub mod unbounded {
     impl<T> Sink<T> for AsyncDynUnboundedMpscSender<T> {
         type Error = PushError<T>;
 
-        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
             // Unbounded is always ready
             Poll::Ready(Ok(()))
         }
@@ -1272,11 +1278,17 @@ pub mod unbounded {
             self.try_send(item)
         }
 
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
 
-        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
             self.close();
             Poll::Ready(Ok(()))
         }
@@ -1427,7 +1439,10 @@ pub mod unbounded {
     }
 
     impl<T> BlockingDynUnboundedMpscSender<T> {
-        fn new(sender: DynUnboundedSenderInner<T>, shared: Arc<DynUnboundedAsyncShared<T>>) -> Self {
+        fn new(
+            sender: DynUnboundedSenderInner<T>,
+            shared: Arc<DynUnboundedAsyncShared<T>>,
+        ) -> Self {
             let parker = Parker::new();
             let parker_waker = Arc::new(ThreadUnparker {
                 unparker: parker.unparker(),
@@ -1693,7 +1708,8 @@ pub mod unbounded {
             .expect("fatal: cannot create initial sender");
 
         let shared = Arc::new(DynUnboundedAsyncShared::new(inner));
-        let blocking_sender = BlockingDynUnboundedMpscSender::new(sender_inner, Arc::clone(&shared));
+        let blocking_sender =
+            BlockingDynUnboundedMpscSender::new(sender_inner, Arc::clone(&shared));
         let blocking_receiver = BlockingDynUnboundedMpscReceiver::new(receiver_inner, shared);
         (blocking_sender, blocking_receiver)
     }
@@ -1737,7 +1753,8 @@ pub mod unbounded {
             .expect("fatal: cannot create initial sender");
 
         let shared = Arc::new(DynUnboundedAsyncShared::new(inner));
-        let blocking_sender = BlockingDynUnboundedMpscSender::new(sender_inner, Arc::clone(&shared));
+        let blocking_sender =
+            BlockingDynUnboundedMpscSender::new(sender_inner, Arc::clone(&shared));
         let async_receiver = AsyncDynUnboundedMpscReceiver::new(receiver_inner, shared);
         (blocking_sender, async_receiver)
     }

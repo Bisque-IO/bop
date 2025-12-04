@@ -1762,10 +1762,12 @@ pub fn new_async_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: usize>(
 ) {
     let shared = Arc::new(AsyncSpscShared::new());
     let signal_arc = Arc::new(signal);
-    let (sender, receiver) =
-        crate::detail::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
-            signal_arc,
-        );
+    let (sender, receiver) = crate::detail::spsc::UnboundedSpsc::<
+        T,
+        P,
+        NUM_SEGS_P2,
+        Arc<AsyncSignalGate>,
+    >::new_with_signal(signal_arc);
     (
         AsyncUnboundedSpscProducer::new(sender, Arc::clone(&shared)),
         AsyncUnboundedSpscConsumer::new(receiver, shared),
@@ -1800,10 +1802,12 @@ pub fn new_blocking_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: usize>(
 ) {
     let shared = Arc::new(AsyncSpscShared::new());
     let signal_arc = Arc::new(signal);
-    let (sender, receiver) =
-        crate::detail::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
-            signal_arc,
-        );
+    let (sender, receiver) = crate::detail::spsc::UnboundedSpsc::<
+        T,
+        P,
+        NUM_SEGS_P2,
+        Arc<AsyncSignalGate>,
+    >::new_with_signal(signal_arc);
     (
         BlockingUnboundedSpscProducer::new(sender, Arc::clone(&shared)),
         BlockingUnboundedSpscConsumer::new(receiver, shared),
@@ -1835,10 +1839,12 @@ pub fn new_blocking_async_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: u
 ) {
     let shared = Arc::new(AsyncSpscShared::new());
     let signal_arc = Arc::new(signal);
-    let (sender, receiver) =
-        crate::detail::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
-            signal_arc,
-        );
+    let (sender, receiver) = crate::detail::spsc::UnboundedSpsc::<
+        T,
+        P,
+        NUM_SEGS_P2,
+        Arc<AsyncSignalGate>,
+    >::new_with_signal(signal_arc);
     (
         BlockingUnboundedSpscProducer::new(sender, Arc::clone(&shared)),
         AsyncUnboundedSpscConsumer::new(receiver, shared),
@@ -1870,10 +1876,12 @@ pub fn new_async_blocking_unbounded_spsc<T, const P: usize, const NUM_SEGS_P2: u
 ) {
     let shared = Arc::new(AsyncSpscShared::new());
     let signal_arc = Arc::new(signal);
-    let (sender, receiver) =
-        crate::detail::spsc::UnboundedSpsc::<T, P, NUM_SEGS_P2, Arc<AsyncSignalGate>>::new_with_signal(
-            signal_arc,
-        );
+    let (sender, receiver) = crate::detail::spsc::UnboundedSpsc::<
+        T,
+        P,
+        NUM_SEGS_P2,
+        Arc<AsyncSignalGate>,
+    >::new_with_signal(signal_arc);
     (
         AsyncUnboundedSpscProducer::new(sender, Arc::clone(&shared)),
         BlockingUnboundedSpscConsumer::new(receiver, shared),

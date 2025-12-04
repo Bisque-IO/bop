@@ -81,3 +81,9 @@ pub enum PopError {
     ///
     Timeout,
 }
+
+pub fn now() -> u64 {
+    runtime::worker::current_worker_now_ns()
+}
+
+pub use runtime::worker::{as_coroutine, current_worker, spawn};

@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 use std::task::Waker;
 
-use crate::driver::unpark::Unpark;
 use crate::driver::UnparkHandle;
+use crate::driver::unpark::Unpark;
 
 /// Global child reaper instance (lazily initialized).
 static REAPER: OnceLock<ChildReaper> = OnceLock::new();
@@ -149,7 +149,9 @@ impl ChildReaper {
     /// Register the runtime's unpark handle.
     fn register_unpark(&self, unpark: &UnparkHandle) {
         let new_unpark = Box::new(unpark.clone());
-        let old_ptr = self.unpark.swap(Box::into_raw(new_unpark), Ordering::AcqRel);
+        let old_ptr = self
+            .unpark
+            .swap(Box::into_raw(new_unpark), Ordering::AcqRel);
         if !old_ptr.is_null() {
             // Drop the old handle
             let _ = unsafe { Box::from_raw(old_ptr) };
@@ -178,7 +180,7 @@ fn init_sigchld() -> io::Result<()> {
         // Set up SIGCHLD handler
         let mut new_action: libc::sigaction =
             unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
-        new_action.sa_sigaction = sigchld_handler as usize;
+        new_action.sa_sigaction = sigchld_handler as *const () as usize;
         // SA_RESTART: Restart interrupted syscalls
         // SA_NOCLDSTOP: Don't notify on stop/continue, only on exit
         new_action.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
@@ -298,4 +300,3 @@ mod tests {
         assert!(!handle.poll_sigchld());
     }
 }
-

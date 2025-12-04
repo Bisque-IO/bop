@@ -2,6 +2,11 @@
 
 #![cfg(feature = "raft")]
 
+pub mod multi;
+pub mod type_config;
+
+pub use type_config::ManiacRaftTypeConfig;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -12,10 +17,10 @@ use maniac_raft::OptionalSend;
 
 /// Wrapper for `maniac::runtime::JoinHandle` to implement `Future` and `Unpin`.
 pub struct JoinHandleWrapper<T> {
-    inner: crate::runtime::JoinHandle<T>,
+    inner: crate::runtime::worker::JoinHandle<T>,
 }
 
-impl<T> Future for JoinHandleWrapper<T> {
+impl<T: Send + 'static> Future for JoinHandleWrapper<T> {
     type Output = Result<T, JoinError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -52,11 +57,10 @@ impl AsyncRuntime for ManiacRuntime {
         // Spawn using the default executor
         // Note: This requires a runtime to be running
         // In practice, this should be called from within a runtime context
-        let handle = maniac::runtime::DefaultExecutor::new_single_threaded()
-            .unwrap()
-            .spawn(future)
-            .unwrap();
-        JoinHandleWrapper { inner: handle }
+        let handle = crate::runtime::worker::spawn(future);
+        JoinHandleWrapper {
+            inner: handle.expect("failed to spawn task"),
+        }
     }
 
     #[inline]
@@ -202,7 +206,8 @@ mod oneshot_mod {
     {
         #[inline]
         fn send(self, t: T) -> Result<(), T> {
-            self.0.send(t)
+            self.0.send(t);
+            Ok(())
         }
     }
 }
@@ -210,9 +215,10 @@ mod oneshot_mod {
 mod mpsc_mod {
     use std::future::Future;
 
-    use crate::sync::mpsc_bounded::{
-        MpscReceiver as ManiacReceiver, MpscSender as ManiacSender, SendError as ManiacSendError,
-        TryRecvError as ManiacTryRecvError, WeakMpscSender as ManiacWeakSender, channel,
+    use crate::sync::mpsc::bounded::{
+        MpscReceiver as ManiacReceiver, MpscSender as ManiacSender, PopError,
+        SendError as ManiacSendError, TryRecvError as ManiacTryRecvError,
+        WeakMpscSender as ManiacWeakSender, channel,
     };
     use maniac_raft::OptionalSend;
     use maniac_raft::async_runtime::{
@@ -248,7 +254,7 @@ mod mpsc_mod {
 
         #[inline]
         fn channel<T: OptionalSend>(buffer: usize) -> (Self::Sender<T>, Self::Receiver<T>) {
-            let (tx, rx) = channel(buffer);
+            let (tx, rx) = channel();
             (ManiacMpscSender(tx), ManiacMpscReceiver(rx))
         }
     }
@@ -259,8 +265,16 @@ mod mpsc_mod {
     {
         #[inline]
         fn send(&self, msg: T) -> impl Future<Output = Result<(), SendError<T>>> {
-            let sender = self.0.clone();
-            async move { sender.send(msg).await.map_err(|e| SendError(e.0)) }
+            let mut sender = self.0.clone();
+            async move {
+                sender
+                    .send(msg)
+                    .await
+                    .map_err(|e: ManiacSendError<T>| match e {
+                        ManiacSendError::Full(t) => SendError(t),
+                        ManiacSendError::Closed(t) => SendError(t),
+                    })
+            }
         }
 
         #[inline]
@@ -269,17 +283,18 @@ mod mpsc_mod {
         }
     }
 
-    impl<T> MpscReceiver<T> for ManiacMpscReceiver<T> {
+    impl<T: OptionalSend> MpscReceiver<T> for ManiacMpscReceiver<T> {
         #[inline]
         fn recv(&mut self) -> impl Future<Output = Option<T>> {
-            self.0.recv()
+            async move { self.0.recv().await.ok() }
         }
 
         #[inline]
         fn try_recv(&mut self) -> Result<T, TryRecvError> {
             self.0.try_recv().map_err(|e| match e {
-                ManiacTryRecvError::Empty => TryRecvError::Empty,
-                ManiacTryRecvError::Disconnected => TryRecvError::Disconnected,
+                PopError::Empty => TryRecvError::Empty,
+                PopError::Closed => TryRecvError::Disconnected,
+                _ => TryRecvError::Empty,
             })
         }
     }
@@ -296,10 +311,10 @@ mod mpsc_mod {
 }
 
 mod mpsc_unbounded_mod {
-    use crate::sync::mpsc_unbounded::{
-        SendError as ManiacSendError, TryRecvError as ManiacTryRecvError,
-        UnboundedReceiver as ManiacReceiver, UnboundedSender as ManiacSender,
-        WeakUnboundedSender as ManiacWeakSender, unbounded_channel,
+    use crate::sync::mpsc::dynamic::{
+        DynSendError as ManiacSendError, DynTryRecvError as ManiacTryRecvError,
+        DynUnboundedReceiver as ManiacReceiver, DynUnboundedSender as ManiacSender,
+        WeakDynUnboundedSender as ManiacWeakSender, dyn_unbounded_channel_default,
     };
     use maniac_raft::OptionalSend;
     use maniac_raft::type_config::async_runtime::mpsc_unbounded;
@@ -333,7 +348,7 @@ mod mpsc_unbounded_mod {
 
         #[inline]
         fn channel<T: OptionalSend>() -> (Self::Sender<T>, Self::Receiver<T>) {
-            let (tx, rx) = unbounded_channel();
+            let (tx, rx) = dyn_unbounded_channel_default();
             (
                 ManiacMpscUnboundedSender(tx),
                 ManiacMpscUnboundedReceiver(rx),
@@ -390,7 +405,7 @@ mod mpsc_unbounded_mod {
 mod watch_mod {
     use std::ops::Deref;
 
-    use maniac::sync::watch::{
+    use crate::sync::watch::{
         Receiver as ManiacReceiver, Ref as ManiacRef, Sender as ManiacSender, channel,
     };
     use maniac_raft::OptionalSend;
@@ -481,7 +496,7 @@ mod watch_mod {
 mod mutex_mod {
     use std::future::Future;
 
-    use maniac::sync::mutex::{Mutex as ManiacMutexImpl, MutexGuard as ManiacMutexGuard};
+    use crate::sync::mutex::{Mutex as ManiacMutexImpl, MutexGuard as ManiacMutexGuard};
     use maniac_raft::OptionalSend;
     use maniac_raft::type_config::async_runtime::mutex;
 

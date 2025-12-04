@@ -60,8 +60,10 @@ impl<I, P> PrefixedReadIo<I, P> {
     }
 }
 
-impl<I: AsyncReadRent, P: std::io::Read> AsyncReadRent for PrefixedReadIo<I, P> {
-    async fn read<T: IoBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
+impl<I: AsyncReadRent + std::marker::Send, P: std::io::Read + std::marker::Send> AsyncReadRent
+    for PrefixedReadIo<I, P>
+{
+    async fn read<T: IoBufMut + std::marker::Send>(&mut self, mut buf: T) -> BufResult<usize, T> {
         if buf.bytes_total() == 0 {
             return (Ok(0), buf);
         }
@@ -87,13 +89,16 @@ impl<I: AsyncReadRent, P: std::io::Read> AsyncReadRent for PrefixedReadIo<I, P> 
         self.io.read(buf).await
     }
 
-    async fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
+    async fn readv<T: IoVecBufMut + std::marker::Send>(
+        &mut self,
+        mut buf: T,
+    ) -> BufResult<usize, T> {
         let slice = match IoVecWrapperMut::new(buf) {
             Ok(slice) => slice,
             Err(buf) => return (Ok(0), buf),
         };
 
-        let (result, slice) = self.read(slice).await;
+        let (result, slice): (std::io::Result<usize>, IoVecWrapperMut<T>) = self.read(slice).await;
         buf = slice.into_inner();
         if let Ok(n) = result {
             unsafe { buf.set_init(n) };
@@ -102,8 +107,8 @@ impl<I: AsyncReadRent, P: std::io::Read> AsyncReadRent for PrefixedReadIo<I, P> 
     }
 }
 
-impl<I: CancelableAsyncReadRent, P: std::io::Read> CancelableAsyncReadRent
-    for PrefixedReadIo<I, P>
+impl<I: CancelableAsyncReadRent + std::marker::Send, P: std::io::Read + std::marker::Send>
+    CancelableAsyncReadRent for PrefixedReadIo<I, P>
 {
     async fn cancelable_read<T: IoBufMut>(
         &mut self,
@@ -154,29 +159,39 @@ impl<I: CancelableAsyncReadRent, P: std::io::Read> CancelableAsyncReadRent
     }
 }
 
-impl<I: AsyncWriteRent, P> AsyncWriteRent for PrefixedReadIo<I, P> {
+impl<I: AsyncWriteRent + std::marker::Send, P: std::marker::Send> AsyncWriteRent
+    for PrefixedReadIo<I, P>
+{
     #[inline]
-    fn write<T: IoBuf>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn write<T: IoBuf + std::marker::Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         self.io.write(buf)
     }
 
     #[inline]
-    fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn writev<T: IoVecBuf + std::marker::Send>(
+        &mut self,
+        buf_vec: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         self.io.writev(buf_vec)
     }
 
     #[inline]
-    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> {
+    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         self.io.flush()
     }
 
     #[inline]
-    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> {
+    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         self.io.shutdown()
     }
 }
 
-impl<I: CancelableAsyncWriteRent, P> CancelableAsyncWriteRent for PrefixedReadIo<I, P> {
+impl<I: CancelableAsyncWriteRent + std::marker::Send, P: std::marker::Send> CancelableAsyncWriteRent
+    for PrefixedReadIo<I, P>
+{
     #[inline]
     fn cancelable_write<T: IoBuf>(
         &mut self,

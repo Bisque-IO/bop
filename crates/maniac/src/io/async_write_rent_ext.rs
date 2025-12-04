@@ -9,13 +9,13 @@ use crate::{
 /// AsyncWriteRentExt
 pub trait AsyncWriteRentExt {
     /// Write all
-    fn write_all<T: IoBuf + 'static>(
+    fn write_all<T: IoBuf + 'static + std::marker::Send>(
         &mut self,
         buf: T,
     ) -> impl Future<Output = BufResult<usize, T>>;
 
     /// Write vectored all
-    fn write_vectored_all<T: IoVecBuf + 'static>(
+    fn write_vectored_all<T: IoVecBuf + 'static + std::marker::Send>(
         &mut self,
         buf: T,
     ) -> impl Future<Output = BufResult<usize, T>>;
@@ -25,7 +25,10 @@ impl<A> AsyncWriteRentExt for A
 where
     A: AsyncWriteRent + ?Sized,
 {
-    async fn write_all<T: IoBuf + 'static>(&mut self, mut buf: T) -> BufResult<usize, T> {
+    async fn write_all<T: IoBuf + 'static + std::marker::Send>(
+        &mut self,
+        mut buf: T,
+    ) -> BufResult<usize, T> {
         let len = buf.bytes_init();
         let mut written = 0;
         while written < len {
@@ -50,7 +53,10 @@ where
         (Ok(written), buf)
     }
 
-    async fn write_vectored_all<T: IoVecBuf + 'static>(&mut self, buf: T) -> BufResult<usize, T> {
+    async fn write_vectored_all<T: IoVecBuf + 'static + std::marker::Send>(
+        &mut self,
+        buf: T,
+    ) -> BufResult<usize, T> {
         let mut meta = crate::buf::read_vec_meta(&buf);
         let len = meta.len();
         let mut written = 0;

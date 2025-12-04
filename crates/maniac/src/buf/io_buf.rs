@@ -292,7 +292,7 @@ pub unsafe trait IoBufMut: Unpin + 'static {
         Self: Sized,
     {
         let (begin, end) = parse_range(range, self.bytes_total());
-        SliceMut::new_unchecked(self, begin, end)
+        unsafe { SliceMut::new_unchecked(self, begin, end) }
     }
 }
 
@@ -309,7 +309,7 @@ unsafe impl IoBufMut for Vec<u8> {
 
     #[inline]
     unsafe fn set_init(&mut self, init_len: usize) {
-        self.set_len(init_len);
+        unsafe { self.set_len(init_len) };
     }
 }
 
@@ -373,7 +373,7 @@ unsafe impl IoBufMut for bytes::BytesMut {
     #[inline]
     unsafe fn set_init(&mut self, init_len: usize) {
         if self.len() < init_len {
-            self.set_len(init_len);
+            unsafe { self.set_len(init_len) };
         }
     }
 }
@@ -391,7 +391,7 @@ where
     }
 
     unsafe fn set_init(&mut self, pos: usize) {
-        <T as IoBufMut>::set_init(self, pos)
+        unsafe { <T as IoBufMut>::set_init(self, pos) }
     }
 }
 

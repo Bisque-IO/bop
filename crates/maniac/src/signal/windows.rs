@@ -31,19 +31,15 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows_sys::Win32::System::Console::{
+    CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
     SetConsoleCtrlHandler,
-    CTRL_C_EVENT,
-    CTRL_BREAK_EVENT,
-    CTRL_CLOSE_EVENT,
-    CTRL_LOGOFF_EVENT,
-    CTRL_SHUTDOWN_EVENT,
 };
 
 /// Windows BOOL type (i32)
 type BOOL = i32;
 
-use super::registry::registry;
 use super::Signal;
+use super::registry::registry;
 
 /// Windows-specific signal kind.
 ///
@@ -188,7 +184,11 @@ pub(crate) fn register_signal(signum: i32) -> io::Result<()> {
     // Validate the event type
     let valid = matches!(
         signum as u32,
-        CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT
+        CTRL_C_EVENT
+            | CTRL_BREAK_EVENT
+            | CTRL_CLOSE_EVENT
+            | CTRL_LOGOFF_EVENT
+            | CTRL_SHUTDOWN_EVENT
     );
 
     if !valid {
@@ -212,7 +212,10 @@ mod tests {
         assert_eq!(SignalKind::ctrl_break().as_raw(), CTRL_BREAK_EVENT as i32);
         assert_eq!(SignalKind::ctrl_close().as_raw(), CTRL_CLOSE_EVENT as i32);
         assert_eq!(SignalKind::ctrl_logoff().as_raw(), CTRL_LOGOFF_EVENT as i32);
-        assert_eq!(SignalKind::ctrl_shutdown().as_raw(), CTRL_SHUTDOWN_EVENT as i32);
+        assert_eq!(
+            SignalKind::ctrl_shutdown().as_raw(),
+            CTRL_SHUTDOWN_EVENT as i32
+        );
     }
 
     #[test]
@@ -223,4 +226,3 @@ mod tests {
         assert_eq!(win_kind, back);
     }
 }
-

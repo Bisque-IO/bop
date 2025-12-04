@@ -686,8 +686,8 @@ unsafe impl Sync for WaitSet {}
 mod tests {
     use super::*;
 
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use std::thread;
     use std::time::Duration;
 

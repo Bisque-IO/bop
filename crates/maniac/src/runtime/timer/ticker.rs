@@ -224,7 +224,8 @@ impl TickService {
                     1
                 } else {
                     // Use saturating_add to prevent overflow when h_duration_ns is near u64::MAX
-                    h_duration_ns.saturating_add(min_handler_duration_ns - 1) / min_handler_duration_ns
+                    h_duration_ns.saturating_add(min_handler_duration_ns - 1)
+                        / min_handler_duration_ns
                 };
             }
         }
@@ -599,11 +600,7 @@ impl TickService {
         }
 
         // Join tick thread
-        if let Some(handle) = self
-            .tick_thread
-            .lock()
-            .take()
-        {
+        if let Some(handle) = self.tick_thread.lock().take() {
             let _ = handle.join();
         }
     }

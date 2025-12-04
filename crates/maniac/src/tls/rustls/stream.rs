@@ -181,7 +181,7 @@ where
         Ok((rdlen, wrlen))
     }
 
-    pub(crate) async fn read_inner<T: crate::buf::IoBufMut>(
+    pub(crate) async fn read_inner<T: crate::buf::IoBufMut + std::marker::Send>(
         &mut self,
         mut buf: T,
         splitted: bool,
@@ -209,15 +209,19 @@ where
     }
 }
 
-impl<IO: AsyncReadRent + AsyncWriteRent, C, SD: SideData + 'static> AsyncReadRent for Stream<IO, C>
+impl<IO, C, SD: SideData + 'static> AsyncReadRent for Stream<IO, C>
 where
-    C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
+    IO: AsyncReadRent + AsyncWriteRent + Unpin + std::marker::Send,
+    C: DerefMut + Deref<Target = ConnectionCommon<SD>> + Unpin + std::marker::Send,
 {
-    async fn read<T: IoBufMut>(&mut self, buf: T) -> BufResult<usize, T> {
+    async fn read<T: IoBufMut + std::marker::Send>(&mut self, buf: T) -> BufResult<usize, T> {
         self.read_inner(buf, false).await
     }
 
-    async fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
+    async fn readv<T: IoVecBufMut + std::marker::Send>(
+        &mut self,
+        mut buf: T,
+    ) -> BufResult<usize, T> {
         let n = match unsafe { RawBuf::new_from_iovec_mut(&mut buf) } {
             Some(raw_buf) => self.read(raw_buf).await.0,
             None => Ok(0),
@@ -229,11 +233,12 @@ where
     }
 }
 
-impl<IO: AsyncReadRent + AsyncWriteRent, C, SD: SideData + 'static> AsyncWriteRent for Stream<IO, C>
+impl<IO, C, SD: SideData + 'static> AsyncWriteRent for Stream<IO, C>
 where
-    C: DerefMut + Deref<Target = ConnectionCommon<SD>>,
+    IO: AsyncReadRent + AsyncWriteRent + Unpin + std::marker::Send,
+    C: DerefMut + Deref<Target = ConnectionCommon<SD>> + Unpin + std::marker::Send,
 {
-    async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+    async fn write<T: IoBuf + std::marker::Send>(&mut self, buf: T) -> BufResult<usize, T> {
         // construct slice
         let slice = unsafe { std::slice::from_raw_parts(buf.read_ptr(), buf.bytes_init()) };
 
@@ -264,7 +269,7 @@ where
     }
 
     // TODO: use real writev
-    async fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> BufResult<usize, T> {
+    async fn writev<T: IoVecBuf + std::marker::Send>(&mut self, buf_vec: T) -> BufResult<usize, T> {
         let n = match unsafe { RawBuf::new_from_iovec(&buf_vec) } {
             Some(raw_buf) => self.write(raw_buf).await.0,
             None => Ok(0),

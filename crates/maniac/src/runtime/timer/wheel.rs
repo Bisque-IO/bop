@@ -343,10 +343,7 @@ impl<T> SingleWheel<T> {
 
     /// Schedule a timer, returns (spoke_index, slot_index, generation)
     #[inline]
-    pub fn schedule(
-        &mut self,
-        deadline_ns: u64,
-    ) -> Result<(usize, usize, u32), TimerWheelError>
+    pub fn schedule(&mut self, deadline_ns: u64) -> Result<(usize, usize, u32), TimerWheelError>
     where
         T: Default,
     {
@@ -655,12 +652,22 @@ impl<T> TimerWheel<T> {
     }
 
     /// Create from Duration-based configuration (for backwards compatibility)
-    pub fn from_duration(tick_resolution: Duration, ticks_per_wheel: usize, worker_id: u32) -> Self {
+    pub fn from_duration(
+        tick_resolution: Duration,
+        ticks_per_wheel: usize,
+        worker_id: u32,
+    ) -> Self {
         let l0_tick_ns = tick_resolution.as_nanos() as u64;
         let l1_tick_ns = l0_tick_ns * ticks_per_wheel as u64;
         let l2_tick_ns = l1_tick_ns * ticks_per_wheel as u64;
 
-        Self::with_config(l0_tick_ns, l1_tick_ns, l2_tick_ns, ticks_per_wheel, worker_id)
+        Self::with_config(
+            l0_tick_ns,
+            l1_tick_ns,
+            l2_tick_ns,
+            ticks_per_wheel,
+            worker_id,
+        )
     }
 
     /// Set start time
@@ -848,7 +855,13 @@ impl<T> TimerWheel<T> {
         if l0_tick > self.prev_l0_tick || self.l0.timer_count() > 0 {
             let remaining = expiry_limit.saturating_sub(total_expired);
             wheel_output.clear();
-            let count = self.l0.poll(now_ns, self.prev_l0_tick, l0_tick, remaining, &mut wheel_output);
+            let count = self.l0.poll(
+                now_ns,
+                self.prev_l0_tick,
+                l0_tick,
+                remaining,
+                &mut wheel_output,
+            );
 
             for (spoke, slot, generation, deadline_ns, data) in wheel_output.drain(..) {
                 let timer_id = Self::encode_timer_id(0, spoke, slot, generation);
@@ -863,7 +876,13 @@ impl<T> TimerWheel<T> {
             let remaining = expiry_limit.saturating_sub(total_expired);
             if remaining > 0 {
                 wheel_output.clear();
-                let count = self.l1.poll(now_ns, self.prev_l1_tick, l1_tick, remaining, &mut wheel_output);
+                let count = self.l1.poll(
+                    now_ns,
+                    self.prev_l1_tick,
+                    l1_tick,
+                    remaining,
+                    &mut wheel_output,
+                );
 
                 for (spoke, slot, generation, deadline_ns, data) in wheel_output.drain(..) {
                     let timer_id = Self::encode_timer_id(1, spoke, slot, generation);
@@ -879,7 +898,13 @@ impl<T> TimerWheel<T> {
             let remaining = expiry_limit.saturating_sub(total_expired);
             if remaining > 0 {
                 wheel_output.clear();
-                let count = self.l2.poll(now_ns, self.prev_l2_tick, l2_tick, remaining, &mut wheel_output);
+                let count = self.l2.poll(
+                    now_ns,
+                    self.prev_l2_tick,
+                    l2_tick,
+                    remaining,
+                    &mut wheel_output,
+                );
 
                 for (spoke, slot, generation, deadline_ns, data) in wheel_output.drain(..) {
                     let timer_id = Self::encode_timer_id(2, spoke, slot, generation);
@@ -905,10 +930,7 @@ impl<T> TimerWheel<T> {
         let d1 = self.l1.next_deadline();
         let d2 = self.l2.next_deadline();
 
-        [d0, d1, d2]
-            .into_iter()
-            .flatten()
-            .min()
+        [d0, d1, d2].into_iter().flatten().min()
     }
 
     /// Get current time
@@ -1189,8 +1211,8 @@ mod tests {
             let id = TimerWheel::<()>::encode_timer_id(level, spoke, slot, generation);
             let (l, s, sl, g) = TimerWheel::<()>::decode_timer_id(id).unwrap();
             assert_eq!(level, l);
-            assert_eq!(spoke & 0xFFF, s);      // 12 bits for spoke
-            assert_eq!(slot & 0xFFFFFFF, sl);  // 28 bits for slot
+            assert_eq!(spoke & 0xFFF, s); // 12 bits for spoke
+            assert_eq!(slot & 0xFFFFFFF, sl); // 28 bits for slot
             assert_eq!(generation & 0x3FFFFF, g); // 22 bits for generation
         }
     }

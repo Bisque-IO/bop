@@ -8,7 +8,9 @@ use std::time::Duration;
 use pin_project_lite::pin_project;
 
 use crate::runtime::timer::{Timer, TimerDelay};
-use crate::runtime::worker::{current_worker_now_ns, reschedule_timer_for_task, schedule_timer_for_task};
+use crate::runtime::worker::{
+    current_worker_now_ns, reschedule_timer_for_task, schedule_timer_for_task,
+};
 use crate::time::Instant;
 
 /// A future that completes after a specified duration.
@@ -136,8 +138,7 @@ impl Future for Sleep {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if !self.timer.is_scheduled() {
-            if schedule_timer_for_task(cx, &self.timer, self.delay).is_some() {
-            }
+            if schedule_timer_for_task(cx, &self.timer, self.delay).is_some() {}
             return Poll::Pending;
         }
 

@@ -1063,7 +1063,10 @@ impl tokio::io::AsyncWrite for TcpStream {
             let mut send = Op::send_raw(&self.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_legacy(&mut send, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
+            std::task::Poll::Ready(
+                ret.result
+                    .map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize),
+            )
         }
     }
 
@@ -1133,7 +1136,10 @@ impl tokio::io::AsyncWrite for TcpStream {
             let mut writev = Op::writev_raw(&self.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_legacy(&mut writev, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
+            std::task::Poll::Ready(
+                ret.result
+                    .map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize),
+            )
         }
     }
 

@@ -261,8 +261,7 @@ impl<'a> Future for TimerDelay<'a> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if !self.timer.is_scheduled() {
-            if schedule_timer_for_task(cx, &self.timer, self.delay).is_some() {
-            }
+            if schedule_timer_for_task(cx, &self.timer, self.delay).is_some() {}
             return Poll::Pending;
         }
 

@@ -85,7 +85,10 @@ impl tokio::io::AsyncWrite for UnixStreamPoll {
             let mut send = Op::send_raw(&self.0.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_io(&mut send, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
+            std::task::Poll::Ready(
+                ret.result
+                    .map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize),
+            )
         }
     }
 
@@ -122,7 +125,10 @@ impl tokio::io::AsyncWrite for UnixStreamPoll {
             let mut writev = Op::writev_raw(&self.0.fd, raw_buf);
             let ret = ready!(crate::driver::op::PollLegacy::poll_io(&mut writev, cx));
 
-            std::task::Poll::Ready(ret.result.map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize))
+            std::task::Poll::Ready(
+                ret.result
+                    .map(|n: crate::driver::op::MaybeFd| n.into_inner() as usize),
+            )
         }
     }
 

@@ -8,8 +8,8 @@ use std::task::{Context, Poll};
 use crate::driver::UnparkHandle;
 use crate::io::stream::Stream;
 
-use super::registry::SignalHandle;
 use super::SignalKind;
+use super::registry::SignalHandle;
 
 /// An async signal listener.
 ///
@@ -152,4 +152,3 @@ impl<'a> Future for RecvFuture<'a> {
         }
     }
 }
-

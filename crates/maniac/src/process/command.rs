@@ -303,4 +303,3 @@ impl From<std::process::Command> for Command {
         Self { inner: cmd }
     }
 }
-

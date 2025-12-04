@@ -123,7 +123,7 @@ fn install_signal_handler() {
             let mut sa: libc::sigaction = std::mem::zeroed();
             libc::sigemptyset(&mut sa.sa_mask);
             sa.sa_flags = 0; // Ensure SA_RESTART is NOT set
-            sa.sa_sigaction = dummy_handler as usize;
+            sa.sa_sigaction = dummy_handler as *const () as usize;
             libc::sigaction(SIGUSR1, &sa, std::ptr::null_mut());
         }
     });

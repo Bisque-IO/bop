@@ -25,6 +25,8 @@ impl RawBuf {
     }
 }
 
+unsafe impl Send for RawBuf {}
+
 unsafe impl IoBuf for RawBuf {
     fn read_ptr(&self) -> *const u8 {
         self.ptr

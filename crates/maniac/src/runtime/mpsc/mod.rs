@@ -42,9 +42,7 @@ pub fn new<T>() -> Receiver<T> {
 /// }))));
 /// let receiver = mpsc::new_with_waker(waker);
 /// ```
-pub fn new_with_waker<T>(
-    waker: Arc<WorkerWaker>,
-) -> Receiver<T> {
+pub fn new_with_waker<T>(waker: Arc<WorkerWaker>) -> Receiver<T> {
     // Create sparse array of AtomicPtr, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
     for _ in 0..MAX_QUEUES {

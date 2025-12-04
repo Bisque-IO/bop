@@ -39,8 +39,8 @@ use rand::RngCore;
 use std::ptr::{self, NonNull};
 
 // pub mod bounded; // Commented out - file doesn't exist yet
+pub mod bounded;
 pub mod dynamic;
-// pub mod unbounded; // Commented out - conflicts with inline module at line 1777
 
 /// A waker implementation that unparks a thread.
 ///
@@ -503,6 +503,31 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
     pub fn close(&mut self) -> bool {
         self.inner.close()
     }
+    pub fn downgrade(&self) -> WeakSender<T, P, NUM_SEGS_P2> {
+        WeakSender {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+}
+
+pub struct WeakSender<T, const P: usize, const NUM_SEGS_P2: usize> {
+    inner: std::sync::Weak<Inner<T, P, NUM_SEGS_P2>>,
+}
+
+impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for WeakSender<T, P, NUM_SEGS_P2> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T, const P: usize, const NUM_SEGS_P2: usize> WeakSender<T, P, NUM_SEGS_P2> {
+    pub fn upgrade(&self) -> Option<Sender<T, P, NUM_SEGS_P2>> {
+        self.inner
+            .upgrade()
+            .and_then(|inner| inner.create_sender().ok())
+    }
 }
 
 impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for Sender<T, P, NUM_SEGS_P2> {
@@ -877,6 +902,26 @@ pub struct AsyncMpscReceiver<T, const P: usize, const NUM_SEGS_P2: usize> {
     shared: Arc<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
 }
 
+pub struct WeakAsyncMpscSender<T, const P: usize, const NUM_SEGS_P2: usize> {
+    shared: std::sync::Weak<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
+}
+
+impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for WeakAsyncMpscSender<T, P, NUM_SEGS_P2> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl<T, const P: usize, const NUM_SEGS_P2: usize> WeakAsyncMpscSender<T, P, NUM_SEGS_P2> {
+    pub fn upgrade(&self) -> Option<AsyncMpscSender<T, P, NUM_SEGS_P2>> {
+        let shared = self.shared.upgrade()?;
+        let sender = shared.inner.create_sender().ok()?;
+        Some(AsyncMpscSender::new(sender, shared))
+    }
+}
+
 impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncMpscSender<T, P, NUM_SEGS_P2> {
     fn new(
         sender: Sender<T, P, NUM_SEGS_P2>,
@@ -884,6 +929,12 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncMpscSender<T, P, NUM_SEGS
     ) -> Self {
         // space_waker is already allocated in the ProducerSlot by create_sender
         Self { sender, shared }
+    }
+
+    pub fn downgrade(&self) -> WeakAsyncMpscSender<T, P, NUM_SEGS_P2> {
+        WeakAsyncMpscSender {
+            shared: Arc::downgrade(&self.shared),
+        }
     }
 
     /// Attempts to enqueue without blocking.

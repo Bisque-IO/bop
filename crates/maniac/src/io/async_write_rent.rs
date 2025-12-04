@@ -39,7 +39,10 @@ pub trait AsyncWriteRent {
     /// completed. If an error occurs, no bytes from the buffer were written to the writer.
     ///
     /// It is **not** an error if the entire buffer could not be written to this writer.
-    fn write<T: IoBuf>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>>;
+    fn write<T: IoBuf + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send;
 
     /// This function attempts to write the entire contents of `buf_vec`, but the write may not
     /// fully succeed, and it might also result in an error. The bytes will be written starting at
@@ -58,7 +61,10 @@ pub trait AsyncWriteRent {
     /// completed. If an error occurs, no bytes from the buffer were written to the writer.
     ///
     /// It is **not** considered an error if the entire buffer could not be written to this writer.
-    fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> impl Future<Output = BufResult<usize, T>>;
+    fn writev<T: IoVecBuf + Send>(
+        &mut self,
+        buf_vec: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send;
 
     /// Flushes this output stream, ensuring that all buffered content is successfully written to
     /// its destination.
@@ -67,13 +73,13 @@ pub trait AsyncWriteRent {
     ///
     /// An error occurs if not all bytes can be written due to I/O issues or if the end of the file
     /// (EOF) is reached.
-    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>>;
+    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send;
 
     /// Shuts down the output stream, ensuring that the value can be cleanly dropped.
     ///
     /// Similar to [`flush`], all buffered data is written to the underlying stream. After this
     /// operation completes, the caller should no longer attempt to write to the stream.
-    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>>;
+    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> + Send;
 }
 
 /// AsyncWriteRentAt: async write with a ownership of a buffer and a position
@@ -99,12 +105,18 @@ impl<A: ?Sized + AsyncWriteRentAt> AsyncWriteRentAt for &mut A {
 
 impl<A: ?Sized + AsyncWriteRent> AsyncWriteRent for &mut A {
     #[inline]
-    fn write<T: IoBuf>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn write<T: IoBuf + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         (**self).write(buf)
     }
 
     #[inline]
-    fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn writev<T: IoVecBuf + Send>(
+        &mut self,
+        buf_vec: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         (**self).writev(buf_vec)
     }
 
@@ -183,7 +195,10 @@ fn extend_vec_from_platform_bufs<P>(
 }
 
 impl AsyncWriteRent for Vec<u8> {
-    fn write<T: IoBuf>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn write<T: IoBuf + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         let slice = buf.as_slice();
         self.extend_from_slice(slice);
         let len = slice.len();
@@ -191,7 +206,10 @@ impl AsyncWriteRent for Vec<u8> {
     }
 
     #[inline]
-    fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn writev<T: IoVecBuf + Send>(
+        &mut self,
+        buf_vec: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         let total_bytes_to_write: usize;
         #[cfg(unix)]
         {
@@ -224,38 +242,44 @@ impl AsyncWriteRent for Vec<u8> {
     }
 
     #[inline]
-    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> {
+    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         std::future::ready(Ok(()))
     }
 
     #[inline]
-    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> {
+    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         std::future::ready(Ok(()))
     }
 }
 
-impl<W> AsyncWriteRent for Cursor<W>
+impl<W: Send> AsyncWriteRent for Cursor<W>
 where
     Cursor<W>: Write + Unpin,
 {
     #[inline]
-    fn write<T: IoBuf>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn write<T: IoBuf + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         let slice = buf.as_slice();
         std::future::ready((Write::write(self, slice), buf))
     }
 
     #[inline]
-    fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn writev<T: IoVecBuf + Send>(
+        &mut self,
+        buf_vec: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         std::future::ready(write_vectored_logic(self, buf_vec))
     }
 
     #[inline]
-    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> {
+    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         std::future::ready(Write::flush(self))
     }
 
     #[inline]
-    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> {
+    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         // Cursor is in-memory, flush is a no-op, so shutdown is also a no-op.
         std::future::ready(Ok(()))
     }
@@ -263,22 +287,28 @@ where
 
 impl<T: ?Sized + AsyncWriteRent + Unpin> AsyncWriteRent for Box<T> {
     #[inline]
-    fn write<B: IoBuf>(&mut self, buf: B) -> impl Future<Output = BufResult<usize, B>> {
+    fn write<B: IoBuf + Send>(
+        &mut self,
+        buf: B,
+    ) -> impl Future<Output = BufResult<usize, B>> + Send {
         (**self).write(buf)
     }
 
     #[inline]
-    fn writev<B: IoVecBuf>(&mut self, buf_vec: B) -> impl Future<Output = BufResult<usize, B>> {
+    fn writev<B: IoVecBuf + Send>(
+        &mut self,
+        buf_vec: B,
+    ) -> impl Future<Output = BufResult<usize, B>> + Send {
         (**self).writev(buf_vec)
     }
 
     #[inline]
-    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> {
+    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         (**self).flush()
     }
 
     #[inline]
-    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> {
+    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         (**self).shutdown()
     }
 }

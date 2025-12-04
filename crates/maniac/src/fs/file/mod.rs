@@ -737,7 +737,7 @@ impl AsyncReadRent for File {
     ///     Ok(())
     /// }
     /// ```
-    async fn read<T: IoBufMut>(&mut self, buf: T) -> crate::BufResult<usize, T> {
+    async fn read<T: IoBufMut + Send>(&mut self, buf: T) -> crate::BufResult<usize, T> {
         self.read(buf).await
     }
 
@@ -801,7 +801,10 @@ impl AsyncReadRent for File {
     ///     Ok(())
     /// }
     /// ```
-    async fn readv<T: crate::buf::IoVecBufMut>(&mut self, buf: T) -> crate::BufResult<usize, T> {
+    async fn readv<T: crate::buf::IoVecBufMut + Send>(
+        &mut self,
+        buf: T,
+    ) -> crate::BufResult<usize, T> {
         self.read_vectored(buf).await
     }
 }

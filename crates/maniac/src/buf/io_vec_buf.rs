@@ -50,6 +50,8 @@ pub struct VecBuf {
     raw: Vec<Vec<u8>>,
 }
 
+unsafe impl Send for VecBuf {}
+
 #[cfg(unix)]
 unsafe impl IoVecBuf for VecBuf {
     fn read_iovec_ptr(&self) -> *const libc::iovec {

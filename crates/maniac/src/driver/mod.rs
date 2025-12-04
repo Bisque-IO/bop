@@ -267,13 +267,15 @@ impl UnparkHandle {
     /// or `Err(())` if not in a runtime context.
     #[allow(unused)]
     pub(crate) fn try_current() -> Result<Self, ()> {
-        CURRENT.try_with(|inner| {
-            inner.map(|inner| match inner {
-                #[cfg(all(target_os = "linux", feature = "iouring"))]
-                Inner::Uring(this) => UringInner::unpark(this).into(),
-                #[cfg(feature = "poll")]
-                Inner::Poller(this) => PollerInner::unpark(this).into(),
+        CURRENT
+            .try_with(|inner| {
+                inner.map(|inner| match inner {
+                    #[cfg(all(target_os = "linux", feature = "iouring"))]
+                    Inner::Uring(this) => UringInner::unpark(this).into(),
+                    #[cfg(feature = "poll")]
+                    Inner::Poller(this) => PollerInner::unpark(this).into(),
+                })
             })
-        }).ok_or(())
+            .ok_or(())
     }
 }

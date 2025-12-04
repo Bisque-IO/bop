@@ -29,7 +29,7 @@ pub struct SendError<T>(pub T);
 ///     assert_eq!(*rx.borrow(), 42);
 /// }
 /// ```
-pub fn channel<T: Clone>(init: T) -> (Sender<T>, Receiver<T>) {
+pub fn channel<T>(init: T) -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(Inner {
         value: RwLock::new(init),
         wakers: Mutex::new(Vec::new()),
@@ -58,7 +58,7 @@ pub struct Sender<T> {
     inner: Arc<Inner<T>>,
 }
 
-impl<T: Clone> Sender<T> {
+impl<T> Sender<T> {
     /// Sends a new value through the channel.
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
         *self.inner.value.write() = value;
@@ -115,7 +115,7 @@ pub struct Receiver<T> {
     last_version: u64,
 }
 
-impl<T: Clone> Receiver<T> {
+impl<T> Receiver<T> {
     /// Waits for the value to change.
     pub async fn changed(&mut self) -> Result<(), RecvError> {
         use std::future::Future;
@@ -126,7 +126,7 @@ impl<T: Clone> Receiver<T> {
             receiver: &'a mut Receiver<T>,
         }
 
-        impl<T: Clone> Future for Changed<'_, T> {
+        impl<T> Future for Changed<'_, T> {
             type Output = Result<(), RecvError>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -145,7 +145,9 @@ impl<T: Clone> Receiver<T> {
 
         Changed { receiver: self }.await
     }
+}
 
+impl<T> Receiver<T> {
     /// Returns a reference to the current value.
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {

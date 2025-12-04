@@ -30,13 +30,19 @@ pub trait AsyncReadRent {
     ///
     /// If an I/O or other error occurs, an error variant will be returned, ensuring that no bytes
     /// were read.
-    fn read<T: IoBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>>;
+    fn read<T: IoBufMut + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send;
     /// Similar to `read`, but reads data into a slice of buffers.
     ///
     /// Data is copied sequentially into each buffer, with the last buffer potentially being only
     /// partially filled. This method should behave equivalently to a single call to `read` with the
     /// buffers concatenated.
-    fn readv<T: IoVecBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>>;
+    fn readv<T: IoVecBufMut + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send;
 }
 
 /// AsyncReadRentAt: async read with a ownership of a buffer and a position
@@ -62,18 +68,27 @@ impl<A: ?Sized + AsyncReadRentAt> AsyncReadRentAt for &mut A {
 
 impl<A: ?Sized + AsyncReadRent> AsyncReadRent for &mut A {
     #[inline]
-    fn read<T: IoBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn read<T: IoBufMut + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         (**self).read(buf)
     }
 
     #[inline]
-    fn readv<T: IoVecBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn readv<T: IoVecBufMut + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         (**self).readv(buf)
     }
 }
 
 impl AsyncReadRent for &[u8] {
-    fn read<T: IoBufMut>(&mut self, mut buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn read<T: IoBufMut + Send>(
+        &mut self,
+        mut buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         let buf_capacity = buf.bytes_total();
         let available = self.len();
         let to_read = std::cmp::min(available, buf_capacity);
@@ -87,7 +102,10 @@ impl AsyncReadRent for &[u8] {
         std::future::ready((Ok(to_read), buf))
     }
 
-    fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn readv<T: IoVecBufMut + Send>(
+        &mut self,
+        mut buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         let mut sum = 0;
         {
             #[cfg(windows)]
@@ -132,7 +150,10 @@ impl AsyncReadRent for &[u8] {
 }
 
 impl AsyncReadRent for &mut [u8] {
-    fn read<T: IoBufMut>(&mut self, mut buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn read<T: IoBufMut + Send>(
+        &mut self,
+        mut buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         // Determine how many bytes to read
         let buf_capacity = buf.bytes_total();
         let available = self.len();
@@ -151,7 +172,10 @@ impl AsyncReadRent for &mut [u8] {
         std::future::ready((Ok(to_read), buf))
     }
 
-    fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn readv<T: IoVecBufMut + Send>(
+        &mut self,
+        mut buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         let mut sum = 0;
         {
             #[cfg(windows)]
@@ -195,8 +219,8 @@ impl AsyncReadRent for &mut [u8] {
     }
 }
 
-impl<T: AsRef<[u8]>> AsyncReadRent for Cursor<T> {
-    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+impl<T: AsRef<[u8]> + Send> AsyncReadRent for Cursor<T> {
+    async fn read<B: IoBufMut + Send>(&mut self, buf: B) -> BufResult<usize, B> {
         let pos = self.position();
         let slice: &[u8] = (*self).get_ref().as_ref();
 
@@ -207,7 +231,7 @@ impl<T: AsRef<[u8]>> AsyncReadRent for Cursor<T> {
         (&slice[pos as usize..]).read(buf).await
     }
 
-    async fn readv<B: IoVecBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+    async fn readv<B: IoVecBufMut + Send>(&mut self, buf: B) -> BufResult<usize, B> {
         let pos = self.position();
         let slice: &[u8] = (*self).get_ref().as_ref();
 
@@ -221,12 +245,18 @@ impl<T: AsRef<[u8]>> AsyncReadRent for Cursor<T> {
 
 impl<T: ?Sized + AsyncReadRent> AsyncReadRent for Box<T> {
     #[inline]
-    fn read<B: IoBufMut>(&mut self, buf: B) -> impl Future<Output = BufResult<usize, B>> {
+    fn read<B: IoBufMut + Send>(
+        &mut self,
+        buf: B,
+    ) -> impl Future<Output = BufResult<usize, B>> + Send {
         (**self).read(buf)
     }
 
     #[inline]
-    fn readv<B: IoVecBufMut>(&mut self, buf: B) -> impl Future<Output = BufResult<usize, B>> {
+    fn readv<B: IoVecBufMut + Send>(
+        &mut self,
+        buf: B,
+    ) -> impl Future<Output = BufResult<usize, B>> + Send {
         (**self).readv(buf)
     }
 }

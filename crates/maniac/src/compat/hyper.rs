@@ -18,8 +18,8 @@ where
 {
     #[inline]
     fn execute(&self, fut: F) {
-        let worker = crate::runtime::worker::current_worker().expect("not on a maniac worker thread");
-        
+        let worker =
+            crate::runtime::worker::current_worker().expect("not on a maniac worker thread");
     }
 }
 

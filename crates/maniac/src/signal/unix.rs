@@ -20,8 +20,8 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::sync::Once;
 
-use super::registry::registry;
 use super::Signal;
+use super::registry::registry;
 
 /// Unix-specific signal kind.
 ///
@@ -215,7 +215,7 @@ pub(crate) fn register_signal(signum: i32) -> io::Result<()> {
 
     // Register the signal handler
     let mut new_action: libc::sigaction = unsafe { MaybeUninit::zeroed().assume_init() };
-    new_action.sa_sigaction = signal_handler as usize;
+    new_action.sa_sigaction = signal_handler as *const () as usize;
     new_action.sa_flags = libc::SA_RESTART | libc::SA_SIGINFO;
 
     // Block all signals during handler execution
@@ -223,13 +223,7 @@ pub(crate) fn register_signal(signum: i32) -> io::Result<()> {
         libc::sigemptyset(&mut new_action.sa_mask);
     }
 
-    let result = unsafe {
-        libc::sigaction(
-            signum,
-            &new_action,
-            std::ptr::null_mut(),
-        )
-    };
+    let result = unsafe { libc::sigaction(signum, &new_action, std::ptr::null_mut()) };
 
     if result == -1 {
         return Err(io::Error::last_os_error());
@@ -265,4 +259,3 @@ mod tests {
         assert_eq!(unix_kind, back);
     }
 }
-

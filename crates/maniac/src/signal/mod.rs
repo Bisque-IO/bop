@@ -192,4 +192,3 @@ mod tests {
         assert_eq!(SignalKind::terminate().as_raw(), libc::SIGTERM);
     }
 }
-

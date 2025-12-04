@@ -6,10 +6,10 @@ use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use crate::BufResult;
 use crate::buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut};
 use crate::driver::op::Op;
 use crate::driver::shared_fd::SharedFd;
-use crate::BufResult;
 
 use super::child::ExitStatus;
 use super::child_reaper::WaitHandle;
@@ -110,7 +110,10 @@ impl ChildStdoutInner {
         Ok(Self { fd })
     }
 
-    pub(crate) fn read<T: IoBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    pub(crate) fn read<T: IoBufMut>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> {
         let op = Op::read(self.fd.clone(), buf);
         async move {
             match op {
@@ -162,7 +165,10 @@ impl ChildStderrInner {
         Ok(Self { fd })
     }
 
-    pub(crate) fn read<T: IoBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    pub(crate) fn read<T: IoBufMut>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> {
         let op = Op::read(self.fd.clone(), buf);
         async move {
             match op {

@@ -104,7 +104,9 @@ impl SignalState {
     /// Register an UnparkHandle to wake the runtime.
     fn register_unpark(&self, unpark: &UnparkHandle) {
         let new_unpark = Box::new(unpark.clone());
-        let old_unpark_ptr = self.unpark.swap(Box::into_raw(new_unpark), Ordering::AcqRel);
+        let old_unpark_ptr = self
+            .unpark
+            .swap(Box::into_raw(new_unpark), Ordering::AcqRel);
         if !old_unpark_ptr.is_null() {
             // Drop the old handle
             let _ = unsafe { Box::from_raw(old_unpark_ptr) };
@@ -218,4 +220,3 @@ impl Drop for SignalHandle {
         }
     }
 }
-

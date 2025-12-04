@@ -78,7 +78,8 @@ impl<W: AsyncWriteRent> BufWriter<W> {
                 .expect("no buffer available, generated future must be awaited");
             // move buf to slice and write_all
             let slice = Slice::new(buf, 0, self.cap);
-            let (ret, slice) = self.inner.write_all(slice).await;
+            let (ret, slice): (std::io::Result<usize>, crate::buf::Slice<Box<[u8]>>) =
+                self.inner.write_all(slice).await;
             // move it back and return
             self.buf = Some(slice.into_inner());
             ret?;
@@ -88,8 +89,8 @@ impl<W: AsyncWriteRent> BufWriter<W> {
     }
 }
 
-impl<W: AsyncWriteRent> AsyncWriteRent for BufWriter<W> {
-    async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+impl<W: AsyncWriteRent + std::marker::Send> AsyncWriteRent for BufWriter<W> {
+    async fn write<T: IoBuf + std::marker::Send>(&mut self, buf: T) -> BufResult<usize, T> {
         let owned_buf = self.buf.as_ref().unwrap();
         let owned_len = owned_buf.len();
         let amt = buf.bytes_init();
@@ -127,13 +128,13 @@ impl<W: AsyncWriteRent> AsyncWriteRent for BufWriter<W> {
     }
 
     // TODO: implement it as real io_vec
-    async fn writev<T: IoVecBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+    async fn writev<T: IoVecBuf + std::marker::Send>(&mut self, buf: T) -> BufResult<usize, T> {
         let slice = match IoVecWrapper::new(buf) {
             Ok(slice) => slice,
             Err(buf) => return (Ok(0), buf),
         };
 
-        let (result, slice) = self.write(slice).await;
+        let (result, slice): (std::io::Result<usize>, IoVecWrapper<T>) = self.write(slice).await;
         (result, slice.into_inner())
     }
 
@@ -148,19 +149,25 @@ impl<W: AsyncWriteRent> AsyncWriteRent for BufWriter<W> {
     }
 }
 
-impl<W: AsyncWriteRent + AsyncReadRent> AsyncReadRent for BufWriter<W> {
+impl<W: AsyncWriteRent + AsyncReadRent + std::marker::Send> AsyncReadRent for BufWriter<W> {
     #[inline]
-    fn read<T: IoBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn read<T: IoBufMut + std::marker::Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         self.inner.read(buf)
     }
 
     #[inline]
-    fn readv<T: IoVecBufMut>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn readv<T: IoVecBufMut + std::marker::Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         self.inner.readv(buf)
     }
 }
 
-impl<W: AsyncWriteRent + AsyncBufRead> AsyncBufRead for BufWriter<W> {
+impl<W: AsyncWriteRent + AsyncBufRead + Send> AsyncBufRead for BufWriter<W> {
     #[inline]
     fn fill_buf(&mut self) -> impl Future<Output = std::io::Result<&[u8]>> {
         self.inner.fill_buf()

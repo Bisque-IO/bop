@@ -19,7 +19,7 @@ pub struct Instant {
 }
 
 impl Instant {
-        /// Returns an instant corresponding to "now".
+    /// Returns an instant corresponding to "now".
     ///
     /// # Examples
     ///
@@ -33,7 +33,7 @@ impl Instant {
         // let epoch_ns = std::time::UNIX_EPOCH + Duration::from_nanos(now_ns);
         // SystemTime::now();
         // let duration = std::time::UNIX_EPOCH.duration_since(Duration::from_nanos(now_ns));
-        
+
         // let instant = std::time::Instant::from(duration);
         // Self {
         //     inner: std::time::Instant::from(std::time::UNIX_EPOCH + Duration::from_nanos(now_ns)),

@@ -160,7 +160,6 @@ impl Summary {
         }
     }
 
-
     #[inline(always)]
     fn leaf_word(&self, idx: usize) -> &AtomicU64 {
         &self.leaf_words[idx]
@@ -200,7 +199,7 @@ impl Summary {
     #[inline(always)]
     fn notify_partition_owner_active(&self, leaf_idx: usize) {
         let owner_id = self.compute_partition_owner(leaf_idx, self.worker_count);
-        
+
         // Validate owner_id against wakers_len to prevent out-of-bounds access
         if owner_id >= self.wakers_len {
             return;
@@ -211,7 +210,8 @@ impl Summary {
         let waker = unsafe { &*self.wakers.add(owner_id) };
 
         // Compute local leaf index within owner's partition
-        if let Some(local_idx) = self.global_to_local_leaf_idx(leaf_idx, owner_id, self.worker_count)
+        if let Some(local_idx) =
+            self.global_to_local_leaf_idx(leaf_idx, owner_id, self.worker_count)
         {
             // Fast path: if partition is already active, just set the bit without wakeup overhead
             let mask = 1u64 << local_idx;
@@ -229,7 +229,7 @@ impl Summary {
     #[inline(always)]
     fn notify_partition_owner_inactive(&self, leaf_idx: usize) {
         let owner_id = self.compute_partition_owner(leaf_idx, self.worker_count);
-        
+
         // Validate owner_id against wakers_len to prevent out-of-bounds access
         if owner_id >= self.wakers_len {
             return;
@@ -240,7 +240,8 @@ impl Summary {
         let waker = unsafe { &*self.wakers.add(owner_id) };
 
         // Compute local leaf index within owner's partition
-        if let Some(local_idx) = self.global_to_local_leaf_idx(leaf_idx, owner_id, self.worker_count)
+        if let Some(local_idx) =
+            self.global_to_local_leaf_idx(leaf_idx, owner_id, self.worker_count)
         {
             waker.clear_partition_leaf(local_idx);
         }
@@ -653,10 +654,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     /// Helper function to create a test Summary with dummy wakers
-    fn setup_tree(
-        leaf_count: usize,
-        signals_per_leaf: usize,
-    ) -> (Summary, Vec<Arc<WorkerWaker>>) {
+    fn setup_tree(leaf_count: usize, signals_per_leaf: usize) -> (Summary, Vec<Arc<WorkerWaker>>) {
         // Create dummy wakers for testing
         let wakers: Vec<Arc<WorkerWaker>> = (0..4).map(|_| Arc::new(WorkerWaker::new())).collect();
         let worker_count = 4;
@@ -1272,7 +1270,10 @@ mod tests {
                 (0..2).map(|_| Arc::new(WorkerWaker::new())).collect();
             Summary::new(4, 3, &wakers, 2); // 3 is not power of 2
         });
-        assert!(result.is_err(), "Non-power-of-2 signals_per_leaf should panic");
+        assert!(
+            result.is_err(),
+            "Non-power-of-2 signals_per_leaf should panic"
+        );
     }
 
     /// Test empty wakers array
@@ -1367,7 +1368,12 @@ mod tests {
                     // Compute partition owners for all leaves
                     for leaf_idx in 0..16 {
                         let owner = tree.compute_partition_owner(leaf_idx, worker_count);
-                        assert!(owner < worker_count, "Invalid owner {} for count {}", owner, worker_count);
+                        assert!(
+                            owner < worker_count,
+                            "Invalid owner {} for count {}",
+                            owner,
+                            worker_count
+                        );
                     }
                 })
             })

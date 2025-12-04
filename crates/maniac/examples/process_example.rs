@@ -43,10 +43,7 @@ async fn run_examples() -> std::io::Result<()> {
     // Example 3: Check exit code
     println!("\n=== Example 3: Exit code ===");
     #[cfg(unix)]
-    let status = Command::new("sh")
-        .args(["-c", "exit 42"])
-        .status()
-        .await?;
+    let status = Command::new("sh").args(["-c", "exit 42"]).status().await?;
     #[cfg(windows)]
     let status = Command::new("cmd")
         .args(["/C", "exit", "42"])

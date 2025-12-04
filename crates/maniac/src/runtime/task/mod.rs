@@ -1,9 +1,8 @@
 pub mod signal;
 pub mod summary;
 
-use summary::Summary;
 use super::timer::TimerHandle;
-use super::worker::{Worker, poll_future as worker_poll_future, drop_future as worker_drop_future};
+use super::worker::{Worker, drop_future as worker_drop_future, poll_future as worker_poll_future};
 use crate::future::waker::DiatomicWaker;
 use crate::generator::Generator;
 use crate::utils::bits;
@@ -17,6 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
+use summary::Summary;
 
 #[cfg(unix)]
 use libc::{MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, mmap, munmap};
@@ -806,6 +806,14 @@ impl Task {
         debug_assert!(!slot_ptr.is_null(), "task is missing slot pointer");
         let ptr = slot_ptr as *const ();
         unsafe { Waker::from_raw(RawWaker::new(ptr, &Self::WAKER_YIELD_VTABLE)) }
+    }
+
+    #[inline(always)]
+    pub fn waker(&self) -> Waker {
+        let slot_ptr = self.slot_ptr.load(Ordering::Acquire);
+        debug_assert!(!slot_ptr.is_null(), "task is missing slot pointer");
+        let ptr = slot_ptr as *const ();
+        unsafe { Waker::from_raw(RawWaker::new(ptr, &Self::WAKER_VTABLE)) }
     }
 
     #[inline(always)]

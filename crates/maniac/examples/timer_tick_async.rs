@@ -5,7 +5,7 @@ use std::error::Error;
 use std::time::Duration;
 
 async fn tick_printer(ticks: usize, interval: Duration) {
-    maniac::runtime::worker::pin_stack();
+    maniac::runtime::worker::as_coroutine();
     let timer = Timer::new();
     for remaining in (0..ticks).rev() {
         let now = Instant::now_high_frequency();

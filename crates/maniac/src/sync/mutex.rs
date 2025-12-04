@@ -141,6 +141,9 @@ pub struct MutexGuard<'a, T> {
     _phanton: PhantomData<&'a ()>,
 }
 
+unsafe impl<T: Send> Send for MutexGuard<'_, T> {}
+unsafe impl<T: Sync> Sync for MutexGuard<'_, T> {}
+
 impl<'a, T> std::ops::Deref for MutexGuard<'a, T> {
     type Target = T;
 

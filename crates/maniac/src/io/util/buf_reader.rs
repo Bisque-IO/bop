@@ -76,8 +76,8 @@ impl<R> BufReader<R> {
     }
 }
 
-impl<R: AsyncReadRent> AsyncReadRent for BufReader<R> {
-    async fn read<T: IoBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
+impl<R: AsyncReadRent + std::marker::Send> AsyncReadRent for BufReader<R> {
+    async fn read<T: IoBufMut + std::marker::Send>(&mut self, mut buf: T) -> BufResult<usize, T> {
         // If we don't have any buffered data and we're doing a massive read
         // (larger than our internal buffer), bypass our internal buffer
         // entirely.
@@ -102,13 +102,16 @@ impl<R: AsyncReadRent> AsyncReadRent for BufReader<R> {
         (Ok(amt), buf)
     }
 
-    async fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
+    async fn readv<T: IoVecBufMut + std::marker::Send>(
+        &mut self,
+        mut buf: T,
+    ) -> BufResult<usize, T> {
         let slice = match IoVecWrapperMut::new(buf) {
             Ok(slice) => slice,
             Err(buf) => return (Ok(0), buf),
         };
 
-        let (result, slice) = self.read(slice).await;
+        let (result, slice): (std::io::Result<usize>, IoVecWrapperMut<T>) = self.read(slice).await;
         buf = slice.into_inner();
         if let Ok(n) = result {
             unsafe { buf.set_init(n) };
@@ -117,7 +120,7 @@ impl<R: AsyncReadRent> AsyncReadRent for BufReader<R> {
     }
 }
 
-impl<R: AsyncReadRent> AsyncBufRead for BufReader<R> {
+impl<R: AsyncReadRent + std::marker::Send> AsyncBufRead for BufReader<R> {
     async fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         if self.pos == self.cap {
             // there's no buffered data
@@ -125,7 +128,7 @@ impl<R: AsyncReadRent> AsyncBufRead for BufReader<R> {
                 .buf
                 .take()
                 .expect("no buffer available, generated future must be awaited");
-            let (res, buf_) = self.inner.read(buf).await;
+            let (res, buf_): (std::io::Result<usize>, Box<[u8]>) = self.inner.read(buf).await;
             self.buf = Some(buf_);
             match res {
                 Ok(n) => {
@@ -153,24 +156,30 @@ impl<R: AsyncReadRent> AsyncBufRead for BufReader<R> {
     }
 }
 
-impl<R: AsyncReadRent + AsyncWriteRent> AsyncWriteRent for BufReader<R> {
+impl<R: AsyncReadRent + AsyncWriteRent + std::marker::Send> AsyncWriteRent for BufReader<R> {
     #[inline]
-    fn write<T: IoBuf>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn write<T: IoBuf + std::marker::Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         self.inner.write(buf)
     }
 
     #[inline]
-    fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> impl Future<Output = BufResult<usize, T>> {
+    fn writev<T: IoVecBuf + std::marker::Send>(
+        &mut self,
+        buf_vec: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
         self.inner.writev(buf_vec)
     }
 
     #[inline]
-    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> {
+    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         self.inner.flush()
     }
 
     #[inline]
-    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> {
+    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         self.inner.shutdown()
     }
 }

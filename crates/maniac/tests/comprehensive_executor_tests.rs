@@ -10,7 +10,7 @@ use maniac::{
         DefaultExecutor, Executor,
         summary::Summary,
         task::{TaskArena, TaskArenaConfig, TaskArenaOptions},
-        worker::{WorkerService, WorkerServiceConfig},
+        worker::{Scheduler, SchedulerConfig},
     },
 };
 
@@ -444,13 +444,13 @@ fn worker_service_basic_startup() {
     )
     .expect("failed to create arena");
 
-    let config = WorkerServiceConfig {
+    let config = SchedulerConfig {
         min_workers: 2,
         max_workers: 4,
-        ..WorkerServiceConfig::default()
+        ..SchedulerConfig::default()
     };
 
-    let service = WorkerService::<10, 6>::start(arena, config);
+    let service = Scheduler::<10, 6>::start(arena, config);
 
     thread::sleep(Duration::from_millis(50));
 
@@ -467,7 +467,7 @@ fn worker_service_task_reservation() {
     )
     .expect("failed to create arena");
 
-    let service = WorkerService::<10, 6>::start(arena, WorkerServiceConfig::default());
+    let service = Scheduler::<10, 6>::start(arena, SchedulerConfig::default());
 
     let handle1 = service.reserve_task().expect("reserve 1");
     let handle2 = service.reserve_task().expect("reserve 2");
@@ -489,13 +489,13 @@ fn worker_service_tick_thread() {
     )
     .expect("failed to create arena");
 
-    let config = WorkerServiceConfig {
+    let config = SchedulerConfig {
         tick_duration: Duration::from_nanos(16_777_216), // Must be power of 2 ns: 2^24 = ~16.7ms
         min_workers: 1,
         max_workers: 1,
     };
 
-    let service = WorkerService::<10, 6>::start(arena, config);
+    let service = Scheduler::<10, 6>::start(arena, config);
 
     // Wait much longer for tick thread to stabilize
     thread::sleep(Duration::from_millis(100));
@@ -1018,13 +1018,13 @@ fn worker_service_multiple_worker_coordination() {
     )
     .expect("failed to create arena");
 
-    let config = WorkerServiceConfig {
+    let config = SchedulerConfig {
         min_workers: 4,
         max_workers: 4,
-        ..WorkerServiceConfig::default()
+        ..SchedulerConfig::default()
     };
 
-    let service = WorkerService::<10, 6>::start(arena, config);
+    let service = Scheduler::<10, 6>::start(arena, config);
 
     thread::sleep(Duration::from_millis(100));
 
@@ -1060,7 +1060,7 @@ fn worker_service_reserve_after_shutdown() {
     )
     .expect("failed to create arena");
 
-    let service = WorkerService::<10, 6>::start(arena, WorkerServiceConfig::default());
+    let service = Scheduler::<10, 6>::start(arena, SchedulerConfig::default());
 
     // Reserve before shutdown
     let handle = service.reserve_task();
@@ -1092,7 +1092,7 @@ fn worker_service_clock_monotonicity() {
     )
     .expect("failed to create arena");
 
-    let service = WorkerService::<10, 6>::start(arena, WorkerServiceConfig::default());
+    let service = Scheduler::<10, 6>::start(arena, SchedulerConfig::default());
 
     let mut prev_clock = 0u64;
 
@@ -1603,13 +1603,13 @@ fn worker_service_dynamic_worker_count() {
     )
     .expect("failed to create arena");
 
-    let config = WorkerServiceConfig {
+    let config = SchedulerConfig {
         min_workers: 2,
         max_workers: 8,
-        ..WorkerServiceConfig::default()
+        ..SchedulerConfig::default()
     };
 
-    let service = WorkerService::<10, 6>::start(arena, config);
+    let service = Scheduler::<10, 6>::start(arena, config);
 
     thread::sleep(Duration::from_millis(50));
 
@@ -1636,13 +1636,13 @@ fn worker_service_tick_stats_progression() {
     )
     .expect("failed to create arena");
 
-    let config = WorkerServiceConfig {
+    let config = SchedulerConfig {
         tick_duration: Duration::from_nanos(16_777_216), // Must be power of 2 ns: 2^24 = ~16.7ms
         min_workers: 1,
         max_workers: 1,
     };
 
-    let service = WorkerService::<10, 6>::start(arena, config);
+    let service = Scheduler::<10, 6>::start(arena, config);
 
     // Wait much longer for ticks to stabilize
     thread::sleep(Duration::from_millis(100));
@@ -1671,7 +1671,7 @@ fn worker_service_has_work_detection() {
     )
     .expect("failed to create arena");
 
-    let service = WorkerService::<10, 6>::start(arena, WorkerServiceConfig::default());
+    let service = Scheduler::<10, 6>::start(arena, SchedulerConfig::default());
 
     thread::sleep(Duration::from_millis(50));
 

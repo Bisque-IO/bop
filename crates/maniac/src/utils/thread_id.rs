@@ -13,9 +13,9 @@ pub(crate) fn gen_id() -> usize {
 }
 
 pub(crate) fn get_current_thread_id() -> usize {
-    crate::runtime::io_runtime::CURRENT.with(|ctx| ctx.thread_id)
+    crate::runtime::worker::io::CURRENT.with(|ctx| ctx.thread_id)
 }
 
 pub(crate) fn try_get_current_thread_id() -> Option<usize> {
-    crate::runtime::io_runtime::CURRENT.try_with(|maybe_ctx| maybe_ctx.map(|ctx| ctx.thread_id))
+    crate::runtime::worker::io::CURRENT.try_with(|maybe_ctx| maybe_ctx.map(|ctx| ctx.thread_id))
 }

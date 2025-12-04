@@ -4,10 +4,10 @@ use std::future::Future;
 use std::io;
 use std::process::ExitStatus as StdExitStatus;
 
+use crate::BufResult;
 use crate::blocking::unblock;
 use crate::buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut};
 use crate::io::{AsyncReadRent, AsyncWriteRent};
-use crate::BufResult;
 
 #[cfg(unix)]
 use super::unix::{ChildStderrInner, ChildStdinInner, ChildStdoutInner, WaitFuture};
@@ -422,4 +422,3 @@ impl AsyncReadRent for ChildStderr {
         self.inner.readv(buf)
     }
 }
-

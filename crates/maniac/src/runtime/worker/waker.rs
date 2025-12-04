@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::runtime::io_driver::IoDriver;
+use crate::runtime::worker::io::IoDriver;
 use crate::utils::CachePadded;
 
 use crate::utils::bits::is_set;
@@ -317,7 +317,9 @@ impl WorkerWaker {
             return;
         }
 
-        let prev = self.status.fetch_and(!STATUS_BIT_PARTITION, Ordering::AcqRel);
+        let prev = self
+            .status
+            .fetch_and(!STATUS_BIT_PARTITION, Ordering::AcqRel);
         if prev & STATUS_BIT_PARTITION == 0 {
             return;
         }

@@ -42,13 +42,13 @@ macro_rules! reader_le_impl {
 /// AsyncReadRentExt
 pub trait AsyncReadRentExt {
     /// Read until buf capacity is fulfilled
-    fn read_exact<T: IoBufMut + 'static>(
+    fn read_exact<T: IoBufMut + 'static + std::marker::Send>(
         &mut self,
         buf: T,
     ) -> impl Future<Output = BufResult<usize, T>>;
 
     /// Readv until buf capacity is fulfilled
-    fn read_vectored_exact<T: IoVecBufMut + 'static>(
+    fn read_vectored_exact<T: IoVecBufMut + 'static + std::marker::Send>(
         &mut self,
         buf: T,
     ) -> impl Future<Output = BufResult<usize, T>>;
@@ -84,7 +84,10 @@ impl<A> AsyncReadRentExt for A
 where
     A: AsyncReadRent + ?Sized,
 {
-    async fn read_exact<T: IoBufMut + 'static>(&mut self, mut buf: T) -> BufResult<usize, T> {
+    async fn read_exact<T: IoBufMut + 'static + std::marker::Send>(
+        &mut self,
+        mut buf: T,
+    ) -> BufResult<usize, T> {
         let len = buf.bytes_total();
         let mut read = 0;
         while read < len {
@@ -112,7 +115,7 @@ where
         (Ok(read), buf)
     }
 
-    async fn read_vectored_exact<T: IoVecBufMut + 'static>(
+    async fn read_vectored_exact<T: IoVecBufMut + 'static + std::marker::Send>(
         &mut self,
         mut buf: T,
     ) -> BufResult<usize, T> {

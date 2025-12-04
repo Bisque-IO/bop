@@ -263,6 +263,8 @@ pub struct IoVecWrapper<T> {
     raw: T,
 }
 
+unsafe impl<T> Send for IoVecWrapper<T> {}
+
 impl<T: IoVecBuf> IoVecWrapper<T> {
     /// Create a new IoVecWrapper with something that impl IoVecBuf.
     #[inline]

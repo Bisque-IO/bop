@@ -1,16 +1,28 @@
 use std::future::Future;
+use std::{io, marker::PhantomData};
 
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use crate::driver::IoUringDriver;
 #[cfg(feature = "poll")]
 use crate::driver::PollerDriver;
+#[cfg(any(feature = "poll", feature = "iouring"))]
+use crate::utils::thread_id::gen_id;
 use crate::{driver::Driver, scoped_thread_local};
+
+// ============================================================================
+// io_runtime module
+// ============================================================================
 
 thread_local! {
     pub(crate) static DEFAULT_CTX: Context = Context {
         thread_id: crate::utils::thread_id::DEFAULT_THREAD_ID,
         user_data: std::cell::Cell::new(std::ptr::null_mut()),
     };
+}
+
+#[cfg(any(feature = "poll", feature = "iouring"))]
+thread_local! {
+    pub(crate) static BUILD_THREAD_ID: usize = gen_id();
 }
 
 scoped_thread_local!(pub static CURRENT: Context);
@@ -25,7 +37,10 @@ pub struct Context {
 
 impl Context {
     pub(crate) fn new() -> Self {
-        let thread_id = crate::runtime::io_builder::BUILD_THREAD_ID.with(|id| *id);
+        #[cfg(any(feature = "poll", feature = "iouring"))]
+        let thread_id = BUILD_THREAD_ID.with(|id| *id);
+        #[cfg(not(any(feature = "poll", feature = "iouring")))]
+        let thread_id = crate::utils::thread_id::DEFAULT_THREAD_ID;
 
         Self {
             thread_id,
@@ -159,8 +174,8 @@ where
         timeout: Option<std::time::Duration>,
     ) -> std::io::Result<()> {
         match self {
-            FusionRuntime::Uring(inner) => inner.poll_once_unchecked(timeout),
-            FusionRuntime::Poller(inner) => inner.poll_once_unchecked(timeout),
+            FusionRuntime::Uring(inner) => unsafe { inner.poll_once_unchecked(timeout) },
+            FusionRuntime::Poller(inner) => unsafe { inner.poll_once_unchecked(timeout) },
         }
     }
 
@@ -352,3 +367,142 @@ impl From<IoRuntime<IoUringDriver>> for FusionRuntime<IoUringDriver> {
         Self::Uring(r)
     }
 }
+
+// ============================================================================
+// io_builder module
+// ============================================================================
+
+#[cfg(all(target_os = "linux", feature = "iouring"))]
+pub type FusionDriver = IoUringDriver;
+#[cfg(all(not(all(target_os = "linux", feature = "iouring")), feature = "poll"))]
+pub type FusionDriver = PollerDriver;
+
+pub trait Buildable {
+    type Output;
+    fn build(self) -> io::Result<Self::Output>;
+}
+
+pub struct RuntimeBuilder<D> {
+    _mark: PhantomData<D>,
+}
+
+impl<D> RuntimeBuilder<D> {
+    pub fn new() -> Self {
+        Self { _mark: PhantomData }
+    }
+}
+
+pub trait DriverNew: Sized {
+    fn new() -> io::Result<Self>;
+}
+
+#[cfg(feature = "poll")]
+impl DriverNew for PollerDriver {
+    fn new() -> io::Result<Self> {
+        PollerDriver::new()
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "iouring"))]
+impl DriverNew for IoUringDriver {
+    fn new() -> io::Result<Self> {
+        let builder = io_uring::IoUring::builder();
+        IoUringDriver::new(&builder)
+    }
+}
+
+impl<D> Buildable for RuntimeBuilder<D>
+where
+    D: Driver + DriverNew,
+{
+    type Output = IoRuntime<D>;
+
+    fn build(self) -> io::Result<Self::Output> {
+        let driver = D::new()?;
+        let context = Context::new();
+
+        Ok(IoRuntime::new(context, driver))
+    }
+}
+
+// ============================================================================
+// io_driver module
+// ============================================================================
+
+#[cfg(all(target_os = "linux", feature = "iouring"))]
+type RuntimeType = FusionRuntime<IoUringDriver, PollerDriver>;
+
+#[cfg(not(all(target_os = "linux", feature = "iouring")))]
+type RuntimeType = FusionRuntime<PollerDriver>;
+
+/// Event Loop - Monoio integration
+///
+/// This replaces the custom mio-based loop with monoio's runtime.
+/// It adapts monoio to function as the reactor for maniac-runtime's workers.
+pub struct IoDriver {
+    // We use TimeDriver wrap to support timeouts
+    pub(crate) runtime: RuntimeType,
+}
+
+impl IoDriver {
+    pub fn new() -> io::Result<Self> {
+        // Build monoio runtime
+        let runtime = RuntimeBuilder::<FusionDriver>::new().build()?;
+
+        #[cfg(all(target_os = "linux", feature = "iouring"))]
+        let runtime = FusionRuntime::Uring(runtime);
+
+        #[cfg(not(all(target_os = "linux", feature = "iouring")))]
+        let runtime = FusionRuntime::Poller(runtime);
+
+        Ok(Self { runtime })
+    }
+
+    /// Poll the event loop once
+    ///
+    /// # Arguments
+    /// * `timeout` - Optional timeout. If None, blocks indefinitely.
+    pub fn poll_once(&mut self, timeout: Option<std::time::Duration>) -> io::Result<usize> {
+        // Since we removed poll_once from Runtime due to borrow issues,
+        // we use park/park_timeout which doesn't set the context.
+        // This assumes the context is managed elsewhere or not needed for this poll.
+        if let Some(t) = timeout {
+            self.runtime.park_timeout(t)?;
+        } else {
+            self.runtime.park()?;
+        }
+        Ok(1)
+    }
+
+    /// Poll the event loop once, assuming context is already set.
+    ///
+    /// # Safety
+    /// This assumes the runtime context is already set up via `with_context()`.
+    /// Only use this when calling from within a `with_context()` block.
+    #[inline]
+    pub unsafe fn poll_once_unchecked(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+    ) -> io::Result<usize> {
+        unsafe {
+            self.runtime.poll_once_unchecked(timeout)?;
+        }
+        Ok(1)
+    }
+
+    /// Execute a closure within the context of the inner runtime
+    pub fn with_context<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        self.runtime.with_context(f)
+    }
+
+    /// Wake the event loop from another thread
+    pub fn waker(&self) -> io::Result<crate::driver::UnparkHandle> {
+        Ok(self.runtime.unpark())
+    }
+}
+
+// Re-export UnparkHandle as it's used by waker()
+pub use crate::driver::UnparkHandle;
