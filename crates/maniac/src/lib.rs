@@ -25,6 +25,12 @@ extern crate alloc;
 
 pub mod blocking;
 pub mod buf;
+mod byteview;
+
+pub use {byteview::ByteView, byteview::StrView};
+
+#[doc(hidden)]
+pub use byteview::{Builder, Mutator};
 #[cfg(feature = "tokio-compat")]
 pub mod compat;
 
@@ -86,4 +92,4 @@ pub fn now() -> u64 {
     runtime::worker::current_worker_now_ns()
 }
 
-pub use runtime::worker::{as_coroutine, current_worker, spawn};
+pub use runtime::worker::{as_coroutine, current_worker, spawn, sync_await, try_sync_await};

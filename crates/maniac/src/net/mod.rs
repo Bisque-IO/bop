@@ -11,6 +11,7 @@ pub use listener_config::ListenerOpts;
 #[deprecated(since = "0.2.0", note = "use ListenerOpts")]
 pub use listener_config::ListenerOpts as ListenerConfig;
 pub use tcp::{TcpConnectOpts, TcpListener, TcpStream};
+pub use udp::UdpSocket;
 #[cfg(unix)]
 pub use unix::{Pipe, UnixDatagram, UnixListener, UnixStream};
 #[cfg(windows)]

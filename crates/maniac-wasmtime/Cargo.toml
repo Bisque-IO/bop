@@ -1,0 +1,34 @@
+[package]
+name = "maniac-wasm"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["wasi-net", "wasi-preview1", "wasi-preview2"]
+wasm = []
+wasi-preview1 = ["dep:anyhow", "dep:cap-std", "dep:wasmtime"]
+wasi-preview2 = ["dep:anyhow", "dep:cap-std", "dep:wasmtime"]
+wasi-net = ["wasi-preview2"]
+
+[dependencies]
+anyerror = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+congee = "0.4.1"
+libmdbx = "0.6"
+bytemuck = "1.16"
+uuid = { version = "1.4", features = ["v4"] }
+thiserror = "2.0"
+crc = "3.4.0"
+crc64fast-nvme = "1.2"
+dashmap = "6.1"
+lz4_flex = "0.12"
+cap-std = { version = "3.4.5", optional = true }
+wasmtime = { version = "39.0.1", default-features = false, features = [
+    "component-model",
+    "std",
+    "runtime",
+], optional = true }
+maniac = { path = "../maniac", default-features = true }
+
+[dev-dependencies]
+tempfile = "3.8"

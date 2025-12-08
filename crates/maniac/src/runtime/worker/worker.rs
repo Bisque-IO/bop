@@ -84,6 +84,8 @@ pub struct Worker<'a> {
     pub(crate) io: Box<crate::runtime::worker::io::IoDriver>,
     /// I/O budget per run_once iteration (prevents I/O from starving tasks)
     pub(crate) io_budget: usize,
+
+    pub(crate) panic_reason: Option<Box<dyn std::any::Any + Send>>,
 }
 
 impl Drop for Worker<'_> {
@@ -580,17 +582,19 @@ impl<'a> Worker<'a> {
             // Use raw pointer for generator closure
             let worker_ptr = self as *mut Self;
 
-            // EXTREMELY UNSAFE: Convert pointer to usize to completely erase type and make it Send
-            // This is safe because Worker is single-threaded and we never actually send across threads
+            // Convert pointer to usize to completely erase type and make it Send
+            // This is safe because Worker is single-threaded and we never actually
+            // send across threads
             let worker_addr = worker_ptr as usize;
 
             let mut generator = crate::generator::Gn::<()>::new_scoped_opt(
                 STACK_SIZE,
-                move |mut scope| -> usize {
+                move |mut scope| -> GeneratorYieldReason {
                     // Wrap in catch_unwind to ensure clean stack behavior
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         // SAFETY: worker_addr is the address of a valid Worker that lives for the generator's lifetime
                         let worker = unsafe { &mut *(worker_addr as *mut Worker<'_>) };
+                        worker.stats.generators_created += 1;
                         let mut spin_count = 0;
                         let waker_id = worker.worker_id as usize;
 
@@ -609,16 +613,8 @@ impl<'a> Worker<'a> {
                             // Check for shutdown
                             if worker.shutdown.load(Ordering::Relaxed) {
                                 worker.current_scope = core::ptr::null_mut();
-                                return 0;
+                                return GeneratorYieldReason::Shutdown;
                             }
-
-                            // for _ in 0..128 {
-                            //     let yielded =
-                            //         worker.poll_yield(&mut run_ctx, worker.yield_queue.len());
-                            //     if yielded == 0 {
-                            //         break;
-                            //     }
-                            // }
 
                             // Process one iteration of work
                             // let mut progress = worker.poll_tasks(&mut run_ctx) > 0;
@@ -646,10 +642,9 @@ impl<'a> Worker<'a> {
                                 } else {
                                     crate::runtime::preemption::GeneratorYieldReason::Cooperative
                                 };
-                                scope.yield_(yield_reason.as_usize());
+                                // scope.yield_(yield_reason);
 
-                                // Return 0 for normal exit (pinned or shutdown)
-                                return 0;
+                                return yield_reason;
                             }
 
                             if !progress {
@@ -692,8 +687,6 @@ impl<'a> Worker<'a> {
                             } else {
                                 spin_count = 0;
                             }
-
-                            // iteration += 1;
                         }
                     }));
 
@@ -701,20 +694,19 @@ impl<'a> Worker<'a> {
                         Ok(r) => r,
                         Err(panic_payload) => {
                             // Log the panic for debugging
-                            #[cfg(debug_assertions)]
-                            {
-                                if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                                    tracing::error!("Worker generator panicked: {}", s);
-                                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                                    tracing::error!("Worker generator panicked: {}", s);
-                                } else {
-                                    tracing::error!(
-                                        "Worker generator panicked with unknown payload"
-                                    );
-                                }
+                            if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                tracing::error!("Worker generator panicked: {}", s);
+                            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                                tracing::error!("Worker generator panicked: {}", s);
+                            } else {
+                                tracing::error!("Worker generator panicked with unknown payload");
                             }
+
+                            let worker = unsafe { &mut *(worker_addr as *mut Worker<'_>) };
+                            worker.panic_reason = Some(panic_payload);
+
                             // Return 2 to indicate panic occurred
-                            2
+                            return GeneratorYieldReason::Panic;
                         }
                     }
                 },
@@ -724,46 +716,82 @@ impl<'a> Worker<'a> {
             // 1. Shutdown is requested
             // 2. A task's generator gets pinned (run_ctx.pinned becomes true)
             // 3. Preemption occurs (signal handler pins generator and yields)
-            generator.resume();
+            let result = generator.resume().unwrap_or(GeneratorYieldReason::Panic);
 
-            // After resume returns, check if preemption occurred.
-            //
-            // current_task is only non-null here if preemption happened:
-            // - Normal exit: ActiveTaskGuard clears current_task when poll returns
-            // - Cooperative pin: poll completes, guard clears current_task, then yields
-            // - Preemption: signal fires mid-poll, yields BEFORE poll returns, guard hasn't run
-            //
-            // rust_preemption_helper already pinned the generator (scope pointer) to the task.
-            // We just need to:
-            // 1. Forget our generator variable (so it doesn't get dropped - task owns it now)
-            // 2. Re-enqueue the task to the yield queue
+            // Shutdown signal found
+            if result == GeneratorYieldReason::Shutdown {
+                self.stats.generators_dropped += 1;
+                break;
+            }
+
+            // After resume returns, check if a generator yield (stack switch occurred)
+            // without returning from poll.
             let task_ptr = self.current_task;
             if !task_ptr.is_null() {
-                // Preemption occurred - task owns the generator now
-                let task = unsafe { &*task_ptr };
-                std::mem::forget(generator);
-
-                // Re-enqueue the preempted task to the yield queue
-                // Preempted tasks are "hot" and should run again soon
-                task.mark_yielded();
-                task.record_yield();
-                let handle = TaskHandle::from_task(task);
-                self.yield_queue.push(handle);
-                self.scheduler.wakers[self.worker_id as usize].mark_yield();
-                self.stats.yielded_count += 1;
-
-                #[cfg(debug_assertions)]
-                tracing::trace!(
-                    "[worker {}] Preempted task re-enqueued to yield queue",
-                    self.worker_id
-                );
-
                 // Clear current_task since we've handled it
                 self.current_task = ptr::null_mut();
+
+                match result {
+                    GeneratorYieldReason::Shutdown => unreachable!(),
+
+                    GeneratorYieldReason::Cooperative => {
+                        #[cfg(debug_assertions)]
+                        tracing::trace!(
+                            "[worker {}] task was pinned and cooperatively parked",
+                            self.worker_id
+                        );
+
+                        // as_coroutine/sync_await already pinned the generator (scope pointer) to the task.
+                        // We just need to:
+                        // 1. Forget our generator variable (so it doesn't get dropped - task owns it now)
+                        // 2. Re-enqueue the task to the yield queue if also yielded
+                        let task = unsafe { &*task_ptr };
+                        std::mem::forget(generator);
+
+                        if task.is_yielded() {
+                            task.record_yield();
+                            let handle = TaskHandle::from_task(task);
+                            self.yield_queue.push(handle);
+                            self.scheduler.wakers[self.worker_id as usize].mark_yield();
+                            self.stats.yielded_count += 1;
+                        }
+                    }
+
+                    GeneratorYieldReason::Preempted => {
+                        // rust_preemption_helper already pinned the generator (scope pointer) to the task.
+                        // We just need to:
+                        // 1. Forget our generator variable (so it doesn't get dropped - task owns it now)
+                        // 2. Re-enqueue the task to the yield queue
+                        let task = unsafe { &*task_ptr };
+                        std::mem::forget(generator);
+
+                        // Re-enqueue the preempted task to the yield queue
+                        // Preempted tasks are "hot" and should run again soon
+                        task.mark_yielded();
+                        task.record_yield();
+                        let handle = TaskHandle::from_task(task);
+                        self.yield_queue.push(handle);
+                        self.scheduler.wakers[self.worker_id as usize].mark_yield();
+                        self.stats.yielded_count += 1;
+                        self.stats.preempts += 1;
+
+                        #[cfg(debug_assertions)]
+                        tracing::trace!(
+                            "[worker {}] preempted task re-enqueued to yield queue",
+                            self.worker_id
+                        );
+                    }
+
+                    GeneratorYieldReason::Panic => {
+                        // let the generator drop
+                    }
+                }
 
                 // Continue to create a new generator for the worker
                 continue;
             }
+
+            self.stats.generators_dropped += 1;
         }
 
         tracing::trace!("Worker is done running: {}", self.worker_id);
@@ -1005,29 +1033,6 @@ impl<'a> Worker<'a> {
         }
 
         task.schedule();
-        // let state = task.state().load(Ordering::Acquire);
-        //
-        // if state == TASK_IDLE {
-        //     if task
-        //         .state()
-        //         .compare_exchange(
-        //             TASK_IDLE,
-        //             TASK_EXECUTING,
-        //             Ordering::AcqRel,
-        //             Ordering::Acquire,
-        //         )
-        //         .is_ok()
-        //     {
-        //         task.schedule();
-        //         // self.poll_task(TaskHandle::from_task(task), task);
-        //     } else {
-        //         task.schedule();
-        //     }
-        // } else if state == TASK_EXECUTING && !task.is_yielded() {
-        //     task.schedule();
-        // } else {
-        //     task.schedule();
-        // }
         self.stats.timer_fires = self.stats.timer_fires.saturating_add(1);
         true
     }
@@ -1632,7 +1637,7 @@ impl<'a> Worker<'a> {
         }
 
         // Re-enqueue task for next poll with the new generator
-        self.enqueue_yield(handle_copy);
+        task.schedule();
     }
 
     fn poll_task(&mut self, run_ctx: &mut RunContext, handle: TaskHandle, task: &Task) {

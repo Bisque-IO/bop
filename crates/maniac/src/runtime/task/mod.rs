@@ -363,6 +363,7 @@ pub struct Task {
     slot_ptr: AtomicPtr<TaskSlot>,
     summary_tree_ptr: *const Summary,
     future_ptr: AtomicPtr<()>,
+    can_preempt: AtomicBool,
     // Generator pinning support: when a task pins a generator, it gets dedicated execution
     pinned_generator_ptr: AtomicPtr<()>,
     pinned_generator_ownership: AtomicU8,
@@ -434,6 +435,7 @@ impl Task {
                     summary_tree_ptr: ptr::null(),
                     state: AtomicU8::new(TASK_IDLE),
                     yielded: AtomicBool::new(false),
+                    can_preempt: AtomicBool::new(true),
                     cpu_time_enabled: AtomicBool::new(false),
                     future_ptr: AtomicPtr::new(ptr::null_mut()),
                     pinned_generator_ptr: AtomicPtr::new(ptr::null_mut()),
@@ -478,6 +480,16 @@ impl Task {
     #[inline(always)]
     pub fn stats(&self) -> TaskStats {
         unsafe { *self.stats.get() }
+    }
+
+    #[inline(always)]
+    pub fn can_preempt(&self) -> bool {
+        self.can_preempt.load(Ordering::Acquire)
+    }
+
+    #[inline(always)]
+    pub fn set_can_preempt(&self, value: bool) {
+        self.can_preempt.store(value, Ordering::Release);
     }
 
     #[inline(always)]

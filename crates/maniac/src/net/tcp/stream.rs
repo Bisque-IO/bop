@@ -68,7 +68,7 @@ impl TcpConnectOpts {
 }
 /// TcpStream
 pub struct TcpStream {
-    pub(super) fd: SharedFd,
+    pub(crate) fd: SharedFd,
     meta: StreamMeta,
 }
 

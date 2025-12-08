@@ -141,6 +141,10 @@ pub extern "C" fn rust_preemption_helper() {
 
         unsafe {
             let task = &mut *task;
+            if !task.can_preempt() {
+                return;
+            }
+
             if !task.has_pinned_generator() {
                 unsafe {
                     task.pin_generator(
@@ -161,8 +165,8 @@ pub extern "C" fn rust_preemption_helper() {
             // SAFETY: The pointer is set only while the worker generator is running and
             // cleared immediately after it exits. The trampoline only executes while the
             // worker is inside that generator, so the pointer is always valid here.
-            let scope = &mut *(scope as *mut crate::generator::Scope<(), usize>);
-            let _ = scope.yield_(GeneratorYieldReason::Preempted.as_usize());
+            let scope = &mut *(scope as *mut crate::generator::Scope<(), GeneratorYieldReason>);
+            let _ = scope.yield_(GeneratorYieldReason::Preempted);
         }
     } else {
         // Non-worker path: Use TLS generator scope
@@ -171,8 +175,9 @@ pub extern "C" fn rust_preemption_helper() {
         // the generator's lifetime and is only cleared when the generator exits.
         let scope = preemption::get_generator_scope();
         if !scope.is_null() {
-            let scope = unsafe { &mut *(scope as *mut crate::generator::Scope<(), usize>) };
-            let _ = scope.yield_(GeneratorYieldReason::Preempted.as_usize());
+            let scope =
+                unsafe { &mut *(scope as *mut crate::generator::Scope<(), GeneratorYieldReason>) };
+            let _ = scope.yield_(GeneratorYieldReason::Preempted);
         }
     }
 }
@@ -259,6 +264,121 @@ pub fn current_waker() -> Option<std::task::Waker> {
         }
     } else {
         None
+    }
+}
+
+/// Awaits a future from synchronous code within a stackful coroutine.
+///
+/// This function allows synchronous code running inside a generator/coroutine context
+/// to await async futures without blocking the thread. It polls the future and yields
+/// to the scheduler when the future is pending, resuming when the task is woken.
+///
+/// # Requirements
+///
+/// This function can only be called from within:
+/// 1. A task that has been converted to a coroutine via `as_coroutine()`
+/// 2. Code running inside a generator context (e.g., inside a poll-mode generator)
+///
+/// # Panics
+///
+/// Panics if called from outside a generator context. Use `is_generator()` to check
+/// if you're in a valid context before calling.
+///
+/// # Example
+///
+/// ```ignore
+/// use maniac::runtime::worker::sync_await;
+/// use maniac::fs::File;
+///
+/// // Inside a WASI host function or other sync code within a coroutine:
+/// fn my_sync_function() -> i32 {
+///     // Now we can await async operations from sync code
+///     let file = sync_await(File::open("test.txt"));
+///     match file {
+///         Ok(f) => 0,
+///         Err(_) => -1,
+///     }
+/// }
+/// ```
+#[inline]
+pub fn sync_await<F: Future>(fut: F) -> F::Output {
+    if let Some(worker) = current_worker() {
+        let task = worker.current_task;
+        let scope = worker.current_scope;
+        if task.is_null() || scope.is_null() {
+            panic!("not executing a maniac task or generator scope!");
+        }
+
+        unsafe {
+            let task = &mut *task;
+
+            let waker = task.waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut fut = std::pin::pin!(fut);
+
+            loop {
+                match fut.as_mut().poll(&mut cx) {
+                    Poll::Ready(result) => return result,
+                    Poll::Pending => {
+                        // disable preemption
+                        if !task.has_pinned_generator() {
+                            unsafe {
+                                task.pin_generator(
+                                    scope as *mut usize,
+                                    GeneratorOwnership::Worker,
+                                    GeneratorRunMode::Switch,
+                                )
+                            };
+                        } else {
+                            task.set_generator_run_mode(GeneratorRunMode::Switch);
+                        }
+
+                        // Yield is cooperative
+                        let scope =
+                            &mut *(scope as *mut crate::generator::Scope<(), GeneratorYieldReason>);
+
+                        let _ = scope.yield_(GeneratorYieldReason::Cooperative);
+                    }
+                }
+            }
+        }
+    } else {
+        panic!("not inside a maniac worker thread!");
+    }
+}
+
+/// Attempts to await a future from synchronous code, returning None if not in a coroutine.
+///
+/// This is a non-panicking version of `sync_await` that returns `None` if called
+/// from outside a generator context, allowing graceful fallback behavior.
+///
+/// # Returns
+///
+/// - `Some(output)` if in a coroutine context and the future completed
+/// - `None` if not in a coroutine context
+#[inline]
+pub fn try_sync_await<F: Future>(fut: F) -> Option<F::Output> {
+    if let Some(worker) = current_worker() {
+        let task = worker.current_task;
+        let scope = worker.current_scope;
+        if task.is_null() || scope.is_null() {
+            panic!("not executing a maniac task or generator scope!");
+        }
+
+        unsafe {
+            let task = &mut *task;
+
+            let waker = task.waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut fut = std::pin::pin!(fut);
+
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => Some(result),
+                Poll::Pending => None,
+            }
+        }
+    } else {
+        panic!("not inside a maniac worker thread!");
     }
 }
 

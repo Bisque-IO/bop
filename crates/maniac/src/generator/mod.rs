@@ -19,5 +19,6 @@ pub use crate::generator::gen_impl::{DEFAULT_STACK_SIZE, Generator, Gn, LocalGen
 pub use crate::generator::rt::{Error, get_local_data, is_generator};
 pub use crate::generator::scope::Scope;
 pub use crate::generator::yield_::{
-    co_get_yield, co_set_para, co_yield_with, done, get_yield, yield_, yield_from, yield_with,
+    co_get_yield, co_set_para, co_yield_with, done, get_yield, yield_, yield_from, yield_now,
+    yield_with,
 };

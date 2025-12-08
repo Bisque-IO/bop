@@ -123,10 +123,12 @@ pub fn block_preemption_signal() -> PreemptionSignalGuard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum GeneratorYieldReason {
+    Shutdown = 0,
     /// Cooperative yield point inside the worker loop (scheduler driven).
-    Cooperative = 0,
+    Cooperative = 1,
     /// Non-cooperative preemption triggered via signal/APC.
-    Preempted = 1,
+    Preempted = 2,
+    Panic = 3,
 }
 
 impl GeneratorYieldReason {
@@ -138,8 +140,10 @@ impl GeneratorYieldReason {
     #[inline]
     pub const fn from_usize(value: usize) -> Option<Self> {
         match value {
-            0 => Some(Self::Cooperative),
-            1 => Some(Self::Preempted),
+            0 => Some(Self::Shutdown),
+            1 => Some(Self::Cooperative),
+            2 => Some(Self::Preempted),
+            3 => Some(Self::Panic),
             _ => None,
         }
     }

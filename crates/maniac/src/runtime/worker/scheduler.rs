@@ -756,6 +756,7 @@ impl Scheduler {
                 preemption_requested: AtomicBool::new(false),
                 io: event_loop,
                 io_budget: 16, // Process up to 16 I/O events per run_once iteration
+                panic_reason: None,
             };
 
             // Wrap execution in monoio context and set user_data
@@ -1273,6 +1274,7 @@ impl SchedulerStats {
             totals.leaf_steal_attempts += w.stats.leaf_steal_attempts;
             totals.leaf_steal_successes += w.stats.leaf_steal_successes;
             totals.timer_fires += w.stats.timer_fires;
+            totals.preempts += w.stats.preempts;
         }
         totals
     }
@@ -1313,6 +1315,7 @@ impl std::fmt::Display for SchedulerStats {
             totals.leaf_steal_attempts, totals.leaf_steal_successes
         )?;
         writeln!(f, "    Timer fires: {}", totals.timer_fires)?;
+        writeln!(f, "    Preempts: {}", totals.preempts)?;
 
         writeln!(f, "  Per-worker:")?;
         for w in &self.per_worker {
@@ -1377,6 +1380,11 @@ pub struct WorkerStats {
     pub leaf_steal_successes: u64,
 
     pub timer_fires: u64,
+
+    pub preempts: u64,
+
+    pub generators_created: u64,
+    pub generators_dropped: u64,
 }
 
 /// Health snapshot of a worker at a point in time.
