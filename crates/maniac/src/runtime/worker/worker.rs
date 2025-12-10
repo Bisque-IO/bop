@@ -5,8 +5,7 @@ use super::scheduler::{
 use crate::PopError;
 use crate::runtime::deque::Worker as YieldWorker;
 use crate::runtime::preemption::GeneratorYieldReason;
-use crate::runtime::task::GeneratorOwnership;
-use crate::runtime::task::{GeneratorRunMode, Task, TaskHandle};
+use crate::runtime::task::{GeneratorOwnership, Task, TaskHandle};
 use crate::runtime::timer::wheel::TimerWheel;
 use crate::runtime::timer::{Timer, TimerHandle};
 use crate::runtime::{mpsc, preemption};
@@ -106,15 +105,6 @@ impl Drop for Worker<'_> {
     }
 }
 
-/// Reason why a generator was pinned to a task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PinReason {
-    /// Explicit `pin_stack()` call from task code.
-    Explicit,
-    /// Signal-based preemption (Unix signal or Windows APC).
-    Preempted,
-}
-
 /// Context tracking generator state during worker execution.
 ///
 /// This struct captures whether the worker's generator was pinned to a task
@@ -127,51 +117,17 @@ pub enum PinReason {
 struct RunContext {
     /// Generator was pinned to a task - worker must create new generator.
     pinned: bool,
-
-    /// Task completed while generator was pinned (vs still pending).
-    /// When true, the pinned generator can be cleaned up immediately.
-    /// When false, the task will continue with its pinned generator.
-    task_completed: bool,
-
-    /// How the generator was pinned (if `pinned` is true).
-    pin_reason: Option<PinReason>,
 }
 
 impl RunContext {
     fn new() -> Self {
-        Self {
-            pinned: false,
-            task_completed: false,
-            pin_reason: None,
-        }
+        Self { pinned: false }
     }
 
-    /// Reset context for next iteration (when not pinned).
+    /// Mark that the generator was pinned to a task.
     #[inline]
-    fn reset(&mut self) {
-        self.pinned = false;
-        self.pin_reason = None;
-        self.task_completed = false;
-    }
-
-    /// Mark that the generator was pinned due to preemption.
-    #[inline]
-    fn mark_preempted(&mut self) {
+    fn mark_pinned(&mut self) {
         self.pinned = true;
-        self.pin_reason = Some(PinReason::Preempted);
-    }
-
-    /// Mark that the generator was pinned explicitly via `pin_stack()`.
-    #[inline]
-    fn mark_explicit_pin(&mut self) {
-        self.pinned = true;
-        self.pin_reason = Some(PinReason::Explicit);
-    }
-
-    /// Mark that the task completed while pinned.
-    #[inline]
-    fn mark_task_completed(&mut self) {
-        self.task_completed = true;
     }
 
     /// Check if we should exit the generator loop.
@@ -624,27 +580,15 @@ impl<'a> Worker<'a> {
                             if run_ctx.should_exit_generator() {
                                 worker.current_scope = core::ptr::null_mut();
 
-                                // Log pin reason for debugging
-                                if let Some(reason) = run_ctx.pin_reason {
-                                    tracing::trace!(
-                                        "[worker {}] Generator pinned: reason={:?}, task_completed={}",
-                                        worker.worker_id,
-                                        reason,
-                                        run_ctx.task_completed
-                                    );
-                                }
+                                #[cfg(debug_assertions)]
+                                tracing::trace!(
+                                    "[worker {}] Generator pinned to task",
+                                    worker.worker_id
+                                );
 
-                                // Yield with appropriate reason based on how we got here
-                                let yield_reason = if run_ctx.pin_reason
-                                    == Some(PinReason::Preempted)
-                                {
-                                    crate::runtime::preemption::GeneratorYieldReason::Preempted
-                                } else {
-                                    crate::runtime::preemption::GeneratorYieldReason::Cooperative
-                                };
-                                // scope.yield_(yield_reason);
-
-                                return yield_reason;
+                                // Worker's generator was pinned to a task - exit so we can
+                                // create a new generator for the worker
+                                return crate::runtime::preemption::GeneratorYieldReason::Cooperative;
                             }
 
                             if !progress {
@@ -652,7 +596,7 @@ impl<'a> Worker<'a> {
 
                                 if spin_count >= worker.wait_strategy.spin_before_sleep {
                                     core::hint::spin_loop();
-                                    progress = worker.run_once_exhaustive(&mut run_ctx);
+                                    // progress = worker.run_once_exhaustive(&mut run_ctx);
 
                                     if progress {
                                         spin_count = 0;
@@ -1402,10 +1346,12 @@ impl<'a> Worker<'a> {
         self.poll_task(run_ctx, handle, task);
     }
 
-    /// Poll a task that has a pinned generator (or wants one).
+    /// Poll a task that has a pinned generator.
     ///
-    /// If the generator pointer is null but mode is Poll, we need to create a new
-    /// poll-mode generator for the task. This happens when pin_stack() was called.
+    /// When a task has a pinned generator, we resume it to continue the interrupted poll.
+    /// The generator will poll the task's future and either:
+    /// - Return Ready: task is complete, clean up generator
+    /// - Return Pending: use normal task scheduling (finish/finish_and_schedule)
     fn poll_task_with_pinned_generator(
         &mut self,
         run_ctx: &mut RunContext,
@@ -1426,221 +1372,57 @@ impl<'a> Worker<'a> {
 
         self.stats.tasks_polled += 1;
 
-        let mode = task.generator_run_mode();
-
-        // Check if we need to create a generator (null pointer with Poll mode)
-        // This happens when pin_stack() was called - it sets mode to Poll but leaves
-        // the pointer null as a signal that we need to create a dedicated generator.
-        let mut guard = unsafe { task.get_pinned_generator() };
-        let has_actual_generator = guard.generator().is_some();
-        drop(guard); // Release the guard before proceeding
-
-        if !has_actual_generator && mode == GeneratorRunMode::Poll {
-            // Need to create a poll-mode generator for this task
-            self.create_poll_mode_generator(run_ctx, handle, task);
-            return;
-        }
-
-        match mode {
-            GeneratorRunMode::Switch => {
-                // Switch mode: Generator has interrupted poll on stack
-                // Resume once to complete that poll, then transition to Poll mode or finish
-                self.poll_task_switch_mode(run_ctx, handle, task);
-            }
-            GeneratorRunMode::Poll => {
-                // Poll mode: Generator contains poll loop
-                // Resume generator, it will call poll once and yield
-                self.poll_task_poll_mode(run_ctx, handle, task);
-            }
-            GeneratorRunMode::None => {
-                // No generator, shouldn't happen but treat as error
-                task.finish();
-                self.stats.completed_count = self.stats.completed_count.saturating_add(1);
-            }
-        }
-    }
-
-    /// Handle Switch mode: resume generator once to complete interrupted poll,
-    /// then transition to Poll mode or finish task.
-    ///
-    /// Switch mode means the generator was captured mid-poll (via preemption signal).
-    /// We resume once to let the interrupted poll complete, then either:
-    /// - Task completes: clean up generator
-    /// - Task still pending: transition to Poll mode with a new task-owned generator
-    ///
-    /// Note: We don't use catch_unwind here because generators have their own panic
-    /// handling mechanism via context.err that propagates panics correctly. Using
-    /// catch_unwind interferes with the generator's context switching.
-    fn poll_task_switch_mode(&mut self, run_ctx: &mut RunContext, handle: TaskHandle, task: &Task) {
-        // Mark that we're handling a preempted generator
-        run_ctx.mark_preempted();
-
         let mut guard = unsafe { task.get_pinned_generator() };
         if let Some(generator) = guard.generator() {
-            // Resume generator once - this completes the interrupted poll
-            match generator.resume() {
-                Some(_) => {
-                    // Generator yielded after completing poll
-                    // Check if task still has a future (if not, task completed during poll)
-                    let future_ptr = task.take_future();
-                    guard.free();
-
-                    if future_ptr.is_none() {
-                        // Task completed during the interrupted poll, clean up generator
-                        task.finish();
-                        self.stats.completed_count = self.stats.completed_count.saturating_add(1);
-                        run_ctx.mark_task_completed();
-                    } else {
-                        // Task still pending - transition to Poll mode
-                        // Discard the worker generator and create a task-specific Poll mode generator
-                        self.create_poll_mode_generator(run_ctx, handle, task);
-                    }
-                }
-                None => {
-                    // Generator exhausted - task must be complete
-                    guard.free();
-                    task.finish();
-                    self.stats.completed_count = self.stats.completed_count.saturating_add(1);
-                    run_ctx.mark_task_completed();
-                }
-            }
-        } else {
-            // Generator lost, treat as error
-            task.finish();
-            self.stats.completed_count = self.stats.completed_count.saturating_add(1);
-            run_ctx.mark_task_completed();
-
-            #[cfg(debug_assertions)]
-            tracing::warn!(
-                "[worker {}] Switch mode task had no generator",
-                self.worker_id
-            );
-        }
-    }
-
-    /// Handle Poll mode: generator contains poll loop, resume to continue task.
-    ///
-    /// Poll mode means the task has its own dedicated generator with a poll loop.
-    /// Each resume polls the future once and yields the result.
-    ///
-    /// Note: We don't use catch_unwind here because generators have their own panic
-    /// handling mechanism via context.err that propagates panics correctly. Using
-    /// catch_unwind interferes with the generator's context switching.
-    fn poll_task_poll_mode(&mut self, run_ctx: &mut RunContext, handle: TaskHandle, task: &Task) {
-        // Mark that we're handling an explicitly pinned generator
-        run_ctx.mark_explicit_pin();
-
-        let mut guard = unsafe { task.get_pinned_generator() };
-        if let Some(generator) = guard.generator() {
-            // Resume generator - it will poll once and yield the result
+            // Resume the generator - it will continue the interrupted poll
             match generator.resume() {
                 Some(status) => {
-                    // Generator yielded - check status and task state
+                    // Generator yielded - check if task completed
+                    // Status 1 = task complete, status 2 = future dropped
                     if status == 1 || status == 2 {
-                        // Status 1 = task complete, status 2 = future dropped
                         // Task completed, clean up generator
                         guard.free();
                         task.finish();
                         self.stats.completed_count = self.stats.completed_count.saturating_add(1);
-                        run_ctx.mark_task_completed();
-                    } else if task.is_yielded() {
-                        task.clear_yielded();
-                        task.finish_and_schedule();
-                        // Task yielded, re-enqueue
-                        // task.record_yield();
-                        self.stats.yielded_count += 1;
-                        // self.enqueue_yield(handle);
-                        // Task still running, don't mark completed
+                        if let Some(ptr) = task.take_future() {
+                            unsafe { drop_future(ptr) };
+                        }
                     } else {
-                        // Task returned Pending, waiting for wake
-                        // Don't re-enqueue, task will be woken when ready
-                        self.stats.waiting_count += 1;
-                        task.finish();
-                        // Task is waiting, not completed in the "done" sense
+                        // Task still pending - use normal scheduling
+                        if task.is_yielded() {
+                            task.clear_yielded();
+                            self.stats.yielded_count += 1;
+                            task.finish_and_schedule();
+                        } else {
+                            self.stats.waiting_count += 1;
+                            task.finish();
+                        }
                     }
                 }
                 None => {
-                    // Generator completed - task is done
+                    // Generator exhausted/completed - task is done
                     guard.free();
                     task.finish();
                     self.stats.completed_count = self.stats.completed_count.saturating_add(1);
-                    run_ctx.mark_task_completed();
+                    if let Some(ptr) = task.take_future() {
+                        unsafe { drop_future(ptr) };
+                    }
                 }
             }
         } else {
-            // Generator lost
+            // No generator found - shouldn't happen, but finish the task
             task.finish();
             self.stats.completed_count = self.stats.completed_count.saturating_add(1);
-            run_ctx.mark_task_completed();
 
             #[cfg(debug_assertions)]
             tracing::warn!(
-                "[worker {}] Poll mode task had no generator",
+                "[worker {}] Task had pinned generator flag but no generator",
                 self.worker_id
             );
         }
     }
 
-    /// Create a Poll mode generator for a task
-    /// This generator wraps task.poll_future() in a loop
-    fn create_poll_mode_generator(
-        &mut self,
-        run_ctx: &mut RunContext,
-        handle: TaskHandle,
-        task: &Task,
-    ) {
-        const STACK_SIZE: usize = 1024 * 1024; // 512KB stack
-
-        // Capture task pointer as usize for Send safety
-        let task_addr = task as *const Task as usize;
-        let handle_copy = handle;
-
-        let generator =
-            crate::generator::Gn::<()>::new_scoped_opt(STACK_SIZE, move |mut scope| -> usize {
-                let task = unsafe { &*(task_addr as *const Task) };
-
-                loop {
-                    // Create waker and context
-                    let waker = unsafe { task.waker_yield() };
-                    let mut cx = Context::from_waker(&waker);
-
-                    // Poll the task's future
-                    let poll_result = unsafe { task.poll_future(&mut cx) };
-
-                    match poll_result {
-                        Some(Poll::Ready(())) => {
-                            // Task complete - return from generator
-                            return 1; // Status code: task complete
-                        }
-                        Some(Poll::Pending) => {
-                            // Task still pending - yield and continue loop
-                            scope.yield_(
-                                crate::runtime::preemption::GeneratorYieldReason::Cooperative
-                                    .as_usize(),
-                            );
-                        }
-                        None => {
-                            // Future is gone, task complete
-                            return 2; // Status code: future dropped
-                        }
-                    }
-                }
-            });
-
-        // Store generator in task with Poll mode
-        unsafe {
-            task.pin_generator(
-                generator.into_raw(),
-                GeneratorOwnership::Owned,
-                GeneratorRunMode::Poll,
-            );
-        }
-
-        // Re-enqueue task for next poll with the new generator
-        task.schedule();
-    }
-
-    fn poll_task(&mut self, run_ctx: &mut RunContext, handle: TaskHandle, task: &Task) {
+    fn poll_task(&mut self, run_ctx: &mut RunContext, _handle: TaskHandle, task: &Task) {
         let waker = unsafe { task.waker_yield() };
         let mut cx = Context::from_waker(&waker);
         let poll_result = unsafe { task.poll_future(&mut cx) };
@@ -1652,14 +1434,7 @@ impl<'a> Worker<'a> {
 
                 // Check if generator was pinned during poll (e.g., via pin_stack() call)
                 if task.has_pinned_generator() {
-                    // Determine pin reason based on generator run mode
-                    let mode = task.generator_run_mode();
-                    match mode {
-                        GeneratorRunMode::Switch => run_ctx.mark_preempted(),
-                        GeneratorRunMode::Poll => run_ctx.mark_explicit_pin(),
-                        GeneratorRunMode::None => {} // Shouldn't happen
-                    }
-                    run_ctx.mark_task_completed();
+                    run_ctx.mark_pinned();
                 }
 
                 self.current_task = core::ptr::null_mut();
@@ -1670,25 +1445,13 @@ impl<'a> Worker<'a> {
             Some(Poll::Pending) => {
                 // Check if generator was pinned during poll
                 if task.has_pinned_generator() {
-                    let mode = task.generator_run_mode();
-                    match mode {
-                        GeneratorRunMode::Switch => run_ctx.mark_preempted(),
-                        GeneratorRunMode::Poll => run_ctx.mark_explicit_pin(),
-                        GeneratorRunMode::None => {}
-                    }
-                    // Task is still pending, not completed
+                    run_ctx.mark_pinned();
                 }
 
                 if task.is_yielded() {
                     task.clear_yielded();
-                    // task.record_yield();
                     self.stats.yielded_count += 1;
                     task.finish_and_schedule();
-                    // task.schedule();
-                    // Yielded Tasks stay in EXECUTING state with yielded set to true
-                    // without resetting the signal. All attempts to set the signal
-                    // will not set it since it is guaranteed to run via the yield queue.
-                    // self.enqueue_yield(handle);
                 } else {
                     self.stats.waiting_count += 1;
                     task.finish();
@@ -1697,13 +1460,7 @@ impl<'a> Worker<'a> {
             None => {
                 // Future is gone - task completed or was cancelled
                 if task.has_pinned_generator() {
-                    let mode = task.generator_run_mode();
-                    match mode {
-                        GeneratorRunMode::Switch => run_ctx.mark_preempted(),
-                        GeneratorRunMode::Poll => run_ctx.mark_explicit_pin(),
-                        GeneratorRunMode::None => {}
-                    }
-                    run_ctx.mark_task_completed();
+                    run_ctx.mark_pinned();
                 }
                 self.stats.completed_count += 1;
                 task.finish();

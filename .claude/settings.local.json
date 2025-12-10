@@ -65,7 +65,19 @@
       "Bash(powershell:*)",
       "Bash(RUST_BACKTRACE=1 cargo test:*)",
       "Bash(rustfmt:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(cat:*)",
+      "Bash(xargs cat:*)",
+      "Bash(wc:*)",
+      "Bash(RUST_BACKTRACE=1 timeout 20 cargo run:*)",
+      "Bash(RUST_BACKTRACE=full timeout 20 cargo run:*)",
+      "Bash(gdb:*)",
+      "Bash(RUSTFLAGS=\"-Z sanitizer=address\" cargo +nightly run:*)",
+      "Bash(RUST_BACKTRACE=full cargo run:*)",
+      "Bash(RUST_BACKTRACE=1 timeout 10 cargo run:*)",
+      "Bash(RUST_LOG=debug timeout 20 cargo run:*)",
+      "Bash(RUST_LOG=maniac_raft=debug,openraft=info timeout 15 cargo run:*)",
+      "Bash(RUST_BACKTRACE=1 timeout 15 cargo run:*)"
     ],
     "deny": [],
     "ask": []

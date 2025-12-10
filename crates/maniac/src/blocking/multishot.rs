@@ -351,29 +351,59 @@ impl<T> Sender<T> {
     pub fn send(self, t: T) {
         let this = ManuallyDrop::new(self);
         unsafe { this.inner.as_ref().write_value(t) };
-        let mut idx = state_to_index(unsafe { this.inner.as_ref().state.load(Ordering::Relaxed) });
-        loop {
-            let waker = unsafe { this.inner.as_ref().take_waker(idx) };
-            let state = unsafe {
-                this.inner
-                    .as_ref()
-                    .state
-                    .fetch_and(!(OPEN | EMPTY | EXECUTING | CANCELLED), Ordering::AcqRel)
-            };
-            unsafe {
-                if state & OPEN == 0 {
-                    this.inner.as_ref().drop_value_in_place();
-                    drop(Box::from_raw(this.inner.as_ptr()));
-                    return;
-                }
-            }
-            if state & EMPTY == EMPTY {
-                if let Some(waker) = waker {
-                    waker.wake()
-                }
+
+        // Atomically clear OPEN, EMPTY, EXECUTING, CANCELLED and get the previous state
+        // This must be done ONCE, not in the loop, otherwise we lose information
+        let state = unsafe {
+            this.inner
+                .as_ref()
+                .state
+                .fetch_and(!(OPEN | EMPTY | EXECUTING | CANCELLED), Ordering::AcqRel)
+        };
+
+        // Check if receiver was dropped
+        unsafe {
+            if state & OPEN == 0 {
+                this.inner.as_ref().drop_value_in_place();
+                drop(Box::from_raw(this.inner.as_ptr()));
                 return;
             }
-            idx = 1 - idx;
+        }
+
+        // Determine waker index from the state
+        let idx = state_to_index(state);
+
+        // The EMPTY flag tells us if a waker is registered:
+        // - EMPTY set: receiver is waiting (polled and returned Pending), waker at new_idx = 1 - idx
+        // - EMPTY clear: receiver polled, may have set waker at 1 - state_idx before clearing EMPTY
+        //
+        // Actually, looking at Recv::poll, when it returns Pending:
+        // - It sets waker at new_idx = 1 - current_idx (where current_idx = state_to_index(state))
+        // - It swaps state to index_to_state(current_idx) | OPEN (which clears EMPTY)
+        //
+        // So after Recv::poll returns Pending, EMPTY is CLEAR and waker is at (1 - old_idx).
+        // But the new state has the OLD index, so we need to wake at (1 - state_idx).
+        //
+        // When EMPTY is set (initial state or after value consumed):
+        // - Waker may be at idx 0 (from channel creation with no waker) or not present
+        //
+        // The loop handles the case where we might need to check both waker slots.
+
+        if state & EMPTY == EMPTY {
+            // EMPTY was set - initial state or polled with no pending recv
+            // Waker was set at slot 0 initially (None) - just wake if present
+            let waker = unsafe { this.inner.as_ref().take_waker(idx) };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        } else {
+            // EMPTY was clear - Recv::poll set a waker at (1 - idx) and cleared EMPTY
+            // The state index is the OLD index from before poll, so waker is at 1 - idx
+            let waker_idx = 1 - idx;
+            let waker = unsafe { this.inner.as_ref().take_waker(waker_idx) };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
         }
     }
 }

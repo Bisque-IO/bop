@@ -2367,12 +2367,19 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize, S: SignalSchedule> Spsc<T, P, 
     /// (SPSC guarantee must be maintained by the caller).
     #[inline(always)]
     pub fn try_push(&self, item: T) -> Result<(), PushError<T>> {
-        self.try_push_n(core::slice::from_ref(&item))
-            .map(|_| ())
-            .map_err(|err| match err {
-                PushError::Full(()) => PushError::Full(item),
-                PushError::Closed(()) => PushError::Closed(item),
-            })
+        // SAFETY: We create a slice from the item reference for try_push_n to copy.
+        // On success, try_push_n copies the bytes using ptr::copy_nonoverlapping,
+        // which creates a bitwise copy. We MUST forget the original item to prevent
+        // double-free: the consumer will later read the copied bytes and drop them.
+        match self.try_push_n(core::slice::from_ref(&item)) {
+            Ok(_) => {
+                // Successfully copied - forget the original to prevent double-free
+                std::mem::forget(item);
+                Ok(())
+            }
+            Err(PushError::Full(())) => Err(PushError::Full(item)),
+            Err(PushError::Closed(())) => Err(PushError::Closed(item)),
+        }
     }
 
     /// Attempts to enqueue multiple items from a slice.

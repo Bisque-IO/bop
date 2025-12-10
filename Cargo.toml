@@ -11,8 +11,7 @@ members = [
     # "crates/maniac-sys",
     # "crates/maniac-usockets",
     "crates/maniac",
-    "crates/raft",
-    "crates/raft-macros",
+    "crates/raft",  # maniac-raft: OpenRaft adapter for Maniac runtime
     "moon/rapp",
     "crates/rusqlite",
     "crates/libsql-ffi",
@@ -140,8 +139,10 @@ zstd = "0.13"
 # maniac-sys = { path = "crates/maniac-sys", version = "0.1.0" }
 # maniac-usockets = { path = "crates/maniac-usockets", version = "0.1.0", default-features = false }
 maniac = { path = "crates/maniac", version = "0.1.0" }
-maniac-raft = { path = "crates/raft", version = "0.10.0" }
-maniac-raft-macros = { path = "crates/raft-macros", version = "0.10.0" }
+maniac-raft = { path = "crates/raft", version = "0.1.0" }
+# Upstream openraft from git
+openraft = { git = "https://github.com/databendlabs/openraft", branch = "main", default-features = false, features = ["serde"] }
+openraft-macros = { git = "https://github.com/databendlabs/openraft", branch = "main" }
 maniac-rusqlite = { path = "crates/rusqlite", version = "0.9.29" }
 maniac-libsql-ffi = { path = "crates/libsql-ffi", version = "3.45.1" }
 maniac-libsql-sys = { path = "crates/libsql-sys", version = "3.45.1" }

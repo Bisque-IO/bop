@@ -5,13 +5,13 @@ pub mod worker;
 
 use super::deque::{Stealer, Worker as YieldWorker};
 use super::task::summary::Summary;
-use super::task::{GeneratorRunMode, Task, TaskArena, TaskArenaStats, TaskHandle, TaskSlot};
+use super::task::{GeneratorOwnership, Task, TaskArena, TaskArenaStats, TaskHandle, TaskSlot};
 use super::timer::wheel::TimerWheel;
 use super::timer::{Timer, TimerHandle};
 use crate::PopError;
 use crate::future::waker::DiatomicWaker;
 use crate::runtime::preemption::GeneratorYieldReason;
-use crate::runtime::task::{GeneratorOwnership, SpawnError};
+use crate::runtime::task::SpawnError;
 use crate::runtime::timer::ticker::{TickHandler, TickHandlerRegistration};
 use crate::runtime::worker::io::IoDriver;
 use crate::runtime::{mpsc, preemption};
@@ -147,14 +147,8 @@ pub extern "C" fn rust_preemption_helper() {
 
             if !task.has_pinned_generator() {
                 unsafe {
-                    task.pin_generator(
-                        scope as *mut usize,
-                        GeneratorOwnership::Worker,
-                        GeneratorRunMode::Switch,
-                    )
+                    task.pin_generator(scope as *mut usize, GeneratorOwnership::Worker)
                 };
-            } else {
-                task.set_generator_run_mode(GeneratorRunMode::Switch);
             }
 
             // 1. Check and clear flag (for cooperative correctness / hygiene)
@@ -221,16 +215,10 @@ pub fn as_coroutine() -> bool {
         if !task.has_pinned_generator() {
             // Mark the task as wanting a dedicated generator.
             // We use a null pointer as a sentinel value - the worker will detect this
-            // and create a proper poll-mode generator for the task.
+            // and create a proper generator for the task.
             // The Owned ownership indicates we need to CREATE a generator, not that
             // we're capturing the worker's generator.
-            unsafe {
-                task.pin_generator(
-                    std::ptr::null_mut(),
-                    GeneratorOwnership::Owned,
-                    GeneratorRunMode::Poll,
-                )
-            };
+            unsafe { task.pin_generator(std::ptr::null_mut(), GeneratorOwnership::Owned) };
         }
         true
     } else {
@@ -320,17 +308,11 @@ pub fn sync_await<F: Future>(fut: F) -> F::Output {
                 match fut.as_mut().poll(&mut cx) {
                     Poll::Ready(result) => return result,
                     Poll::Pending => {
-                        // disable preemption
+                        // Pin the generator if not already pinned
                         if !task.has_pinned_generator() {
                             unsafe {
-                                task.pin_generator(
-                                    scope as *mut usize,
-                                    GeneratorOwnership::Worker,
-                                    GeneratorRunMode::Switch,
-                                )
+                                task.pin_generator(scope as *mut usize, GeneratorOwnership::Worker)
                             };
-                        } else {
-                            task.set_generator_run_mode(GeneratorRunMode::Switch);
                         }
 
                         // Yield is cooperative

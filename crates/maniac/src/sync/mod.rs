@@ -9,3 +9,9 @@ pub mod multishot;
 pub mod semaphore;
 pub use semaphore::Semaphore;
 pub mod watch;
+
+pub use multishot::*;
+pub use mutex::*;
+pub use oneshot::*;
+pub use semaphore::*;
+pub use watch::*;

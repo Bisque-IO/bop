@@ -99,6 +99,15 @@ impl<T> Sender<T> {
             inner: self.inner.value.read(),
         }
     }
+
+    /// Creates a new receiver subscribed to this sender.
+    pub fn subscribe(&self) -> Receiver<T> {
+        let current_version = *self.inner.version.lock();
+        Receiver {
+            inner: Arc::clone(&self.inner),
+            last_version: current_version,
+        }
+    }
 }
 
 impl<T> Clone for Sender<T> {

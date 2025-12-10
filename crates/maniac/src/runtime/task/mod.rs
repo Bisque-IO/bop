@@ -364,11 +364,11 @@ pub struct Task {
     summary_tree_ptr: *const Summary,
     future_ptr: AtomicPtr<()>,
     can_preempt: AtomicBool,
-    // Generator pinning support: when a task pins a generator, it gets dedicated execution
+    // Generator pinning support: when a task pins a generator, it gets dedicated execution.
+    // The generator is pinned when this task's poll was interrupted (e.g., by preemption or
+    // cooperative yield). Once pinned, the generator only runs this task until completion.
     pinned_generator_ptr: AtomicPtr<()>,
     pinned_generator_ownership: AtomicU8,
-    // Generator run mode: 0 = None, 1 = Switch (preempted), 2 = Poll (explicit/loop)
-    generator_run_mode: AtomicU8,
     // Safety: stats are mutated without synchronization based on executor guarantees that
     // only the owning worker thread records updates while other threads may only clone/copy.
     stats: UnsafeCell<TaskStats>,
@@ -377,24 +377,14 @@ pub struct Task {
 unsafe impl Send for Task {}
 unsafe impl Sync for Task {}
 
-/// Generator run modes
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GeneratorRunMode {
-    /// No generator pinned
-    None = 0,
-    /// Switch mode: Generator has interrupted poll on stack (one-shot resume)
-    Switch = 1,
-    /// Poll mode: Generator contains poll loop (multi-shot resume)
-    Poll = 2,
-}
-
+/// Generator ownership indicates whether the task owns its generator or if the worker does.
+/// When a worker's generator gets pinned to a task, the task takes ownership.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeneratorOwnership {
-    /// No generator pinned
+    /// Task owns the generator (e.g., spawned with pinned generator)
     Owned = 0,
-    /// Switch mode: Generator has interrupted poll on stack (one-shot resume)
+    /// Worker's generator was captured and pinned to this task
     Worker = 1,
 }
 
@@ -440,7 +430,6 @@ impl Task {
                     future_ptr: AtomicPtr::new(ptr::null_mut()),
                     pinned_generator_ptr: AtomicPtr::new(ptr::null_mut()),
                     pinned_generator_ownership: AtomicU8::new(GeneratorOwnership::Owned as u8),
-                    generator_run_mode: AtomicU8::new(GeneratorRunMode::None as u8),
                     stats: UnsafeCell::new(TaskStats::default()),
                 },
             );
@@ -955,8 +944,6 @@ impl Task {
             .store(ptr::null_mut(), Ordering::Relaxed);
         self.pinned_generator_ownership
             .store(GeneratorOwnership::Owned as u8, Ordering::Relaxed);
-        self.generator_run_mode
-            .store(GeneratorRunMode::None as u8, Ordering::Relaxed);
         unsafe {
             let stats = &mut *self.stats.get();
             stats.reset();
@@ -983,31 +970,23 @@ impl Task {
         }
     }
 
-    /// Pin a generator to this task
-    /// Safety: Only call from the worker thread that owns this task
+    /// Pin a generator to this task.
+    ///
+    /// Once pinned, this generator will only run this task until the task completes.
+    /// The worker that pinned the generator must create a new generator for itself.
+    ///
+    /// # Safety
+    /// Only call from the worker thread that owns this task.
     #[inline(always)]
     pub unsafe fn pin_generator(
         &self,
         generator_ptr: *mut usize,
         ownership: GeneratorOwnership,
-        mode: GeneratorRunMode,
     ) {
         self.pinned_generator_ptr
             .store(generator_ptr as *mut (), Ordering::Release);
         self.pinned_generator_ownership
             .store(ownership as u8, Ordering::Release);
-        self.generator_run_mode.store(mode as u8, Ordering::Release);
-    }
-
-    /// Get the generator run mode
-    #[inline(always)]
-    pub fn generator_run_mode(&self) -> GeneratorRunMode {
-        let mode = self.generator_run_mode.load(Ordering::Acquire);
-        match mode {
-            1 => GeneratorRunMode::Switch,
-            2 => GeneratorRunMode::Poll,
-            _ => GeneratorRunMode::None,
-        }
     }
 
     #[inline(always)]
@@ -1018,13 +997,6 @@ impl Task {
     #[inline(always)]
     pub fn is_generator_owned_by_worker(&self) -> bool {
         self.pinned_generator_ownership.load(Ordering::Relaxed) == GeneratorOwnership::Worker as u8
-    }
-
-    /// Set the generator run mode
-    /// Safety: Only call from the worker thread that owns this task
-    #[inline(always)]
-    pub unsafe fn set_generator_run_mode(&self, mode: GeneratorRunMode) {
-        self.generator_run_mode.store(mode as u8, Ordering::Release);
     }
 
     /// Take ownership of the pinned generator (for cleanup)
