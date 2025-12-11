@@ -14,25 +14,29 @@ default = ["multi"]
 multi = []
 
 [dependencies]
+futures = { workspace = true }
 # Upstream openraft
-openraft = { workspace = true }
+openraft = { workspace = true, features = ["tokio-rt"] }
 
 # Maniac runtime (for async primitives)
 maniac = { path = "../maniac", version = "0.1.0", default-features = false, features = [
     "std",
     "race",
-    "mio",
+    "iouring",
     "poll",
+    "mio",
     "bytes",
     "utils",
     "async-cancel",
     "tracing",
+    "mkdirat",
 ] }
 
 # Other dependencies
 crc64fast-nvme = { workspace = true }
 dashmap = { workspace = true }
-flume = "0.11"
+flume = "0.12"
+kanal = "0.1"
 parking_lot = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
@@ -44,10 +48,21 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 bincode = { version = "2.0.1", features = ["serde"] }
 chrono = { workspace = true }
-futures = { workspace = true }
 futures-lite = { workspace = true }
-tracing-subscriber = { version = "0.3" }
+kanal = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]
 name = "multi_raft_cluster"
 path = "examples/multi_raft_cluster.rs"
+
+[[example]]
+name = "network_stress_test"
+path = "examples/network_stress_test.rs"
+
+[profile.release]
+debug = true
+
+[profile.profiling]
+inherits = "release"
+debug = true

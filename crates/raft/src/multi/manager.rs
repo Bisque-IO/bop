@@ -68,7 +68,7 @@ where
         SM: RaftStateMachine<C>,
     {
         let group_factory = GroupNetworkFactory::new(self.network_factory.clone(), group_id);
-        let log_store = self.storage.get_log_storage(group_id);
+        let log_store = self.storage.get_log_storage(group_id).await;
 
         let raft = Raft::new(
             node_id,

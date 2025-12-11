@@ -40,17 +40,18 @@
 //! 5. Truncates the file at that point
 //! 6. Rebuilds in-memory state from valid records
 
-use crate::multi::codec::{Encode, Entry as CodecEntry, RawBytes, ToCodec, Vote as CodecVote};
+use crate::multi::codec::{Encode, Entry as CodecEntry, LogId as CodecLogId, RawBytes, ToCodec, Vote as CodecVote};
 use crc64fast_nvme::Digest;
 use dashmap::DashMap;
-use maniac::fs::File;
+use maniac::fs::{File, OpenOptions};
 use maniac::io::AsyncWriteRentExt;
+// Using flume instead of maniac mpsc for reliability
+// use maniac::sync::mpsc::bounded as mpsc_bounded;
 use openraft::{
     storage::{IOFlushed, RaftLogReader, RaftLogStorage},
     LogId, LogState, RaftTypeConfig,
 };
 use std::io;
-use std::io::{Read, Seek, Write};
 use std::ops::RangeBounds;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -209,11 +210,12 @@ fn validate_record(data: &[u8]) -> io::Result<ParsedRecord<'_>> {
     })
 }
 
-/// Configuration for per-group log storage
+/// Configuration for per-group log storage.
+/// Uses Arc<PathBuf> for cheap cloning of config across groups.
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
-    /// Base directory for storage files
-    pub base_dir: PathBuf,
+    /// Base directory for storage files (Arc for cheap cloning)
+    pub base_dir: Arc<PathBuf>,
     /// Maximum segment size in bytes. When exceeded, a new segment is created.
     /// Default: 64MB
     pub segment_size: u64,
@@ -227,11 +229,39 @@ pub struct StorageConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            base_dir: PathBuf::from("./raft-data"),
+            base_dir: Arc::new(PathBuf::from("./raft-data")),
             segment_size: DEFAULT_SEGMENT_SIZE,
             fsync_interval: Some(Duration::from_millis(100)),
             max_cache_entries_per_group: 10000,
         }
+    }
+}
+
+impl StorageConfig {
+    /// Create a new StorageConfig with the given base directory
+    pub fn new(base_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            base_dir: Arc::new(base_dir.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Set the segment size
+    pub fn with_segment_size(mut self, size: u64) -> Self {
+        self.segment_size = size;
+        self
+    }
+
+    /// Set the fsync interval
+    pub fn with_fsync_interval(mut self, interval: Option<Duration>) -> Self {
+        self.fsync_interval = interval;
+        self
+    }
+
+    /// Set the max cache entries per group
+    pub fn with_max_cache_entries(mut self, entries: usize) -> Self {
+        self.max_cache_entries_per_group = entries;
+        self
     }
 }
 
@@ -262,7 +292,7 @@ impl Default for ShardedStorageConfig {
 impl From<ShardedStorageConfig> for StorageConfig {
     fn from(cfg: ShardedStorageConfig) -> Self {
         Self {
-            base_dir: cfg.base_dir,
+            base_dir: Arc::new(cfg.base_dir),
             segment_size: cfg.segment_size,
             fsync_interval: cfg.fsync_interval,
             max_cache_entries_per_group: cfg.max_cache_entries_per_group,
@@ -290,8 +320,8 @@ struct GroupState<C: RaftTypeConfig> {
 }
 
 impl<C: RaftTypeConfig + 'static> GroupState<C> {
-    fn new(group_id: u64, config: &StorageConfig) -> io::Result<Self> {
-        let shard = ShardState::new(group_id, config)?;
+    async fn new(group_id: u64, config: &StorageConfig) -> io::Result<Self> {
+        let shard = ShardState::new(group_id, config).await?;
         Ok(Self {
             cache: DashMap::new(),
             vote: AtomicVote::new(),
@@ -467,32 +497,27 @@ struct SegmentedLog {
 }
 
 impl SegmentedLog {
-    /// Create or recover a segmented log for a group
-    fn recover(group_dir: PathBuf, group_id: u64, segment_size: u64) -> io::Result<Self> {
-        std::fs::create_dir_all(&group_dir)?;
+    /// Create or recover a segmented log for a group (async version)
+    async fn recover(group_dir: PathBuf, group_id: u64, segment_size: u64) -> io::Result<Self> {
+        maniac::fs::create_dir_all(&group_dir).await?;
 
         // Find existing segments
-        let segments = Self::list_segments(&group_dir, group_id)?;
+        let segments = Self::list_segments_async(&group_dir, group_id).await?;
 
         let (current_segment_id, current_file, current_size) = if segments.is_empty() {
             // No existing segments - create first one
             let segment_id = 0u64;
             let path = Self::segment_path(&group_dir, group_id, segment_id);
-            let std_file = std::fs::OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .open(&path)?;
-            let file = File::from_std(std_file)?;
+            let file = File::create(&path).await?;
             (segment_id, file, 0)
         } else {
-            // Recover from existing segments
+            // Recover from existing segments using async I/O
             let mut last_valid_segment_id = 0u64;
             let mut total_valid_bytes = 0u64;
 
             for segment_id in &segments {
                 let path = Self::segment_path(&group_dir, group_id, *segment_id);
-                let valid_bytes = Self::recover_segment(&path)?;
+                let valid_bytes = Self::recover_segment_async(&path).await?;
 
                 if valid_bytes > 0 {
                     last_valid_segment_id = *segment_id;
@@ -502,18 +527,14 @@ impl SegmentedLog {
 
             // Open the last valid segment for appending
             let path = Self::segment_path(&group_dir, group_id, last_valid_segment_id);
-            let std_file = std::fs::OpenOptions::new()
+
+            // Truncate any data after valid point using async File::set_len
+            let file = OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open(&path)?;
-
-            // Seek to end of valid data
-            let mut file_handle = std_file;
-            file_handle.seek(io::SeekFrom::Start(total_valid_bytes))?;
-            // Truncate any data after valid point
-            file_handle.set_len(total_valid_bytes)?;
-
-            let file = File::from_std(file_handle)?;
+                .open(&path)
+                .await?;
+            file.set_len(total_valid_bytes).await?;
             (last_valid_segment_id, file, total_valid_bytes)
         };
 
@@ -527,19 +548,20 @@ impl SegmentedLog {
         })
     }
 
-    /// List segment IDs for a group, sorted by ID
-    fn list_segments(group_dir: &PathBuf, group_id: u64) -> io::Result<Vec<u64>> {
+    /// List segment IDs for a group, sorted by ID (async version)
+    async fn list_segments_async(group_dir: &PathBuf, group_id: u64) -> io::Result<Vec<u64>> {
         let prefix = format!("group-{}-", group_id);
         let suffix = ".log";
 
         let mut segments = Vec::new();
 
-        if let Ok(entries) = std::fs::read_dir(group_dir) {
-            for entry in entries.flatten() {
+        // Use async read_dir from maniac::fs
+        if let Ok(entries) = maniac::fs::read_dir(group_dir).await {
+            for entry in entries {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
 
-                if name_str.starts_with(&prefix) && name_str.ends_with(suffix) {
+                if name_str.starts_with(&prefix) && name_str.ends_with(&suffix) {
                     // Extract segment ID from filename
                     let id_str = &name_str[prefix.len()..name_str.len() - suffix.len()];
                     if let Ok(segment_id) = id_str.parse::<u64>() {
@@ -558,18 +580,20 @@ impl SegmentedLog {
         group_dir.join(format!("group-{}-{}.log", group_id, segment_id))
     }
 
-    /// Recover a segment file, validating all records
+    /// Recover a segment file using async I/O, validating all records
     /// Returns the byte offset of the last valid record's end
-    fn recover_segment(path: &PathBuf) -> io::Result<u64> {
-        let mut file = std::fs::File::open(path)?;
-        let file_len = file.metadata()?.len();
+    async fn recover_segment_async(path: &PathBuf) -> io::Result<u64> {
+        let file = File::open(path).await?;
+        let file_len = file.metadata().await?.len();
 
         if file_len == 0 {
             return Ok(0);
         }
 
         let mut offset = 0u64;
-        let mut len_buf = [0u8; LENGTH_SIZE];
+        // Reusable buffer for reading length + record - avoids allocation per record
+        // Start with capacity for typical small records
+        let mut read_buf: Vec<u8> = Vec::with_capacity(4096);
 
         loop {
             // Check if we have enough bytes for a length field
@@ -578,40 +602,49 @@ impl SegmentedLog {
                 break;
             }
 
-            // Read length
-            file.seek(io::SeekFrom::Start(offset))?;
-            if file.read_exact(&mut len_buf).is_err() {
+            // Read length field using async read_at
+            read_buf.resize(LENGTH_SIZE, 0);
+            let (result, buf) = file.read_exact_at(read_buf, offset).await;
+            read_buf = buf;
+            if result.is_err() {
                 break;
             }
 
-            let record_len = u32::from_le_bytes(len_buf) as u64;
+            let record_len = u32::from_le_bytes(read_buf[..LENGTH_SIZE].try_into().unwrap()) as usize;
 
             // Sanity check on length
-            if record_len < (1 + 8 + CRC64_SIZE) as u64 || record_len > 100 * 1024 * 1024 {
+            if record_len < (1 + 8 + CRC64_SIZE) || record_len > 100 * 1024 * 1024 {
                 // Invalid length - truncate here
                 break;
             }
 
             // Check if we have enough bytes for the full record
-            if offset + LENGTH_SIZE as u64 + record_len > file_len {
+            if offset + LENGTH_SIZE as u64 + record_len as u64 > file_len {
                 // Partial record - truncate here
                 break;
             }
 
-            // Read the record data (everything after length)
-            let mut record_data = vec![0u8; record_len as usize];
-            if file.read_exact(&mut record_data).is_err() {
+            // Resize buffer if needed (capacity grows but never shrinks)
+            if read_buf.capacity() < record_len {
+                read_buf.reserve(record_len - read_buf.capacity());
+            }
+            read_buf.resize(record_len, 0);
+
+            // Read the record data using async read_at
+            let (result, buf) = file.read_exact_at(read_buf, offset + LENGTH_SIZE as u64).await;
+            read_buf = buf;
+            if result.is_err() {
                 break;
             }
 
             // Validate CRC
-            if validate_record(&record_data).is_err() {
+            if validate_record(&read_buf[..record_len]).is_err() {
                 // Invalid CRC - truncate here
                 break;
             }
 
             // Record is valid, move to next
-            offset += LENGTH_SIZE as u64 + record_len;
+            offset += LENGTH_SIZE as u64 + record_len as u64;
         }
 
         Ok(offset)
@@ -643,13 +676,13 @@ impl SegmentedLog {
         self.current_segment_id += 1;
         let path = Self::segment_path(&self.group_dir, self.group_id, self.current_segment_id);
 
-        let std_file = std::fs::OpenOptions::new()
+        // Use async OpenOptions to create the new segment file
+        self.current_file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open(&path)?;
-
-        self.current_file = File::from_std(std_file)?;
+            .open(&path)
+            .await?;
         self.current_size = 0;
 
         Ok(())
@@ -663,7 +696,7 @@ impl SegmentedLog {
 
 /// Per-group shard state
 struct ShardState<C: RaftTypeConfig> {
-    /// Channel to send write requests to the shard writer task
+    /// Channel to send write requests to the shard writer task (using flume for reliability)
     write_tx: flume::Sender<WriteRequest<C>>,
     /// Whether the shard is running
     #[allow(dead_code)]
@@ -671,16 +704,16 @@ struct ShardState<C: RaftTypeConfig> {
 }
 
 impl<C: RaftTypeConfig + 'static> ShardState<C> {
-    /// Create a new shard with its writer task, performing recovery
-    fn new(group_id: u64, config: &StorageConfig) -> io::Result<Self> {
+    /// Create a new shard with its writer task, performing async recovery
+    async fn new(group_id: u64, config: &StorageConfig) -> io::Result<Self> {
         // Group-specific directory
         let group_dir = config.base_dir.join(format!("{}", group_id));
 
-        // Recover the segmented log synchronously during initialization
-        let segmented_log = SegmentedLog::recover(group_dir, group_id, config.segment_size)?;
+        // Recover the segmented log asynchronously during initialization
+        let segmented_log = SegmentedLog::recover(group_dir, group_id, config.segment_size).await?;
 
-        // Create channel for write requests (bounded for backpressure)
-        let (write_tx, write_rx) = flume::bounded::<WriteRequest<C>>(1024);
+        // Create channel for write requests using flume for reliability
+        let (write_tx, write_rx) = flume::bounded::<WriteRequest<C>>(256);
 
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
@@ -718,18 +751,15 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
                 })
                 .unwrap_or(Duration::from_secs(3600));
 
-            // Try to receive with timeout
-            let request = if timeout.is_zero() {
-                write_rx.try_recv().ok()
-            } else {
-                match maniac::time::timeout(timeout, async {
-                    write_rx.recv_async().await.ok()
-                })
-                .await
-                {
-                    Ok(req) => req,
-                    Err(_) => None,
+            // Wait for a request with timeout (properly blocks without busy-wait)
+            let request = match maniac::time::timeout(timeout, write_rx.recv_async()).await {
+                Ok(Ok(req)) => Some(req),
+                Ok(Err(_)) => {
+                    // Channel closed (flume::RecvError)
+                    running.store(false, Ordering::Release);
+                    return;
                 }
+                Err(_) => None, // Timeout - no request, check for fsync
             };
 
             match request {
@@ -737,11 +767,13 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
                     data,
                     sync_immediately,
                 }) => {
+                    tracing::trace!("writer_loop: received write request ({} bytes)", data.len());
                     if let Err(e) = log.write(data).await {
                         eprintln!("Shard write error: {}", e);
                         continue;
                     }
                     dirty = true;
+                    tracing::trace!("writer_loop: write complete");
 
                     if sync_immediately {
                         if let Err(e) = log.sync().await {
@@ -749,6 +781,7 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
                         }
                         dirty = false;
                         last_sync = std::time::Instant::now();
+                        tracing::trace!("writer_loop: sync complete");
                     }
                 }
                 Some(WriteRequest::QueueCallback(callback)) => {
@@ -770,33 +803,6 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
             // Check if it's time for interval-based fsync
             if let Some(interval) = fsync_interval {
                 if last_sync.elapsed() >= interval && (dirty || !pending_callbacks.is_empty()) {
-                    // Drain any pending requests first (non-blocking batch)
-                    while let Ok(req) = write_rx.try_recv() {
-                        match req {
-                            WriteRequest::Write {
-                                data,
-                                sync_immediately: _,
-                            } => {
-                                if log.write(data).await.is_ok() {
-                                    dirty = true;
-                                }
-                            }
-                            WriteRequest::QueueCallback(callback) => {
-                                pending_callbacks.push(callback);
-                            }
-                            WriteRequest::Shutdown => {
-                                if dirty {
-                                    let _ = log.sync().await;
-                                }
-                                for callback in pending_callbacks.drain(..) {
-                                    callback.io_completed(Ok(()));
-                                }
-                                running.store(false, Ordering::Release);
-                                return;
-                            }
-                        }
-                    }
-
                     // Now sync
                     if dirty {
                         let result = log.sync().await;
@@ -829,23 +835,29 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
 
     /// Send a write request to the shard
     async fn write(&self, data: Vec<u8>, sync_immediately: bool) -> io::Result<()> {
-        self.write_tx
+        tracing::trace!("ShardState::write: sending {} bytes, sync_immediately={}", data.len(), sync_immediately);
+        let result = self.write_tx
             .send_async(WriteRequest::Write {
                 data,
                 sync_immediately,
             })
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "shard writer task closed"))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "shard writer task closed"));
+        tracing::trace!("ShardState::write: send complete, result={:?}", result.is_ok());
+        result
     }
 
     /// Queue an IOFlushed callback
-    fn queue_callback(&self, callback: IOFlushed<C>) {
-        let _ = self.write_tx.try_send(WriteRequest::QueueCallback(callback));
+    async fn queue_callback(&self, callback: IOFlushed<C>) {
+        let _ = self.write_tx.send_async(WriteRequest::QueueCallback(callback)).await;
     }
 
-    /// Shutdown the shard
+    /// Shutdown the shard (fire-and-forget, spawns async send)
     fn shutdown(&self) {
-        let _ = self.write_tx.try_send(WriteRequest::Shutdown);
+        let tx = self.write_tx.clone();
+        let _ = maniac::spawn(async move {
+            let _ = tx.send_async(WriteRequest::Shutdown).await;
+        });
     }
 }
 
@@ -878,7 +890,7 @@ impl<C: RaftTypeConfig + 'static> PerGroupLogStorage<C> {
     /// Groups are created dynamically on first access.
     pub async fn new(config: impl Into<StorageConfig>) -> io::Result<Self> {
         let config = config.into();
-        std::fs::create_dir_all(&config.base_dir)?;
+        maniac::fs::create_dir_all(&*config.base_dir).await?;
 
         Ok(Self {
             config,
@@ -894,25 +906,26 @@ impl<C: RaftTypeConfig + 'static> PerGroupLogStorage<C> {
     }
 
     /// Get or create state for a group (creates shard on first access)
-    fn get_or_create_group(&self, group_id: u64) -> io::Result<Arc<GroupState<C>>> {
+    async fn get_or_create_group(&self, group_id: u64) -> io::Result<Arc<GroupState<C>>> {
         if let Some(state) = self.groups.get(&group_id) {
             return Ok(state.value().clone());
         }
 
-        // Create new group state (includes shard creation and recovery)
-        let state = Arc::new(GroupState::new(group_id, &self.config)?);
+        // Create new group state (includes shard creation and async recovery)
+        let state = Arc::new(GroupState::new(group_id, &self.config).await?);
         self.groups.insert(group_id, state.clone());
         Ok(state)
     }
 
     /// Get a log storage handle for a specific group
-    pub fn get_log_storage(&self, group_id: u64) -> io::Result<GroupLogStorage<C>> {
-        let group_state = self.get_or_create_group(group_id)?;
+    pub async fn get_log_storage(&self, group_id: u64) -> io::Result<GroupLogStorage<C>> {
+        let group_state = self.get_or_create_group(group_id).await?;
         Ok(GroupLogStorage {
             group_id,
             config: self.config.clone(),
             state: group_state,
             encode_buf: Vec::new(),
+            payload_buf: Vec::new(),
         })
     }
 
@@ -940,7 +953,7 @@ impl<C: RaftTypeConfig + 'static> PerGroupLogStorage<C> {
 pub trait MultiplexedStorage<C: RaftTypeConfig> {
     type GroupLogStorage: RaftLogStorage<C>;
 
-    fn get_log_storage(&self, group_id: u64) -> Self::GroupLogStorage;
+    fn get_log_storage(&self, group_id: u64) -> impl std::future::Future<Output = Self::GroupLogStorage> + Send;
     fn remove_group(&self, group_id: u64);
     fn group_ids(&self) -> Vec<u64>;
 }
@@ -961,9 +974,9 @@ where
 {
     type GroupLogStorage = GroupLogStorage<C>;
 
-    fn get_log_storage(&self, group_id: u64) -> Self::GroupLogStorage {
+    async fn get_log_storage(&self, group_id: u64) -> Self::GroupLogStorage {
         // Panics if group creation fails - in practice this should be fallible
-        self.get_log_storage(group_id).expect("Failed to create group storage")
+        PerGroupLogStorage::get_log_storage(self, group_id).await.expect("Failed to create group storage")
     }
 
     fn remove_group(&self, group_id: u64) {
@@ -992,9 +1005,9 @@ where
 {
     type GroupLogStorage = GroupLogStorage<C>;
 
-    fn get_log_storage(&self, group_id: u64) -> Self::GroupLogStorage {
+    async fn get_log_storage(&self, group_id: u64) -> Self::GroupLogStorage {
         // Panics if group creation fails - in practice this should be fallible
-        self.get_log_storage(group_id).expect("Failed to create group storage")
+        PerGroupLogStorage::get_log_storage(self, group_id).await.expect("Failed to create group storage")
     }
 
     fn remove_group(&self, group_id: u64) {
@@ -1016,6 +1029,8 @@ pub struct GroupLogStorage<C: RaftTypeConfig> {
     state: Arc<GroupState<C>>,
     /// Reusable buffer for encoding records (avoids allocation per write)
     encode_buf: Vec<u8>,
+    /// Reusable buffer for encoding payloads before wrapping in record format
+    payload_buf: Vec<u8>,
 }
 
 impl<C: RaftTypeConfig> Clone for GroupLogStorage<C> {
@@ -1025,11 +1040,20 @@ impl<C: RaftTypeConfig> Clone for GroupLogStorage<C> {
             config: self.config.clone(),
             state: self.state.clone(),
             encode_buf: Vec::new(), // Each clone gets its own buffer
+            payload_buf: Vec::new(),
         }
     }
 }
 
 impl<C: RaftTypeConfig> GroupLogStorage<C> {
+    /// Send the data in encode_buf to the shard writer.
+    /// This takes the buffer and gives it to the writer task.
+    async fn send_encoded(&mut self) -> Result<(), io::Error> {
+        let data = std::mem::take(&mut self.encode_buf);
+        let sync_immediately = self.config.fsync_interval.is_none();
+        self.state.shard.write(data, sync_immediately).await
+    }
+
     /// Encode a record into the internal buffer and send it to the shard writer.
     /// The buffer is taken and a new empty buffer is received back from the channel
     /// response (amortizing allocation over time).
@@ -1039,15 +1063,13 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
         payload: &[u8],
     ) -> Result<(), io::Error> {
         encode_record_into(&mut self.encode_buf, record_type, self.group_id, payload);
-        let data = std::mem::take(&mut self.encode_buf);
-        let sync_immediately = self.config.fsync_interval.is_none();
-        self.state.shard.write(data, sync_immediately).await
+        self.send_encoded().await
     }
 
     /// Queue an IOFlushed callback to be notified after the next fsync
-    fn queue_callback(&self, callback: IOFlushed<C>) {
+    async fn queue_callback(&self, callback: IOFlushed<C>) {
         if self.config.fsync_interval.is_some() {
-            self.state.shard.queue_callback(callback);
+            self.state.shard.queue_callback(callback).await;
         } else {
             callback.io_completed(Ok(()));
         }
@@ -1096,7 +1118,10 @@ where
             Bound::Unbounded => u64::MAX,
         };
 
-        let mut entries = Vec::new();
+        // Pre-size the vec based on expected range (cap at reasonable size)
+        let expected_len = end.saturating_sub(start).min(1024) as usize;
+        let mut entries = Vec::with_capacity(expected_len);
+
         for idx in start..end {
             if let Some(entry) = self.state.cache.get(&idx) {
                 entries.push(entry.value().as_ref().clone());
@@ -1146,13 +1171,15 @@ where
         // Store atomically in memory
         self.state.vote.store(Some(vote));
 
-        // Persist to log file
+        // Persist to log file - encode into payload buffer, then build record
         let codec_vote = vote.to_codec();
-        let vote_bytes = codec_vote
-            .encode_to_vec()
+        codec_vote
+            .encode_into(&mut self.payload_buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-        self.write_record(RecordType::Vote, &vote_bytes).await?;
+        // Build the record directly from payload_buf contents
+        encode_record_into(&mut self.encode_buf, RecordType::Vote, self.group_id, &self.payload_buf);
+        self.send_encoded().await?;
 
         Ok(())
     }
@@ -1169,14 +1196,15 @@ where
             let log_id = entry.log_id();
             let index = log_id.index;
 
-            // Convert entry to codec type and serialize
+            // Convert entry to codec type and serialize - reuse payload buffer
             let codec_entry: CodecEntry<RawBytes> = entry.to_codec();
-            let entry_bytes = codec_entry
-                .encode_to_vec()
+            codec_entry
+                .encode_into(&mut self.payload_buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-            // Write record with CRC
-            self.write_record(RecordType::Entry, &entry_bytes).await?;
+            // Build the record directly from payload_buf contents
+            encode_record_into(&mut self.encode_buf, RecordType::Entry, self.group_id, &self.payload_buf);
+            self.send_encoded().await?;
 
             // Store in cache
             self.state.cache.insert(index, Arc::new(entry));
@@ -1192,7 +1220,7 @@ where
         }
 
         // Queue callback to be notified after fsync
-        self.queue_callback(callback);
+        self.queue_callback(callback).await;
 
         Ok(())
     }
@@ -1230,14 +1258,15 @@ where
         self.state.first_index.store(index + 1, Ordering::Relaxed);
         self.state.last_purged_log_id.store(Some(&log_id));
 
-        // Persist purge marker with CRC
-        use crate::multi::codec::LogId as CodecLogId;
+        // Persist purge marker with CRC - reuse payload buffer
         let codec_log_id: CodecLogId = log_id.to_codec();
-        let log_id_bytes = codec_log_id
-            .encode_to_vec()
+        codec_log_id
+            .encode_into(&mut self.payload_buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-        self.write_record(RecordType::Purge, &log_id_bytes).await?;
+        // Build the record directly from payload_buf contents
+        encode_record_into(&mut self.encode_buf, RecordType::Purge, self.group_id, &self.payload_buf);
+        self.send_encoded().await?;
 
         Ok(())
     }
@@ -1266,7 +1295,7 @@ mod tests {
         };
 
         let config: StorageConfig = sharded.into();
-        assert_eq!(config.base_dir, PathBuf::from("/tmp/test"));
+        assert_eq!(*config.base_dir, PathBuf::from("/tmp/test"));
         assert_eq!(config.segment_size, 32 * 1024 * 1024);
         assert_eq!(config.fsync_interval, None);
         assert_eq!(config.max_cache_entries_per_group, 5000);

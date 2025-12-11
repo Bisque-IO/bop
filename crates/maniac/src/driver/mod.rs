@@ -96,6 +96,10 @@ pub(crate) enum Inner {
     Poller(std::sync::Arc<std::cell::UnsafeCell<PollerInner>>),
 }
 
+// SAFETY: Inner is Send + Sync because:
+// 1. The UringInner/PollerInner are accessed through Arc<UnsafeCell<...>>
+// 2. The slab inside UringInner is protected by a mutex for thread-safe access
+// 3. All operations are properly synchronized
 unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
 

@@ -272,7 +272,12 @@ impl<T> Page<T> {
                 Entry::Vacant(next_slot) => {
                     self.next = *next_slot;
                 }
-                _ => std::hint::unreachable_unchecked(),
+                Entry::Occupied(_) => {
+                    panic!(
+                        "slab corruption: slot {} is Occupied but in free list (next={}, initialized={}, used={}, len={})",
+                        next, next, self.initialized, self.used, self.slots.len()
+                    );
+                }
             }
         }
         self.used += 1;
@@ -314,9 +319,14 @@ impl<T> Page<T> {
         unsafe {
             let slot_mut = self.slots.get_unchecked_mut(slot).assume_init_mut();
             if slot_mut.is_vacant() {
-                return None;
+                // Double-remove detected!
+                panic!(
+                    "slab double-remove: slot {} is already Vacant! (next={}, initialized={}, used={}, len={})",
+                    slot, self.next, self.initialized, self.used, self.slots.len()
+                );
             }
-            let val = std::mem::replace(slot_mut, Entry::Vacant(self.next));
+            let old_next = self.next;
+            let val = std::mem::replace(slot_mut, Entry::Vacant(old_next));
             self.next = slot;
             self.used -= 1;
 

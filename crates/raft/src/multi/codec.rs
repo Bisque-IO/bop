@@ -43,6 +43,14 @@ pub trait Encode {
         self.encode(&mut buf)?;
         Ok(buf)
     }
+
+    /// Encode into an existing Vec<u8>, clearing it first and reserving capacity.
+    /// This avoids allocation when the buffer already has sufficient capacity.
+    fn encode_into(&self, buf: &mut Vec<u8>) -> Result<(), CodecError> {
+        buf.clear();
+        buf.reserve(self.encoded_size());
+        self.encode(buf)
+    }
 }
 
 /// Trait for types that can be decoded from bytes

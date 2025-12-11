@@ -15,48 +15,11 @@ pub use type_config::ManiacRaftTypeConfig;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use maniac::runtime::worker::Scheduler;
 use openraft::AsyncRuntime;
 use openraft::OptionalSend;
-
-// Global scheduler for spawning tasks from outside worker context
-static GLOBAL_SCHEDULER: AtomicPtr<Scheduler> = AtomicPtr::new(std::ptr::null_mut());
-
-/// Set the global scheduler used for spawning tasks outside of worker context.
-///
-/// This must be called during runtime initialization before any Raft operations.
-/// The scheduler reference must remain valid for the lifetime of the program.
-///
-/// # Safety
-/// The caller must ensure the scheduler remains valid for the program's lifetime.
-pub fn set_global_scheduler(scheduler: &Arc<Scheduler>) {
-    let ptr = Arc::as_ptr(scheduler) as *mut Scheduler;
-    GLOBAL_SCHEDULER.store(ptr, Ordering::Release);
-}
-
-/// Clear the global scheduler (call on shutdown).
-pub fn clear_global_scheduler() {
-    GLOBAL_SCHEDULER.store(std::ptr::null_mut(), Ordering::Release);
-}
-
-/// Get the global scheduler if set.
-fn global_scheduler() -> Option<Arc<Scheduler>> {
-    let ptr = GLOBAL_SCHEDULER.load(Ordering::Acquire);
-    if ptr.is_null() {
-        None
-    } else {
-        // SAFETY: We only store valid Arc pointers and increment refcount
-        unsafe {
-            Arc::increment_strong_count(ptr);
-            Some(Arc::from_raw(ptr))
-        }
-    }
-}
 
 /// Wrapper for `maniac::runtime::worker::JoinHandle` to implement `Future` and `Unpin`.
 pub struct JoinHandleWrapper<T> {
@@ -97,31 +60,10 @@ impl AsyncRuntime for ManiacRuntime {
         T: Future + OptionalSend + 'static,
         T::Output: OptionalSend + 'static,
     {
-        // Try to spawn using the current worker if we're in a worker context
-        // Otherwise, fallback to a panicking implementation (caller should ensure context)
-        if let Some(worker) = maniac::current_worker() {
-            let handle = maniac::spawn(future);
-            JoinHandleWrapper {
-                inner: handle.expect("failed to spawn task"),
-            }
-        } else {
-            // We're not in a worker context - this can happen during Raft initialization
-            // Use the global scheduler if available
-            if let Some(scheduler) = global_scheduler() {
-                let handle = scheduler.spawn(
-                    std::any::TypeId::of::<T>(),
-                    std::panic::Location::caller(),
-                    future,
-                );
-                JoinHandleWrapper {
-                    inner: handle.expect("failed to spawn task"),
-                }
-            } else {
-                panic!(
-                    "ManiacRuntime::spawn called outside of worker context and no global scheduler set. \
-                        Call set_global_scheduler() during runtime initialization."
-                );
-            }
+        let handle = maniac::spawn(future);
+        JoinHandleWrapper {
+            inner: handle
+                .expect("ManiacRuntime::spawn must be called from within a worker context"),
         }
     }
 
@@ -228,7 +170,7 @@ mod instant_mod {
     impl instant::Instant for ManiacInstant {
         #[inline]
         fn now() -> Self {
-            Self(maniac::time::Instant::now())
+            Self(maniac::time::Instant::now_high_frequency())
         }
 
         #[inline]
@@ -248,21 +190,21 @@ mod oneshot_mod {
 
     pub struct ManiacOneshot;
 
-    pub struct ManiacOneshotSender<T>(maniac::sync::oneshot::Sender<T>);
+    pub struct ManiacOneshotSender<T>(tokio::sync::oneshot::Sender<T>);
 
-    pub struct ManiacOneshotReceiver<T>(maniac::sync::oneshot::Receiver<T>);
+    pub struct ManiacOneshotReceiver<T>(tokio::sync::oneshot::Receiver<T>);
 
     impl oneshot::Oneshot for ManiacOneshot {
         type Sender<T: OptionalSend> = ManiacOneshotSender<T>;
         type Receiver<T: OptionalSend> = ManiacOneshotReceiver<T>;
-        type ReceiverError = maniac::sync::oneshot::RecvError;
+        type ReceiverError = tokio::sync::oneshot::error::RecvError;
 
         #[inline]
         fn channel<T>() -> (Self::Sender<T>, Self::Receiver<T>)
         where
             T: OptionalSend,
         {
-            let (tx, rx) = maniac::sync::oneshot::channel();
+            let (tx, rx) = tokio::sync::oneshot::channel();
             (ManiacOneshotSender(tx), ManiacOneshotReceiver(rx))
         }
     }
@@ -279,7 +221,7 @@ mod oneshot_mod {
     }
 
     impl<T> Future for ManiacOneshotReceiver<T> {
-        type Output = Result<T, maniac::sync::oneshot::RecvError>;
+        type Output = Result<T, tokio::sync::oneshot::error::RecvError>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             Pin::new(&mut self.0).poll(cx)
@@ -289,28 +231,34 @@ mod oneshot_mod {
 
 mod mpsc_mod {
     use std::future::Future;
+    use std::sync::Arc;
 
     use openraft::OptionalSend;
     use openraft::async_runtime::{
         Mpsc, MpscReceiver, MpscSender, MpscWeakSender, SendError, TryRecvError,
     };
+    use tokio::sync::mpsc as tokio_mpsc;
 
     pub struct ManiacMpsc;
 
-    pub struct ManiacMpscSender<T>(flume::Sender<T>);
+    /// Sender wrapper using tokio's mpsc (which is properly single-consumer)
+    pub struct TokioMpscSender<T>(tokio_mpsc::Sender<T>);
 
-    impl<T> Clone for ManiacMpscSender<T> {
+    impl<T> Clone for TokioMpscSender<T> {
         #[inline]
         fn clone(&self) -> Self {
             Self(self.0.clone())
         }
     }
 
-    pub struct ManiacMpscReceiver<T>(flume::Receiver<T>);
+    /// Receiver wrapper using tokio's mpsc
+    /// We use Arc<Mutex> to allow `recv()` to take &mut self while the receiver is shared
+    pub struct TokioMpscReceiver<T>(Arc<tokio::sync::Mutex<tokio_mpsc::Receiver<T>>>);
 
-    pub struct ManiacMpscWeakSender<T>(flume::WeakSender<T>);
+    // Weak sender using tokio's WeakSender
+    pub struct TokioMpscWeakSender<T>(tokio_mpsc::WeakSender<T>);
 
-    impl<T> Clone for ManiacMpscWeakSender<T> {
+    impl<T> Clone for TokioMpscWeakSender<T> {
         #[inline]
         fn clone(&self) -> Self {
             Self(self.0.clone())
@@ -318,80 +266,98 @@ mod mpsc_mod {
     }
 
     impl Mpsc for ManiacMpsc {
-        type Sender<T: OptionalSend> = ManiacMpscSender<T>;
-        type Receiver<T: OptionalSend> = ManiacMpscReceiver<T>;
-        type WeakSender<T: OptionalSend> = ManiacMpscWeakSender<T>;
+        type Sender<T: OptionalSend> = TokioMpscSender<T>;
+        type Receiver<T: OptionalSend> = TokioMpscReceiver<T>;
+        type WeakSender<T: OptionalSend> = TokioMpscWeakSender<T>;
 
         #[inline]
         fn channel<T: OptionalSend>(buffer: usize) -> (Self::Sender<T>, Self::Receiver<T>) {
-            let (tx, rx) = flume::bounded(buffer.max(1));
-            (ManiacMpscSender(tx), ManiacMpscReceiver(rx))
+            let (tx, rx) = tokio_mpsc::channel::<T>(buffer);
+            (
+                TokioMpscSender(tx),
+                TokioMpscReceiver(Arc::new(tokio::sync::Mutex::new(rx))),
+            )
         }
     }
 
-    impl<T> MpscSender<ManiacMpsc, T> for ManiacMpscSender<T>
+    impl<T> MpscSender<ManiacMpsc, T> for TokioMpscSender<T>
     where
         T: OptionalSend,
     {
         #[inline]
         fn send(&self, msg: T) -> impl Future<Output = Result<(), SendError<T>>> {
             let sender = self.0.clone();
-            async move { sender.send_async(msg).await.map_err(|e| SendError(e.0)) }
+            async move { sender.send(msg).await.map_err(|e| SendError(e.0)) }
         }
 
         #[inline]
         fn downgrade(&self) -> <ManiacMpsc as Mpsc>::WeakSender<T> {
-            ManiacMpscWeakSender(self.0.downgrade())
+            TokioMpscWeakSender(self.0.downgrade())
         }
     }
 
-    impl<T: OptionalSend> MpscReceiver<T> for ManiacMpscReceiver<T> {
+    impl<T: OptionalSend> MpscReceiver<T> for TokioMpscReceiver<T> {
         #[inline]
         fn recv(&mut self) -> impl Future<Output = Option<T>> + Send {
-            let receiver = self.0.clone();
-            async move { receiver.recv_async().await.ok() }
+            let rx = self.0.clone();
+            async move { rx.lock().await.recv().await }
         }
 
         #[inline]
         fn try_recv(&mut self) -> Result<T, TryRecvError> {
-            self.0.try_recv().map_err(|e| match e {
-                flume::TryRecvError::Empty => TryRecvError::Empty,
-                flume::TryRecvError::Disconnected => TryRecvError::Disconnected,
-            })
+            // For try_recv, we need to try to lock without blocking
+            match self.0.try_lock() {
+                Ok(mut guard) => match guard.try_recv() {
+                    Ok(v) => Ok(v),
+                    Err(tokio_mpsc::error::TryRecvError::Empty) => Err(TryRecvError::Empty),
+                    Err(tokio_mpsc::error::TryRecvError::Disconnected) => {
+                        Err(TryRecvError::Disconnected)
+                    }
+                },
+                Err(_) => Err(TryRecvError::Empty), // Treat lock contention as empty
+            }
         }
     }
 
-    impl<T> MpscWeakSender<ManiacMpsc, T> for ManiacMpscWeakSender<T>
+    impl<T> MpscWeakSender<ManiacMpsc, T> for TokioMpscWeakSender<T>
     where
         T: OptionalSend,
     {
         #[inline]
         fn upgrade(&self) -> Option<<ManiacMpsc as Mpsc>::Sender<T>> {
-            self.0.upgrade().map(ManiacMpscSender)
+            self.0.upgrade().map(TokioMpscSender)
         }
     }
 }
 
 mod mpsc_unbounded_mod {
+    use std::sync::Arc;
+
     use openraft::OptionalSend;
     use openraft::type_config::async_runtime::mpsc_unbounded;
+    use tokio::sync::mpsc as tokio_mpsc;
 
     pub struct ManiacMpscUnbounded;
 
-    pub struct ManiacMpscUnboundedSender<T>(flume::Sender<T>);
+    /// Sender wrapper using tokio's unbounded mpsc
+    pub struct TokioMpscUnboundedSender<T>(tokio_mpsc::UnboundedSender<T>);
 
-    impl<T> Clone for ManiacMpscUnboundedSender<T> {
+    impl<T> Clone for TokioMpscUnboundedSender<T> {
         #[inline]
         fn clone(&self) -> Self {
             Self(self.0.clone())
         }
     }
 
-    pub struct ManiacMpscUnboundedReceiver<T>(flume::Receiver<T>);
+    /// Receiver wrapper using tokio's unbounded mpsc
+    pub struct TokioMpscUnboundedReceiver<T>(
+        Arc<tokio::sync::Mutex<tokio_mpsc::UnboundedReceiver<T>>>,
+    );
 
-    pub struct ManiacMpscUnboundedWeakSender<T>(flume::WeakSender<T>);
+    /// Weak sender using tokio's WeakUnboundedSender
+    pub struct TokioMpscUnboundedWeakSender<T>(tokio_mpsc::WeakUnboundedSender<T>);
 
-    impl<T> Clone for ManiacMpscUnboundedWeakSender<T> {
+    impl<T> Clone for TokioMpscUnboundedWeakSender<T> {
         #[inline]
         fn clone(&self) -> Self {
             Self(self.0.clone())
@@ -399,21 +365,21 @@ mod mpsc_unbounded_mod {
     }
 
     impl mpsc_unbounded::MpscUnbounded for ManiacMpscUnbounded {
-        type Sender<T: OptionalSend> = ManiacMpscUnboundedSender<T>;
-        type Receiver<T: OptionalSend> = ManiacMpscUnboundedReceiver<T>;
-        type WeakSender<T: OptionalSend> = ManiacMpscUnboundedWeakSender<T>;
+        type Sender<T: OptionalSend> = TokioMpscUnboundedSender<T>;
+        type Receiver<T: OptionalSend> = TokioMpscUnboundedReceiver<T>;
+        type WeakSender<T: OptionalSend> = TokioMpscUnboundedWeakSender<T>;
 
         #[inline]
         fn channel<T: OptionalSend>() -> (Self::Sender<T>, Self::Receiver<T>) {
-            let (tx, rx) = flume::unbounded();
+            let (tx, rx) = tokio_mpsc::unbounded_channel::<T>();
             (
-                ManiacMpscUnboundedSender(tx),
-                ManiacMpscUnboundedReceiver(rx),
+                TokioMpscUnboundedSender(tx),
+                TokioMpscUnboundedReceiver(Arc::new(tokio::sync::Mutex::new(rx))),
             )
         }
     }
 
-    impl<T> mpsc_unbounded::MpscUnboundedSender<ManiacMpscUnbounded, T> for ManiacMpscUnboundedSender<T>
+    impl<T> mpsc_unbounded::MpscUnboundedSender<ManiacMpscUnbounded, T> for TokioMpscUnboundedSender<T>
     where
         T: OptionalSend,
     {
@@ -426,28 +392,36 @@ mod mpsc_unbounded_mod {
         fn downgrade(
             &self,
         ) -> <ManiacMpscUnbounded as mpsc_unbounded::MpscUnbounded>::WeakSender<T> {
-            ManiacMpscUnboundedWeakSender(self.0.downgrade())
+            TokioMpscUnboundedWeakSender(self.0.downgrade())
         }
     }
 
-    impl<T: OptionalSend> mpsc_unbounded::MpscUnboundedReceiver<T> for ManiacMpscUnboundedReceiver<T> {
+    impl<T: OptionalSend> mpsc_unbounded::MpscUnboundedReceiver<T> for TokioMpscUnboundedReceiver<T> {
         #[inline]
         fn recv(&mut self) -> impl std::future::Future<Output = Option<T>> + Send {
-            let receiver = self.0.clone();
-            async move { receiver.recv_async().await.ok() }
+            let rx = self.0.clone();
+            async move { rx.lock().await.recv().await }
         }
 
         #[inline]
         fn try_recv(&mut self) -> Result<T, mpsc_unbounded::TryRecvError> {
-            self.0.try_recv().map_err(|e| match e {
-                flume::TryRecvError::Empty => mpsc_unbounded::TryRecvError::Empty,
-                flume::TryRecvError::Disconnected => mpsc_unbounded::TryRecvError::Disconnected,
-            })
+            match self.0.try_lock() {
+                Ok(mut guard) => match guard.try_recv() {
+                    Ok(v) => Ok(v),
+                    Err(tokio_mpsc::error::TryRecvError::Empty) => {
+                        Err(mpsc_unbounded::TryRecvError::Empty)
+                    }
+                    Err(tokio_mpsc::error::TryRecvError::Disconnected) => {
+                        Err(mpsc_unbounded::TryRecvError::Disconnected)
+                    }
+                },
+                Err(_) => Err(mpsc_unbounded::TryRecvError::Empty),
+            }
         }
     }
 
     impl<T> mpsc_unbounded::MpscUnboundedWeakSender<ManiacMpscUnbounded, T>
-        for ManiacMpscUnboundedWeakSender<T>
+        for TokioMpscUnboundedWeakSender<T>
     where
         T: OptionalSend,
     {
@@ -455,7 +429,7 @@ mod mpsc_unbounded_mod {
         fn upgrade(
             &self,
         ) -> Option<<ManiacMpscUnbounded as mpsc_unbounded::MpscUnbounded>::Sender<T>> {
-            self.0.upgrade().map(ManiacMpscUnboundedSender)
+            self.0.upgrade().map(TokioMpscUnboundedSender)
         }
     }
 }

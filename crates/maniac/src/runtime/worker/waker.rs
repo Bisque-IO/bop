@@ -610,6 +610,10 @@ impl WorkerWaker {
     /// - `true` if a permit was acquired
     /// - `false` if returned due to I/O event (no permit acquired)
     pub fn acquire_with_io(&self, event_loop: &mut IoDriver) -> bool {
+        if self.status() != 0 || self.partition_summary() != 0 || self.snapshot_summary() != 0 {
+            return true;
+        }
+
         if self.try_acquire() {
             return true;
         }
@@ -617,6 +621,10 @@ impl WorkerWaker {
         self.sleepers.fetch_add(1, Ordering::Relaxed);
 
         loop {
+            if self.status() != 0 || self.partition_summary() != 0 || self.snapshot_summary() != 0 {
+                self.sleepers.fetch_sub(1, Ordering::Relaxed);
+                return true;
+            }
             // Fast check before polling
             if self.try_acquire() {
                 self.sleepers.fetch_sub(1, Ordering::Relaxed);
@@ -646,6 +654,9 @@ impl WorkerWaker {
     ///
     /// Like `acquire_with_io()`, but returns after `timeout` if no permit becomes available.
     pub fn acquire_timeout_with_io(&self, event_loop: &mut IoDriver, timeout: Duration) -> bool {
+        if self.status() != 0 || self.partition_summary() != 0 || self.snapshot_summary() != 0 {
+            return true;
+        }
         if self.try_acquire() {
             return true;
         }
@@ -654,6 +665,10 @@ impl WorkerWaker {
         self.sleepers.fetch_add(1, Ordering::Relaxed);
 
         loop {
+            if self.status() != 0 || self.partition_summary() != 0 || self.snapshot_summary() != 0 {
+                self.sleepers.fetch_sub(1, Ordering::Relaxed);
+                return true;
+            }
             if self.try_acquire() {
                 self.sleepers.fetch_sub(1, Ordering::Relaxed);
                 return true;

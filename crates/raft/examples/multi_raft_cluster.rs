@@ -12,37 +12,37 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │                         Node 1                              │
+//! │                         Node 1 (127.0.0.1:9001)             │
 //! │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐    │
 //! │  │   Group 1     │  │   Group 2     │  │   Group 3     │    │
-//! │  │   (Raft)      │  │   (Raft)      │  │   (Raft)      │    │
-//! │  └───────────────┘  └───────────────┘  └───────────────┘    │
-//! │           │                 │                  │            │
-//! │           └─────────────────┼──────────────────┘            │
-//! │                             │                               │
-//! │  ┌──────────────────────────┴────────────────────────────┐  │
-//! │  │            Multiplexed TCP Transport                  │  │
-//! │  │         (Shared connections across groups)            │  │
-//! │  └──────────────────────────┬────────────────────────────┘  │
-//! │                             │                               │
-//! │  ┌──────────────────────────┴────────────────────────────┐  │
-//! │  │         Multiplexed Log Storage                       │  │
-//! │  │  (Single log file for all groups, keyed by group_id)  │  │
-//! │  └───────────────────────────────────────────────────────┘  │
-//! └─────────────────────────────────────────────────────────────┘
+//! │  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘    │
+//! │          │                  │                  │            │
+//! │  ┌───────┴──────────────────┴──────────────────┴───────┐    │
+//! │  │           Multiplexed TCP Transport + Storage       │    │
+//! │  └───────────────────────────┬─────────────────────────┘    │
+//! └──────────────────────────────┼──────────────────────────────┘
+//!                                │
+//!        ┌───────────────────────┼───────────────────────┐
+//!        │                       │                       │
+//! ┌──────┴──────┐         ┌──────┴──────┐         ┌──────┴──────┐
+//! │   Node 2    │         │   Node 3    │         │    ...      │
+//! │ :9002       │         │ :9003       │         │             │
+//! │ Group 1,2,3 │         │ Group 1,2,3 │         │             │
+//! └─────────────┘         └─────────────┘         └─────────────┘
 //! ```
 //!
 //! ## Running the Example
 //!
-//! This example runs a single-node cluster with 3 Raft groups for demonstration.
-//! In a real deployment, you would run multiple nodes on different machines.
+//! This example runs a 3-node cluster with 3 Raft groups. Each node participates
+//! in all groups, demonstrating how multi-raft enables horizontal scaling.
 
 use futures::StreamExt;
 use maniac_raft::ManiacRaftTypeConfig;
 use maniac_raft::multi::codec::{FromCodec, RawBytes, ToCodec};
 use maniac_raft::multi::{
-    DefaultNodeRegistry, ManiacTcpTransport, ManiacTcpTransportConfig, MultiRaftConfig,
-    MultiRaftManager, MultiplexedLogStorage, MultiplexedStorageConfig, NodeAddressResolver,
+    DefaultNodeRegistry, ManiacRpcServer, ManiacRpcServerConfig, ManiacTcpTransport,
+    ManiacTcpTransportConfig, MultiRaftConfig, MultiRaftManager, MultiplexedLogStorage,
+    MultiplexedStorageConfig, NodeAddressResolver,
 };
 use openraft::impls::BasicNode;
 use openraft::storage::RaftStateMachine;
@@ -284,11 +284,17 @@ impl openraft::storage::RaftSnapshotBuilder<KvTypeConfig> for KvStateMachine {
 
 fn main() {
     use futures_lite::future::block_on;
+    use tracing_subscriber::EnvFilter;
 
     // Initialize logging
+    // Initialize logging
+    // Use RUST_LOG env var if set, otherwise default to INFO to avoid chatty debug logs
+    // Setup logging
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_target(false)
+        .with_env_filter(env_filter)
+        .with_target(true)
         .init();
 
     println!("=== Multi-Raft Cluster Example ===\n");
@@ -298,14 +304,9 @@ fn main() {
     println!("  3. Shared networking and storage infrastructure");
     println!("  4. Proposing commands to different groups\n");
 
-    // Create the maniac runtime with single thread to avoid cross-thread generator issues
-    // Note: Using single-threaded mode avoids potential issues with stackful coroutines
-    // accessing data across worker threads
-    let runtime = maniac::runtime::new_multi_threaded(8, 65536).expect("Failed to create runtime");
-
-    // Set the global scheduler for spawning tasks from outside worker context
-    // This is required because OpenRaft spawns internal tasks during initialization
-    maniac_raft::set_global_scheduler(runtime.service());
+    // Create the maniac runtime with multiple workers
+    // Need at least 4 workers to handle concurrent TCP servers and RPC processing
+    let runtime = maniac::runtime::new_multi_threaded(16, 65536).expect("Failed to create runtime");
 
     // Spawn our async task on the runtime
     let handle = runtime.spawn(async_main()).expect("Failed to spawn task");
@@ -314,9 +315,83 @@ fn main() {
     block_on(handle);
 
     println!("exiting...");
-    // Clear the global scheduler on shutdown
-    maniac_raft::clear_global_scheduler();
 }
+
+/// Node configuration for a multi-raft node
+struct NodeConfig {
+    node_id: u64,
+    addr: SocketAddr,
+}
+
+/// Type alias for our node registry
+type NodeRegistry = DefaultNodeRegistry<u64>;
+
+/// Type alias for our transport
+type Transport = ManiacTcpTransport<KvTypeConfig>;
+
+/// Type alias for our storage
+type Storage = MultiplexedLogStorage<KvTypeConfig>;
+
+/// Type alias for our manager
+type Manager = MultiRaftManager<KvTypeConfig, Transport, Storage>;
+
+/// Type alias for our RPC server
+type RpcServer = ManiacRpcServer<KvTypeConfig, Transport, Storage>;
+
+/// Create a node's infrastructure (storage, transport, manager)
+async fn create_node(
+    node_id: u64,
+    node_addr: SocketAddr,
+    base_dir: &std::path::Path,
+    node_registry: Arc<NodeRegistry>,
+) -> Arc<Manager> {
+    // Create per-node data directory
+    let node_dir = base_dir.join(format!("node-{}", node_id));
+    std::fs::create_dir_all(&node_dir).expect("Failed to create node dir");
+
+    // Create storage configuration with 4 shards
+    let storage_config = MultiplexedStorageConfig {
+        base_dir: node_dir.clone(),
+        num_shards: 4,
+        segment_size: 64 * 1024 * 1024, // 64MB segment files
+        fsync_interval: None,
+        max_cache_entries_per_group: 10000,
+    };
+
+    // Create the sharded log storage
+    let storage = MultiplexedLogStorage::<KvTypeConfig>::new(storage_config)
+        .await
+        .expect("Failed to create storage");
+
+    println!("  Node {}: Created storage at {:?}", node_id, node_dir);
+
+    // Create TCP transport
+    let transport_config = ManiacTcpTransportConfig {
+        connect_timeout: Duration::from_secs(5),
+        // Set slightly lower than election timeout (4000ms) to ensure transport
+        // fails fast and rotates connections before Raft gives up.
+        request_timeout: Duration::from_millis(3000),
+        // Increased to allow more concurrent streams per pair
+        connections_per_addr: 8,
+        max_concurrent_requests_per_conn: 128,
+        connection_ttl: Duration::from_secs(300),
+        tcp_nodelay: true,
+    };
+
+    let transport = Transport::new(transport_config, node_registry);
+
+    println!("  Node {}: Created TCP transport at {}", node_id, node_addr);
+
+    // Create multi-raft configuration
+    let multi_config = MultiRaftConfig {
+        heartbeat_interval: Duration::from_millis(100),
+    };
+
+    // Create and return the manager wrapped in Arc
+    Arc::new(MultiRaftManager::new(transport, storage, multi_config))
+}
+
+const NUM_GROUPS: u64 = 3;
 
 async fn async_main() {
     // Create temporary data directory
@@ -324,131 +399,199 @@ async fn async_main() {
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
 
-    println!("--- Setting up Multi-Raft infrastructure ---\n");
+    println!("--- Setting up 3-Node Multi-Raft Cluster ---\n");
 
-    // Create storage configuration with 4 shards
-    // Note: fsync_interval is None to avoid spawning background tasks during debugging
-    let storage_config = MultiplexedStorageConfig {
-        base_dir: temp_dir.clone(),
-        num_shards: 4, // 4 shards for parallel writes
-        segment_size: 64 * 1024 * 1024, // 64MB segment files
-        fsync_interval: None,
-        max_cache_entries_per_group: 10000,
-    };
+    // Define our 3 nodes
+    let nodes = vec![
+        NodeConfig {
+            node_id: 1,
+            addr: "127.0.0.1:9001".parse().unwrap(),
+        },
+        NodeConfig {
+            node_id: 2,
+            addr: "127.0.0.1:9002".parse().unwrap(),
+        },
+        NodeConfig {
+            node_id: 3,
+            addr: "127.0.0.1:9003".parse().unwrap(),
+        },
+    ];
 
-    // Create the sharded log storage using async constructor
-    let storage = MultiplexedLogStorage::<KvTypeConfig>::new(storage_config)
-        .await
-        .expect("Failed to create storage");
+    // Create shared node registry with all nodes registered
+    let node_registry = Arc::new(NodeRegistry::new());
+    for node in &nodes {
+        node_registry.register(node.node_id, node.addr);
+        println!("  Registered node {} at {}", node.node_id, node.addr);
+    }
+    println!();
 
-    println!("  Created sharded log storage at {:?} with {} shards", temp_dir, storage.num_shards());
-
-    // Create TCP transport with node registry
-    let transport_config = ManiacTcpTransportConfig {
-        connect_timeout: Duration::from_secs(5),
-        request_timeout: Duration::from_secs(10),
-        connections_per_addr: 2,
-        max_concurrent_requests_per_conn: 128,
-        connection_ttl: Duration::from_secs(300),
-        tcp_nodelay: true,
-    };
-
-    let node_registry = Arc::new(DefaultNodeRegistry::new());
-    let node_id: u64 = 1;
-    let node_addr: SocketAddr = "127.0.0.1:9001".parse().unwrap();
-
-    // Register our node
-    node_registry.register(node_id, node_addr);
-
-    let transport = ManiacTcpTransport::new(transport_config, node_registry.clone());
-
-    println!(
-        "  Created TCP transport for node {} at {}",
-        node_id, node_addr
-    );
-
-    // Create multi-raft configuration
-    let multi_config = MultiRaftConfig {
-        heartbeat_interval: Duration::from_millis(100),
-    };
-
-    // Create the manager
-    let manager = MultiRaftManager::new(transport, storage, multi_config);
-
-    println!("  Created MultiRaftManager\n");
-
-    // Create Raft configuration
+    // Create Raft configuration (shared across all nodes)
+    // Use longer timeouts to give TCP transport time to deliver messages
     let raft_config = Arc::new(
         Config {
-            heartbeat_interval: 100,
-            election_timeout_min: 300,
-            election_timeout_max: 600,
+            heartbeat_interval: 500,
+            election_timeout_min: 1000,
+            election_timeout_max: 1500,
             ..Default::default()
         }
         .validate()
         .expect("Invalid raft config"),
     );
 
-    println!("--- Creating Raft groups ---\n");
+    // Create all node managers concurrently using maniac::spawn for true parallelism
+    let mut handles = Vec::new();
+    for node in &nodes {
+        let node_id = node.node_id;
+        let addr = node.addr;
+        let temp_dir = temp_dir.clone();
+        let node_registry = node_registry.clone();
+        let handle = maniac::spawn(async move {
+            let manager = create_node(node_id, addr, &temp_dir, node_registry).await;
+            (node_id, addr, manager)
+        })
+        .expect("Failed to spawn node creation task");
+        handles.push(handle);
+    }
 
-    // Add three Raft groups
-    for group_id in 1..=3u64 {
-        let state_machine = KvStateMachine::new(group_id);
+    // Wait for all nodes to be created
+    let mut node_results = Vec::new();
+    for handle in handles {
+        node_results.push(handle.await);
+    }
 
-        match manager
-            .add_group(group_id, node_id, raft_config.clone(), state_machine)
-            .await
-        {
-            Ok(raft) => {
-                println!("  Created Raft group {}", group_id);
+    // Start RPC servers for all nodes
+    let mut managers = Vec::new();
+    for (node_id, addr, manager) in node_results {
+        // Create and start RPC server for this node
+        let rpc_config = ManiacRpcServerConfig {
+            bind_addr: addr,
+            ..Default::default()
+        };
+        let rpc_server = Arc::new(RpcServer::new(rpc_config, manager.clone()));
 
-                // Initialize with just ourselves as the only member
-                let mut members = BTreeMap::new();
-                members.insert(node_id, BasicNode::default());
+        // Spawn the RPC server in the background
+        let server = rpc_server.clone();
+        let _ = maniac::spawn(async move {
+            if let Err(e) = server.serve().await {
+                eprintln!("RPC server error: {:?}", e);
+            }
+        });
 
-                println!("  Calling initialize for group {}...", group_id);
-                match maniac::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    raft.initialize(members),
-                )
+        println!("  Node {}: Started RPC server at {}", node_id, addr);
+        managers.push((node_id, manager));
+    }
+
+    // Give the servers a moment to bind
+    maniac::time::sleep(Duration::from_millis(100)).await;
+
+    println!("\n--- Creating Raft groups on all nodes ---\n");
+
+    // Build membership with all 3 nodes
+    let mut members = BTreeMap::new();
+    for node in &nodes {
+        members.insert(node.node_id, BasicNode::default());
+    }
+
+    // Add three Raft groups to each node
+    for group_id in 1..=NUM_GROUPS {
+        println!("Group {}:", group_id);
+
+        for (node_id, manager) in &managers {
+            let state_machine = KvStateMachine::new(group_id);
+
+            match manager
+                .add_group(group_id, *node_id, raft_config.clone(), state_machine)
                 .await
-                {
-                    Ok(Ok(_)) => {
-                        println!(
-                            "  Initialized group {} with node {} as leader",
-                            group_id, node_id
-                        );
-                    }
-                    Ok(Err(e)) => {
-                        println!(
-                            "  Warning: Could not initialize group {}: {:?}",
-                            group_id, e
-                        );
-                    }
-                    Err(_) => {
-                        println!(
-                            "  TIMEOUT: Initialize for group {} timed out after 5s",
-                            group_id
-                        );
-                    }
+            {
+                Ok(_raft) => {
+                    println!("  Node {}: Added group {}", node_id, group_id);
+                }
+                Err(e) => {
+                    println!(
+                        "  Node {}: Failed to add group {}: {:?}",
+                        node_id, group_id, e
+                    );
                 }
             }
-            Err(e) => {
-                println!("  Failed to create group {}: {:?}", group_id, e);
+        }
+        println!();
+    }
+
+    // Initialize cluster from node 1 (it will become the initial leader)
+    println!("--- Initializing cluster from node 1 ---\n");
+
+    let (_node1_id, node1_manager) = &managers[0];
+
+    // Initialize groups sequentially for stability
+    for group_id in 1..=NUM_GROUPS {
+        if let Some(raft) = node1_manager.get_group(group_id) {
+            match maniac::time::timeout(Duration::from_secs(5), raft.initialize(members.clone()))
+                .await
+            {
+                Ok(Ok(_)) => {
+                    println!("  Group {} initialized successfully", group_id);
+                }
+                Ok(Err(e)) => {
+                    println!(
+                        "  Warning: Could not initialize group {}: {:?}",
+                        group_id, e
+                    );
+                }
+                Err(_) => {
+                    println!(
+                        "  TIMEOUT: Initialize for group {} timed out after 5s",
+                        group_id
+                    );
+                }
+            }
+        }
+    }
+
+    // Wait for leader election (need more time for 3 groups to elect leaders)
+    println!("\n--- Waiting for leader election ---\n");
+    maniac::time::sleep(Duration::from_secs(5)).await;
+
+    // Check leader status for each group
+    for group_id in 1..=NUM_GROUPS {
+        for (node_id, manager) in &managers {
+            if let Some(raft) = manager.get_group(group_id) {
+                let metrics = raft.metrics().borrow_watched().clone();
+                if metrics.current_leader == Some(*node_id) {
+                    println!("  Group {}: Node {} is the LEADER", group_id, node_id);
+                } else {
+                    println!(
+                        "  Group {}: Node {} is a follower (leader: {:?})",
+                        group_id, node_id, metrics.current_leader
+                    );
+                }
             }
         }
     }
 
     // Show final state
-    println!("\n--- Raft Groups Initialized ---\n");
-    println!("  Active groups: {:?}", manager.group_ids());
-    println!("  Total groups: {}", manager.group_count());
+    println!("\n--- Cluster Status ---\n");
+    for (node_id, manager) in &managers {
+        println!(
+            "  Node {}: {} groups active",
+            node_id,
+            manager.group_count()
+        );
+    }
+
+    // Keep cluster running for testing/interaction
+    // Press Ctrl+C to shut down gracefully
+    println!("\nCluster is running. Press Ctrl+C to shutdown...\n");
+    loop {
+        maniac::time::sleep(Duration::from_secs(60)).await;
+    }
 
     // Cleanup
     println!("\n--- Shutting down ---\n");
-    for group_id in 1..=3u64 {
-        manager.remove_group(group_id).await;
-        println!("  Removed group {}", group_id);
+    for (node_id, manager) in &managers {
+        for group_id in 1..=NUM_GROUPS {
+            manager.remove_group(group_id).await;
+        }
+        println!("  Node {}: Removed all groups", node_id);
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);

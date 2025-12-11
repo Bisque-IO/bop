@@ -73,8 +73,10 @@ pub(crate) struct UringInner {
 
 // When dropping the driver, all in-flight operations must have completed. This
 // type wraps the slab and ensures that, on drop, the slab is empty.
+// The slab is protected by a mutex because tasks can migrate between workers
+// and access the same slab from different threads.
 struct Ops {
-    slab: Slab<MaybeFdLifecycle>,
+    slab: parking_lot::Mutex<Slab<MaybeFdLifecycle>>,
 }
 
 impl IoUringDriver {
@@ -123,7 +125,7 @@ impl IoUringDriver {
     #[allow(unused)]
     fn num_operations(&self) -> usize {
         let inner = self.inner.get();
-        unsafe { (*inner).ops.slab.len() }
+        unsafe { (*inner).ops.slab.lock().len() }
     }
 
     // Flush to make enough space
@@ -340,7 +342,7 @@ impl UringInner {
         }
     }
 
-    fn new_op<T: OpAble>(data: T, inner: &mut UringInner, driver: Inner) -> Op<T> {
+    fn new_op<T: OpAble>(data: T, inner: &UringInner, driver: Inner) -> Op<T> {
         Op {
             driver,
             index: inner.ops.insert(T::RET_IS_FD),
@@ -394,9 +396,8 @@ impl UringInner {
         index: usize,
         cx: &mut Context<'_>,
     ) -> Poll<CompletionMeta> {
-        let inner = unsafe { &mut *this.get() };
-        let lifecycle = unsafe { inner.ops.slab.get(index).unwrap_unchecked() };
-        lifecycle.poll_op(cx)
+        let inner = unsafe { &*this.get() };
+        inner.ops.poll_op(index, cx)
     }
 
     #[cfg(feature = "poll-io")]
@@ -430,25 +431,24 @@ impl UringInner {
         data: &mut Option<T>,
         _skip_cancel: bool,
     ) {
-        let inner = unsafe { &mut *this.get() };
         if index == usize::MAX {
             // already finished
             return;
         }
-        if let Some(lifecycle) = inner.ops.slab.get(index) {
-            let _must_finished = lifecycle.drop_op(data);
-            #[cfg(feature = "async-cancel")]
-            if !_must_finished && !_skip_cancel {
-                unsafe {
-                    let cancel = opcode::AsyncCancel::new(index as u64)
-                        .build()
-                        .user_data(u64::MAX);
+        let inner = unsafe { &mut *this.get() };
+        // Use the thread-safe drop_op method
+        let _must_finished = inner.ops.drop_op(index, data);
+        #[cfg(feature = "async-cancel")]
+        if !_must_finished && !_skip_cancel {
+            unsafe {
+                let cancel = opcode::AsyncCancel::new(index as u64)
+                    .build()
+                    .user_data(u64::MAX);
 
-                    // Try push cancel, if failed, will submit and re-push.
-                    if inner.uring.submission().push(&cancel).is_err() {
-                        let _ = inner.submit();
-                        let _ = inner.uring.submission().push(&cancel);
-                    }
+                // Try push cancel, if failed, will submit and re-push.
+                if inner.uring.submission().push(&cancel).is_err() {
+                    let _ = inner.submit();
+                    let _ = inner.uring.submission().push(&cancel);
                 }
             }
         }
@@ -498,23 +498,48 @@ impl Drop for UringInner {
 }
 
 impl Ops {
-    const fn new() -> Self {
-        Ops { slab: Slab::new() }
+    fn new() -> Self {
+        Ops {
+            slab: parking_lot::Mutex::new(Slab::new()),
+        }
     }
 
     // Insert a new operation
     #[inline]
-    pub(crate) fn insert(&mut self, is_fd: bool) -> usize {
-        self.slab.insert(MaybeFdLifecycle::new(is_fd))
+    pub(crate) fn insert(&self, is_fd: bool) -> usize {
+        self.slab.lock().insert(MaybeFdLifecycle::new(is_fd))
     }
 
     // Complete an operation
     // # Safety
     // Caller must make sure the result is valid.
     #[inline]
-    unsafe fn complete(&mut self, index: usize, result: io::Result<u32>, flags: u32) {
-        let lifecycle = unsafe { self.slab.get(index).unwrap_unchecked() };
+    unsafe fn complete(&self, index: usize, result: io::Result<u32>, flags: u32) {
+        let mut slab = self.slab.lock();
+        let lifecycle = unsafe { slab.get(index).unwrap_unchecked() };
         lifecycle.complete(result, flags);
+    }
+
+    // Poll an operation for completion
+    #[inline]
+    pub(crate) fn poll_op(&self, index: usize, cx: &mut Context<'_>) -> Poll<CompletionMeta> {
+        let mut slab = self.slab.lock();
+        let lifecycle = unsafe { slab.get(index).unwrap_unchecked() };
+        lifecycle.poll_op(cx)
+    }
+
+    // Drop an operation (called when Op is dropped)
+    #[inline]
+    pub(crate) fn drop_op<T: 'static>(&self, index: usize, data: &mut Option<T>) -> bool {
+        let mut slab = self.slab.lock();
+        let lifecycle = unsafe { slab.get(index).unwrap_unchecked() };
+        lifecycle.drop_op(data)
+    }
+
+    // Access slab directly (for legacy code that needs raw access)
+    #[inline]
+    pub(crate) fn with_slab<R>(&self, f: impl FnOnce(&mut Slab<MaybeFdLifecycle>) -> R) -> R {
+        f(&mut self.slab.lock())
     }
 }
 

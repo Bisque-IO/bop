@@ -160,7 +160,24 @@ impl PollerInner {
         };
 
         // wait io ready and do syscall
-        let sio_ref = inner.io_dispatch.get(index).expect("scheduled_io lost");
+        let sio_ref = match inner.io_dispatch.get(index) {
+            Some(sio_ref) => sio_ref,
+            None => {
+                // The ScheduledIo entry was removed (fd was closed/deregistered)
+                // This can happen if the fd was dropped while an operation was pending
+                tracing::warn!(
+                    index = index,
+                    "scheduled_io entry missing - fd was closed while operation was pending"
+                );
+                return Poll::Ready(CompletionMeta {
+                    result: Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "fd was closed while operation was pending",
+                    )),
+                    flags: 0,
+                });
+            }
+        };
         let sio: &std::sync::Arc<ScheduledIo> = &*sio_ref; // Deref Ref<Arc<ScheduledIo>> to &Arc<ScheduledIo>
         // SAFETY: We're polling from the owning thread
         let sio_mut = unsafe { &mut *(std::sync::Arc::as_ptr(sio) as *mut ScheduledIo) };

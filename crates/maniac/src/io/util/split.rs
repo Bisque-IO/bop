@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fmt::{self, Debug},
     future::Future,
-    rc::Rc,
+    sync::Arc,
 };
 
 use super::CancelHandle;
@@ -12,23 +12,69 @@ use crate::{
     io::{AsyncReadRent, AsyncWriteRent, CancelableAsyncReadRent, CancelableAsyncWriteRent},
 };
 
+/// Inner wrapper that allows us to implement Send + Sync for split halves.
+///
+/// # Safety
+///
+/// This is safe because:
+/// - The Split trait requires that read and write operations are independent
+/// - Only one half can perform reads and only one half can perform writes
+/// - The runtime ensures proper synchronization when tasks are stolen
+#[repr(transparent)]
+pub struct SplitInner<T>(UnsafeCell<T>);
+
+// SAFETY: The Split trait contract guarantees that read and write operations
+// are independent and can execute concurrently. The runtime handles task
+// migration safely.
+unsafe impl<T: Send> Send for SplitInner<T> {}
+unsafe impl<T: Send> Sync for SplitInner<T> {}
+
+impl<T> SplitInner<T> {
+    fn new(inner: T) -> Self {
+        SplitInner(UnsafeCell::new(inner))
+    }
+
+    /// Get a raw pointer to the inner value.
+    ///
+    /// # Safety
+    /// The caller must ensure that:
+    /// - Only read operations are performed through pointers obtained on the read half
+    /// - Only write operations are performed through pointers obtained on the write half
+    pub fn get(&self) -> *mut T {
+        self.0.get()
+    }
+
+    fn into_inner(self) -> T {
+        self.0.into_inner()
+    }
+}
+
+impl<T: Debug> Debug for SplitInner<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // SAFETY: Only used for debug formatting
+        let inner = unsafe { &*self.0.get() };
+        f.debug_tuple("SplitInner").field(inner).finish()
+    }
+}
+
 /// Owned Read Half Part
 #[derive(Debug)]
-pub struct OwnedReadHalf<T>(pub Rc<UnsafeCell<T>>);
+pub struct OwnedReadHalf<T>(pub Arc<SplitInner<T>>);
+
 /// Owned Write Half Part
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct OwnedWriteHalf<T>(pub Rc<UnsafeCell<T>>)
+pub struct OwnedWriteHalf<T>(pub Arc<SplitInner<T>>)
 where
     T: AsyncWriteRent;
 
-/// This is a dummy unsafe trait to inform monoio,
+/// This is a dummy unsafe trait to inform maniac,
 /// the object with has this `Split` trait can be safely split
 /// to read/write object in both form of `Owned` or `Borrowed`.
 ///
 /// # Safety
 ///
-/// monoio cannot guarantee whether the custom object can be
+/// maniac cannot guarantee whether the custom object can be
 /// safely split to divided objects. Users should ensure the read
 /// operations are indenpendence from the write ones, the methods
 /// from `AsyncReadRent` and `AsyncWriteRent` can execute concurrently.
@@ -54,137 +100,137 @@ where
 
     #[inline]
     fn into_split(self) -> (Self::OwnedRead, Self::OwnedWrite) {
-        let shared = Rc::new(UnsafeCell::new(self));
+        let shared = Arc::new(SplitInner::new(self));
         (OwnedReadHalf(shared.clone()), OwnedWriteHalf(shared))
     }
 }
 
-// impl<Inner> AsyncReadRent for OwnedReadHalf<Inner>
-// where
-//     Inner: AsyncReadRent,
-// {
-//     #[inline]
-//     fn read<T: crate::buf::IoBufMut + std::marker::Send>(
-//         &mut self,
-//         buf: T,
-//     ) -> impl Future<Output = BufResult<usize, T>> + Send {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.read(buf)
-//     }
-//
-//     #[inline]
-//     fn readv<T: crate::buf::IoVecBufMut + std::marker::Send>(
-//         &mut self,
-//         buf: T,
-//     ) -> impl Future<Output = BufResult<usize, T>> + Send {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.readv(buf)
-//     }
-// }
+impl<Inner> AsyncReadRent for OwnedReadHalf<Inner>
+where
+    Inner: AsyncReadRent,
+{
+    #[inline]
+    fn read<T: crate::buf::IoBufMut + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.read(buf)
+    }
 
-// impl<Inner> CancelableAsyncReadRent for OwnedReadHalf<Inner>
-// where
-//     Inner: CancelableAsyncReadRent,
-// {
-//     #[inline]
-//     fn cancelable_read<T: crate::buf::IoBufMut>(
-//         &mut self,
-//         buf: T,
-//         c: CancelHandle,
-//     ) -> impl Future<Output = crate::BufResult<usize, T>> {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.cancelable_read(buf, c)
-//     }
-//
-//     #[inline]
-//     fn cancelable_readv<T: crate::buf::IoVecBufMut>(
-//         &mut self,
-//         buf: T,
-//         c: CancelHandle,
-//     ) -> impl Future<Output = crate::BufResult<usize, T>> {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.cancelable_readv(buf, c)
-//     }
-// }
+    #[inline]
+    fn readv<T: crate::buf::IoVecBufMut + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.readv(buf)
+    }
+}
 
-// impl<Inner> AsyncWriteRent for OwnedWriteHalf<Inner>
-// where
-//     Inner: AsyncWriteRent,
-// {
-//     #[inline]
-//     fn write<T: crate::buf::IoBuf + std::marker::Send>(
-//         &mut self,
-//         buf: T,
-//     ) -> impl Future<Output = BufResult<usize, T>> + Send {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.write(buf)
-//     }
-//
-//     #[inline]
-//     fn writev<T: crate::buf::IoVecBuf + std::marker::Send>(
-//         &mut self,
-//         buf_vec: T,
-//     ) -> impl Future<Output = BufResult<usize, T>> + Send {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.writev(buf_vec)
-//     }
-//
-//     #[inline]
-//     fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.flush()
-//     }
-//
-//     #[inline]
-//     fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.shutdown()
-//     }
-// }
+impl<Inner> CancelableAsyncReadRent for OwnedReadHalf<Inner>
+where
+    Inner: CancelableAsyncReadRent,
+{
+    #[inline]
+    fn cancelable_read<T: crate::buf::IoBufMut>(
+        &mut self,
+        buf: T,
+        c: CancelHandle,
+    ) -> impl Future<Output = crate::BufResult<usize, T>> {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.cancelable_read(buf, c)
+    }
 
-// impl<Inner> CancelableAsyncWriteRent for OwnedWriteHalf<Inner>
-// where
-//     Inner: CancelableAsyncWriteRent,
-// {
-//     #[inline]
-//     fn cancelable_write<T: crate::buf::IoBuf>(
-//         &mut self,
-//         buf: T,
-//         c: CancelHandle,
-//     ) -> impl Future<Output = crate::BufResult<usize, T>> {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.cancelable_write(buf, c)
-//     }
-//
-//     #[inline]
-//     fn cancelable_writev<T: crate::buf::IoVecBuf>(
-//         &mut self,
-//         buf_vec: T,
-//         c: CancelHandle,
-//     ) -> impl Future<Output = crate::BufResult<usize, T>> {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.cancelable_writev(buf_vec, c)
-//     }
-//
-//     #[inline]
-//     fn cancelable_flush(&mut self, c: CancelHandle) -> impl Future<Output = std::io::Result<()>> {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.cancelable_flush(c)
-//     }
-//
-//     #[inline]
-//     fn cancelable_shutdown(
-//         &mut self,
-//         c: CancelHandle,
-//     ) -> impl Future<Output = std::io::Result<()>> {
-//         let stream = unsafe { &mut *self.0.get() };
-//         stream.cancelable_shutdown(c)
-//     }
-// }
+    #[inline]
+    fn cancelable_readv<T: crate::buf::IoVecBufMut>(
+        &mut self,
+        buf: T,
+        c: CancelHandle,
+    ) -> impl Future<Output = crate::BufResult<usize, T>> {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.cancelable_readv(buf, c)
+    }
+}
+
+impl<Inner> AsyncWriteRent for OwnedWriteHalf<Inner>
+where
+    Inner: AsyncWriteRent,
+{
+    #[inline]
+    fn write<T: crate::buf::IoBuf + Send>(
+        &mut self,
+        buf: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.write(buf)
+    }
+
+    #[inline]
+    fn writev<T: crate::buf::IoVecBuf + Send>(
+        &mut self,
+        buf_vec: T,
+    ) -> impl Future<Output = BufResult<usize, T>> + Send {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.writev(buf_vec)
+    }
+
+    #[inline]
+    fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.flush()
+    }
+
+    #[inline]
+    fn shutdown(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.shutdown()
+    }
+}
+
+impl<Inner> CancelableAsyncWriteRent for OwnedWriteHalf<Inner>
+where
+    Inner: CancelableAsyncWriteRent,
+{
+    #[inline]
+    fn cancelable_write<T: crate::buf::IoBuf>(
+        &mut self,
+        buf: T,
+        c: CancelHandle,
+    ) -> impl Future<Output = crate::BufResult<usize, T>> {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.cancelable_write(buf, c)
+    }
+
+    #[inline]
+    fn cancelable_writev<T: crate::buf::IoVecBuf>(
+        &mut self,
+        buf_vec: T,
+        c: CancelHandle,
+    ) -> impl Future<Output = crate::BufResult<usize, T>> {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.cancelable_writev(buf_vec, c)
+    }
+
+    #[inline]
+    fn cancelable_flush(&mut self, c: CancelHandle) -> impl Future<Output = std::io::Result<()>> {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.cancelable_flush(c)
+    }
+
+    #[inline]
+    fn cancelable_shutdown(
+        &mut self,
+        c: CancelHandle,
+    ) -> impl Future<Output = std::io::Result<()>> {
+        let stream = unsafe { &mut *self.0.get() };
+        stream.cancelable_shutdown(c)
+    }
+}
 
 impl<T> OwnedReadHalf<T>
 where
-    T: AsyncWriteRent,
+    T: AsyncWriteRent + Debug,
 {
     /// reunite write half
     #[inline]
@@ -195,7 +241,7 @@ where
 
 impl<T> OwnedWriteHalf<T>
 where
-    T: AsyncWriteRent,
+    T: AsyncWriteRent + Debug,
 {
     /// reunite read half
     #[inline]
@@ -220,18 +266,18 @@ where
     }
 }
 
-pub(crate) fn reunite<T: AsyncWriteRent>(
+pub(crate) fn reunite<T: AsyncWriteRent + Debug>(
     read: OwnedReadHalf<T>,
     write: OwnedWriteHalf<T>,
 ) -> Result<T, ReuniteError<T>> {
-    if Rc::ptr_eq(&read.0, &write.0) {
+    if Arc::ptr_eq(&read.0, &write.0) {
         // we cannot execute drop for OwnedWriteHalf.
         unsafe {
-            let _inner: Rc<UnsafeCell<T>> = std::mem::transmute(write);
+            let _inner: Arc<SplitInner<T>> = std::mem::transmute(write);
         }
         // This unwrap cannot fail as the api does not allow creating more than two
         // Arcs, and we just dropped the other half.
-        Ok(Rc::try_unwrap(read.0)
+        Ok(Arc::try_unwrap(read.0)
             .expect("try_unwrap failed in reunite")
             .into_inner())
     } else {

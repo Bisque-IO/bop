@@ -9,6 +9,7 @@ use openraft::OptionalSend;
 use openraft::OptionalSync;
 use openraft::RaftTypeConfig;
 use openraft::storage::RaftLogStorage;
+use std::future::Future;
 
 /// Trait for a storage backend that provides log storage for multiple Raft groups.
 ///
@@ -24,12 +25,15 @@ where
     /// The log storage type for individual groups
     type GroupLogStorage: RaftLogStorage<C>;
 
-    /// Get the log storage for a specific group.
+    /// Get the log storage for a specific group (async version).
     ///
     /// This returns a handle to the log storage for a single group.
     /// Multiple calls with the same group_id should return handles
     /// that share the same underlying state.
-    fn get_log_storage(&self, group_id: u64) -> Self::GroupLogStorage;
+    ///
+    /// The first call for a new group_id may perform recovery operations
+    /// using async I/O.
+    fn get_log_storage(&self, group_id: u64) -> impl Future<Output = Self::GroupLogStorage> + Send;
 
     /// Remove a group from this storage.
     ///

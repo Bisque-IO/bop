@@ -548,6 +548,85 @@ impl File {
         std::future::ready(Ok(()))
     }
 
+    /// Truncates or extends the underlying file, updating the size of this
+    /// file to become `size`.
+    ///
+    /// If the `size` is less than the current file's size, then the file will
+    /// be shrunk. If it is greater than the current file's size, then the file
+    /// will be extended to `size` and have all of the intermediate data filled
+    /// in with 0s.
+    ///
+    /// The file's cursor isn't changed. In particular, if the cursor was at the
+    /// end and the file is shrunk using this operation, the cursor will now be
+    /// past the end.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the file is not opened for writing.
+    /// Also, if the file is not opened with read access, it is unspecified whether
+    /// this function returns an error.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use fs::File;
+    ///
+    /// #[main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let file = fs::OpenOptions::new()
+    ///         .read(true)
+    ///         .write(true)
+    ///         .create(true)
+    ///         .open("foo.txt")
+    ///         .await?;
+    ///
+    ///     file.set_len(10).await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn set_len(&self, size: u64) -> io::Result<()> {
+        #[cfg(all(target_os = "linux", feature = "iouring"))]
+        {
+            let op = Op::ftruncate(&self.fd, size).unwrap();
+            let completion = op.await;
+            completion.meta.result?;
+            Ok(())
+        }
+        #[cfg(not(all(target_os = "linux", feature = "iouring")))]
+        {
+            #[cfg(unix)]
+            {
+                let fd = self.fd.raw_fd();
+                crate::blocking::unblock(move || {
+                    let res = unsafe { libc::ftruncate(fd, size as libc::off_t) };
+                    if res == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                })
+                .await
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::FromRawHandle;
+                let handle = self.fd.raw_socket() as std::os::windows::io::RawHandle;
+                crate::blocking::unblock(move || {
+                    let file = unsafe {
+                        std::mem::ManuallyDrop::new(std::fs::File::from_raw_handle(handle))
+                    };
+                    file.set_len(size)
+                })
+                .await
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = size;
+                unreachable!()
+            }
+        }
+    }
+
     /// Closes the file.
     ///
     /// The method completes once the close operation has completed,

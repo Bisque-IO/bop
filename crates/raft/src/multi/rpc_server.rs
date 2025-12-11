@@ -11,8 +11,6 @@
 //! - Each connection has separate reader and writer tasks
 //! - Request IDs correlate responses to their original requests
 
-use maniac::io::{AsyncReadRent, AsyncWriteRent};
-use maniac::net::{TcpListener, TcpStream};
 use crate::multi::codec::{
     Decode, Encode, ResponseMessage as CodecResponseMessage, RpcMessage as CodecRpcMessage,
     SnapshotMeta as CodecSnapshotMeta, Vote as CodecVote,
@@ -21,10 +19,10 @@ use crate::multi::manager::MultiRaftManager;
 use crate::multi::network::MultiplexedTransport;
 use crate::multi::storage::MultiRaftLogStorage;
 use crate::multi::tcp_transport::{read_frame, write_frame};
-use maniac::sync::mpsc::bounded as mpsc;
-use maniac::sync::mutex::Mutex;
-use maniac::time::timeout;
 use dashmap::DashMap;
+use maniac::io::{AsyncReadRent, AsyncWriteRent, Splitable};
+use maniac::net::{TcpListener, TcpStream};
+use maniac::time::timeout;
 use openraft::RaftTypeConfig;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
@@ -205,7 +203,9 @@ where
 {
     /// Create a new RPC server
     pub fn new(config: ManiacRpcServerConfig, manager: Arc<MultiRaftManager<C, T, S>>) -> Self {
-        let snapshot_transfers = Arc::new(SnapshotTransferManager::new(config.snapshot_transfer_timeout));
+        let snapshot_transfers = Arc::new(SnapshotTransferManager::new(
+            config.snapshot_transfer_timeout,
+        ));
         Self {
             config,
             manager,
@@ -262,99 +262,169 @@ where
 
     /// Handle a multiplexed connection with true out-of-order response support
     ///
-    /// Uses a channel-based approach:
-    /// - Main task reads requests and spawns handlers
-    /// - Handler tasks send responses to a channel
-    /// - Main task also drains the channel and writes responses
+    /// Uses separate tasks for reading and writing to avoid busy-waiting
     async fn handle_multiplexed_connection(
         &self,
-        mut stream: TcpStream,
+        stream: TcpStream,
         peer_addr: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         tracing::debug!(
             "New multiplexed connection from: {} (max_concurrent={})",
             peer_addr,
             self.config.max_concurrent_requests
         );
 
-        // Channel for responses from handler tasks
-        let (response_tx, mut response_rx) = mpsc::channel::<Vec<u8>>();
+        // Shared connection alive flag
+        let alive = Arc::new(AtomicBool::new(true));
+
+        // Channel for responses from handler tasks - use flume for reliability
+        let (response_tx, response_rx) = flume::bounded::<Vec<u8>>(256);
+
+        // Split the stream
+        let (read_half, write_half) = stream.into_split();
+
+        // Spawn writer task
+        let alive_clone = alive.clone();
+        let _writer_handle = maniac::spawn(async move {
+            Self::response_writer_loop(write_half, response_rx, alive_clone).await;
+        });
+
+        // Run reader in current task
+        let result = self
+            .request_reader_loop(read_half, peer_addr, response_tx, alive.clone())
+            .await;
+
+        // Mark connection as done
+        alive.store(false, Ordering::Release);
+
+        result
+    }
+
+    /// Writer loop - sends responses back to client
+    async fn response_writer_loop<W: maniac::io::AsyncWriteRent>(
+        mut write_half: W,
+        response_rx: flume::Receiver<Vec<u8>>,
+        alive: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use std::sync::atomic::Ordering;
 
         loop {
-            // Try to send any pending responses first (non-blocking)
-            while let Ok(response_data) = response_rx.try_recv() {
-                if let Err(e) = write_frame(&mut stream, &response_data).await {
-                    tracing::error!("Failed to write response: {}", e);
-                    return Err(Box::new(e));
-                }
+            if !alive.load(Ordering::Acquire) {
+                tracing::debug!("RPC writer: connection no longer alive, exiting");
+                return;
             }
 
-            // Read next request with timeout
-            let request_data =
-                match timeout(self.config.connection_timeout, read_frame(&mut stream)).await {
-                    Ok(Ok(data)) => data,
-                    Ok(Err(e)) => {
-                        if let crate::multi::tcp_transport::ManiacTransportError::IoError(
-                            ref io_err,
-                        ) = e
-                        {
-                            if io_err.kind() == std::io::ErrorKind::UnexpectedEof {
-                                tracing::debug!("Connection closed by peer: {}", peer_addr);
-                                break;
+            match response_rx.recv_async().await {
+                Ok(response_data) => {
+                    tracing::debug!("RPC writer: sending response ({} bytes)", response_data.len());
+                    if let Err(e) = write_frame(&mut write_half, &response_data).await {
+                        tracing::error!("RPC writer: failed to write response: {}", e);
+                        alive.store(false, Ordering::Release);
+                        return;
+                    }
+                    tracing::debug!("RPC writer: response sent successfully");
+                }
+                Err(_) => {
+                    // Channel closed
+                    tracing::debug!("RPC writer: channel closed, exiting");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Reader loop - reads requests from client
+    async fn request_reader_loop<R: maniac::io::AsyncReadRent>(
+        &self,
+        mut read_half: R,
+        peer_addr: SocketAddr,
+        response_tx: flume::Sender<Vec<u8>>,
+        alive: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use std::sync::atomic::Ordering;
+
+        loop {
+            if !alive.load(Ordering::Acquire) {
+                return Ok(());
+            }
+
+            // Wait for request from socket
+            match timeout(self.config.connection_timeout, read_frame(&mut read_half)).await {
+                Ok(Ok(request_data)) => {
+                    // Decode request using zero-copy codec
+                    let request: CodecRpcMessage<crate::multi::codec::RawBytes> =
+                        match CodecRpcMessage::decode_from_slice(&request_data) {
+                            Ok(req) => req,
+                            Err(e) => {
+                                tracing::error!(
+                                    "RPC reader: failed to decode request from {}: {}",
+                                    peer_addr,
+                                    e
+                                );
+                                // Return error to close connection, preventing busy loop on garbage data
+                                return Err(Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    e,
+                                )));
+                            }
+                        };
+
+                    let request_id = request.request_id();
+                    tracing::debug!("RPC reader: received request {} from {}", request_id, peer_addr);
+                    let manager = self.manager.clone();
+                    let snapshot_transfers = self.snapshot_transfers.clone();
+                    let tx = response_tx.clone();
+
+                    // Spawn handler for this request
+                    let _ = maniac::spawn(async move {
+                        tracing::debug!("RPC handler: processing request {}", request_id);
+                        let response =
+                            Self::process_codec_request(&manager, &snapshot_transfers, request)
+                                .await;
+                        tracing::debug!("RPC handler: request {} processed, encoding response", request_id);
+
+                        // Serialize and send response to writer
+                        match response.encode_to_vec() {
+                            Ok(response_data) => {
+                                tracing::debug!("RPC handler: sending response for request {} ({} bytes)", request_id, response_data.len());
+                                if tx.send_async(response_data).await.is_err() {
+                                    tracing::debug!(
+                                        "RPC handler: response channel closed for request {}",
+                                        request_id
+                                    );
+                                } else {
+                                    tracing::debug!("RPC handler: response for request {} sent to writer", request_id);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "RPC handler: failed to encode response for request {}: {}",
+                                    request_id,
+                                    e
+                                );
                             }
                         }
-                        return Err(Box::new(e));
-                    }
-                    Err(_) => {
-                        tracing::debug!("Connection timeout from: {}", peer_addr);
-                        break;
-                    }
-                };
-
-            // Decode request using zero-copy codec
-            let request: CodecRpcMessage<crate::multi::codec::RawBytes> =
-                match CodecRpcMessage::decode_from_slice(&request_data) {
-                    Ok(req) => req,
-                    Err(e) => {
-                        tracing::error!("Failed to decode request from {}: {}", peer_addr, e);
-                        continue;
-                    }
-                };
-
-            let request_id = request.request_id();
-            let manager = self.manager.clone();
-            let snapshot_transfers = self.snapshot_transfers.clone();
-            let mut tx = response_tx.clone();
-
-            // Spawn handler for this request
-            let _ = maniac::spawn(async move {
-                let response = Self::process_codec_request(&manager, &snapshot_transfers, request).await;
-
-                // Serialize and send response to writer
-                match response.encode_to_vec() {
-                    Ok(response_data) => {
-                        if tx.send(response_data).await.is_err() {
-                            tracing::debug!("Response channel closed for request {}", request_id);
+                    });
+                }
+                Ok(Err(e)) => {
+                    if let crate::multi::tcp_transport::ManiacTransportError::IoError(ref io_err) =
+                        e
+                    {
+                        if io_err.kind() == std::io::ErrorKind::UnexpectedEof {
+                            tracing::debug!("RPC reader: connection closed by peer: {}", peer_addr);
+                            return Ok(());
                         }
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to encode response for request {}: {}",
-                            request_id,
-                            e
-                        );
-                    }
+                    return Err(Box::new(e));
                 }
-            });
+                Err(_) => {
+                    tracing::debug!("RPC reader: connection timeout from: {}", peer_addr);
+                    return Ok(());
+                }
+            }
         }
-
-        // Drain any remaining responses before closing
-        drop(response_tx);
-        while let Ok(response_data) = response_rx.try_recv() {
-            let _ = write_frame(&mut stream, &response_data).await;
-        }
-
-        Ok(())
     }
 
     /// Process a codec request and return a codec response
@@ -364,9 +434,9 @@ where
         request: CodecRpcMessage<crate::multi::codec::RawBytes>,
     ) -> CodecRpcMessage<crate::multi::codec::RawBytes> {
         use crate::multi::codec::{
-            AppendEntriesResponse as CodecAppendEntriesResponse,
-            InstallSnapshotResponse as CodecInstallSnapshotResponse, RawBytes,
-            VoteResponse as CodecVoteResponse, ToCodec, FromCodec,
+            AppendEntriesResponse as CodecAppendEntriesResponse, FromCodec,
+            InstallSnapshotResponse as CodecInstallSnapshotResponse, RawBytes, ToCodec,
+            VoteResponse as CodecVoteResponse,
         };
 
         match request {
@@ -386,7 +456,9 @@ where
                     // Convert codec types to raft types using FromCodec
                     let vote = openraft::impls::Vote::<C>::from_codec(rpc.vote);
                     let prev_log_id = rpc.prev_log_id.map(|l| openraft::LogId::<C>::from_codec(l));
-                    let leader_commit = rpc.leader_commit.map(|l| openraft::LogId::<C>::from_codec(l));
+                    let leader_commit = rpc
+                        .leader_commit
+                        .map(|l| openraft::LogId::<C>::from_codec(l));
 
                     // Convert entries using FromCodec trait
                     let entries: Vec<C::Entry> = rpc
@@ -398,18 +470,22 @@ where
                     let raft_rpc = openraft::raft::AppendEntriesRequest {
                         vote,
                         prev_log_id,
-                        entries,
+                        entries: entries.clone(),
                         leader_commit,
                     };
 
+                    tracing::trace!("AppendEntries handler: calling raft.append_entries (req_id={}, entries={})", request_id, entries.len());
                     match raft.append_entries(raft_rpc).await {
                         Ok(response) => {
+                            tracing::trace!("AppendEntries handler: got Ok response (req_id={})", request_id);
                             let codec_response = match response {
                                 openraft::raft::AppendEntriesResponse::Success => {
                                     CodecAppendEntriesResponse::Success
                                 }
                                 openraft::raft::AppendEntriesResponse::PartialSuccess(lid) => {
-                                    CodecAppendEntriesResponse::PartialSuccess(lid.map(|l| l.to_codec()))
+                                    CodecAppendEntriesResponse::PartialSuccess(
+                                        lid.map(|l| l.to_codec()),
+                                    )
                                 }
                                 openraft::raft::AppendEntriesResponse::Conflict => {
                                     CodecAppendEntriesResponse::Conflict
@@ -423,9 +499,12 @@ where
                                 message: CodecResponseMessage::AppendEntries(codec_response),
                             }
                         }
-                        Err(e) => CodecRpcMessage::Error {
-                            request_id,
-                            error: format!("AppendEntries failed: {}", e),
+                        Err(e) => {
+                            tracing::trace!("AppendEntries handler: got Err response (req_id={}): {}", request_id, e);
+                            CodecRpcMessage::Error {
+                                request_id,
+                                error: format!("AppendEntries failed: {}", e),
+                            }
                         },
                     }
                 } else {
@@ -548,9 +627,7 @@ where
                         }
 
                         // Return success to continue receiving chunks
-                        let codec_response = CodecInstallSnapshotResponse {
-                            vote: rpc.vote,
-                        };
+                        let codec_response = CodecInstallSnapshotResponse { vote: rpc.vote };
                         CodecRpcMessage::Response {
                             request_id,
                             message: CodecResponseMessage::InstallSnapshot(codec_response),
@@ -579,7 +656,9 @@ where
                             if rpc.done {
                                 // Final chunk - install the complete snapshot
                                 let vote = openraft::impls::Vote::<C>::from_codec(acc.vote.clone());
-                                let meta = openraft::storage::SnapshotMeta::<C>::from_codec(acc.meta.clone());
+                                let meta = openraft::storage::SnapshotMeta::<C>::from_codec(
+                                    acc.meta.clone(),
+                                );
                                 let data = std::mem::take(&mut acc.data);
                                 drop(acc);
 
@@ -605,7 +684,9 @@ where
                                         };
                                         CodecRpcMessage::Response {
                                             request_id,
-                                            message: CodecResponseMessage::InstallSnapshot(codec_response),
+                                            message: CodecResponseMessage::InstallSnapshot(
+                                                codec_response,
+                                            ),
                                         }
                                     }
                                     Err(e) => CodecRpcMessage::Error {
@@ -623,9 +704,8 @@ where
                                     acc.next_offset
                                 );
 
-                                let codec_response = CodecInstallSnapshotResponse {
-                                    vote: rpc.vote,
-                                };
+                                let codec_response =
+                                    CodecInstallSnapshotResponse { vote: rpc.vote };
                                 CodecRpcMessage::Response {
                                     request_id,
                                     message: CodecResponseMessage::InstallSnapshot(codec_response),
@@ -671,7 +751,9 @@ where
                     // Heartbeats typically have no entries
                     let vote = openraft::impls::Vote::<C>::from_codec(rpc.vote);
                     let prev_log_id = rpc.prev_log_id.map(|l| openraft::LogId::<C>::from_codec(l));
-                    let leader_commit = rpc.leader_commit.map(|l| openraft::LogId::<C>::from_codec(l));
+                    let leader_commit = rpc
+                        .leader_commit
+                        .map(|l| openraft::LogId::<C>::from_codec(l));
 
                     // Convert entries (typically empty for heartbeats)
                     let entries: Vec<C::Entry> = rpc
@@ -694,7 +776,9 @@ where
                                     CodecAppendEntriesResponse::Success
                                 }
                                 openraft::raft::AppendEntriesResponse::PartialSuccess(lid) => {
-                                    CodecAppendEntriesResponse::PartialSuccess(lid.map(|l| l.to_codec()))
+                                    CodecAppendEntriesResponse::PartialSuccess(
+                                        lid.map(|l| l.to_codec()),
+                                    )
                                 }
                                 openraft::raft::AppendEntriesResponse::Conflict => {
                                     CodecAppendEntriesResponse::Conflict

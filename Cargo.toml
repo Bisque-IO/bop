@@ -11,7 +11,7 @@ members = [
     # "crates/maniac-sys",
     # "crates/maniac-usockets",
     "crates/maniac",
-    "crates/raft",  # maniac-raft: OpenRaft adapter for Maniac runtime
+    "crates/raft",           # maniac-raft: OpenRaft adapter for Maniac runtime
     "moon/rapp",
     "crates/rusqlite",
     "crates/libsql-ffi",
@@ -141,7 +141,10 @@ zstd = "0.13"
 maniac = { path = "crates/maniac", version = "0.1.0" }
 maniac-raft = { path = "crates/raft", version = "0.1.0" }
 # Upstream openraft from git
-openraft = { git = "https://github.com/databendlabs/openraft", branch = "main", default-features = false, features = ["serde"] }
+openraft = { git = "https://github.com/databendlabs/openraft", branch = "main", default-features = false, features = [
+    "serde",
+    "tokio-rt",
+] }
 openraft-macros = { git = "https://github.com/databendlabs/openraft", branch = "main" }
 maniac-rusqlite = { path = "crates/rusqlite", version = "0.9.29" }
 maniac-libsql-ffi = { path = "crates/libsql-ffi", version = "3.45.1" }
@@ -160,5 +163,5 @@ opt-level = "z"   # Optimize for size
 lto = true
 codegen-units = 1
 panic = "abort"   # Smaller binary size (no unwinding)
-strip = "symbols" # Strip debug symbols (more aggressive than `true`)
-debug = false
+# strip = "symbols" # Strip debug symbols (more aggressive than `true`)
+debug = true

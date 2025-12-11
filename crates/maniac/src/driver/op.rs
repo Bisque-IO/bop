@@ -14,6 +14,7 @@ pub(crate) mod write;
 mod accept;
 mod connect;
 mod fsync;
+mod ftruncate;
 mod open;
 mod poll;
 mod recv;

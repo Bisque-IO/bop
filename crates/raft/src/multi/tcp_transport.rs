@@ -12,13 +12,13 @@
 //! - Connection pools maintain multiple connections per peer for maximum throughput
 //! - Connections have a TTL to prevent degradation from long-lived connections
 
-use maniac::io::{AsyncReadRent, AsyncWriteRent};
-use maniac::net::{TcpConnectOpts, TcpStream};
 use crate::multi::codec::{Decode, Encode, ResponseMessage, RpcMessage};
 use crate::multi::network::MultiplexedTransport;
+use dashmap::DashMap;
+use maniac::io::{AsyncReadRent, AsyncWriteRent, Splitable};
+use maniac::net::{TcpConnectOpts, TcpStream};
 use maniac::sync::oneshot;
 use maniac::time::Instant;
-use dashmap::DashMap;
 use openraft::OptionalSend;
 use openraft::RaftTypeConfig;
 use openraft::error::{InstallSnapshotError, RPCError, RaftError};
@@ -178,10 +178,29 @@ struct WriteRequest {
     response_tx: PendingResponseSender,
 }
 
+/// RAII Guard for in-flight request counter to ensure it is decremented
+/// even if the future is cancelled/dropped (e.g. due to timeout).
+struct InFlightGuard<'a> {
+    counter: &'a std::sync::atomic::AtomicU64,
+}
+
+impl<'a> InFlightGuard<'a> {
+    fn new(counter: &'a std::sync::atomic::AtomicU64) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self { counter }
+    }
+}
+
+impl<'a> Drop for InFlightGuard<'a> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// A single multiplexed connection with its own IO task
 struct MultiplexedConnection {
-    /// Channel to send write requests to the IO task
-    write_tx: maniac::sync::mpsc::bounded::MpscSender<WriteRequest>,
+    /// Channel to send write requests to the IO task (using flume for reliability)
+    write_tx: flume::Sender<WriteRequest>,
     /// Connection creation time for TTL tracking
     created_at: Instant,
     /// Number of in-flight requests
@@ -195,8 +214,8 @@ struct MultiplexedConnection {
 impl MultiplexedConnection {
     /// Create a new multiplexed connection and spawn the IO task
     fn new(stream: TcpStream, conn_id: u64) -> Arc<Self> {
-        // Channel for write requests - buffer up to 256 pending writes
-        let (write_tx, write_rx) = maniac::sync::mpsc::bounded::channel::<WriteRequest>();
+        // Channel for write requests - buffer up to 256 pending writes (using flume for reliability)
+        let (write_tx, write_rx) = flume::bounded::<WriteRequest>(256);
 
         let conn = Arc::new(Self {
             write_tx,
@@ -216,45 +235,95 @@ impl MultiplexedConnection {
     }
 
     /// IO loop that handles both reading responses and writing requests
-    /// This runs in a single task to avoid split issues
+    /// Uses split stream with separate reader and writer tasks for true concurrency
     async fn io_loop(
         self: Arc<Self>,
-        mut stream: TcpStream,
-        mut write_rx: maniac::sync::mpsc::bounded::MpscReceiver<WriteRequest>,
+        stream: TcpStream,
+        write_rx: flume::Receiver<WriteRequest>,
     ) {
-        use maniac::io::AsyncReadRentExt;
-
         // Map of pending requests awaiting responses
         let pending: Arc<DashMap<u64, PendingResponseSender>> = Arc::new(DashMap::new());
 
-        loop {
-            // Process any pending write requests first (non-blocking)
-            while let Ok(write_req) = write_rx.try_recv() {
-                // Register the pending request before writing
-                pending.insert(write_req.request_id, write_req.response_tx);
+        // Split the stream into read and write halves
+        let (read_half, write_half) = stream.into_split();
 
-                // Write the request
-                if let Err(e) = write_frame(&mut stream, &write_req.data).await {
-                    tracing::debug!("Connection {} write error: {}", self.conn_id, e);
-                    // Remove and notify this request
-                    if let Some((_, tx)) = pending.remove(&write_req.request_id) {
-                        tx.send(Err(e));
+        // Spawn the writer task
+        let conn_self = self.clone();
+        let pending_clone = pending.clone();
+        let _writer_handle = maniac::spawn(async move {
+            conn_self
+                .writer_loop(write_half, write_rx, pending_clone)
+                .await;
+        });
+
+        // Run the reader in the current task
+        let reader_self = self.clone();
+        reader_self.reader_loop(read_half, pending.clone()).await;
+
+        // When reader exits, mark connection as dead (writer will notice via channel closure)
+        self.alive.store(false, Ordering::Release);
+        self.notify_all_pending_error(&pending);
+    }
+
+    /// Writer loop - processes write requests from the channel
+    async fn writer_loop(
+        self: Arc<Self>,
+        mut write_half: maniac::net::TcpOwnedWriteHalf,
+        write_rx: flume::Receiver<WriteRequest>,
+        pending: Arc<DashMap<u64, PendingResponseSender>>,
+    ) {
+        loop {
+            // Check if connection is still alive
+            if !self.alive.load(Ordering::Acquire) {
+                return;
+            }
+
+            // Wait for a write request (this blocks properly without busy-wait)
+            match write_rx.recv_async().await {
+                Ok(write_req) => {
+                    // Register the pending request before writing
+                    pending.insert(write_req.request_id, write_req.response_tx);
+
+                    // Write the request
+                    if let Err(e) = write_frame(&mut write_half, &write_req.data).await {
+                        tracing::debug!("Connection {} write error: {}", self.conn_id, e);
+                        // Remove and notify this request
+                        if let Some((_, tx)) = pending.remove(&write_req.request_id) {
+                            tx.send(Err(e));
+                        }
+                        self.alive.store(false, Ordering::Release);
+                        return;
                     }
-                    self.alive.store(false, Ordering::Release);
-                    // Notify all other pending requests
-                    self.notify_all_pending_error(&pending);
+                }
+                Err(_) => {
+                    // Channel closed, connection is shutting down
                     return;
                 }
             }
+        }
+    }
 
-            // Now try to read a response (with a short timeout to allow write processing)
-            let read_timeout = std::time::Duration::from_millis(10);
-            match maniac::time::timeout(read_timeout, read_frame(&mut stream)).await {
-                Ok(Ok(data)) => {
+    /// Reader loop - reads responses and dispatches to pending requests
+    async fn reader_loop(
+        self: Arc<Self>,
+        mut read_half: maniac::net::TcpOwnedReadHalf,
+        pending: Arc<DashMap<u64, PendingResponseSender>>,
+    ) {
+        loop {
+            // Check if connection is still alive
+            if !self.alive.load(Ordering::Acquire) {
+                return;
+            }
+
+            // Read a response (blocks properly without busy-wait)
+            match read_frame(&mut read_half).await {
+                Ok(data) => {
+                    // Parse request_id from response
                     // Parse request_id from response
                     if data.len() < 9 {
                         tracing::error!("Response too short: {} bytes", data.len());
-                        continue;
+                        // Close connection on invalid data to prevent busy loop
+                        return;
                     }
 
                     let request_id = u64::from_le_bytes(data[1..9].try_into().unwrap());
@@ -262,10 +331,15 @@ impl MultiplexedConnection {
                     if let Some((_, sender)) = pending.remove(&request_id) {
                         sender.send(Ok(data));
                     } else {
-                        tracing::warn!("Received response for unknown request ID: {}", request_id);
+                        tracing::warn!(
+                            "Received response for unknown request ID: {} (len={}, disc={})",
+                            request_id,
+                            data.len(),
+                            data[0]
+                        );
                     }
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     // Check if it's an EOF (connection closed gracefully)
                     if let ManiacTransportError::IoError(ref io_err) = e {
                         if io_err.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -274,16 +348,7 @@ impl MultiplexedConnection {
                             tracing::debug!("Connection {} read error: {}", self.conn_id, e);
                         }
                     }
-                    self.alive.store(false, Ordering::Release);
-                    self.notify_all_pending_error(&pending);
                     return;
-                }
-                Err(_timeout) => {
-                    // Timeout is fine, just continue to process writes
-                    // Check if connection is still supposed to be alive
-                    if !self.alive.load(Ordering::Acquire) {
-                        return;
-                    }
                 }
             }
         }
@@ -323,7 +388,9 @@ impl MultiplexedConnection {
         // Create response channel
         let (response_tx, response_rx) = oneshot::channel();
 
-        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        // RAII guard for in-flight count
+        // This increments on creation and decrements on Drop (even if cancelled)
+        let _guard = InFlightGuard::new(&self.in_flight);
 
         // Send write request to the IO task
         let write_req = WriteRequest {
@@ -332,22 +399,31 @@ impl MultiplexedConnection {
             response_tx,
         };
 
-        if self.write_tx.clone().send(write_req).await.is_err() {
-            self.in_flight.fetch_sub(1, Ordering::Relaxed);
+        if self.write_tx.send_async(write_req).await.is_err() {
             self.alive.store(false, Ordering::Release);
             return Err(ManiacTransportError::ConnectionClosed);
         }
 
         // Wait for response with timeout
         // Note: Receiver implements Future directly, returning Result<T, RecvError>
-        let result = match maniac::time::timeout(timeout, response_rx).await {
+        match maniac::time::timeout(timeout, response_rx).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_recv_err)) => Err(ManiacTransportError::ConnectionClosed),
-            Err(_timeout) => Err(ManiacTransportError::RequestTimeout),
-        };
-
-        self.in_flight.fetch_sub(1, Ordering::Relaxed);
-        result
+            Ok(Err(_recv_err)) => {
+                // Sender dropped - connection likely closed
+                self.alive.store(false, Ordering::Release);
+                Err(ManiacTransportError::ConnectionClosed)
+            }
+            Err(_timeout) => {
+                // Request timed out - mark connection as dead to prevent reuse of stalled connection
+                tracing::warn!(
+                    "Request {} timed out, marking connection {} as dead",
+                    request_id,
+                    self.conn_id
+                );
+                self.alive.store(false, Ordering::Release);
+                Err(ManiacTransportError::RequestTimeout)
+            }
+        }
     }
 }
 
@@ -392,67 +468,77 @@ impl MultiplexedConnectionPool {
         Fut: Future<Output = Result<TcpStream, io::Error>>,
     {
         let ttl = self.connection_ttl;
+        let max_per_conn = self.max_per_conn as u64;
 
-        // Clean up expired/dead connections and find best available
-        let mut pool = self.pools.entry(addr).or_insert_with(Vec::new);
+        // First pass: try to find an existing usable connection
+        // We scope this block to ensure the DashMap lock is dropped before any await
+        {
+            let mut pool = self.pools.entry(addr).or_insert_with(Vec::new);
 
-        // Remove dead or expired connections
-        pool.retain(|conn| conn.is_usable(ttl));
+            // Remove dead or expired connections
+            pool.retain(|conn| conn.is_usable(ttl));
 
-        // Find connection with lowest in-flight count that has capacity
-        let mut best_conn: Option<Arc<MultiplexedConnection>> = None;
-        let mut best_count = u64::MAX;
+            // Find connection with lowest in-flight count that has capacity
+            let mut best_conn: Option<Arc<MultiplexedConnection>> = None;
+            let mut best_count = u64::MAX;
 
-        for conn in pool.iter() {
-            let count = conn.in_flight_count();
-            if count < best_count && count < self.max_per_conn as u64 {
-                best_count = count;
-                best_conn = Some(conn.clone());
+            for conn in pool.iter() {
+                let count = conn.in_flight_count();
+                if count < best_count && count < max_per_conn {
+                    best_count = count;
+                    best_conn = Some(conn.clone());
+                }
             }
-        }
 
-        // If we found a good connection, use it
-        if let Some(conn) = best_conn {
-            return Ok(conn);
-        }
+            if let Some(conn) = best_conn {
+                return Ok(conn);
+            }
 
-        // Need to create a new connection if under limit
-        if pool.len() < self.connections_per_addr {
-            let stream = factory().await.map_err(|e| {
-                ManiacTransportError::ConnectionError(format!(
-                    "Failed to connect to {}: {}",
-                    addr, e
-                ))
-            })?;
+            // If we are at capacity, reuse the one with lowest load even if full
+            // (Only if we can't create new ones)
+            if pool.len() >= self.connections_per_addr {
+                if let Some(conn) = pool.iter().min_by_key(|c| c.in_flight_count()) {
+                    return Ok(conn.clone());
+                }
+            }
+        } // Lock dropped here
 
-            let conn_id = self.next_conn_id();
-            let conn = MultiplexedConnection::new(stream, conn_id);
-            pool.push(conn.clone());
-
-            tracing::debug!(
-                "Created new multiplexed connection {} to {} (pool size: {})",
-                conn_id,
-                addr,
-                pool.len()
-            );
-
-            return Ok(conn);
-        }
-
-        // All connections are at max capacity, use the one with lowest count anyway
-        if let Some(conn) = pool.iter().min_by_key(|c| c.in_flight_count()) {
-            return Ok(conn.clone());
-        }
-
-        // This shouldn't happen, but create a new connection as fallback
+        // No usable connection and we have capacity to create one.
+        // Create new connection without holding the lock
         let stream = factory().await.map_err(|e| {
             ManiacTransportError::ConnectionError(format!("Failed to connect to {}: {}", addr, e))
         })?;
 
         let conn_id = self.next_conn_id();
         let conn = MultiplexedConnection::new(stream, conn_id);
-        pool.push(conn.clone());
-        Ok(conn)
+
+        // Re-acquire lock to insert
+        // Note: another task might have inserted a connection in the meantime,
+        // but it's safe to add ours too or check limit again.
+        {
+            let mut pool = self.pools.entry(addr).or_insert_with(Vec::new);
+            // Re-check limit to be safe, though slightly over-limit is fine
+            if pool.len() < self.connections_per_addr {
+                pool.push(conn.clone());
+                tracing::debug!(
+                    "Created new multiplexed connection {} to {} (pool size: {})",
+                    conn_id,
+                    addr,
+                    pool.len()
+                );
+                Ok(conn)
+            } else {
+                // Race condition: someone filled the pool while we were connecting.
+                // We can either return our new connection (detached from pool) or use one from pool.
+                // Let's use our new connection this time but not add it to the pool to respect limit strictly?
+                // Or just add it temporarily.
+                // For simplicity/robustness, let's just add it if strictly needed, or just return it.
+                // Let's return it but not add to pool if full, effectively making it a one-off?
+                // Better: Add it anyway to avoid waste, slightly exceeding soft limit is acceptable.
+                pool.push(conn.clone());
+                Ok(conn)
+            }
+        }
     }
 
     /// Remove a specific connection from the pool
@@ -586,23 +672,39 @@ where
         let pool = self.connection_pool.clone();
         let addr = *target;
 
+        tracing::debug!("rpc_call: target={}, request_id={}", addr, request_id);
+
         // Serialize request using zero-copy codec
         let request_data = request_msg
             .encode_to_vec()
             .map_err(|e| ManiacTransportError::CodecError(e.to_string()))?;
 
+        tracing::debug!("rpc_call: encoded {} bytes", request_data.len());
+
         // Get a connection from the pool
+        tracing::debug!("rpc_call: getting connection from pool");
         let conn = pool
             .get_or_create(addr, || async {
+                tracing::debug!("rpc_call: creating new TCP connection to {}", addr);
                 let opts = TcpConnectOpts::default();
                 TcpStream::connect_addr_with_config(addr, &opts).await
             })
             .await?;
 
+        tracing::debug!("rpc_call: got connection conn_id={}", conn.conn_id);
+
         // Send request and wait for response
         let result = conn
             .send_request(request_id, request_data, self.config.request_timeout)
             .await;
+
+        tracing::debug!(
+            "rpc_call: send_request result={:?}",
+            result
+                .as_ref()
+                .map(|v| v.len())
+                .map_err(|e| format!("{}", e))
+        );
 
         // If the connection failed, remove it from the pool
         if result.is_err() && !conn.alive.load(Ordering::Acquire) {
@@ -635,9 +737,8 @@ where
         rpc: AppendEntriesRequest<C>,
     ) -> Result<AppendEntriesResponse<C>, RPCError<C, RaftError<C>>> {
         use crate::multi::codec::{
-            AppendEntriesRequest as CodecAppendEntriesRequest,
-            Entry as CodecEntry, RawBytes,
-            ToCodec, FromCodec,
+            AppendEntriesRequest as CodecAppendEntriesRequest, Entry as CodecEntry, FromCodec,
+            RawBytes, ToCodec,
         };
 
         let addr = self.node_registry.resolve(&target).ok_or_else(|| {
@@ -646,11 +747,8 @@ where
         let request_id = self.next_request_id();
 
         // Convert entries using ToCodec trait
-        let codec_entries: Vec<CodecEntry<RawBytes>> = rpc
-            .entries
-            .iter()
-            .map(|entry| entry.to_codec())
-            .collect();
+        let codec_entries: Vec<CodecEntry<RawBytes>> =
+            rpc.entries.iter().map(|entry| entry.to_codec()).collect();
 
         let codec_rpc = CodecAppendEntriesRequest {
             vote: rpc.vote.to_codec(),
@@ -705,13 +803,16 @@ where
         group_id: u64,
         rpc: VoteRequest<C>,
     ) -> Result<VoteResponse<C>, RPCError<C, RaftError<C>>> {
-        use crate::multi::codec::{
-            RawBytes, VoteRequest as CodecVoteRequest, ToCodec, FromCodec,
-        };
+        use crate::multi::codec::{FromCodec, RawBytes, ToCodec, VoteRequest as CodecVoteRequest};
+
+        tracing::debug!("send_vote: target={}, group_id={}", target, group_id);
 
         let addr = self.node_registry.resolve(&target).ok_or_else(|| {
+            tracing::error!("send_vote: Unknown node: {}", target);
             ManiacTransportError::ConnectionError(format!("Unknown node: {}", target))
         })?;
+
+        tracing::debug!("send_vote: resolved addr={}", addr);
         let request_id = self.next_request_id();
 
         let codec_rpc = CodecVoteRequest {
@@ -739,13 +840,13 @@ where
             RpcMessage::Response {
                 message: ResponseMessage::Vote(resp),
                 ..
-            } => {
-                Ok(VoteResponse {
-                    vote: openraft::impls::Vote::<C>::from_codec(resp.vote),
-                    vote_granted: resp.vote_granted,
-                    last_log_id: resp.last_log_id.map(|l| openraft::LogId::<C>::from_codec(l)),
-                })
-            }
+            } => Ok(VoteResponse {
+                vote: openraft::impls::Vote::<C>::from_codec(resp.vote),
+                vote_granted: resp.vote_granted,
+                last_log_id: resp
+                    .last_log_id
+                    .map(|l| openraft::LogId::<C>::from_codec(l)),
+            }),
             RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error).into()),
             _ => Err(ManiacTransportError::InvalidResponse.into()),
         }
@@ -758,7 +859,7 @@ where
         rpc: InstallSnapshotRequest<C>,
     ) -> Result<InstallSnapshotResponse<C>, RPCError<C, RaftError<C, InstallSnapshotError>>> {
         use crate::multi::codec::{
-            InstallSnapshotRequest as CodecInstallSnapshotRequest, RawBytes, ToCodec, FromCodec,
+            FromCodec, InstallSnapshotRequest as CodecInstallSnapshotRequest, RawBytes, ToCodec,
         };
 
         let addr = self.node_registry.resolve(&target).ok_or_else(|| {
@@ -794,11 +895,9 @@ where
             RpcMessage::Response {
                 message: ResponseMessage::InstallSnapshot(resp),
                 ..
-            } => {
-                Ok(InstallSnapshotResponse {
-                    vote: openraft::impls::Vote::<C>::from_codec(resp.vote),
-                })
-            }
+            } => Ok(InstallSnapshotResponse {
+                vote: openraft::impls::Vote::<C>::from_codec(resp.vote),
+            }),
             RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error).into()),
             _ => Err(ManiacTransportError::InvalidResponse.into()),
         }
@@ -810,14 +909,26 @@ where
         batch: &[(u64, AppendEntriesRequest<C>)],
     ) -> Result<Vec<(u64, AppendEntriesResponse<C>)>, RPCError<C, RaftError<C>>> {
         // For heartbeat batches, we can send them concurrently using the multiplexed connection
-        let mut results = Vec::with_capacity(batch.len());
+        // We use join_all to execute them in parallel
+        let mut futures = Vec::with_capacity(batch.len());
 
         for (gid, rpc) in batch {
-            match self
-                .send_append_entries(target.clone(), *gid, rpc.clone())
-                .await
-            {
-                Ok(resp) => results.push((*gid, resp)),
+            let gid = *gid;
+            let rpc = rpc.clone();
+            let target = target.clone();
+
+            futures.push(async move {
+                let res = self.send_append_entries(target, gid, rpc).await;
+                (gid, res)
+            });
+        }
+
+        let results_raw = futures::future::join_all(futures).await;
+
+        let mut results = Vec::with_capacity(results_raw.len());
+        for (gid, res) in results_raw {
+            match res {
+                Ok(resp) => results.push((gid, resp)),
                 Err(e) => return Err(e),
             }
         }
