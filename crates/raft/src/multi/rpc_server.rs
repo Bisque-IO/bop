@@ -18,9 +18,9 @@ use crate::multi::codec::{
 use crate::multi::manager::MultiRaftManager;
 use crate::multi::network::MultiplexedTransport;
 use crate::multi::storage::MultiRaftLogStorage;
-use crate::multi::tcp_transport::{read_frame, write_frame};
+use crate::multi::tcp_transport::{read_frame, return_encode_buffer, write_frame_vectored};
 use dashmap::DashMap;
-use maniac::io::{AsyncReadRent, AsyncWriteRent, Splitable};
+use maniac::io::Splitable;
 use maniac::net::{TcpListener, TcpStream};
 use maniac::time::timeout;
 use openraft::RaftTypeConfig;
@@ -319,12 +319,19 @@ where
             match response_rx.recv_async().await {
                 Ok(response_data) => {
                     tracing::debug!("RPC writer: sending response ({} bytes)", response_data.len());
-                    if let Err(e) = write_frame(&mut write_half, &response_data).await {
-                        tracing::error!("RPC writer: failed to write response: {}", e);
-                        alive.store(false, Ordering::Release);
-                        return;
+                    // Use vectored I/O to avoid copying the payload
+                    match write_frame_vectored(&mut write_half, response_data).await {
+                        Ok(returned_buf) => {
+                            // Return the buffer to the thread-local pool for reuse
+                            return_encode_buffer(returned_buf);
+                            tracing::debug!("RPC writer: response sent successfully");
+                        }
+                        Err(e) => {
+                            tracing::error!("RPC writer: failed to write response: {}", e);
+                            alive.store(false, Ordering::Release);
+                            return;
+                        }
                     }
-                    tracing::debug!("RPC writer: response sent successfully");
                 }
                 Err(_) => {
                     // Channel closed
@@ -442,7 +449,7 @@ where
     ) -> CodecRpcMessage<crate::multi::codec::RawBytes> {
         use crate::multi::codec::{
             AppendEntriesResponse as CodecAppendEntriesResponse, FromCodec,
-            InstallSnapshotResponse as CodecInstallSnapshotResponse, RawBytes, ToCodec,
+            InstallSnapshotResponse as CodecInstallSnapshotResponse, ToCodec,
             VoteResponse as CodecVoteResponse,
         };
 
@@ -467,21 +474,20 @@ where
                         .leader_commit
                         .map(|l| openraft::LogId::<C>::from_codec(l));
 
-                    // Convert entries using FromCodec trait
-                    let entries: Vec<C::Entry> = rpc
-                        .entries
-                        .into_iter()
-                        .map(|e| openraft::impls::Entry::<C>::from_codec(e))
-                        .collect();
-
+                    // Convert entries using FromCodec trait - pre-allocate capacity
+                    let entry_count = rpc.entries.len();
+                    let mut entries: Vec<C::Entry> = Vec::with_capacity(entry_count);
+                    for e in rpc.entries {
+                        entries.push(openraft::impls::Entry::<C>::from_codec(e));
+                    }
                     let raft_rpc = openraft::raft::AppendEntriesRequest {
                         vote,
                         prev_log_id,
-                        entries: entries.clone(),
+                        entries,
                         leader_commit,
                     };
 
-                    tracing::trace!("AppendEntries handler: calling raft.append_entries (req_id={}, entries={})", request_id, entries.len());
+                    tracing::trace!("AppendEntries handler: calling raft.append_entries (req_id={}, entries={})", request_id, entry_count);
                     match raft.append_entries(raft_rpc).await {
                         Ok(response) => {
                             tracing::trace!("AppendEntries handler: got Ok response (req_id={})", request_id);
@@ -585,7 +591,7 @@ where
 
                     if rpc.offset == 0 && rpc.done {
                         // Full snapshot in one piece - no accumulation needed
-                        let vote = openraft::impls::Vote::<C>::from_codec(rpc.vote.clone());
+                        let vote = openraft::impls::Vote::<C>::from_codec(rpc.vote);
                         let meta = openraft::storage::SnapshotMeta::<C>::from_codec(rpc.meta);
                         let snapshot = openraft::storage::Snapshot {
                             meta,
@@ -762,12 +768,11 @@ where
                         .leader_commit
                         .map(|l| openraft::LogId::<C>::from_codec(l));
 
-                    // Convert entries (typically empty for heartbeats)
-                    let entries: Vec<C::Entry> = rpc
-                        .entries
-                        .into_iter()
-                        .map(|e| openraft::impls::Entry::<C>::from_codec(e))
-                        .collect();
+                    // Convert entries (typically empty for heartbeats) - pre-allocate capacity
+                    let mut entries: Vec<C::Entry> = Vec::with_capacity(rpc.entries.len());
+                    for e in rpc.entries {
+                        entries.push(openraft::impls::Entry::<C>::from_codec(e));
+                    }
 
                     let raft_rpc = openraft::raft::AppendEntriesRequest {
                         vote,
@@ -845,11 +850,11 @@ where
                                 .leader_commit
                                 .map(|l| openraft::LogId::<C>::from_codec(l));
 
-                            let entries: Vec<C::Entry> = rpc
-                                .entries
-                                .into_iter()
-                                .map(|e| openraft::impls::Entry::<C>::from_codec(e))
-                                .collect();
+                            // Pre-allocate entry conversion vector
+                            let mut entries: Vec<C::Entry> = Vec::with_capacity(rpc.entries.len());
+                            for e in rpc.entries {
+                                entries.push(openraft::impls::Entry::<C>::from_codec(e));
+                            }
 
                             let raft_rpc = openraft::raft::AppendEntriesRequest {
                                 vote,

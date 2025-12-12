@@ -26,6 +26,7 @@ use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
 use openraft::storage::Snapshot;
 use openraft::{ErrorSubject, ErrorVerb};
+use std::borrow::Cow;
 use std::future::Future;
 use std::marker::Unpin;
 use std::sync::Arc;
@@ -89,8 +90,16 @@ pub struct MultiRaftNetworkFactory<C: RaftTypeConfig, T: MultiplexedTransport<C>
     buffers: Arc<DashMap<C::NodeId, HeartbeatBuffer<C>>>,
 }
 
-#[derive(Debug)]
-struct BatchError(String);
+/// Error type for batch operations using Cow to avoid allocations for static messages
+#[derive(Debug, Clone)]
+struct BatchError(Cow<'static, str>);
+
+impl BatchError {
+    /// Create a BatchError with a static string (no allocation)
+    const fn new_static(msg: &'static str) -> Self {
+        Self(Cow::Borrowed(msg))
+    }
+}
 
 impl std::fmt::Display for BatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -216,11 +225,18 @@ where
                     }
                 }
 
-                // Build the batch request from the deduped map.
+                // Build the batch request from the deduped map by draining to avoid clones.
+                // We'll rebuild the waiter map as we go.
                 batch_req.clear();
                 batch_req.reserve(pending.len());
-                for (gid, (rpc, _)) in pending.iter() {
-                    batch_req.push((*gid, rpc.clone()));
+
+                // Temporary storage for waiters while we build the batch
+                let mut waiter_map: std::collections::HashMap<u64, Vec<HeartbeatTx<C>>> =
+                    std::collections::HashMap::with_capacity(pending.len());
+
+                for (gid, (rpc, waiters)) in pending.drain() {
+                    batch_req.push((gid, rpc));
+                    waiter_map.insert(gid, waiters);
                 }
 
                 let result = flush_transport
@@ -234,13 +250,17 @@ where
                             resp_map.insert(gid, resp);
                         }
 
-                        for (gid, (_rpc, waiters)) in pending.drain() {
+                        for (gid, mut waiters) in waiter_map.drain() {
                             if let Some(resp) = resp_map.remove(&gid) {
-                                for sender in waiters {
-                                    let _ = sender.send(Ok(resp.clone()));
+                                // Give ownership to the last waiter, clone for others
+                                if let Some(last_sender) = waiters.pop() {
+                                    for sender in waiters {
+                                        let _ = sender.send(Ok(resp.clone()));
+                                    }
+                                    let _ = last_sender.send(Ok(resp));
                                 }
                             } else {
-                                let err = BatchError("Missing response in batch".to_string());
+                                let err = BatchError::new_static("Missing response in batch");
                                 let rpc_err = RPCError::Network(openraft::error::NetworkError::new(&err));
                                 for sender in waiters {
                                     let _ = sender.send(Err(rpc_err.clone()));
@@ -249,7 +269,7 @@ where
                         }
                     }
                     Err(e) => {
-                        for (_gid, (_rpc, waiters)) in pending.drain() {
+                        for (_gid, waiters) in waiter_map.drain() {
                             for sender in waiters {
                                 let _ = sender.send(Err(e.clone()));
                             }
@@ -336,7 +356,7 @@ where
             let (tx, rx) = oneshot::channel();
 
             if let Err(_) = self.buffer.tx.send((self.group_id, rpc, tx)).await {
-                let err = BatchError("Heartbeat buffer closed".to_string());
+                let err = BatchError::new_static("Heartbeat buffer closed");
                 return Err(RPCError::Network(openraft::error::NetworkError::new(
                     &err,
                 )));
@@ -346,7 +366,7 @@ where
             match rx.await {
                 Ok(res) => res.decompose_infallible(),
                 Err(_) => {
-                    let err = BatchError("Heartbeat channel closed".to_string());
+                    let err = BatchError::new_static("Heartbeat channel closed");
                     Err(RPCError::Network(openraft::error::NetworkError::new(
                         &err,
                     )))
@@ -381,10 +401,14 @@ where
         let mut offset = 0u64;
         let mut snapshot_data = snapshot.snapshot;
         let snapshot_meta = snapshot.meta;
+        let chunk_size = option.snapshot_chunk_size().unwrap_or(1024 * 1024);
+
+        // Reusable read buffer - allocated once, reused across loop iterations
+        let mut read_buf: Option<Vec<u8>> = Some(vec![0u8; chunk_size]);
 
         loop {
-            let chunk_size = option.snapshot_chunk_size().unwrap_or(1024 * 1024);
-            let buf = vec![0u8; chunk_size];
+            // Take the buffer (or create new one if we don't have it - shouldn't happen)
+            let buf = read_buf.take().unwrap_or_else(|| vec![0u8; chunk_size]);
 
             let (res, mut buf) = snapshot_data.read(buf).await;
             let n = res.map_err(|e| {
@@ -416,8 +440,8 @@ where
                     Ok(Err(_snapshot_err)) => {
                         // InstallSnapshotError is received - convert to network error
                         return Err(StreamingError::Network(
-                            openraft::error::NetworkError::new(&BatchError(
-                                "Snapshot rejected by remote".to_string(),
+                            openraft::error::NetworkError::new(&BatchError::new_static(
+                                "Snapshot rejected by remote",
                             )),
                         ));
                     }
@@ -443,8 +467,8 @@ where
                 Ok(Ok(_)) => {}
                 Ok(Err(_snapshot_err)) => {
                     return Err(StreamingError::Network(
-                        openraft::error::NetworkError::new(&BatchError(
-                            "Snapshot rejected by remote".to_string(),
+                        openraft::error::NetworkError::new(&BatchError::new_static(
+                            "Snapshot rejected by remote",
                         )),
                     ));
                 }

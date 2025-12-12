@@ -19,32 +19,53 @@ use maniac::io::{AsyncReadRent, AsyncWriteRent, Splitable};
 use maniac::net::{TcpConnectOpts, TcpStream};
 use maniac::sync::oneshot;
 use maniac::time::Instant;
-use openraft::OptionalSend;
 use openraft::RaftTypeConfig;
 use openraft::error::{InstallSnapshotError, RPCError, RaftError};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     VoteRequest, VoteResponse,
 };
+use std::borrow::Cow;
 use std::future::Future;
 use std::io;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::cell::RefCell;
 use std::time::Duration;
+
+// Thread-local buffer pool for encoding to avoid repeated allocations.
+// The pool maintains a single buffer per thread that grows to accommodate the largest message.
+thread_local! {
+    static ENCODE_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Return a buffer to the thread-local pool for reuse.
+/// If the current pool buffer is smaller, replace it with this one.
+/// The buffer should be cleared before being returned.
+pub fn return_encode_buffer(mut buffer: Vec<u8>) {
+    buffer.clear();
+    ENCODE_BUFFER.with(|buf| {
+        let mut borrowed = buf.borrow_mut();
+        // Keep the larger buffer for better reuse
+        if buffer.capacity() > borrowed.capacity() {
+            *borrowed = buffer;
+        }
+    });
+}
 
 /// Network error types for maniac transport
 #[derive(Debug, thiserror::Error)]
 pub enum ManiacTransportError {
     #[error("Connection failed: {0}")]
-    ConnectionError(String),
+    ConnectionError(Cow<'static, str>),
 
     #[error("Serialization error: {0}")]
-    SerializationError(String),
+    SerializationError(Cow<'static, str>),
 
     #[error("Network error: {0}")]
-    NetworkError(String),
+    NetworkError(Cow<'static, str>),
 
     #[error("Invalid response")]
     InvalidResponse,
@@ -55,17 +76,20 @@ pub enum ManiacTransportError {
     #[error("Connection closed")]
     ConnectionClosed,
 
+    #[error("Unknown node: {0}")]
+    UnknownNode(u64),
+
     #[error("Channel error: {0}")]
-    ChannelError(String),
+    ChannelError(Cow<'static, str>),
 
     #[error("Io error: {0}")]
     IoError(#[from] io::Error),
 
     #[error("Remote error: {0}")]
-    RemoteError(String),
+    RemoteError(Cow<'static, str>),
 
     #[error("Codec error: {0}")]
-    CodecError(String),
+    CodecError(Cow<'static, str>),
 }
 
 impl<C: RaftTypeConfig> From<ManiacTransportError> for RPCError<C> {
@@ -130,12 +154,13 @@ const FRAME_PREFIX_LEN: usize = 4;
 pub async fn read_frame<R: AsyncReadRent>(stream: &mut R) -> Result<Vec<u8>, ManiacTransportError> {
     use maniac::io::AsyncReadRentExt;
 
-    // Read length prefix
+    // Read length prefix - use small vec that will likely be stack-optimized
     let len_buf = vec![0u8; FRAME_PREFIX_LEN];
     let (res, len_buf) = stream.read_exact(len_buf).await;
     res.map_err(ManiacTransportError::IoError)?;
 
-    let len = u32::from_le_bytes(len_buf[..FRAME_PREFIX_LEN].try_into().unwrap()) as usize;
+    // SAFETY: len_buf is exactly FRAME_PREFIX_LEN (4) bytes
+    let len = u32::from_le_bytes([len_buf[0], len_buf[1], len_buf[2], len_buf[3]]) as usize;
 
     if len == 0 {
         return Ok(Vec::new());
@@ -149,7 +174,33 @@ pub async fn read_frame<R: AsyncReadRent>(stream: &mut R) -> Result<Vec<u8>, Man
     Ok(payload)
 }
 
-/// Helper to write a frame to any AsyncWriteRent stream
+/// Helper to write a frame to any AsyncWriteRent stream using vectored I/O.
+/// Takes ownership of the data to avoid copying into a new buffer.
+/// Returns the payload buffer (cleared) so it can be reused by a buffer pool.
+pub async fn write_frame_vectored<W: AsyncWriteRent>(
+    stream: &mut W,
+    data: Vec<u8>,
+) -> Result<Vec<u8>, ManiacTransportError> {
+    use maniac::buf::VecBuf;
+    use maniac::io::AsyncWriteRentExt;
+
+    let len = data.len() as u32;
+    let len_buf = len.to_le_bytes().to_vec();
+
+    // Use vectored I/O to write length prefix + payload without copying
+    let vec_buf: VecBuf = vec![len_buf, data].into();
+    let (res, vec_buf) = stream.write_vectored_all(vec_buf).await;
+    res.map_err(ManiacTransportError::IoError)?;
+
+    // Recover the payload buffer for potential reuse
+    let mut bufs: Vec<Vec<u8>> = vec_buf.into();
+    // bufs[0] is the length prefix (4 bytes), bufs[1] is the payload
+    let mut payload_buf = bufs.pop().unwrap_or_default();
+    payload_buf.clear(); // Clear for reuse but keep capacity
+    Ok(payload_buf)
+}
+
+/// Helper to write a frame to any AsyncWriteRent stream (legacy version for borrowed data)
 pub async fn write_frame<W: AsyncWriteRent>(
     stream: &mut W,
     data: &[u8],
@@ -169,7 +220,6 @@ pub async fn write_frame<W: AsyncWriteRent>(
 
 /// Type alias for pending request channel
 type PendingResponseSender = oneshot::Sender<Result<Vec<u8>, ManiacTransportError>>;
-type PendingResponseReceiver = oneshot::Receiver<Result<Vec<u8>, ManiacTransportError>>;
 
 /// Message sent to the connection task for writing
 struct WriteRequest {
@@ -284,15 +334,21 @@ impl MultiplexedConnection {
                     // Register the pending request before writing
                     pending.insert(write_req.request_id, write_req.response_tx);
 
-                    // Write the request
-                    if let Err(e) = write_frame(&mut write_half, &write_req.data).await {
-                        tracing::debug!("Connection {} write error: {}", self.conn_id, e);
-                        // Remove and notify this request
-                        if let Some((_, tx)) = pending.remove(&write_req.request_id) {
-                            tx.send(Err(e));
+                    // Write the request using vectored I/O (avoids copying payload)
+                    match write_frame_vectored(&mut write_half, write_req.data).await {
+                        Ok(returned_buf) => {
+                            // Return the buffer to the thread-local pool for reuse
+                            return_encode_buffer(returned_buf);
                         }
-                        self.alive.store(false, Ordering::Release);
-                        return;
+                        Err(e) => {
+                            tracing::debug!("Connection {} write error: {}", self.conn_id, e);
+                            // Remove and notify this request
+                            if let Some((_, tx)) = pending.remove(&write_req.request_id) {
+                                let _ = tx.send(Err(e));
+                            }
+                            self.alive.store(false, Ordering::Release);
+                            return;
+                        }
                     }
                 }
                 Err(_) => {
@@ -356,10 +412,11 @@ impl MultiplexedConnection {
 
     /// Notify all pending requests of connection error
     fn notify_all_pending_error(&self, pending: &DashMap<u64, PendingResponseSender>) {
-        let keys: Vec<u64> = pending.iter().map(|e| *e.key()).collect();
-        for key in keys {
-            if let Some((_, sender)) = pending.remove(&key) {
-                sender.send(Err(ManiacTransportError::ConnectionClosed));
+        // Drain all entries one by one - avoids collecting all keys into a Vec upfront
+        // which could be large under high load
+        while let Some(entry) = pending.iter().next().map(|e| *e.key()) {
+            if let Some((_, sender)) = pending.remove(&entry) {
+                let _ = sender.send(Err(ManiacTransportError::ConnectionClosed));
             }
         }
     }
@@ -478,27 +535,35 @@ impl MultiplexedConnectionPool {
             // Remove dead or expired connections
             pool.retain(|conn| conn.is_usable(ttl));
 
-            // Find connection with lowest in-flight count that has capacity
-            let mut best_conn: Option<Arc<MultiplexedConnection>> = None;
+            // Find connection with lowest in-flight count in a single pass
+            // Track indices to avoid cloning Arc until we know which one we need
+            let mut best_idx: Option<usize> = None;
             let mut best_count = u64::MAX;
+            let mut fallback_idx: Option<usize> = None;
+            let mut fallback_count = u64::MAX;
 
-            for conn in pool.iter() {
+            for (idx, conn) in pool.iter().enumerate() {
                 let count = conn.in_flight_count();
+                // Track best connection with capacity
                 if count < best_count && count < max_per_conn {
                     best_count = count;
-                    best_conn = Some(conn.clone());
+                    best_idx = Some(idx);
+                }
+                // Also track overall best for fallback
+                if count < fallback_count {
+                    fallback_count = count;
+                    fallback_idx = Some(idx);
                 }
             }
 
-            if let Some(conn) = best_conn {
-                return Ok(conn);
+            if let Some(idx) = best_idx {
+                return Ok(pool[idx].clone());
             }
 
             // If we are at capacity, reuse the one with lowest load even if full
-            // (Only if we can't create new ones)
             if pool.len() >= self.connections_per_addr {
-                if let Some(conn) = pool.iter().min_by_key(|c| c.in_flight_count()) {
-                    return Ok(conn.clone());
+                if let Some(idx) = fallback_idx {
+                    return Ok(pool[idx].clone());
                 }
             }
         } // Lock dropped here
@@ -506,7 +571,7 @@ impl MultiplexedConnectionPool {
         // No usable connection and we have capacity to create one.
         // Create new connection without holding the lock
         let stream = factory().await.map_err(|e| {
-            ManiacTransportError::ConnectionError(format!("Failed to connect to {}: {}", addr, e))
+            ManiacTransportError::ConnectionError(format!("Failed to connect to {}: {}", addr, e).into())
         })?;
 
         let conn_id = self.next_conn_id();
@@ -674,10 +739,17 @@ where
 
         tracing::debug!("rpc_call: target={}, request_id={}", addr, request_id);
 
-        // Serialize request using zero-copy codec
-        let request_data = request_msg
-            .encode_to_vec()
-            .map_err(|e| ManiacTransportError::CodecError(e.to_string()))?;
+        // Serialize request using thread-local buffer pool to reduce allocations.
+        // We encode into the pooled buffer, clone the data (fast memcpy), then return the buffer.
+        // The buffer keeps its capacity for reuse, avoiding repeated Vec growth.
+        let request_data = ENCODE_BUFFER.with(|buf| {
+            let mut borrowed = buf.borrow_mut();
+            borrowed.clear();
+            request_msg.encode_into(&mut borrowed)
+                .map_err(|e| ManiacTransportError::CodecError(e.to_string().into()))?;
+            // Clone the data - this is a fast memcpy, the buffer keeps its capacity
+            Ok::<_, ManiacTransportError>(borrowed.clone())
+        })?;
 
         tracing::debug!("rpc_call: encoded {} bytes", request_data.len());
 
@@ -742,13 +814,15 @@ where
         };
 
         let addr = self.node_registry.resolve(&target).ok_or_else(|| {
-            ManiacTransportError::ConnectionError(format!("Unknown node: {}", target))
+            ManiacTransportError::UnknownNode(target)
         })?;
         let request_id = self.next_request_id();
 
-        // Convert entries using ToCodec trait
-        let codec_entries: Vec<CodecEntry<RawBytes>> =
-            rpc.entries.iter().map(|entry| entry.to_codec()).collect();
+        // Convert entries using ToCodec trait - pre-allocate capacity
+        let mut codec_entries: Vec<CodecEntry<RawBytes>> = Vec::with_capacity(rpc.entries.len());
+        for entry in rpc.entries.iter() {
+            codec_entries.push(entry.to_codec());
+        }
 
         let codec_rpc = CodecAppendEntriesRequest {
             vote: rpc.vote.to_codec(),
@@ -770,7 +844,7 @@ where
 
         // Deserialize response
         let response: RpcMessage<RawBytes> = RpcMessage::decode_from_slice(&response_data)
-            .map_err(|e| ManiacTransportError::CodecError(e.to_string()))
+            .map_err(|e| ManiacTransportError::CodecError(e.to_string().into()))
             .map_err(RPCError::<C, RaftError<C>>::from)?;
 
         match response {
@@ -792,7 +866,7 @@ where
                     }
                 }
             }
-            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error).into()),
+            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error.into()).into()),
             _ => Err(ManiacTransportError::InvalidResponse.into()),
         }
     }
@@ -809,7 +883,7 @@ where
 
         let addr = self.node_registry.resolve(&target).ok_or_else(|| {
             tracing::error!("send_vote: Unknown node: {}", target);
-            ManiacTransportError::ConnectionError(format!("Unknown node: {}", target))
+            ManiacTransportError::UnknownNode(target)
         })?;
 
         tracing::debug!("send_vote: resolved addr={}", addr);
@@ -833,7 +907,7 @@ where
 
         // Deserialize response
         let response: RpcMessage<RawBytes> = RpcMessage::decode_from_slice(&response_data)
-            .map_err(|e| ManiacTransportError::CodecError(e.to_string()))
+            .map_err(|e| ManiacTransportError::CodecError(e.to_string().into()))
             .map_err(RPCError::<C, RaftError<C>>::from)?;
 
         match response {
@@ -847,7 +921,7 @@ where
                     .last_log_id
                     .map(|l| openraft::LogId::<C>::from_codec(l)),
             }),
-            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error).into()),
+            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error.into()).into()),
             _ => Err(ManiacTransportError::InvalidResponse.into()),
         }
     }
@@ -863,7 +937,7 @@ where
         };
 
         let addr = self.node_registry.resolve(&target).ok_or_else(|| {
-            ManiacTransportError::ConnectionError(format!("Unknown node: {}", target))
+            ManiacTransportError::UnknownNode(target)
         })?;
         let request_id = self.next_request_id();
 
@@ -888,7 +962,7 @@ where
 
         // Deserialize response
         let response: RpcMessage<RawBytes> = RpcMessage::decode_from_slice(&response_data)
-            .map_err(|e| ManiacTransportError::CodecError(e.to_string()))
+            .map_err(|e| ManiacTransportError::CodecError(e.to_string().into()))
             .map_err(RPCError::<C, RaftError<C, InstallSnapshotError>>::from)?;
 
         match response {
@@ -898,7 +972,7 @@ where
             } => Ok(InstallSnapshotResponse {
                 vote: openraft::impls::Vote::<C>::from_codec(resp.vote),
             }),
-            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error).into()),
+            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error.into()).into()),
             _ => Err(ManiacTransportError::InvalidResponse.into()),
         }
     }
@@ -914,7 +988,7 @@ where
         };
 
         let addr = self.node_registry.resolve(&target).ok_or_else(|| {
-            ManiacTransportError::ConnectionError(format!("Unknown node: {}", target))
+            ManiacTransportError::UnknownNode(target)
         })?;
 
         let request_id = self.next_request_id();
@@ -924,8 +998,11 @@ where
             Vec::with_capacity(batch.len());
 
         for (gid, rpc) in batch {
-            let codec_entries: Vec<CodecEntry<RawBytes>> =
-                rpc.entries.iter().map(|entry| entry.to_codec()).collect();
+            // Pre-allocate entry conversion vector
+            let mut codec_entries: Vec<CodecEntry<RawBytes>> = Vec::with_capacity(rpc.entries.len());
+            for entry in rpc.entries.iter() {
+                codec_entries.push(entry.to_codec());
+            }
 
             let codec_rpc = CodecAppendEntriesRequest {
                 vote: rpc.vote.to_codec(),
@@ -948,7 +1025,7 @@ where
             .map_err(RPCError::<C, RaftError<C>>::from)?;
 
         let response: RpcMessage<RawBytes> = RpcMessage::decode_from_slice(&response_data)
-            .map_err(|e| ManiacTransportError::CodecError(e.to_string()))
+            .map_err(|e| ManiacTransportError::CodecError(e.to_string().into()))
             .map_err(RPCError::<C, RaftError<C>>::from)?;
 
         let convert_resp = |resp: CodecResp| -> AppendEntriesResponse<C> {
@@ -973,7 +1050,7 @@ where
                     .map(|(gid, resp)| (gid, convert_resp(resp)))
                     .collect())
             }
-            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error).into()),
+            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error.into()).into()),
             _ => Err(ManiacTransportError::InvalidResponse.into()),
         }
     }
