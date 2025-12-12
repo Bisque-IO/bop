@@ -228,7 +228,11 @@ impl<T: AsRef<[u8]> + Send> AsyncReadRent for Cursor<T> {
             return (Ok(0), buf);
         }
 
-        (&slice[pos as usize..]).read(buf).await
+        let (res, buf) = (&slice[pos as usize..]).read(buf).await;
+        if let Ok(n) = res {
+            self.set_position(pos + n as u64);
+        }
+        (res, buf)
     }
 
     async fn readv<B: IoVecBufMut + Send>(&mut self, buf: B) -> BufResult<usize, B> {
@@ -239,7 +243,11 @@ impl<T: AsRef<[u8]> + Send> AsyncReadRent for Cursor<T> {
             return (Ok(0), buf);
         }
 
-        (&slice[pos as usize..]).readv(buf).await
+        let (res, buf) = (&slice[pos as usize..]).readv(buf).await;
+        if let Ok(n) = res {
+            self.set_position(pos + n as u64);
+        }
+        (res, buf)
     }
 }
 

@@ -73,6 +73,8 @@ pub struct OpenOptions {
     truncate: bool,
     create: bool,
     create_new: bool,
+    #[cfg(target_os = "macos")]
+    direct_io: bool,
     #[cfg(unix)]
     pub(crate) mode: libc::mode_t,
     #[cfg(unix)]
@@ -117,6 +119,8 @@ impl OpenOptions {
             truncate: false,
             create: false,
             create_new: false,
+            #[cfg(target_os = "macos")]
+            direct_io: false,
             #[cfg(unix)]
             mode: 0o666,
             #[cfg(unix)]
@@ -134,6 +138,46 @@ impl OpenOptions {
             #[cfg(windows)]
             security_attributes: std::ptr::null_mut(),
         }
+    }
+
+    /// Enable/disable **direct I/O** (DIO) for this file, where supported.
+    ///
+    /// Platform behavior:
+    /// - **Linux**: sets `O_DIRECT` on the file descriptor.
+    /// - **Windows**: sets `FILE_FLAG_NO_BUFFERING`.
+    /// - **macOS/iOS**: enables `F_NOCACHE` (no page cache) after open (best-effort).
+    ///
+    /// Notes:
+    /// - Direct I/O usually requires **aligned buffers**, **aligned offsets**, and **aligned lengths**.
+    /// - This flag does **not** imply durability; use `sync_all()` / `fsync` semantics separately.
+    pub fn direct_io(&mut self, direct: bool) -> &mut OpenOptions {
+        #[cfg(target_os = "linux")]
+        {
+            if direct {
+                self.custom_flags |= libc::O_DIRECT;
+            } else {
+                self.custom_flags &= !libc::O_DIRECT;
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_NO_BUFFERING;
+            if direct {
+                self.custom_flags |= FILE_FLAG_NO_BUFFERING as u32;
+            } else {
+                self.custom_flags &= !(FILE_FLAG_NO_BUFFERING as u32);
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            self.direct_io = direct;
+        }
+
+        // On other Unix platforms, there is no portable equivalent; no-op.
+        let _ = direct;
+        self
     }
 
     /// Sets the option for read access.
@@ -377,12 +421,27 @@ impl OpenOptions {
                     }
                     std_opts.share_mode(opts.share_mode);
                     std_opts.attributes(opts.attributes);
+                    std_opts.custom_flags(opts.custom_flags);
                     std_opts.security_qos_flags(opts.security_qos_flags);
                     // Note: security_attributes is not directly settable via OpenOptionsExt
                     // It's handled internally by the Windows API when opening
                 }
 
-                std_opts.open(&path)
+                let f = std_opts.open(&path)?;
+
+                #[cfg(target_os = "macos")]
+                {
+                    if opts.direct_io {
+                        use std::os::unix::io::AsRawFd;
+                        // Best-effort: disable page cache for this fd.
+                        // This is not identical to Linux O_DIRECT.
+                        unsafe {
+                            let _ = libc::fcntl(f.as_raw_fd(), libc::F_NOCACHE, 1);
+                        }
+                    }
+                }
+
+                Ok::<_, io::Error>(f)
             })
             .await?;
 

@@ -12,7 +12,7 @@ members = [
     # "crates/maniac-usockets",
     "crates/maniac",
     "crates/raft",           # maniac-raft: OpenRaft adapter for Maniac runtime
-    "moon/rapp",
+    # "moon/rapp",
     "crates/rusqlite",
     "crates/libsql-ffi",
     "crates/libsql-sys",
@@ -39,7 +39,7 @@ keywords = ["async", "runtime", "concurrency"]
 categories = ["asynchronous", "concurrency"]
 
 [workspace.dependencies]
-allocator-api2 = "0.3"
+allocator-api2 = "0.4"
 anyerror = "0.1"
 anyhow = "1"
 arc-swap = "1.7"
@@ -61,7 +61,7 @@ congee = "0.4.1"
 core_affinity = "0.8"
 crc32fast = "1.4"
 crc64fast-nvme = "1.2"
-criterion = { version = "0.7", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 crossbeam = "0.8"
 crossbeam-epoch = "0.9"
 crossbeam-utils = "0.8"
@@ -72,7 +72,7 @@ derive_more = { version = "2", features = [
     "try_into",
     "display",
 ] }
-flume = "0.11"
+flume = "0.12"
 futures = "0.3"
 futures-io = "0.3"
 futures-lite = "2.6"
@@ -154,14 +154,14 @@ maniac-wasmtime = { path = "crates/maniac-wasmtime", version = "0.1.0" }
 #sanakirja-core = { path = "crates/sanakirja-core", version = "1.4.1" }
 #sanakirja = { path = "crates/sanakirja", version = "1.4.1" }
 
-[profile.dev]
-opt-level = 0
-debug = true
+# [profile.dev]
+# opt-level = 0
+# debug = true
 
-[profile.release]
-opt-level = "z"   # Optimize for size
-lto = true
-codegen-units = 1
-panic = "abort"   # Smaller binary size (no unwinding)
-# strip = "symbols" # Strip debug symbols (more aggressive than `true`)
-debug = true
+# [profile.release]
+# opt-level = "z"   # Optimize for size
+# lto = true
+# codegen-units = 1
+# panic = "abort"   # Smaller binary size (no unwinding)
+# # strip = "symbols" # Strip debug symbols (more aggressive than `true`)
+# debug = true

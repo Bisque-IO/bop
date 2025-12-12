@@ -891,6 +891,10 @@ pub enum MessageType {
     Response = 5,
     BatchResponse = 6,
     ErrorResponse = 7,
+    /// Multi-group heartbeat batch (true coalescing on the wire)
+    HeartbeatBatchMulti = 8,
+    /// Response to a multi-group heartbeat batch
+    HeartbeatBatchMultiResponse = 9,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -905,6 +909,8 @@ impl TryFrom<u8> for MessageType {
             5 => Ok(MessageType::Response),
             6 => Ok(MessageType::BatchResponse),
             7 => Ok(MessageType::ErrorResponse),
+            8 => Ok(MessageType::HeartbeatBatchMulti),
+            9 => Ok(MessageType::HeartbeatBatchMultiResponse),
             _ => Err(CodecError::InvalidMessageType(value)),
         }
     }
@@ -1013,6 +1019,11 @@ pub enum RpcMessage<D> {
         group_id: u64,
         rpc: AppendEntriesRequest<D>,
     },
+    /// Multi-group batched heartbeat request (one message containing heartbeats for many groups)
+    HeartbeatBatchMulti {
+        request_id: u64,
+        heartbeats: Vec<(u64, AppendEntriesRequest<D>)>,
+    },
     /// Single response message
     Response {
         request_id: u64,
@@ -1022,6 +1033,11 @@ pub enum RpcMessage<D> {
     BatchResponse {
         request_id: u64,
         responses: Vec<(u64, ResponseMessage)>,
+    },
+    /// Response to a multi-group heartbeat batch (per-group AppendEntriesResponse)
+    HeartbeatBatchMultiResponse {
+        request_id: u64,
+        responses: Vec<(u64, AppendEntriesResponse)>,
     },
     /// Error response
     Error { request_id: u64, error: String },
@@ -1035,8 +1051,10 @@ impl<D> RpcMessage<D> {
             RpcMessage::Vote { request_id, .. } => *request_id,
             RpcMessage::InstallSnapshot { request_id, .. } => *request_id,
             RpcMessage::HeartbeatBatch { request_id, .. } => *request_id,
+            RpcMessage::HeartbeatBatchMulti { request_id, .. } => *request_id,
             RpcMessage::Response { request_id, .. } => *request_id,
             RpcMessage::BatchResponse { request_id, .. } => *request_id,
+            RpcMessage::HeartbeatBatchMultiResponse { request_id, .. } => *request_id,
             RpcMessage::Error { request_id, .. } => *request_id,
         }
     }
@@ -1085,6 +1103,14 @@ impl<D: Encode> Encode for RpcMessage<D> {
                 group_id.encode(writer)?;
                 rpc.encode(writer)?;
             }
+            RpcMessage::HeartbeatBatchMulti {
+                request_id,
+                heartbeats,
+            } => {
+                (MessageType::HeartbeatBatchMulti as u8).encode(writer)?;
+                request_id.encode(writer)?;
+                heartbeats.encode(writer)?;
+            }
             RpcMessage::Response {
                 request_id,
                 message,
@@ -1098,6 +1124,14 @@ impl<D: Encode> Encode for RpcMessage<D> {
                 responses,
             } => {
                 (MessageType::BatchResponse as u8).encode(writer)?;
+                request_id.encode(writer)?;
+                responses.encode(writer)?;
+            }
+            RpcMessage::HeartbeatBatchMultiResponse {
+                request_id,
+                responses,
+            } => {
+                (MessageType::HeartbeatBatchMultiResponse as u8).encode(writer)?;
                 request_id.encode(writer)?;
                 responses.encode(writer)?;
             }
@@ -1132,11 +1166,19 @@ impl<D: Encode> Encode for RpcMessage<D> {
                 group_id,
                 rpc,
             } => request_id.encoded_size() + group_id.encoded_size() + rpc.encoded_size(),
+            RpcMessage::HeartbeatBatchMulti {
+                request_id,
+                heartbeats,
+            } => request_id.encoded_size() + heartbeats.encoded_size(),
             RpcMessage::Response {
                 request_id,
                 message,
             } => request_id.encoded_size() + message.encoded_size(),
             RpcMessage::BatchResponse {
+                request_id,
+                responses,
+            } => request_id.encoded_size() + responses.encoded_size(),
+            RpcMessage::HeartbeatBatchMultiResponse {
                 request_id,
                 responses,
             } => request_id.encoded_size() + responses.encoded_size(),
@@ -1171,6 +1213,10 @@ impl<D: Decode> Decode for RpcMessage<D> {
                 group_id: u64::decode(reader)?,
                 rpc: AppendEntriesRequest::decode(reader)?,
             }),
+            MessageType::HeartbeatBatchMulti => Ok(RpcMessage::HeartbeatBatchMulti {
+                request_id: u64::decode(reader)?,
+                heartbeats: Vec::<(u64, AppendEntriesRequest<D>)>::decode(reader)?,
+            }),
             MessageType::Response => Ok(RpcMessage::Response {
                 request_id: u64::decode(reader)?,
                 message: ResponseMessage::decode(reader)?,
@@ -1178,6 +1224,10 @@ impl<D: Decode> Decode for RpcMessage<D> {
             MessageType::BatchResponse => Ok(RpcMessage::BatchResponse {
                 request_id: u64::decode(reader)?,
                 responses: Vec::<(u64, ResponseMessage)>::decode(reader)?,
+            }),
+            MessageType::HeartbeatBatchMultiResponse => Ok(RpcMessage::HeartbeatBatchMultiResponse {
+                request_id: u64::decode(reader)?,
+                responses: Vec::<(u64, AppendEntriesResponse)>::decode(reader)?,
             }),
             MessageType::ErrorResponse => Ok(RpcMessage::Error {
                 request_id: u64::decode(reader)?,
@@ -1817,6 +1867,66 @@ mod tests {
     }
 
     #[test]
+    fn test_rpc_message_heartbeat_batch_multi_roundtrip() {
+        // Heartbeats are AppendEntries requests with empty entries.
+        let hb1 = AppendEntriesRequest::<Vec<u8>> {
+            vote: Vote {
+                leader_id: LeaderId { term: 1, node_id: 10 },
+                committed: true,
+            },
+            prev_log_id: None,
+            entries: vec![],
+            leader_commit: None,
+        };
+        let hb2 = AppendEntriesRequest::<Vec<u8>> {
+            vote: Vote {
+                leader_id: LeaderId { term: 1, node_id: 10 },
+                committed: true,
+            },
+            prev_log_id: Some(LogId {
+                leader_id: LeaderId { term: 1, node_id: 10 },
+                index: 100,
+            }),
+            entries: vec![],
+            leader_commit: Some(LogId {
+                leader_id: LeaderId { term: 1, node_id: 10 },
+                index: 100,
+            }),
+        };
+
+        let msg = RpcMessage::HeartbeatBatchMulti {
+            request_id: 42,
+            heartbeats: vec![(1u64, hb1), (2u64, hb2)],
+        };
+
+        let encoded = msg.encode_to_vec().unwrap();
+        let decoded = RpcMessage::<Vec<u8>>::decode_from_slice(&encoded).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_rpc_message_heartbeat_batch_multi_response_roundtrip() {
+        let msg = RpcMessage::<Vec<u8>>::HeartbeatBatchMultiResponse {
+            request_id: 7,
+            responses: vec![
+                (1u64, AppendEntriesResponse::Success),
+                (2u64, AppendEntriesResponse::Conflict),
+                (
+                    3u64,
+                    AppendEntriesResponse::HigherVote(Vote {
+                        leader_id: LeaderId { term: 9, node_id: 99 },
+                        committed: true,
+                    }),
+                ),
+            ],
+        };
+
+        let encoded = msg.encode_to_vec().unwrap();
+        let decoded = RpcMessage::<Vec<u8>>::decode_from_slice(&encoded).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
     fn test_rpc_message_roundtrip() {
         let msg = RpcMessage::<Vec<u8>>::Vote {
             request_id: 12345,
@@ -1960,5 +2070,99 @@ mod tests {
         let encoded = val.encode_to_vec().unwrap();
         let decoded = InstallSnapshotRequest::decode_from_slice(&encoded).unwrap();
         assert_eq!(val, decoded);
+    }
+
+    #[test]
+    fn test_invalid_message_type() {
+        let mut data = vec![0xFFu8]; // Invalid message type
+        data.extend_from_slice(&0u64.to_le_bytes()); // request_id
+        assert!(RpcMessage::<Vec<u8>>::decode_from_slice(&data).is_err());
+    }
+
+    #[test]
+    fn test_invalid_response_type() {
+        let mut data = vec![0xFFu8]; // Invalid response type
+        assert!(ResponseMessage::decode_from_slice(&data).is_err());
+    }
+
+    #[test]
+    fn test_invalid_option_tag() {
+        let mut data = vec![2u8]; // Invalid tag (should be 0 or 1)
+        data.extend_from_slice(&42u64.to_le_bytes());
+        assert!(Option::<u64>::decode_from_slice(&data).is_err());
+    }
+
+    #[test]
+    fn test_truncated_buffer() {
+        // Valid u64 encoding is 8 bytes, test with only 4
+        let data = vec![0x00, 0x00, 0x00, 0x00];
+        assert!(u64::decode_from_slice(&data).is_err());
+    }
+
+    #[test]
+    fn test_truncated_string() {
+        // String encoding: len(4) + data
+        // Test with incomplete length prefix
+        let data = vec![0x05, 0x00, 0x00]; // Only 3 bytes for length
+        assert!(String::decode_from_slice(&data).is_err());
+    }
+
+    #[test]
+    fn test_truncated_string_data() {
+        // String encoding with length but incomplete data
+        let mut data = vec![0x05, 0x00, 0x00, 0x00]; // length = 5
+        data.extend_from_slice(b"hel"); // Only 3 bytes instead of 5
+        assert!(String::decode_from_slice(&data).is_err());
+    }
+
+    #[test]
+    fn test_invalid_entry_payload_discriminant() {
+        let mut data = vec![0xFFu8]; // Invalid EntryPayloadType
+        assert!(EntryPayload::<Vec<u8>>::decode_from_slice(&data).is_err());
+    }
+
+    #[test]
+    fn test_invalid_append_entries_response_discriminant() {
+        let mut data = vec![0xFFu8]; // Invalid AppendEntriesResponseType
+        assert!(AppendEntriesResponse::decode_from_slice(&data).is_err());
+    }
+
+    #[test]
+    fn test_corrupted_vote() {
+        let vote = Vote {
+            leader_id: LeaderId {
+                term: 5,
+                node_id: 10,
+            },
+            committed: true,
+        };
+        let encoded = vote.encode_to_vec().unwrap();
+        assert_eq!(encoded.len(), 17);
+
+        // Vote doesn't include CRC validation; the only reliable failure mode is truncation.
+        let invalid_too_short = vec![0xFFu8; 16];
+        assert!(Vote::decode_from_slice(&invalid_too_short).is_err());
+    }
+
+    #[test]
+    fn test_corrupted_log_id() {
+        // Test with invalid data length - LogId should be 24 bytes
+        let invalid_data = vec![0xFFu8; 20]; // Too short
+        assert!(LogId::decode_from_slice(&invalid_data).is_err());
+    }
+
+    #[test]
+    fn test_empty_buffer() {
+        assert!(u64::decode_from_slice(&[]).is_err());
+        assert!(String::decode_from_slice(&[]).is_err());
+        assert!(Option::<u64>::decode_from_slice(&[]).is_err());
+    }
+
+    #[test]
+    fn test_invalid_utf8_string() {
+        // Length prefix says 3 bytes, but provide invalid UTF-8
+        let mut data = vec![0x03, 0x00, 0x00, 0x00]; // length = 3
+        data.extend_from_slice(&[0xFF, 0xFE, 0xFD]); // Invalid UTF-8
+        assert!(String::decode_from_slice(&data).is_err());
     }
 }

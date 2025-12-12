@@ -908,38 +908,83 @@ where
         target: C::NodeId,
         batch: &[(u64, AppendEntriesRequest<C>)],
     ) -> Result<Vec<(u64, AppendEntriesResponse<C>)>, RPCError<C, RaftError<C>>> {
-        // For heartbeat batches, we can send them concurrently using the multiplexed connection
-        // We use join_all to execute them in parallel
-        let mut futures = Vec::with_capacity(batch.len());
+        use crate::multi::codec::{
+            AppendEntriesRequest as CodecAppendEntriesRequest, AppendEntriesResponse as CodecResp,
+            Entry as CodecEntry, FromCodec, RawBytes, RpcMessage, ToCodec,
+        };
+
+        let addr = self.node_registry.resolve(&target).ok_or_else(|| {
+            ManiacTransportError::ConnectionError(format!("Unknown node: {}", target))
+        })?;
+
+        let request_id = self.next_request_id();
+
+        // Build codec heartbeats: one per group_id (already deduped by the buffer).
+        let mut heartbeats: Vec<(u64, CodecAppendEntriesRequest<RawBytes>)> =
+            Vec::with_capacity(batch.len());
 
         for (gid, rpc) in batch {
-            let gid = *gid;
-            let rpc = rpc.clone();
-            let target = target.clone();
+            let codec_entries: Vec<CodecEntry<RawBytes>> =
+                rpc.entries.iter().map(|entry| entry.to_codec()).collect();
 
-            futures.push(async move {
-                let res = self.send_append_entries(target, gid, rpc).await;
-                (gid, res)
-            });
+            let codec_rpc = CodecAppendEntriesRequest {
+                vote: rpc.vote.to_codec(),
+                prev_log_id: rpc.prev_log_id.as_ref().map(|lid| lid.to_codec()),
+                entries: codec_entries,
+                leader_commit: rpc.leader_commit.as_ref().map(|lid| lid.to_codec()),
+            };
+
+            heartbeats.push((*gid, codec_rpc));
         }
 
-        let results_raw = futures::future::join_all(futures).await;
+        let request = RpcMessage::HeartbeatBatchMulti {
+            request_id,
+            heartbeats,
+        };
 
-        let mut results = Vec::with_capacity(results_raw.len());
-        for (gid, res) in results_raw {
-            match res {
-                Ok(resp) => results.push((gid, resp)),
-                Err(e) => return Err(e),
+        let response_data = self
+            .rpc_call(&addr, request_id, &request)
+            .await
+            .map_err(RPCError::<C, RaftError<C>>::from)?;
+
+        let response: RpcMessage<RawBytes> = RpcMessage::decode_from_slice(&response_data)
+            .map_err(|e| ManiacTransportError::CodecError(e.to_string()))
+            .map_err(RPCError::<C, RaftError<C>>::from)?;
+
+        let convert_resp = |resp: CodecResp| -> AppendEntriesResponse<C> {
+            match resp {
+                CodecResp::Success => AppendEntriesResponse::Success,
+                CodecResp::PartialSuccess(log_id) => {
+                    let lid = log_id.map(|l| openraft::LogId::<C>::from_codec(l));
+                    AppendEntriesResponse::PartialSuccess(lid)
+                }
+                CodecResp::Conflict => AppendEntriesResponse::Conflict,
+                CodecResp::HigherVote(v) => {
+                    let vote = openraft::impls::Vote::<C>::from_codec(v);
+                    AppendEntriesResponse::HigherVote(vote)
+                }
             }
-        }
+        };
 
-        Ok(results)
+        match response {
+            RpcMessage::HeartbeatBatchMultiResponse { responses, .. } => {
+                Ok(responses
+                    .into_iter()
+                    .map(|(gid, resp)| (gid, convert_resp(resp)))
+                    .collect())
+            }
+            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error).into()),
+            _ => Err(ManiacTransportError::InvalidResponse.into()),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multi::test_support::run_async;
+    use maniac::io::{AsyncReadRent, AsyncWriteRent};
+    use std::io::Cursor;
 
     #[test]
     fn test_transport_config_default() {
@@ -947,5 +992,94 @@ mod tests {
         assert_eq!(config.connections_per_addr, 4);
         assert_eq!(config.max_concurrent_requests_per_conn, 256);
         assert_eq!(config.connection_ttl, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_read_write_frame_roundtrip() {
+        run_async(async {
+            let data = b"hello, world!";
+            let mut buffer = Vec::new();
+            let mut cursor = Cursor::new(&mut buffer);
+
+            // Write frame
+            write_frame(&mut cursor, data).await.unwrap();
+
+            // Reset cursor to read
+            cursor.set_position(0);
+
+            // Read frame
+            let read_data = read_frame(&mut cursor).await.unwrap();
+            assert_eq!(read_data, data);
+        });
+    }
+
+    #[test]
+    fn test_read_frame_empty() {
+        run_async(async {
+            let mut buffer = vec![0u8; 4]; // length = 0
+            let mut cursor = Cursor::new(&mut buffer);
+
+            let result = read_frame(&mut cursor).await.unwrap();
+            assert_eq!(result, Vec::<u8>::new());
+        });
+    }
+
+    #[test]
+    fn test_read_frame_truncated_length() {
+        run_async(async {
+            let mut buffer = vec![0u8; 2]; // Incomplete length prefix
+            let mut cursor = Cursor::new(&mut buffer);
+
+            let result = read_frame(&mut cursor).await;
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn test_read_frame_truncated_payload() {
+        run_async(async {
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&10u32.to_le_bytes()); // length = 10
+            buffer.extend_from_slice(b"abc"); // Only 3 bytes instead of 10
+            let mut cursor = Cursor::new(&mut buffer);
+
+            let result = read_frame(&mut cursor).await;
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn test_write_frame_large_data() {
+        run_async(async {
+            let data = vec![0x42u8; 10000];
+            let mut buffer = Vec::new();
+            let mut cursor = Cursor::new(&mut buffer);
+
+            write_frame(&mut cursor, &data).await.unwrap();
+
+            cursor.set_position(0);
+            let read_data = read_frame(&mut cursor).await.unwrap();
+            assert_eq!(read_data, data);
+        });
+    }
+
+    #[test]
+    fn test_multiple_frames() {
+        run_async(async {
+            let data1 = b"frame1";
+            let data2 = b"frame2";
+            let mut buffer = Vec::new();
+            let mut cursor = Cursor::new(&mut buffer);
+
+            write_frame(&mut cursor, data1).await.unwrap();
+            write_frame(&mut cursor, data2).await.unwrap();
+
+            cursor.set_position(0);
+            let read1 = read_frame(&mut cursor).await.unwrap();
+            assert_eq!(read1, data1);
+
+            let read2 = read_frame(&mut cursor).await.unwrap();
+            assert_eq!(read2, data2);
+        });
     }
 }

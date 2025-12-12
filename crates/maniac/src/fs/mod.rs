@@ -23,6 +23,9 @@ pub use symlink::symlink;
 mod open_options;
 pub use open_options::OpenOptions;
 
+mod direct_io;
+pub use direct_io::DirectIoRequirements;
+
 #[cfg(unix)]
 mod metadata;
 #[cfg(unix)]

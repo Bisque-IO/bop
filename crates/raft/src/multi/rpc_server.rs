@@ -376,13 +376,19 @@ where
                     let manager = self.manager.clone();
                     let snapshot_transfers = self.snapshot_transfers.clone();
                     let tx = response_tx.clone();
+                    let max_concurrent_requests = self.config.max_concurrent_requests;
 
                     // Spawn handler for this request
                     let _ = maniac::spawn(async move {
                         tracing::debug!("RPC handler: processing request {}", request_id);
                         let response =
-                            Self::process_codec_request(&manager, &snapshot_transfers, request)
-                                .await;
+                            Self::process_codec_request(
+                                &manager,
+                                &snapshot_transfers,
+                                request,
+                                max_concurrent_requests,
+                            )
+                            .await;
                         tracing::debug!("RPC handler: request {} processed, encoding response", request_id);
 
                         // Serialize and send response to writer
@@ -432,6 +438,7 @@ where
         manager: &Arc<MultiRaftManager<C, T, S>>,
         snapshot_transfers: &Arc<SnapshotTransferManager>,
         request: CodecRpcMessage<crate::multi::codec::RawBytes>,
+        max_concurrent_requests: usize,
     ) -> CodecRpcMessage<crate::multi::codec::RawBytes> {
         use crate::multi::codec::{
             AppendEntriesResponse as CodecAppendEntriesResponse, FromCodec,
@@ -805,8 +812,96 @@ where
                 }
             }
 
+            CodecRpcMessage::HeartbeatBatchMulti {
+                request_id,
+                heartbeats,
+            } => {
+                use futures::stream::{self, StreamExt, TryStreamExt};
+
+                tracing::trace!(
+                    "Processing HeartbeatBatchMulti (req_id={}, groups={})",
+                    request_id,
+                    heartbeats.len()
+                );
+
+                // Bound the amount of parallel work triggered by a single batch.
+                // We cap at max_concurrent_requests (per connection) but also at the batch size.
+                let concurrency = std::cmp::max(
+                    1usize,
+                    std::cmp::min(max_concurrent_requests, heartbeats.len()),
+                );
+
+                let responses: Result<Vec<(u64, CodecAppendEntriesResponse)>, String> = stream::iter(
+                    heartbeats.into_iter(),
+                )
+                .map(|(group_id, rpc)| {
+                    let manager = manager.clone();
+                    async move {
+                        if let Some(raft) = manager.get_group(group_id) {
+                            let vote = openraft::impls::Vote::<C>::from_codec(rpc.vote);
+                            let prev_log_id =
+                                rpc.prev_log_id.map(|l| openraft::LogId::<C>::from_codec(l));
+                            let leader_commit = rpc
+                                .leader_commit
+                                .map(|l| openraft::LogId::<C>::from_codec(l));
+
+                            let entries: Vec<C::Entry> = rpc
+                                .entries
+                                .into_iter()
+                                .map(|e| openraft::impls::Entry::<C>::from_codec(e))
+                                .collect();
+
+                            let raft_rpc = openraft::raft::AppendEntriesRequest {
+                                vote,
+                                prev_log_id,
+                                entries,
+                                leader_commit,
+                            };
+
+                            match raft.append_entries(raft_rpc).await {
+                                Ok(response) => {
+                                    let codec_response = match response {
+                                        openraft::raft::AppendEntriesResponse::Success => {
+                                            CodecAppendEntriesResponse::Success
+                                        }
+                                        openraft::raft::AppendEntriesResponse::PartialSuccess(
+                                            lid,
+                                        ) => CodecAppendEntriesResponse::PartialSuccess(
+                                            lid.map(|l| l.to_codec()),
+                                        ),
+                                        openraft::raft::AppendEntriesResponse::Conflict => {
+                                            CodecAppendEntriesResponse::Conflict
+                                        }
+                                        openraft::raft::AppendEntriesResponse::HigherVote(v) => {
+                                            CodecAppendEntriesResponse::HigherVote(v.to_codec())
+                                        }
+                                    };
+
+                                    Ok((group_id, codec_response))
+                                }
+                                Err(e) => Err(format!("HeartbeatBatchMulti failed for group {}: {}", group_id, e)),
+                            }
+                        } else {
+                            Err(format!("Group {} not found", group_id))
+                        }
+                    }
+                })
+                .buffer_unordered(concurrency)
+                .try_collect()
+                .await;
+
+                match responses {
+                    Ok(responses) => CodecRpcMessage::HeartbeatBatchMultiResponse {
+                        request_id,
+                        responses,
+                    },
+                    Err(e) => CodecRpcMessage::Error { request_id, error: e },
+                }
+            }
+
             CodecRpcMessage::Response { request_id, .. }
             | CodecRpcMessage::BatchResponse { request_id, .. }
+            | CodecRpcMessage::HeartbeatBatchMultiResponse { request_id, .. }
             | CodecRpcMessage::Error { request_id, .. } => CodecRpcMessage::Error {
                 request_id,
                 error: "Invalid request type: received response message as request".to_string(),
@@ -887,5 +982,132 @@ pub mod protocol {
         AppendEntries(AppendEntriesResponse<C>),
         Vote(VoteResponse<C>),
         InstallSnapshot(InstallSnapshotResponse<C>),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::multi::codec::{RawBytes, SnapshotMeta as CodecSnapshotMeta, Vote as CodecVote};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_snapshot_accumulator_append_chunk() {
+        let vote = CodecVote {
+            leader_id: crate::multi::codec::LeaderId { term: 1, node_id: 1 },
+            committed: true,
+        };
+        let meta = CodecSnapshotMeta {
+            last_log_id: None,
+            last_membership: crate::multi::codec::StoredMembership::default(),
+            snapshot_id: "test-snap".to_string(),
+        };
+        let mut acc = SnapshotAccumulator::new(vote.clone(), meta.clone());
+
+        // Append first chunk
+        assert!(acc.append_chunk(0, b"chunk1"));
+        assert_eq!(acc.next_offset, 6);
+        assert_eq!(acc.data, b"chunk1");
+
+        // Append second chunk
+        assert!(acc.append_chunk(6, b"chunk2"));
+        assert_eq!(acc.next_offset, 12);
+        assert_eq!(acc.data, b"chunk1chunk2");
+
+        // Offset mismatch should fail
+        assert!(!acc.append_chunk(10, b"bad"));
+        assert_eq!(acc.data, b"chunk1chunk2"); // Should not have changed
+    }
+
+    #[test]
+    fn test_snapshot_accumulator_expiry() {
+        let vote = CodecVote {
+            leader_id: crate::multi::codec::LeaderId { term: 1, node_id: 1 },
+            committed: true,
+        };
+        let meta = CodecSnapshotMeta {
+            last_log_id: None,
+            last_membership: crate::multi::codec::StoredMembership::default(),
+            snapshot_id: "test-snap".to_string(),
+        };
+        let mut acc = SnapshotAccumulator::new(vote, meta);
+
+        // Should not be expired immediately
+        assert!(!acc.is_expired(Duration::from_secs(60)));
+
+        // Manually set last_activity to past
+        acc.last_activity = Instant::now() - Duration::from_secs(120);
+        assert!(acc.is_expired(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_snapshot_transfer_manager() {
+        let manager = SnapshotTransferManager::new(Duration::from_secs(60));
+
+        let vote = CodecVote {
+            leader_id: crate::multi::codec::LeaderId { term: 1, node_id: 1 },
+            committed: true,
+        };
+        let meta = CodecSnapshotMeta {
+            last_log_id: None,
+            last_membership: crate::multi::codec::StoredMembership::default(),
+            snapshot_id: "snap-1".to_string(),
+        };
+
+        // Get or create accumulator
+        let mut acc = manager.get_or_create(1, "snap-1".to_string(), vote.clone(), meta.clone());
+        acc.append_chunk(0, b"data");
+        // IMPORTANT: drop the DashMap guard before re-entering `get_or_create` on the same key,
+        // otherwise we can deadlock by trying to take the same shard lock twice.
+        drop(acc);
+
+        // Should be able to retrieve it
+        let acc2 = manager.get_or_create(1, "snap-1".to_string(), vote, meta);
+        assert_eq!(acc2.data.len(), 4);
+        // Same re-entrancy issue: release guard before calling into the manager again.
+        drop(acc2);
+
+        // Remove it
+        let removed = manager.remove(1, "snap-1");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().data, b"data");
+
+        // Should be gone
+        let removed_again = manager.remove(1, "snap-1");
+        assert!(removed_again.is_none());
+    }
+
+    #[test]
+    fn test_snapshot_transfer_manager_cleanup_expired() {
+        let manager = SnapshotTransferManager::new(Duration::from_secs(1));
+
+        let vote = CodecVote {
+            leader_id: crate::multi::codec::LeaderId { term: 1, node_id: 1 },
+            committed: true,
+        };
+        let meta = CodecSnapshotMeta {
+            last_log_id: None,
+            last_membership: crate::multi::codec::StoredMembership::default(),
+            snapshot_id: "snap-1".to_string(),
+        };
+
+        // Create an accumulator
+        let mut acc = manager.get_or_create(1, "snap-1".to_string(), vote, meta);
+        // Manually expire it
+        acc.last_activity = Instant::now() - Duration::from_secs(10);
+        drop(acc);
+
+        // Cleanup should remove it
+        manager.cleanup_expired();
+        let removed = manager.remove(1, "snap-1");
+        assert!(removed.is_none());
+    }
+
+    #[test]
+    fn test_rpc_server_config_default() {
+        let config = ManiacRpcServerConfig::default();
+        assert_eq!(config.max_connections, 1000);
+        assert_eq!(config.max_concurrent_requests, 256);
+        assert_eq!(config.snapshot_transfer_timeout, Duration::from_secs(300));
     }
 }

@@ -2,9 +2,9 @@ use std::{future::Future, io, path::Path};
 
 use crate::{
     BufResult,
-    buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut},
+    buf::{AlignedBuf, IoBuf, IoBufMut, IoVecBuf, IoVecBufMut},
     driver::{op::Op, shared_fd::SharedFd},
-    fs::OpenOptions,
+    fs::{DirectIoRequirements, OpenOptions},
     io::{AsyncReadRent, AsyncWriteRent},
 };
 
@@ -69,6 +69,38 @@ pub struct File {
 }
 
 impl File {
+    /// Returns direct I/O alignment requirements (conservative defaults).
+    ///
+    /// Notes:
+    /// - On Linux/Windows these are typically enforced for DIO/no-buffering handles.
+    /// - For best performance/correctness, use `buf::AlignedBuf` and align offsets/lengths.
+    pub fn direct_io_requirements(&self) -> DirectIoRequirements {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            DirectIoRequirements::conservative_4k()
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // F_NOCACHE is not strict direct I/O; it does not usually require alignment.
+            DirectIoRequirements {
+                alignment: 1,
+                requires_aligned_buffer: false,
+                requires_aligned_offset: false,
+                requires_aligned_len: false,
+            }
+        }
+
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+        {
+            DirectIoRequirements {
+                alignment: 1,
+                requires_aligned_buffer: false,
+                requires_aligned_offset: false,
+                requires_aligned_len: false,
+            }
+        }
+    }
     /// Attempts to open a file in read-only mode.
     ///
     /// See the [`OpenOptions::open`] method for more details.
@@ -654,6 +686,131 @@ impl File {
     pub async fn close(self) -> io::Result<()> {
         self.fd.close().await;
         Ok(())
+    }
+
+    /// Read `len` bytes at `pos`, handling unaligned requests for direct-I/O files.
+    ///
+    /// This method performs an aligned read into an `AlignedBuf` and then slices out the requested
+    /// range. It is safe to use with Linux `O_DIRECT` and Windows `FILE_FLAG_NO_BUFFERING`.
+    pub async fn read_exact_at_unaligned_into(
+        &self,
+        pos: u64,
+        dst: &mut [u8],
+        scratch: &mut AlignedBuf,
+    ) -> io::Result<()> {
+        if dst.is_empty() {
+            return Ok(());
+        }
+
+        let req = self.direct_io_requirements();
+        let a = req.alignment.max(1);
+
+        let len = dst.len();
+        let start = (pos as usize / a) * a;
+        let end = pos as usize + len;
+        let end_aligned = ((end + a - 1) / a) * a;
+        let total = end_aligned - start;
+
+        let mut buf = std::mem::take(scratch);
+        if buf.alignment() != a || buf.capacity() < total {
+            // Allocate once to satisfy the caller; caller can reuse on subsequent calls.
+            buf = AlignedBuf::new(total, a);
+        }
+
+        // Use a single aligned read. Direct I/O can legitimately return short reads near EOF;
+        // accept them as long as the requested [pos, pos+len) range is covered.
+        let n = loop {
+            let (res, b) = self.read_at(buf, start as u64).await;
+            buf = b;
+            match res {
+                Ok(n) => break n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    *scratch = buf;
+                    return Err(e);
+                }
+            }
+        };
+
+        let off = pos as usize - start;
+        if n < off + len {
+            *scratch = buf;
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            ));
+        }
+
+        // Mark the bytes we read as initialized for safe reuse.
+        unsafe { buf.set_init(n) };
+
+        dst.copy_from_slice(&buf.as_mut_slice_total()[off..off + len]);
+        *scratch = buf;
+        Ok(())
+    }
+
+    pub async fn read_exact_at_unaligned(&self, pos: u64, len: usize) -> io::Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut out = vec![0u8; len];
+        let mut scratch = AlignedBuf::default();
+        self.read_exact_at_unaligned_into(pos, &mut out, &mut scratch)
+            .await?;
+        Ok(out)
+    }
+
+    /// Write `data` at `pos`, handling unaligned requests for direct-I/O files.
+    ///
+    /// This uses a read-modify-write cycle for partial alignment blocks.
+    /// For purely aligned writes, this is a single write call.
+    pub async fn write_all_at_unaligned(&self, pos: u64, data: &[u8]) -> io::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let req = self.direct_io_requirements();
+        let a = req.alignment.max(1);
+
+        // Fast path: fully aligned.
+        if (pos as usize) % a == 0 && data.len() % a == 0 {
+            let mut buf = AlignedBuf::new(data.len(), a);
+            buf.as_mut_slice_total().copy_from_slice(data);
+            unsafe { buf.set_init(data.len()) };
+            let (res, _buf) = self.write_all_at(buf, pos).await;
+            return res;
+        }
+
+        // RMW path: align the covered region.
+        let start = (pos as usize / a) * a;
+        let end = pos as usize + data.len();
+        let end_aligned = ((end + a - 1) / a) * a;
+        let total = end_aligned - start;
+
+        // Read existing bytes into aligned buffer; if EOF, treat missing bytes as zeros.
+        let mut scratch = AlignedBuf::new(total, a);
+        let n = loop {
+            let (res, b) = self.read_at(scratch, start as u64).await;
+            scratch = b;
+            match res {
+                Ok(n) => break n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        };
+        if n < total {
+            scratch.as_mut_slice_total()[n..total].fill(0);
+        }
+        unsafe { scratch.set_init(total) };
+
+        // Patch in the caller data.
+        let off = pos as usize - start;
+        scratch.as_mut_slice_total()[off..off + data.len()].copy_from_slice(data);
+
+        // Write the whole aligned region back.
+        let (res, _buf) = self.write_all_at(scratch, start as u64).await;
+        res
     }
 }
 

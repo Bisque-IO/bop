@@ -61,13 +61,13 @@ pub trait MultiplexedTransport<C: RaftTypeConfig> {
 - Connection pooling with `max_connections_per_addr`
 - Configurable timeouts (connect, read, write)
 - TCP keepalive and nodelay options
-- Bincode serialization over length-prefixed frames
+- Custom zero-copy binary codec over length-prefixed frames (4-byte LE length + payload)
 
 #### 3. **Network Layer** (`network.rs`)
 Implements RaftNetworkV2 with heartbeat batching:
 - `MultiRaftNetworkFactory`: Creates networks per target node
 - `HeartbeatBuffer`: Batches heartbeats per target to coalesce multiple groups
-- Automatic flush on channel capacity or timeout
+- Automatic flush on `heartbeat_interval` (or when a max batch size is reached)
 
 #### 4. **Storage Layer** (`storage.rs`, `maniac_storage.rs`)
 **MultiRaftStorage** trait:
@@ -270,7 +270,7 @@ impl<C: RaftTypeConfig> MultiRaftStorage<C> for MyCustomStorage {
 
 ### Serialization Format
 
-Uses **bincode 2.0** with standard configuration for wire protocol and persistence. All messages are length-prefixed (4-byte LE length header + bincode payload).
+Uses a **custom binary codec** implemented in `codec.rs`. Messages are length-prefixed (4-byte LE length header + codec payload) and include a `request_id` for true multiplexing over a single TCP connection.
 
 ### Error Handling
 

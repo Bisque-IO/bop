@@ -24,6 +24,9 @@ pub(crate) use vec_wrapper::{IoVecMeta, read_vec_meta, write_vec_meta};
 mod msg;
 pub use msg::{MsgBuf, MsgBufMut, MsgMeta};
 
+mod aligned;
+pub use aligned::AlignedBuf;
+
 pub(crate) fn deref(buf: &impl IoBuf) -> &[u8] {
     // Safety: the `IoBuf` trait is marked as unsafe and is expected to be
     // implemented correctly.

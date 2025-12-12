@@ -53,9 +53,6 @@ pub mod time;
 pub mod tls;
 pub mod utils;
 
-// NOTE: Raft support has been moved to the separate maniac-raft crate.
-// Use `maniac-raft` directly instead of enabling a raft feature on maniac.
-
 pub use crate::utils::*;
 
 #[macro_use]
