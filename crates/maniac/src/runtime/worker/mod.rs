@@ -146,9 +146,7 @@ pub extern "C" fn rust_preemption_helper() {
             }
 
             if !task.has_pinned_generator() {
-                unsafe {
-                    task.pin_generator(scope as *mut usize, GeneratorOwnership::Worker)
-                };
+                unsafe { task.pin_generator(scope as *mut usize, GeneratorOwnership::Worker) };
             }
 
             // 1. Check and clear flag (for cooperative correctness / hygiene)
@@ -360,7 +358,8 @@ pub fn try_sync_await<F: Future>(fut: F) -> Option<F::Output> {
             }
         }
     } else {
-        panic!("not inside a maniac worker thread!");
+        // panic!("not inside a maniac worker thread!");
+        None
     }
 }
 

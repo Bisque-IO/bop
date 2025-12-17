@@ -27,10 +27,13 @@ pub mod blocking;
 pub mod buf;
 mod byteview;
 
+pub mod chan;
+
 pub use {byteview::ByteView, byteview::StrView};
 
 #[doc(hidden)]
 pub use byteview::{Builder, Mutator};
+
 #[cfg(feature = "tokio-compat")]
 pub mod compat;
 
@@ -57,6 +60,9 @@ pub use crate::utils::*;
 
 #[macro_use]
 pub mod macros;
+
+#[doc(hidden)]
+pub use maniac_macros::select_priv_declare_output_enum;
 
 pub use crate::blocking::unblock;
 

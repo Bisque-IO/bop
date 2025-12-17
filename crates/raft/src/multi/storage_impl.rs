@@ -38,12 +38,14 @@
 //! 3. Reads each segment, validating CRC64 for each record
 //! 4. Stops at first invalid record (partial write from crash)
 //! 5. Truncates the file at that point
-//! 6. Rebuilds in-memory state from valid records
+//! Rebuilds in-memory state from valid records
 
-use crate::multi::codec::{Encode, Entry as CodecEntry, LogId as CodecLogId, RawBytes, ToCodec, Vote as CodecVote};
 use crate::multi::codec::{Decode, FromCodec};
-use congee::epoch;
+use crate::multi::codec::{
+    Encode, Entry as CodecEntry, LogId as CodecLogId, RawBytes, ToCodec, Vote as CodecVote,
+};
 use congee::U64Congee;
+use congee::epoch;
 use crc64fast_nvme::Digest;
 use crossfire::MAsyncTx;
 use dashmap::DashMap;
@@ -52,15 +54,15 @@ use maniac::fs::{File, OpenOptions};
 // Using flume instead of maniac mpsc for reliability
 // use maniac::sync::mpsc::bounded as mpsc_bounded;
 use openraft::{
-    storage::{IOFlushed, RaftLogReader, RaftLogStorage},
     LogId, LogState, RaftTypeConfig,
+    storage::{IOFlushed, RaftLogReader, RaftLogStorage},
 };
 use std::io;
 use std::ops::RangeBounds;
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::manifest_mdbx::{ManifestManager, SegmentMeta};
@@ -111,14 +113,39 @@ impl TryFrom<u8> for RecordType {
 const LENGTH_SIZE: usize = 4;
 /// CRC64 size: 8 bytes
 const CRC64_SIZE: usize = 8;
-/// Minimum record size: len(4) + type(1) + group_id(8) + crc(8) = 21 bytes
+/// Group ID size: 3 bytes (u24 little-endian)
+const GROUP_ID_SIZE: usize = 3;
+/// Minimum record size: len(4) + type(1) + group_id(3) + crc(8) = 16 bytes
 #[allow(dead_code)]
-const MIN_RECORD_SIZE: usize = LENGTH_SIZE + 1 + 8 + CRC64_SIZE;
-/// Default segment size: 64MB
-pub const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
+const MIN_RECORD_SIZE: usize = LENGTH_SIZE + 1 + GROUP_ID_SIZE + CRC64_SIZE;
+/// Default segment size: 1MB
+pub const DEFAULT_SEGMENT_SIZE: u64 = 1 * 1024 * 1024;
+/// Default streaming chunk size: 1MB (should be aligned and large enough for efficiency)
+pub const DEFAULT_CHUNK_SIZE: usize = 1 * 1024 * 1024;
 
-/// Header size: len(4) + type(1) + group_id(8) = 13 bytes
-const HEADER_SIZE: usize = LENGTH_SIZE + 1 + 8;
+/// Header size: len(4) + type(1) + group_id(3) = 8 bytes (64-bit aligned)
+const HEADER_SIZE: usize = LENGTH_SIZE + 1 + GROUP_ID_SIZE;
+
+/// Default maximum record size: 1MB
+pub const DEFAULT_MAX_RECORD_SIZE: u64 = 1 * 1024 * 1024;
+
+/// Write a u24 little-endian value to the buffer at the given offset.
+#[inline]
+fn write_u24_le(buf: &mut [u8], offset: usize, value: u64) {
+    debug_assert!(value <= 0xFF_FFFF, "group_id exceeds u24 range");
+    buf[offset] = value as u8;
+    buf[offset + 1] = (value >> 8) as u8;
+    buf[offset + 2] = (value >> 16) as u8;
+}
+
+/// Read a u24 little-endian value from the buffer at the given offset.
+#[inline]
+fn read_u24_le(buf: &[u8], offset: usize) -> u64 {
+    let lo = buf[offset] as u64;
+    let mid = (buf[offset + 1] as u64) << 8;
+    let high = (buf[offset + 2] as u64) << 16;
+    lo | mid | high
+}
 
 async fn read_exact_at_reuse(
     file: &File,
@@ -204,21 +231,42 @@ async fn open_segment_file(
     truncate: bool,
 ) -> io::Result<File> {
     let mut opts = OpenOptions::new();
-    opts.read(read).write(write).create(create).truncate(truncate);
-    // Only enable direct I/O for writable handles. Our direct write path performs RMW internally
-    // and benefits from O_DIRECT; read-only recovery/scans stay buffered for broader compatibility.
+    opts.read(read)
+        .write(write)
+        .create(create)
+        .truncate(truncate);
+
+    // Only enable direct I/O for writable handles
     if write {
         opts.direct_io(true);
     }
+
     match opts.open(path).await {
         Ok(f) => Ok(f),
-        Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
-            // Some filesystems / environments don't support direct I/O. Fall back to buffered I/O.
-            let mut opts = OpenOptions::new();
-            opts.read(read).write(write).create(create).truncate(truncate);
-            opts.open(path).await
+        Err(e) => {
+            // Check for InvalidInput (EINVAL) which indicates Direct I/O is not supported
+            // Error code 22 is EINVAL on Unix systems, 87 on Windows
+            if write
+                && (e.kind() == io::ErrorKind::InvalidInput
+                    || e.raw_os_error() == Some(22)
+                    || e.raw_os_error() == Some(87))
+            {
+                tracing::debug!(
+                    "Direct I/O not supported for {:?}, falling back to buffered I/O: {}",
+                    path,
+                    e
+                );
+                let mut opts = OpenOptions::new();
+                opts.read(read)
+                    .write(write)
+                    .create(create)
+                    .truncate(truncate);
+                // Don't set direct_io this time
+                opts.open(path).await
+            } else {
+                Err(e)
+            }
         }
-        Err(e) => Err(e),
     }
 }
 
@@ -269,26 +317,24 @@ fn append_record_into(
     payload: &[u8],
 ) -> usize {
     // Total record size (excluding the len field itself)
-    let record_len = 1 + 8 + payload.len() + CRC64_SIZE; // type + group_id + payload + crc
+    let record_len = 1 + GROUP_ID_SIZE + payload.len() + CRC64_SIZE; // type + group_id + payload + crc
     let total_size = LENGTH_SIZE + record_len;
 
     buf.reserve(total_size);
 
     // Build header: [len][type][group_id]
-    let header: [u8; HEADER_SIZE] = {
-        let mut h = [0u8; HEADER_SIZE];
-        h[0..4].copy_from_slice(&(record_len as u32).to_le_bytes());
-        h[4] = record_type as u8;
-        h[5..13].copy_from_slice(&group_id.to_le_bytes());
-        h
-    };
+    let mut header: [u8; HEADER_SIZE] = [0u8; HEADER_SIZE];
+    header[0..4].copy_from_slice(&(record_len as u32).to_le_bytes());
+    header[4] = record_type as u8;
+    write_u24_le(&mut header, 5, group_id);
 
     // Compute CRC64 incrementally over [type + group_id + payload]
     let mut digest = Digest::new();
-    digest.write(&header[LENGTH_SIZE..]); // type + group_id (9 bytes)
+    digest.write(&header[LENGTH_SIZE..]); // type + group_id (4 bytes)
     digest.write(payload);
     let crc = digest.sum64();
 
+    // Append everything to buffer
     buf.extend_from_slice(&header);
     buf.extend_from_slice(payload);
     buf.extend_from_slice(&crc.to_le_bytes());
@@ -316,12 +362,23 @@ pub struct ParsedRecord<'a> {
 /// Validates a record's CRC64 checksum
 /// Input is the data AFTER the length field (type + group_id + payload + crc)
 /// Returns (record_type, group_id, payload) if valid
-fn validate_record(data: &[u8]) -> io::Result<ParsedRecord<'_>> {
-    // Minimum: type(1) + group_id(8) + crc(8) = 17 bytes
-    if data.len() < 1 + 8 + CRC64_SIZE {
+fn validate_record(data: &[u8], max_record_size: usize) -> io::Result<ParsedRecord<'_>> {
+    // Minimum: type(1) + group_id(3) + crc(8) = 12 bytes
+    if data.len() < 1 + GROUP_ID_SIZE + CRC64_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "record too short",
+        ));
+    }
+
+    if data.len() > max_record_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "record exceeds max_record_size: {} > {}",
+                data.len(),
+                max_record_size
+            ),
         ));
     }
 
@@ -346,8 +403,8 @@ fn validate_record(data: &[u8]) -> io::Result<ParsedRecord<'_>> {
 
     // Parse header
     let record_type = RecordType::try_from(data[0])?;
-    let group_id = u64::from_le_bytes(data[1..9].try_into().unwrap());
-    let payload = &data[9..payload_end];
+    let group_id = read_u24_le(data, 1);
+    let payload = &data[1 + GROUP_ID_SIZE..payload_end];
 
     Ok(ParsedRecord {
         record_type,
@@ -360,11 +417,17 @@ fn validate_record(data: &[u8]) -> io::Result<ParsedRecord<'_>> {
 /// Uses Arc<PathBuf> for cheap cloning of config across groups.
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
-    /// Base directory for storage files (Arc for cheap cloning)
+    /// Base directory for all raft data
     pub base_dir: Arc<PathBuf>,
+    /// Optional manifest directory. If None, manifest is stored in base_dir/.raft_manifest
+    /// Use this if base_dir is on a filesystem that doesn't support Direct I/O (e.g., tmpfs)
+    pub manifest_dir: Option<Arc<PathBuf>>,
     /// Maximum segment size in bytes. When exceeded, a new segment is created.
-    /// Default: 64MB
+    /// Default: 1MB, minimum: MIN_RECORD_SIZE as u64
     pub segment_size: u64,
+    /// Maximum size for individual records. None means no limit (but constrained by segment_size).
+    /// Default: 1MB, validated to be <= segment_size
+    pub max_record_size: Option<u64>,
     /// Interval for fsync per group. If None, fsync after every write.
     /// If Some(duration), fsync on interval only if dirty.
     pub fsync_interval: Option<Duration>,
@@ -376,7 +439,9 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             base_dir: Arc::new(PathBuf::from("./raft-data")),
+            manifest_dir: None,
             segment_size: DEFAULT_SEGMENT_SIZE,
+            max_record_size: Some(DEFAULT_MAX_RECORD_SIZE),
             fsync_interval: Some(Duration::from_millis(100)),
             max_cache_entries_per_group: 10000,
         }
@@ -393,8 +458,57 @@ impl StorageConfig {
     }
 
     /// Set the segment size
+    /// Validates that segment_size >= MIN_RECORD_SIZE
     pub fn with_segment_size(mut self, size: u64) -> Self {
-        self.segment_size = size;
+        assert!(
+            size >= MIN_RECORD_SIZE as u64,
+            "segment_size must be at least MIN_RECORD_SIZE ({})",
+            MIN_RECORD_SIZE
+        );
+
+        // Ensure segment_size is aligned for Direct I/O (must be multiple of 512 or 4096)
+        let aligned_size = align_up_u64(size, dio_align());
+        if aligned_size != size {
+            tracing::warn!(
+                "segment_size {} is not aligned to {} bytes for Direct I/O, rounding up to {}",
+                size,
+                dio_align(),
+                aligned_size
+            );
+        }
+        self.segment_size = aligned_size;
+
+        // Validate max_record_size if set
+        if let Some(max_record) = self.max_record_size {
+            assert!(
+                max_record <= aligned_size,
+                "max_record_size ({}) must be <= segment_size ({})",
+                max_record,
+                aligned_size
+            );
+        }
+        self
+    }
+
+    /// Set the maximum record size
+    /// None means no explicit limit (but still constrained by segment_size)
+    /// Validates that max_record_size <= segment_size
+    pub fn with_max_record_size(mut self, max_size: impl Into<Option<u64>>) -> Self {
+        let max_size_opt = max_size.into();
+        if let Some(max_size) = max_size_opt {
+            assert!(
+                max_size <= self.segment_size,
+                "max_record_size ({}) must be <= segment_size ({})",
+                max_size,
+                self.segment_size
+            );
+            assert!(
+                max_size >= MIN_RECORD_SIZE as u64,
+                "max_record_size must be at least MIN_RECORD_SIZE ({})",
+                MIN_RECORD_SIZE
+            );
+        }
+        self.max_record_size = max_size_opt;
         self
     }
 
@@ -404,9 +518,17 @@ impl StorageConfig {
         self
     }
 
-    /// Set the max cache entries per group
-    pub fn with_max_cache_entries(mut self, entries: usize) -> Self {
-        self.max_cache_entries_per_group = entries;
+    /// Set the maximum cache entries per group
+    pub fn with_max_cache_entries(mut self, max_entries: usize) -> Self {
+        self.max_cache_entries_per_group = max_entries;
+        self
+    }
+
+    /// Set the manifest directory. Use this if the base_dir is on a filesystem
+    /// that doesn't support Direct I/O (e.g., tmpfs). If not set, manifest is
+    /// stored in base_dir/.raft_manifest
+    pub fn with_manifest_dir(mut self, manifest_dir: impl AsRef<Path>) -> Self {
+        self.manifest_dir = Some(Arc::new(manifest_dir.as_ref().to_path_buf()));
         self
     }
 }
@@ -419,6 +541,7 @@ pub struct ShardedStorageConfig {
     /// Ignored - each group gets its own shard now
     pub num_shards: usize,
     pub segment_size: u64,
+    pub max_record_size: Option<u64>,
     pub fsync_interval: Option<Duration>,
     pub max_cache_entries_per_group: usize,
 }
@@ -427,8 +550,9 @@ impl Default for ShardedStorageConfig {
     fn default() -> Self {
         Self {
             base_dir: PathBuf::from("./raft-data"),
-            num_shards: 8, // Ignored
+            num_shards: 8, // Default value, not used
             segment_size: DEFAULT_SEGMENT_SIZE,
+            max_record_size: Some(DEFAULT_MAX_RECORD_SIZE),
             fsync_interval: Some(Duration::from_millis(100)),
             max_cache_entries_per_group: 10000,
         }
@@ -436,12 +560,14 @@ impl Default for ShardedStorageConfig {
 }
 
 impl From<ShardedStorageConfig> for StorageConfig {
-    fn from(cfg: ShardedStorageConfig) -> Self {
+    fn from(sharded: ShardedStorageConfig) -> Self {
         Self {
-            base_dir: Arc::new(cfg.base_dir),
-            segment_size: cfg.segment_size,
-            fsync_interval: cfg.fsync_interval,
-            max_cache_entries_per_group: cfg.max_cache_entries_per_group,
+            base_dir: Arc::new(sharded.base_dir),
+            manifest_dir: None,
+            segment_size: sharded.segment_size,
+            max_record_size: sharded.max_record_size,
+            fsync_interval: sharded.fsync_interval,
+            max_cache_entries_per_group: sharded.max_cache_entries_per_group,
         }
     }
 }
@@ -506,11 +632,14 @@ impl LogIndex {
         let slot = if let Some(slot) = self.free.write().pop() {
             let mut locs = self.locations.write();
             if slot >= locs.len() {
-                locs.resize(slot + 1, LogLocation {
-                    segment_id: 0,
-                    offset: 0,
-                    len: 0,
-                });
+                locs.resize(
+                    slot + 1,
+                    LogLocation {
+                        segment_id: 0,
+                        offset: 0,
+                        len: 0,
+                    },
+                );
             }
             locs[slot] = loc;
             slot
@@ -584,6 +713,142 @@ impl LogIndex {
     }
 }
 
+/// Owned parsed record to avoid lifetime issues
+#[derive(Debug)]
+struct OwnedParsedRecord {
+    pub record_type: RecordType,
+    pub group_id: u64,
+    pub payload: Vec<u8>,
+}
+
+/// Iterator for reading records from a segment file.
+/// Reads aligned chunks and yields parsed records with proper boundary handling.
+struct RecordIterator<'a> {
+    file: &'a File,
+    offset: u64,
+    end_offset: u64,
+    chunk_size: usize,
+    buffer: Vec<u8>,
+    carry: Vec<u8>,
+    position: usize,
+    dio_scratch: &'a mut AlignedBuf,
+}
+
+impl<'a> RecordIterator<'a> {
+    /// Creates a new RecordIterator
+    pub fn new(
+        file: &'a File,
+        start_offset: u64,
+        end_offset: u64,
+        chunk_size: usize,
+        dio_scratch: &'a mut AlignedBuf,
+    ) -> Self {
+        Self {
+            file,
+            offset: start_offset,
+            end_offset,
+            chunk_size,
+            buffer: Vec::new(),
+            carry: Vec::new(),
+            position: 0,
+            dio_scratch,
+        }
+    }
+
+    /// Reads the next chunk from the file, handling alignment requirements
+    pub async fn read_chunk(&mut self) -> io::Result<bool> {
+        if self.offset >= self.end_offset {
+            return Ok(false);
+        }
+
+        // Calculate aligned read range
+        let remaining = (self.end_offset - self.offset) as usize;
+        let to_read = remaining.min(self.chunk_size);
+
+        // Ensure buffer is large enough
+        if self.buffer.capacity() < to_read {
+            self.buffer.reserve(to_read - self.buffer.capacity());
+        }
+
+        // Read the chunk with alignment safety
+        read_exact_at_reuse(
+            self.file,
+            self.offset,
+            to_read,
+            &mut self.buffer,
+            self.dio_scratch,
+        )
+        .await?;
+
+        // Prepend any carried-over data from previous chunk
+        if !self.carry.is_empty() {
+            self.carry.extend_from_slice(&self.buffer);
+            std::mem::swap(&mut self.carry, &mut self.buffer);
+            self.carry.clear();
+        }
+
+        self.position = 0;
+        self.offset += to_read as u64;
+        Ok(true)
+    }
+
+    /// Returns the next record from the current chunk, or None if more data is needed
+    pub async fn next_record(&mut self) -> io::Result<Option<(u64, OwnedParsedRecord)>> {
+        loop {
+            if self.position + LENGTH_SIZE > self.buffer.len() {
+                // Not enough data for length prefix
+                return Ok(None);
+            }
+
+            // Read length prefix
+            let len_bytes: [u8; LENGTH_SIZE] = self.buffer
+                [self.position..self.position + LENGTH_SIZE]
+                .try_into()
+                .unwrap();
+            let total_len = u32::from_le_bytes(len_bytes) as usize;
+
+            // Validate length using configurable max_record_size (fallback to chunk_size if not configured)
+            if total_len < MIN_RECORD_SIZE - LENGTH_SIZE || total_len > self.chunk_size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid record length: {}", total_len),
+                ));
+            }
+
+            let record_start = self.position + LENGTH_SIZE;
+            let record_end = record_start + total_len;
+
+            if record_end > self.buffer.len() {
+                // Record spans chunk boundary - carry over to next read
+                self.carry = self.buffer[self.position..].to_vec();
+                self.position = self.buffer.len(); // Mark buffer as consumed
+
+                if !self.read_chunk().await? {
+                    return Ok(None);
+                }
+                continue;
+            }
+
+            // Parse the record
+            let record_data = &self.buffer[record_start..record_end];
+            let record_offset = self.offset - self.buffer.len() as u64 + self.position as u64;
+
+            let parsed = validate_record(record_data, self.chunk_size)?;
+
+            self.position = record_end;
+
+            // Convert to owned record to avoid lifetime issues
+            let owned_record = OwnedParsedRecord {
+                record_type: parsed.record_type,
+                group_id: parsed.group_id,
+                payload: record_data[1 + GROUP_ID_SIZE..record_data.len() - CRC64_SIZE].to_vec(),
+            };
+
+            return Ok(Some((record_offset, owned_record)));
+        }
+    }
+}
+
 struct RecoveredGroup<C: RaftTypeConfig> {
     vote: Option<openraft::impls::Vote<C>>,
     last_log_id: Option<LogId<C>>,
@@ -602,13 +867,13 @@ async fn replay_group_from_manifest<C>(
 ) -> io::Result<RecoveredGroup<C>>
 where
     C: RaftTypeConfig<
-        NodeId = u64,
-        Term = u64,
-        LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-        Vote = openraft::impls::Vote<C>,
-        Node = openraft::impls::BasicNode,
-        Entry = openraft::impls::Entry<C>,
-    >,
+            NodeId = u64,
+            Term = u64,
+            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+            Vote = openraft::impls::Vote<C>,
+            Node = openraft::impls::BasicNode,
+            Entry = openraft::impls::Entry<C>,
+        >,
     C::D: FromCodec<RawBytes>,
 {
     let mut vote: Option<openraft::impls::Vote<C>> = None;
@@ -620,10 +885,18 @@ where
     let mut last_log_id_hint: Option<LogId<C>> = None;
     let mut cache: Vec<(u64, Arc<C::Entry>)> = Vec::new();
     let mut cache_low: u64 = 0;
+    // Note: cache_low is computed and used later in recovery process
 
     // Reusable buffer for reading record fields/bodies.
     let mut read_buf: Vec<u8> = Vec::with_capacity(4096);
     let mut dio_scratch = AlignedBuf::default();
+
+    // Calculate max record size from config
+    let max_record_size = manifest
+        .get(0)
+        .and_then(|m| m.1.checked_sub(1).map(|i| i as usize))
+        .unwrap_or(DEFAULT_CHUNK_SIZE);
+    // Note: cache_low is computed and used later in recovery process
 
     for (segment_id, valid_bytes) in manifest.iter().copied() {
         if valid_bytes == 0 {
@@ -633,44 +906,19 @@ where
         let path = SegmentedLog::segment_path(group_dir, group_id, segment_id);
         let file = open_segment_file(&path, true, false, false, false).await?;
 
-        let mut offset = 0u64;
-        while offset < valid_bytes {
-            // Read length field.
-            if offset + LENGTH_SIZE as u64 > valid_bytes {
-                break;
-            }
+        // Use streaming record iterator for efficient bulk reading
+        let mut record_iter = RecordIterator::new(
+            &file,
+            0u64,
+            valid_bytes,
+            DEFAULT_CHUNK_SIZE,
+            &mut dio_scratch,
+        );
 
-            let len_bytes = match read_exact_at_reuse(&file, offset, LENGTH_SIZE, &mut read_buf, &mut dio_scratch)
-                .await
-            {
-                Ok(()) => &read_buf[..LENGTH_SIZE],
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(_) => break,
-            };
+        // Pre-read first chunk
+        record_iter.read_chunk().await?;
 
-            let record_len =
-                u32::from_le_bytes(len_bytes[..LENGTH_SIZE].try_into().unwrap()) as usize;
-            if record_len < (1 + 8 + CRC64_SIZE) || record_len > 100 * 1024 * 1024 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid record length"));
-            }
-
-            let total_len = LENGTH_SIZE + record_len;
-            let record_end = offset + total_len as u64;
-            if record_end > valid_bytes {
-                break;
-            }
-
-            // Read the record data (after len field) into the reusable buffer.
-            read_exact_at_reuse(
-                &file,
-                offset + LENGTH_SIZE as u64,
-                record_len,
-                &mut read_buf,
-                &mut dio_scratch,
-            )
-            .await?;
-
-            let parsed = validate_record(&read_buf[..record_len])?;
+        while let Some((record_offset, parsed)) = record_iter.next_record().await? {
             if parsed.group_id != group_id {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -683,12 +931,12 @@ where
 
             match parsed.record_type {
                 RecordType::Vote => {
-                    let codec_vote = CodecVote::decode_from_slice(parsed.payload)
+                    let codec_vote = CodecVote::decode_from_slice(&parsed.payload)
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
                     vote = Some(openraft::impls::Vote::<C>::from_codec(codec_vote));
                 }
                 RecordType::Entry => {
-                    let codec_entry = CodecEntry::<RawBytes>::decode_from_slice(parsed.payload)
+                    let codec_entry = CodecEntry::<RawBytes>::decode_from_slice(&parsed.payload)
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
                     let entry: openraft::impls::Entry<C> =
                         openraft::impls::Entry::<C>::from_codec(codec_entry);
@@ -699,8 +947,12 @@ where
                         index,
                         LogLocation {
                             segment_id,
-                            offset,
-                            len: total_len as u32,
+                            offset: record_offset,
+                            len: (LENGTH_SIZE
+                                + 1
+                                + GROUP_ID_SIZE
+                                + parsed.payload.len()
+                                + CRC64_SIZE) as u32,
                         },
                     )?;
 
@@ -710,7 +962,9 @@ where
                     // Maintain a simple "last N" cache window.
                     if max_cache_entries > 0 {
                         let keep = max_cache_entries as u64;
-                        cache_low = last_index.saturating_sub(keep.saturating_sub(1)).max(first_index);
+                        cache_low = last_index
+                            .saturating_sub(keep.saturating_sub(1))
+                            .max(first_index);
                         if index >= cache_low {
                             cache.push((index, Arc::new(entry)));
                             // Prune old cached entries.
@@ -721,7 +975,7 @@ where
                 RecordType::Truncate => {
                     // New format: full LogId. Backwards compat: old payload was only u64 index.
                     let (truncate_index, truncate_log_id) =
-                        match CodecLogId::decode_from_slice(parsed.payload) {
+                        match CodecLogId::decode_from_slice(&parsed.payload) {
                             Ok(codec_lid) => {
                                 let lid = LogId::<C>::from_codec(codec_lid);
                                 (lid.index, Some(lid))
@@ -731,7 +985,10 @@ where
                                 (idx, None)
                             }
                             Err(e) => {
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    e.to_string(),
+                                ));
                             }
                         };
 
@@ -746,7 +1003,7 @@ where
                     }
                 }
                 RecordType::Purge => {
-                    let codec_lid = CodecLogId::decode_from_slice(parsed.payload)
+                    let codec_lid = CodecLogId::decode_from_slice(&parsed.payload)
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
                     let lid = LogId::<C>::from_codec(codec_lid);
                     let purge_index = lid.index;
@@ -760,8 +1017,6 @@ where
                     // LibSQL and other record types are ignored for Raft recovery state here.
                 }
             }
-
-            offset = record_end;
         }
     }
 
@@ -787,7 +1042,7 @@ where
             )
             .await?;
             let buf = &read_buf[..loc.len as usize];
-            let parsed = validate_record(&buf[LENGTH_SIZE..loc.len as usize])?;
+            let parsed = validate_record(&buf[LENGTH_SIZE..loc.len as usize], max_record_size)?;
             if parsed.record_type == RecordType::Entry {
                 let codec_entry = CodecEntry::<RawBytes>::decode_from_slice(parsed.payload)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -816,16 +1071,20 @@ where
 }
 
 impl<C: RaftTypeConfig + 'static> GroupState<C> {
-    async fn new(group_id: u64, config: &StorageConfig, manifest: Arc<ManifestManager>) -> io::Result<Self>
+    async fn new(
+        group_id: u64,
+        config: &StorageConfig,
+        manifest: Arc<ManifestManager>,
+    ) -> io::Result<Self>
     where
         C: RaftTypeConfig<
-            NodeId = u64,
-            Term = u64,
-            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-            Vote = openraft::impls::Vote<C>,
-            Node = openraft::impls::BasicNode,
-            Entry = openraft::impls::Entry<C>,
-        >,
+                NodeId = u64,
+                Term = u64,
+                LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+                Vote = openraft::impls::Vote<C>,
+                Node = openraft::impls::BasicNode,
+                Entry = openraft::impls::Entry<C>,
+            >,
         C::D: FromCodec<RawBytes>,
     {
         let group_dir = config.base_dir.join(format!("{}", group_id));
@@ -920,10 +1179,10 @@ impl AtomicVote {
     fn store<C>(&self, vote: Option<&openraft::impls::Vote<C>>)
     where
         C: RaftTypeConfig<
-            NodeId = u64,
-            Term = u64,
-            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-        >,
+                NodeId = u64,
+                Term = u64,
+                LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+            >,
     {
         // Increment sequence to odd (write in progress)
         let seq = self.seq.fetch_add(1, Ordering::Release);
@@ -951,10 +1210,10 @@ impl AtomicVote {
     fn load<C>(&self) -> Option<openraft::impls::Vote<C>>
     where
         C: RaftTypeConfig<
-            NodeId = u64,
-            Term = u64,
-            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-        >,
+                NodeId = u64,
+                Term = u64,
+                LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+            >,
     {
         loop {
             let seq1 = self.seq.load(Ordering::Acquire);
@@ -1024,10 +1283,10 @@ impl AtomicLogId {
     fn store<C>(&self, log_id: Option<&LogId<C>>)
     where
         C: RaftTypeConfig<
-            NodeId = u64,
-            Term = u64,
-            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-        >,
+                NodeId = u64,
+                Term = u64,
+                LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+            >,
     {
         // Increment sequence to odd (write in progress)
         let seq = self.seq.fetch_add(1, Ordering::Release);
@@ -1048,7 +1307,8 @@ impl AtomicLogId {
                     lid.leader_id.node_id,
                     Self::MAX_NODE_ID
                 );
-                let high = (lid.leader_id.term << Self::TERM_SHIFT) | (lid.leader_id.node_id & Self::MAX_NODE_ID);
+                let high = (lid.leader_id.term << Self::TERM_SHIFT)
+                    | (lid.leader_id.node_id & Self::MAX_NODE_ID);
                 let low = (lid.index << Self::INDEX_SHIFT) | Self::VALID_BIT;
                 self.high.store(high, Ordering::Relaxed);
                 self.low.store(low, Ordering::Relaxed);
@@ -1066,10 +1326,10 @@ impl AtomicLogId {
     fn load<C>(&self) -> Option<LogId<C>>
     where
         C: RaftTypeConfig<
-            NodeId = u64,
-            Term = u64,
-            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-        >,
+                NodeId = u64,
+                Term = u64,
+                LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+            >,
     {
         loop {
             let seq1 = self.seq.load(Ordering::Acquire);
@@ -1219,19 +1479,39 @@ impl SegmentedLog {
         // Find existing segments
         let segments = Self::list_segments_async(&group_dir, group_id).await?;
 
-        let (current_segment_id, current_file, current_size, replay_manifest) = if segments.is_empty() {
+        let (current_segment_id, current_file, current_size, replay_manifest) = if segments
+            .is_empty()
+        {
             // No existing segments - create first one
             let segment_id = 0u64;
             let path = Self::segment_path(&group_dir, group_id, segment_id);
+
+            // Ensure segment_size is properly aligned for Direct I/O
+            let aligned_segment_size = align_up_u64(segment_size, dio_align());
+            if aligned_segment_size != segment_size {
+                tracing::warn!(
+                    "segment_size {} is not aligned to {} bytes, using aligned size {}",
+                    segment_size,
+                    dio_align(),
+                    aligned_segment_size
+                );
+            }
+
+            // Open file initially without Direct I/O for setup operations on problematic filesystems
             let file = open_segment_file(&path, true, true, true, true).await?;
+            // Preallocate segment to full size for alignment and performance
+            file.set_len(aligned_segment_size).await?;
+            drop(file); // Close the file
+
+            // Reopen with Direct I/O enabled if supported
+            let file = open_segment_file(&path, true, true, false, false).await?;
             (segment_id, file, 0, vec![(segment_id, 0)])
         } else {
             // Use MDBX segment metadata to avoid scanning all segments.
             // We only validate the *tail* segment; earlier segments are assumed sealed.
             let meta_map: std::collections::HashMap<u64, SegmentMeta> = {
                 let manifest = manifest.clone();
-                maniac::blocking::unblock(move || manifest.read_group_segments(group_id))
-                    .await?
+                maniac::blocking::unblock(move || manifest.read_group_segments(group_id)).await?
             };
 
             let mut manifest_vec: Vec<(u64, u64)> = Vec::with_capacity(segments.len());
@@ -1246,12 +1526,12 @@ impl SegmentedLog {
                 // Only validate the last segment's tail; earlier segments use manifest metadata if present.
                 let is_last = i + 1 == segments.len();
                 let (valid_bytes, file_len) = if is_last {
-                    Self::recover_segment_async(&path).await?
+                    Self::recover_segment_async(&path, segment_size).await?
                 } else if let Some(m) = meta_map.get(segment_id) {
                     (m.valid_bytes.min(file_len), file_len)
                 } else {
                     // Fallback: if metadata missing, validate this segment too.
-                    Self::recover_segment_async(&path).await?
+                    Self::recover_segment_async(&path, segment_size).await?
                 };
 
                 // Truncate this segment if it contains a partial/corrupt tail.
@@ -1259,17 +1539,28 @@ impl SegmentedLog {
                     // Truncation does not benefit from direct I/O and may fail with `EINVAL` on
                     // some kernels when the fd is opened with `O_DIRECT`. Do it on a buffered fd.
                     let desired_len = align_up_u64(valid_bytes, dio_align());
-                    let file = OpenOptions::new().read(true).write(true).open(&path).await?;
-                    if file_len != desired_len {
-                        file.set_len(desired_len).await?;
-                    }
-                    if desired_len > valid_bytes {
-                        let pad = (desired_len - valid_bytes) as usize;
-                        // pad is <= dio_align() (4KiB on Linux/Windows), so this is safe and avoids alloc.
-                        let (res, _buf) = file
-                            .write_all_at(&ZERO_4K[..pad] as &'static [u8], valid_bytes)
-                            .await;
-                        res?;
+
+                    // For truncation operations, always use a file opened without Direct I/O
+                    // to avoid alignment restrictions
+                    {
+                        let trunc_file = OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&path)
+                            .await?;
+
+                        if file_len != desired_len {
+                            trunc_file.set_len(desired_len).await?;
+                        }
+
+                        if desired_len > valid_bytes {
+                            let pad = (desired_len - valid_bytes) as usize;
+                            // This write is small (<= 4KB) and doesn't need Direct I/O
+                            let (res, _buf) = trunc_file
+                                .write_all_at(&ZERO_4K[..pad] as &'static [u8], valid_bytes)
+                                .await;
+                            res?;
+                        }
                     }
 
                     // Remove any later segments; they are after the first invalid record.
@@ -1296,7 +1587,11 @@ impl SegmentedLog {
             // Ensure the last segment has an aligned length so subsequent O_DIRECT RMW reads work.
             {
                 let desired_len = align_up_u64(last_valid_bytes, dio_align());
-                let tmp = OpenOptions::new().read(true).write(true).open(&path).await?;
+                let tmp = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .await?;
                 let current_len = tmp.metadata().await?.len();
                 if current_len != desired_len {
                     tmp.set_len(desired_len).await?;
@@ -1317,12 +1612,12 @@ impl SegmentedLog {
 
         Ok((
             Self {
-            group_dir,
-            group_id,
-            segment_size,
-            current_segment_id,
-            current_file,
-            current_size,
+                group_dir,
+                group_id,
+                segment_size,
+                current_segment_id,
+                current_file,
+                current_size,
                 min_entry_index: None,
                 max_entry_index: None,
                 min_ts: None,
@@ -1368,7 +1663,7 @@ impl SegmentedLog {
 
     /// Recover a segment file using async I/O, validating all records
     /// Returns the byte offset of the last valid record's end
-    async fn recover_segment_async(path: &PathBuf) -> io::Result<(u64, u64)> {
+    async fn recover_segment_async(path: &PathBuf, max_record_size: u64) -> io::Result<(u64, u64)> {
         let file = open_segment_file(path.as_path(), true, false, false, false).await?;
         let file_len = file.metadata().await?.len();
 
@@ -1385,24 +1680,51 @@ impl SegmentedLog {
                 break;
             }
 
-            let len_bytes = match read_exact_at_reuse(&file, offset, LENGTH_SIZE, &mut read_buf, &mut dio_scratch)
-                .await
+            let len_bytes = match read_exact_at_reuse(
+                &file,
+                offset,
+                LENGTH_SIZE,
+                &mut read_buf,
+                &mut dio_scratch,
+            )
+            .await
             {
                 Ok(()) => &read_buf[..LENGTH_SIZE],
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
                 Err(_) => break,
             };
 
-            let record_len = u32::from_le_bytes(len_bytes[..LENGTH_SIZE].try_into().unwrap()) as usize;
-            if record_len < (1 + 8 + CRC64_SIZE) || record_len > 100 * 1024 * 1024 {
+            let record_len =
+                u32::from_le_bytes(len_bytes[..LENGTH_SIZE].try_into().unwrap()) as usize;
+
+            // Handle zero-length record (padding at end of segment)
+            if record_len == 0 {
+                tracing::debug!(
+                    "Found zero-length record at offset {}, treating as padding",
+                    offset
+                );
                 break;
             }
 
+            // Use provided max_record_size, but also ensure it doesn't exceed file boundaries
+            let effective_max = max_record_size.min(file_len) as usize;
+            if record_len < (1 + GROUP_ID_SIZE + CRC64_SIZE) || record_len > effective_max {
+                tracing::debug!("Invalid record length {} at offset {}", record_len, offset);
+                break;
+            }
             if offset + LENGTH_SIZE as u64 + record_len as u64 > file_len {
+                tracing::debug!(
+                    "Record at offset {} would exceed file length (record_len={}, file_len={})",
+                    offset,
+                    record_len,
+                    file_len
+                );
                 break;
             }
 
-            if read_exact_at_reuse(
+            // Read and validate record data - handle UnexpectedEof gracefully (padding bytes)
+            // Also handle "failed to fill whole buffer" which can occur with Direct I/O
+            match read_exact_at_reuse(
                 &file,
                 offset + LENGTH_SIZE as u64,
                 record_len,
@@ -1410,18 +1732,53 @@ impl SegmentedLog {
                 &mut dio_scratch,
             )
             .await
-            .is_err()
             {
-                break;
+                Ok(()) => {
+                    // Successfully read record data, now validate it
+                    match validate_record(&read_buf[..record_len], max_record_size as usize) {
+                        Ok(_parsed) => {
+                            // Record is valid, continue to next
+                            offset += LENGTH_SIZE as u64 + record_len as u64;
+                        }
+                        Err(e) => {
+                            tracing::debug!("Record validation failed at offset {}: {}", offset, e);
+                            break;
+                        }
+                    }
+                }
+                Err(e)
+                    if e.kind() == io::ErrorKind::UnexpectedEof
+                        || e.to_string().contains("failed to fill whole buffer") =>
+                {
+                    // Padding bytes at end of segment can look like length prefix
+                    // but there's insufficient data - this is normal, stop here
+                    tracing::debug!(
+                        "Reached end of valid data at offset {} (len={}): {}",
+                        offset,
+                        record_len,
+                        e
+                    );
+                    break;
+                }
+                Err(e) => {
+                    // Other errors are more serious
+                    tracing::warn!(
+                        "Failed to read record data at offset {} (len={}): {}",
+                        offset,
+                        record_len,
+                        e
+                    );
+                    break;
+                }
             }
-
-            if validate_record(&read_buf[..record_len]).is_err() {
-                break;
-            }
-
-            offset += LENGTH_SIZE as u64 + record_len as u64;
         }
 
+        tracing::info!(
+            "Recovered segment {:?}: valid_bytes={}, file_len={}",
+            path,
+            offset,
+            file_len
+        );
         Ok((offset, file_len))
     }
 
@@ -1441,8 +1798,10 @@ impl SegmentedLog {
         }
 
         if let Some((min_i, max_i)) = index_range {
-            self.min_entry_index = Some(self.min_entry_index.map(|v| v.min(min_i)).unwrap_or(min_i));
-            self.max_entry_index = Some(self.max_entry_index.map(|v| v.max(max_i)).unwrap_or(max_i));
+            self.min_entry_index =
+                Some(self.min_entry_index.map(|v| v.min(min_i)).unwrap_or(min_i));
+            self.max_entry_index =
+                Some(self.max_entry_index.map(|v| v.max(max_i)).unwrap_or(max_i));
         }
 
         // Write to current segment at the computed offset.
@@ -1552,7 +1911,14 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
 
         // Spawn the writer task
         let _ = maniac::spawn(async move {
-            Self::writer_loop(segmented_log, write_rx, fsync_interval, running_clone, failed_clone).await;
+            Self::writer_loop(
+                segmented_log,
+                write_rx,
+                fsync_interval,
+                running_clone,
+                failed_clone,
+            )
+            .await;
         });
 
         Self {
@@ -1642,9 +2008,14 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
                                     Err(e) => {
                                         // We can't return the original buffer (it was moved into the I/O op),
                                         // so return an empty buffer and fail the shard.
-                                        let _ = respond_to
-                                            .send((Err(io::Error::new(e.kind(), e.to_string())), Vec::new(), None));
-                                        for (tx, mut buf, placement) in pending_sync_responders.drain(..) {
+                                        let _ = respond_to.send((
+                                            Err(io::Error::new(e.kind(), e.to_string())),
+                                            Vec::new(),
+                                            None,
+                                        ));
+                                        for (tx, mut buf, placement) in
+                                            pending_sync_responders.drain(..)
+                                        {
                                             buf.clear();
                                             let _ = tx.send((
                                                 Err(io::Error::new(e.kind(), e.to_string())),
@@ -1681,15 +2052,17 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
 
                                     // Complete pending callbacks for this fsync boundary.
                                     for cb in pending_callbacks.drain(..) {
-                                        cb.io_completed(cb_result.as_ref().map(|_| ()).map_err(|e| {
-                                            io::Error::new(e.kind(), e.to_string())
-                                        }));
+                                        cb.io_completed(
+                                            cb_result.as_ref().map(|_| ()).map_err(|e| {
+                                                io::Error::new(e.kind(), e.to_string())
+                                            }),
+                                        );
                                     }
 
                                     match cb_result {
                                         Ok(_) => {
                                             tracing::trace!("writer_loop: sync complete");
-                                        log.emit_manifest_updates();
+                                            log.emit_manifest_updates();
                                         }
                                         Err(e) => {
                                             fail_and_exit(e, &mut pending_callbacks);
@@ -1747,7 +2120,11 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
                         }
                         for (tx, mut buf, placement) in pending_sync_responders.drain(..) {
                             buf.clear();
-                            let _ = tx.send((Err(io::Error::new(err.kind(), err.to_string())), buf, placement));
+                            let _ = tx.send((
+                                Err(io::Error::new(err.kind(), err.to_string())),
+                                buf,
+                                placement,
+                            ));
                         }
                         fail_and_exit(err, &mut pending_callbacks);
                         return;
@@ -1814,9 +2191,12 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "shard writer task closed"))?;
 
-        let (res, buf, placement) = rx
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "shard writer task dropped response"))?;
+        let (res, buf, placement) = rx.await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "shard writer task dropped response",
+            )
+        })?;
         res.map(|_| (buf, placement))
     }
 
@@ -2014,7 +2394,28 @@ impl<C: RaftTypeConfig + 'static> PerGroupLogStorage<C> {
         maniac::fs::create_dir_all(&*config.base_dir).await?;
 
         let base = (*config.base_dir).clone();
-        let manifest = maniac::blocking::unblock(move || ManifestManager::open(&base)).await?;
+        let manifest_dir = config
+            .manifest_dir
+            .as_ref()
+            .map(|p| (**p).clone())
+            .unwrap_or(base);
+        let manifest = maniac::blocking::unblock(move || {
+            // Try to open MDBX manifest, but fall back to no-op if it fails
+            // This can happen on filesystems that don't support Direct I/O like tmpfs
+            let result = match ManifestManager::open(&manifest_dir) {
+                Ok(manifest) => Ok(manifest),
+                Err(e) if e.raw_os_error() == Some(22) || e.kind() == io::ErrorKind::InvalidInput => {
+                    tracing::warn!(
+                        "MDBX manifest not supported on this filesystem ({}), using in-memory fallback",
+                        e
+                    );
+                    Ok(ManifestManager::open_in_memory())
+                }
+                Err(e) => Err(e),
+            };
+            result
+        })
+        .await?;
 
         Ok(Self {
             config,
@@ -2034,13 +2435,13 @@ impl<C: RaftTypeConfig + 'static> PerGroupLogStorage<C> {
     async fn get_or_create_group(&self, group_id: u64) -> io::Result<Arc<GroupState<C>>>
     where
         C: RaftTypeConfig<
-            NodeId = u64,
-            Term = u64,
-            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-            Vote = openraft::impls::Vote<C>,
-            Node = openraft::impls::BasicNode,
-            Entry = openraft::impls::Entry<C>,
-        >,
+                NodeId = u64,
+                Term = u64,
+                LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+                Vote = openraft::impls::Vote<C>,
+                Node = openraft::impls::BasicNode,
+                Entry = openraft::impls::Entry<C>,
+            >,
         C::D: FromCodec<RawBytes>,
     {
         // Fast path: group already exists (lock-free lookup)
@@ -2060,7 +2461,10 @@ impl<C: RaftTypeConfig + 'static> PerGroupLogStorage<C> {
                 // Another task won - shut down our orphaned shard and use theirs
                 returned_state.shard.shutdown();
                 // Get the winner's state
-                Ok(self.groups.get(group_id).expect("group must exist after failed insert"))
+                Ok(self
+                    .groups
+                    .get(group_id)
+                    .expect("group must exist after failed insert"))
             }
         }
     }
@@ -2069,13 +2473,13 @@ impl<C: RaftTypeConfig + 'static> PerGroupLogStorage<C> {
     pub async fn get_log_storage(&self, group_id: u64) -> io::Result<GroupLogStorage<C>>
     where
         C: RaftTypeConfig<
-            NodeId = u64,
-            Term = u64,
-            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-            Vote = openraft::impls::Vote<C>,
-            Node = openraft::impls::BasicNode,
-            Entry = openraft::impls::Entry<C>,
-        >,
+                NodeId = u64,
+                Term = u64,
+                LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+                Vote = openraft::impls::Vote<C>,
+                Node = openraft::impls::BasicNode,
+                Entry = openraft::impls::Entry<C>,
+            >,
         C::D: FromCodec<RawBytes>,
     {
         let group_state = self.get_or_create_group(group_id).await?;
@@ -2115,7 +2519,10 @@ impl<C: RaftTypeConfig + 'static> PerGroupLogStorage<C> {
 pub trait MultiplexedStorage<C: RaftTypeConfig> {
     type GroupLogStorage: RaftLogStorage<C>;
 
-    fn get_log_storage(&self, group_id: u64) -> impl std::future::Future<Output = Self::GroupLogStorage> + Send;
+    fn get_log_storage(
+        &self,
+        group_id: u64,
+    ) -> impl std::future::Future<Output = Self::GroupLogStorage> + Send;
     fn remove_group(&self, group_id: u64);
     fn group_ids(&self) -> Vec<u64>;
 }
@@ -2138,7 +2545,9 @@ where
 
     async fn get_log_storage(&self, group_id: u64) -> Self::GroupLogStorage {
         // Panics if group creation fails - in practice this should be fallible
-        PerGroupLogStorage::get_log_storage(self, group_id).await.expect("Failed to create group storage")
+        PerGroupLogStorage::get_log_storage(self, group_id)
+            .await
+            .expect("Failed to create group storage")
     }
 
     fn remove_group(&self, group_id: u64) {
@@ -2169,7 +2578,9 @@ where
 
     async fn get_log_storage(&self, group_id: u64) -> Self::GroupLogStorage {
         // Panics if group creation fails - in practice this should be fallible
-        PerGroupLogStorage::get_log_storage(self, group_id).await.expect("Failed to create group storage")
+        PerGroupLogStorage::get_log_storage(self, group_id)
+            .await
+            .expect("Failed to create group storage")
     }
 
     fn remove_group(&self, group_id: u64) {
@@ -2267,13 +2678,13 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
     async fn read_entry_from_disk(&mut self, index: u64) -> io::Result<Option<C::Entry>>
     where
         C: RaftTypeConfig<
-            NodeId = u64,
-            Term = u64,
-            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-            Vote = openraft::impls::Vote<C>,
-            Node = openraft::impls::BasicNode,
-            Entry = openraft::impls::Entry<C>,
-        >,
+                NodeId = u64,
+                Term = u64,
+                LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+                Vote = openraft::impls::Vote<C>,
+                Node = openraft::impls::BasicNode,
+                Entry = openraft::impls::Entry<C>,
+            >,
         C::D: FromCodec<RawBytes>,
     {
         let loc = self.state.log_index.get(index);
@@ -2301,12 +2712,22 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
 
         let record_len = u32::from_le_bytes(buf[..LENGTH_SIZE].try_into().unwrap()) as usize;
         if record_len + LENGTH_SIZE != buf.len() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "record length mismatch"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "record length mismatch",
+            ));
         }
 
-        let parsed = validate_record(&buf[LENGTH_SIZE..])?;
+        let max_record_size = self
+            .config
+            .max_record_size
+            .unwrap_or(self.config.segment_size);
+        let parsed = validate_record(&buf[LENGTH_SIZE..], max_record_size as usize)?;
         if parsed.group_id != self.group_id {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "group_id mismatch"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "group_id mismatch",
+            ));
         }
         if parsed.record_type != RecordType::Entry {
             return Err(io::Error::new(
@@ -2324,7 +2745,11 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
     fn cache_window_start(&self) -> u64 {
         let max = self.config.max_cache_entries_per_group;
         if max == 0 {
-            return self.state.last_index.load(Ordering::Relaxed).saturating_add(1);
+            return self
+                .state
+                .last_index
+                .load(Ordering::Relaxed)
+                .saturating_add(1);
         }
 
         let last = self.state.last_index.load(Ordering::Relaxed);
@@ -2353,13 +2778,13 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
     async fn compact_purged_segments(&self, purged_before: u64) -> io::Result<()>
     where
         C: RaftTypeConfig<
-            NodeId = u64,
-            Term = u64,
-            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-            Vote = openraft::impls::Vote<C>,
-            Node = openraft::impls::BasicNode,
-            Entry = openraft::impls::Entry<C>,
-        >,
+                NodeId = u64,
+                Term = u64,
+                LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+                Vote = openraft::impls::Vote<C>,
+                Node = openraft::impls::BasicNode,
+                Entry = openraft::impls::Entry<C>,
+            >,
         C::D: FromCodec<RawBytes>,
     {
         // Conservative compaction: only delete segments that contain ONLY Entry records
@@ -2408,7 +2833,7 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
             let mut only_entries = true;
 
             while offset + LENGTH_SIZE as u64 <= file_len {
-                // Read length.
+                // Read length - handle UnexpectedEof for padding bytes
                 let len_bytes = match read_exact_at_reuse(
                     &file,
                     offset,
@@ -2419,17 +2844,45 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
                 .await
                 {
                     Ok(()) => &read_buf[..LENGTH_SIZE],
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                        tracing::debug!("Reached EOF while reading length at offset {}", offset);
+                        break;
+                    }
                     Err(_) => break,
                 };
-                let record_len = u32::from_le_bytes(len_bytes[..LENGTH_SIZE].try_into().unwrap()) as usize;
-                if record_len < (1 + 8 + CRC64_SIZE) || record_len > 100 * 1024 * 1024 {
-                    break;
-                }
-                if offset + LENGTH_SIZE as u64 + record_len as u64 > file_len {
+                let record_len =
+                    u32::from_le_bytes(len_bytes[..LENGTH_SIZE].try_into().unwrap()) as usize;
+                let max_record_size =
+                    self.config
+                        .max_record_size
+                        .unwrap_or(self.config.segment_size) as usize;
+
+                // Handle zero-length record (padding)
+                if record_len == 0 {
+                    tracing::debug!(
+                        "Found zero-length record at offset {}, treating as padding",
+                        offset
+                    );
                     break;
                 }
 
-                if read_exact_at_reuse(
+                if record_len < (1 + GROUP_ID_SIZE + CRC64_SIZE) || record_len > max_record_size {
+                    tracing::debug!(
+                        "compact_purged_segments: Invalid record length {} at offset {}",
+                        record_len,
+                        offset
+                    );
+                    break;
+                }
+                if offset + LENGTH_SIZE as u64 + record_len as u64 > file_len {
+                    tracing::debug!(
+                        "compact_purged_segments: Record at offset {} would exceed file length",
+                        offset
+                    );
+                    break;
+                }
+
+                if let Err(e) = read_exact_at_reuse(
                     &file,
                     offset + LENGTH_SIZE as u64,
                     record_len,
@@ -2437,14 +2890,25 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
                     &mut dio_scratch,
                 )
                 .await
-                .is_err()
                 {
+                    tracing::debug!(
+                        "compact_purged_segments: Failed to read record at offset {}: {}",
+                        offset,
+                        e
+                    );
                     break;
                 }
 
-                let parsed = match validate_record(&read_buf[..record_len]) {
+                let parsed = match validate_record(&read_buf[..record_len], max_record_size) {
                     Ok(p) => p,
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::debug!(
+                            "compact_purged_segments: Record validation failed at offset {}: {}",
+                            offset,
+                            e
+                        );
+                        break;
+                    }
                 };
 
                 if parsed.group_id != self.group_id {
@@ -2456,11 +2920,16 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
                     RecordType::Entry => {
                         // Decode to find index.
                         let codec_entry = CodecEntry::<RawBytes>::decode_from_slice(parsed.payload)
-                            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                            .map_err(|e| {
+                                io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+                            })?;
                         let entry: openraft::impls::Entry<C> =
                             openraft::impls::Entry::<C>::from_codec(codec_entry);
-                        max_entry_index_in_segment =
-                            Some(max_entry_index_in_segment.map(|v| v.max(entry.log_id.index)).unwrap_or(entry.log_id.index));
+                        max_entry_index_in_segment = Some(
+                            max_entry_index_in_segment
+                                .map(|v| v.max(entry.log_id.index))
+                                .unwrap_or(entry.log_id.index),
+                        );
                     }
                     _ => {
                         only_entries = false;
@@ -2508,13 +2977,13 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
 impl<C> RaftLogReader<C> for GroupLogStorage<C>
 where
     C: RaftTypeConfig<
-        NodeId = u64,
-        Term = u64,
-        LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-        Vote = openraft::impls::Vote<C>,
-        Node = openraft::impls::BasicNode,
-        Entry = openraft::impls::Entry<C>,
-    >,
+            NodeId = u64,
+            Term = u64,
+            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+            Vote = openraft::impls::Vote<C>,
+            Node = openraft::impls::BasicNode,
+            Entry = openraft::impls::Entry<C>,
+        >,
     C::Entry: Clone + 'static,
     C::D: FromCodec<RawBytes>,
 {
@@ -2568,13 +3037,13 @@ where
 impl<C> RaftLogStorage<C> for GroupLogStorage<C>
 where
     C: RaftTypeConfig<
-        NodeId = u64,
-        Term = u64,
-        LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
-        Vote = openraft::impls::Vote<C>,
-        Node = openraft::impls::BasicNode,
-        Entry = openraft::impls::Entry<C>,
-    >,
+            NodeId = u64,
+            Term = u64,
+            LeaderId = openraft::impls::leader_id_adv::LeaderId<C>,
+            Vote = openraft::impls::Vote<C>,
+            Node = openraft::impls::BasicNode,
+            Entry = openraft::impls::Entry<C>,
+        >,
     C::Entry: Send + Sync + Clone + 'static,
     C::Vote: ToCodec<CodecVote>,
     C::D: ToCodec<RawBytes> + FromCodec<RawBytes>,
@@ -2606,7 +3075,12 @@ where
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         // Build the record directly from payload_buf contents
-        encode_record_into(&mut self.encode_buf, RecordType::Vote, self.group_id, &self.payload_buf);
+        encode_record_into(
+            &mut self.encode_buf,
+            RecordType::Vote,
+            self.group_id,
+            &self.payload_buf,
+        );
         // Vote must be durably persisted before returning.
         let _ = self.send_encoded(None, Callbacks::None, true).await?;
 
@@ -2636,8 +3110,12 @@ where
 
             // Append record to the batch buffer.
             let record_start = self.encode_buf.len() as u64;
-            let record_len =
-                append_record_into(&mut self.encode_buf, RecordType::Entry, self.group_id, &self.payload_buf);
+            let record_len = append_record_into(
+                &mut self.encode_buf,
+                RecordType::Entry,
+                self.group_id,
+                &self.payload_buf,
+            );
             self.index_updates_buf
                 .push((index, record_start, record_len as u32));
 
@@ -2737,7 +3215,12 @@ where
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         // Build the record directly from payload_buf contents
-        encode_record_into(&mut self.encode_buf, RecordType::Purge, self.group_id, &self.payload_buf);
+        encode_record_into(
+            &mut self.encode_buf,
+            RecordType::Purge,
+            self.group_id,
+            &self.payload_buf,
+        );
         // Purge must be durably persisted before returning.
         let _ = self.send_encoded(None, Callbacks::None, true).await?;
         self.enforce_cache_window();
@@ -2791,6 +3274,7 @@ mod tests {
             base_dir: PathBuf::from("/tmp/test"),
             num_shards: 16, // Should be ignored
             segment_size: 32 * 1024 * 1024,
+            max_record_size: Some(2 * 1024 * 1024),
             fsync_interval: None,
             max_cache_entries_per_group: 5000,
         };
@@ -2816,7 +3300,8 @@ mod tests {
 
         // Validate the record
         let record_data = &encoded[LENGTH_SIZE..];
-        let parsed = validate_record(record_data).expect("should validate");
+        let parsed = validate_record(record_data, DEFAULT_MAX_RECORD_SIZE as usize)
+            .expect("should validate");
 
         assert_eq!(parsed.record_type, RecordType::Entry);
         assert_eq!(parsed.group_id, 42);
@@ -2832,7 +3317,7 @@ mod tests {
         corrupted[10] ^= 0xFF;
 
         let record_data = &corrupted[LENGTH_SIZE..];
-        assert!(validate_record(record_data).is_err());
+        assert!(validate_record(record_data, DEFAULT_MAX_RECORD_SIZE as usize).is_err());
     }
 
     #[test]
@@ -2846,7 +3331,8 @@ mod tests {
         ] {
             let encoded = encode_record(record_type, 123, b"libsql data");
             let record_data = &encoded[LENGTH_SIZE..];
-            let parsed = validate_record(record_data).expect("should validate");
+            let parsed = validate_record(record_data, DEFAULT_MAX_RECORD_SIZE as usize)
+                .expect("should validate");
             assert_eq!(parsed.record_type, record_type);
             assert_eq!(parsed.group_id, 123);
         }
@@ -2904,6 +3390,8 @@ mod tests {
 
         crate::multi::test_support::run_async(async {
             let dir = TempDir::new().unwrap();
+            // Tests often use tmpfs which may not support MDBX properly
+            // The manifest will automatically fall back to in-memory mode
             let cfg = StorageConfig::new(dir.path())
                 .with_fsync_interval(None)
                 .with_max_cache_entries(1);
@@ -2914,14 +3402,20 @@ mod tests {
                 let mut group = storage.get_log_storage(42).await.unwrap();
 
                 let vote = openraft::impls::Vote::<C> {
-                    leader_id: openraft::impls::leader_id_adv::LeaderId { term: 3, node_id: 7 },
+                    leader_id: openraft::impls::leader_id_adv::LeaderId {
+                        term: 3,
+                        node_id: 7,
+                    },
                     committed: true,
                 };
                 group.save_vote(&vote).await.unwrap();
 
                 let entry = openraft::impls::Entry::<C> {
                     log_id: LogId {
-                        leader_id: openraft::impls::leader_id_adv::LeaderId { term: 3, node_id: 7 },
+                        leader_id: openraft::impls::leader_id_adv::LeaderId {
+                            term: 3,
+                            node_id: 7,
+                        },
                         index: 1,
                     },
                     payload: openraft::EntryPayload::Normal(TestData(b"hello".to_vec())),
@@ -2949,7 +3443,8 @@ mod tests {
                 assert_eq!(recovered_vote.leader_id.node_id, 7);
                 assert!(recovered_vote.committed);
 
-                let entries = group.try_get_log_entries(1u64..=1u64).await.unwrap();
+                let entries: Vec<openraft::impls::Entry<ManiacRaftTypeConfig<TestData, ()>>> =
+                    group.try_get_log_entries(1u64..=1u64).await.unwrap();
                 assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0].log_id.index, 1);
             }
@@ -2961,20 +3456,20 @@ mod tests {
         // Test minimum valid record size
         let min_record = encode_record(RecordType::Vote, 1, &[]);
         let record_data = &min_record[LENGTH_SIZE..];
-        let parsed = validate_record(record_data);
-        assert!(parsed.is_ok());
-        assert_eq!(parsed.unwrap().payload.len(), 0);
+        let parsed = validate_record(record_data, DEFAULT_MAX_RECORD_SIZE as usize)
+            .expect("should validate");
+        assert_eq!(parsed.payload.len(), 0);
 
         // Test record too short (missing CRC)
-        let mut short = vec![0u8; 16]; // type(1) + group_id(8) + payload(0) = 9, but we need 8 more for CRC
+        let mut short = vec![0u8; 16]; // type(1) + group_id(3) + payload(0) = 4, but we need 8 more for CRC
         short[0] = RecordType::Vote as u8;
-        assert!(validate_record(&short).is_err());
+        assert!(validate_record(&short, DEFAULT_MAX_RECORD_SIZE as usize).is_err());
 
         // Test record with invalid type
         let mut invalid_type = encode_record(RecordType::Vote, 1, b"data");
         invalid_type[LENGTH_SIZE] = 0xFF; // Invalid record type
         let record_data = &invalid_type[LENGTH_SIZE..];
-        assert!(validate_record(record_data).is_err());
+        assert!(validate_record(record_data, DEFAULT_MAX_RECORD_SIZE as usize).is_err());
     }
 
     #[test]
@@ -2997,17 +3492,19 @@ mod tests {
     fn test_encode_record_various_sizes() {
         // Test small payload
         let small = encode_record(RecordType::Entry, 1, b"a");
-        assert!(validate_record(&small[LENGTH_SIZE..]).is_ok());
+        assert!(validate_record(&small[LENGTH_SIZE..], DEFAULT_MAX_RECORD_SIZE as usize).is_ok());
 
         // Test large payload
         let large_payload = vec![0x42u8; 10000];
         let large = encode_record(RecordType::Entry, 1, &large_payload);
-        let parsed = validate_record(&large[LENGTH_SIZE..]).unwrap();
+        let parsed =
+            validate_record(&large[LENGTH_SIZE..], DEFAULT_MAX_RECORD_SIZE as usize).unwrap();
         assert_eq!(parsed.payload, large_payload.as_slice());
 
         // Test zero-length payload
         let empty = encode_record(RecordType::Entry, 1, &[]);
-        let parsed = validate_record(&empty[LENGTH_SIZE..]).unwrap();
+        let parsed =
+            validate_record(&empty[LENGTH_SIZE..], DEFAULT_MAX_RECORD_SIZE as usize).unwrap();
         assert_eq!(parsed.payload.len(), 0);
     }
 

@@ -53,7 +53,8 @@ use crate::utils::CachePadded;
 
 use crate::sync::signal::AsyncSignalGate;
 
-use crate::detail::spsc::dynamic::{DynSpsc, DynSpscConfig, Receiver, Sender};
+pub use crate::detail::spsc::dynamic::DynSpscConfig;
+use crate::detail::spsc::dynamic::{DynSpsc, Receiver, Sender};
 use crate::{PopError, PushError};
 
 use std::pin::Pin;

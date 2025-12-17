@@ -3,8 +3,10 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use crossfire::{TryRecvError, MAsyncTx, Rx};
-use libmdbx::{Database, DatabaseOptions, NoWriteMap, Table, TableFlags, WriteFlags};
+use crossfire::{MAsyncTx, Rx, TryRecvError};
+use libmdbx::{
+    Database, DatabaseOptions, Mode, NoWriteMap, ReadWriteOptions, Table, TableFlags, WriteFlags,
+};
 
 const RAFT_SEGMENTS_META_TABLE: &str = "raft_segments_meta_v1";
 
@@ -124,8 +126,20 @@ impl MdbxManifest {
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
         std::fs::create_dir_all(path)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        // Configure explicit geometry to avoid "invalid arguments" errors on some systems.
+        // MDBX requires valid geometry settings; using defaults (-1) can fail on certain
+        // filesystems or configurations.
         let mut opts = DatabaseOptions::default();
         opts.max_tables = Some(8);
+        opts.mode = Mode::ReadWrite(ReadWriteOptions {
+            min_size: Some(64 * 1024),          // 64 KB minimum
+            max_size: Some(256 * 1024 * 1024),  // 256 MB maximum (plenty for manifest metadata)
+            growth_step: Some(64 * 1024),       // Grow by 64 KB at a time
+            shrink_threshold: Some(256 * 1024), // Shrink when 256 KB can be reclaimed
+            ..Default::default()
+        });
+
         let db = Database::<NoWriteMap>::open_with_options(path, opts)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         let db = Arc::new(db);
@@ -145,6 +159,26 @@ impl MdbxManifest {
             db,
             segments_meta_dbi: segments_dbi,
         })
+    }
+
+    /// Create an in-memory manifest for filesystems that don't support MDBX
+    pub(crate) fn new_in_memory() -> Self {
+        // Use a temp directory that should work
+        let temp_dir = std::env::temp_dir().join(".raft_manifest_in_memory");
+        // Try to use temp dir, if that fails too, use a no-op implementation
+        match Self::open(&temp_dir) {
+            Ok(manifest) => manifest,
+            Err(_) => {
+                // This should not happen in practice, but if it does, we'll create a minimal
+                // in-memory database. However, libmdbx requires a path, so we need to use a temp path.
+                // For true in-memory, we'd need a different approach.
+                let fallback_path = std::env::temp_dir()
+                    .join(format!(".raft_manifest_fallback_{}", std::process::id()));
+                Self::open(&fallback_path).unwrap_or_else(|_| {
+                    panic!("Failed to create in-memory manifest even with temp directory");
+                })
+            }
+        }
     }
 
     unsafe fn table_ro<'txn>(
@@ -179,7 +213,10 @@ impl MdbxManifest {
         unsafe { std::mem::transmute(raw) }
     }
 
-    pub(crate) fn read_group_segments(&self, group_id: u64) -> io::Result<HashMap<u64, SegmentMeta>> {
+    pub(crate) fn read_group_segments(
+        &self,
+        group_id: u64,
+    ) -> io::Result<HashMap<u64, SegmentMeta>> {
         let txn = self
             .db
             .begin_ro_txn()
@@ -193,8 +230,7 @@ impl MdbxManifest {
         let mut start = [0u8; 16];
         start[0..8].copy_from_slice(&group_id.to_be_bytes());
         // segment_id = 0 for starting point
-        let mut iter =
-            cursor.iter_from::<std::borrow::Cow<[u8]>, std::borrow::Cow<[u8]>>(&start);
+        let mut iter = cursor.iter_from::<std::borrow::Cow<[u8]>, std::borrow::Cow<[u8]>>(&start);
         while let Some(Ok((k, v))) = iter.next() {
             let kb = k.as_ref();
             if kb.len() != 16 {
@@ -214,7 +250,10 @@ impl MdbxManifest {
         Ok(out)
     }
 
-    pub(crate) fn apply_segment_updates(&self, updates: impl Iterator<Item = SegmentMeta>) -> io::Result<()> {
+    pub(crate) fn apply_segment_updates(
+        &self,
+        updates: impl Iterator<Item = SegmentMeta>,
+    ) -> io::Result<()> {
         let txn = self
             .db
             .begin_rw_txn()
@@ -254,11 +293,30 @@ impl ManifestManager {
         Ok(Self { tx, manifest })
     }
 
+    /// Open an in-memory manifest for filesystems that don't support MDBX (e.g., tmpfs)
+    /// This is best-effort metadata only - recovery will work but may be slower
+    pub(crate) fn open_in_memory() -> Self {
+        let manifest = Arc::new(MdbxManifest::new_in_memory());
+        let (tx, rx) = crossfire::mpsc::bounded_tx_async_rx_blocking::<SegmentMeta>(4096);
+        let manifest_clone = manifest.clone();
+        std::thread::Builder::new()
+            .name("raft-manifest-memory".to_string())
+            .spawn(move || {
+                Self::worker_loop(manifest_clone, rx);
+            })
+            .expect("Failed to spawn manifest worker thread");
+
+        Self { tx, manifest }
+    }
+
     pub(crate) fn sender(&self) -> MAsyncTx<SegmentMeta> {
         self.tx.clone()
     }
 
-    pub(crate) fn read_group_segments(&self, group_id: u64) -> io::Result<HashMap<u64, SegmentMeta>> {
+    pub(crate) fn read_group_segments(
+        &self,
+        group_id: u64,
+    ) -> io::Result<HashMap<u64, SegmentMeta>> {
         self.manifest.read_group_segments(group_id)
     }
 
@@ -341,8 +399,14 @@ mod tests {
         let key = meta.key_bytes();
         assert_eq!(key.len(), 16);
         // Check big-endian encoding
-        assert_eq!(&key[0..8], &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
-        assert_eq!(&key[8..16], &[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]);
+        assert_eq!(
+            &key[0..8],
+            &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        );
+        assert_eq!(
+            &key[8..16],
+            &[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]
+        );
     }
 
     #[test]
@@ -659,7 +723,9 @@ mod tests {
                 max_ts: None,
                 sealed: false,
             };
-            manifest.apply_segment_updates(std::iter::once(meta)).unwrap();
+            manifest
+                .apply_segment_updates(std::iter::once(meta))
+                .unwrap();
         }
 
         // Reopen and verify data persisted
@@ -690,7 +756,9 @@ mod tests {
             sealed: true,
         };
 
-        manifest.apply_segment_updates(std::iter::once(meta)).unwrap();
+        manifest
+            .apply_segment_updates(std::iter::once(meta))
+            .unwrap();
 
         let segments = manifest.read_group_segments(42).unwrap();
         assert_eq!(segments.len(), 1);
@@ -833,7 +901,9 @@ mod tests {
             max_ts: None,
             sealed: false,
         };
-        manifest.apply_segment_updates(std::iter::once(meta1)).unwrap();
+        manifest
+            .apply_segment_updates(std::iter::once(meta1))
+            .unwrap();
 
         // Update with new values
         let meta2 = SegmentMeta {
@@ -846,7 +916,9 @@ mod tests {
             max_ts: None,
             sealed: true,
         };
-        manifest.apply_segment_updates(std::iter::once(meta2)).unwrap();
+        manifest
+            .apply_segment_updates(std::iter::once(meta2))
+            .unwrap();
 
         let segments = manifest.read_group_segments(1).unwrap();
         assert_eq!(segments.len(), 1);
@@ -1092,7 +1164,10 @@ mod tests {
         let seg2 = manager2.read_group_segments(1).unwrap();
         assert_eq!(seg1.len(), 1);
         assert_eq!(seg2.len(), 1);
-        assert_eq!(seg1.get(&0).unwrap().valid_bytes, seg2.get(&0).unwrap().valid_bytes);
+        assert_eq!(
+            seg1.get(&0).unwrap().valid_bytes,
+            seg2.get(&0).unwrap().valid_bytes
+        );
     }
 
     #[test]
@@ -1127,4 +1202,3 @@ mod tests {
         }
     }
 }
-

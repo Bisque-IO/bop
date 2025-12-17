@@ -1,3 +1,5 @@
+use rand::rngs::ThreadRng;
+
 use crate::runtime::worker::waker::WorkerWaker;
 use crate::utils::CachePadded;
 use crate::utils::bits;
@@ -424,6 +426,16 @@ impl Summary {
         }
         if self.signals_per_leaf == 0 {
             return None;
+        }
+
+        let task_count = self.leaf_count * self.signals_per_leaf;
+        for leaf_idx in 0..self.leaf_count {
+            // let leaf_idx = self.next_partition.fetch_add(1, Ordering::Relaxed) % self.leaf_count;
+            let leaf_idx = crate::utils::random_usize() % self.leaf_count;
+            // let leaf_idx = self.next_partition.fetch_add(1, Ordering::Relaxed) % (self.leaf_count;
+            if let Some(found) = self.try_reserve_in_leaf(leaf_idx) {
+                return Some(found);
+            }
         }
 
         // Exhaustively scan partitions one by one. Each partition represents a worker's slice of

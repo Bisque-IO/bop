@@ -139,6 +139,7 @@ use crate::parking::{Parker, Unparker};
 use std::task::Wake;
 
 pub mod dynamic;
+pub mod simple;
 
 /// A waker implementation that unparks a thread.
 ///

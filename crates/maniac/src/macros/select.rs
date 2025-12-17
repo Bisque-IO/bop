@@ -295,9 +295,11 @@ macro_rules! select {
 
         // Create a scope to separate polling from handling the output. This
         // adds borrow checker flexibility when using the macro.
+        #[allow(unused_mut)]
         let mut output = {
             // Safety: Nothing must be moved out of `futures`. This is to
             // satisfy the requirement of `Pin::new_unchecked` called below.
+            #[allow(unused_mut)]
             let mut futures = ( $( $fut , )+ );
 
             $crate::macros::support::poll_fn(|cx| {
@@ -318,6 +320,7 @@ macro_rules! select {
                     {
                         branch = (start + i) % BRANCHES;
                     }
+                    #[allow(unused_mut)]
                     match branch {
                         $(
                             #[allow(unreachable_code)]
@@ -339,6 +342,7 @@ macro_rules! select {
 
                                 // Safety: future is stored on the stack above
                                 // and never moved.
+                                #[allow(unused_mut)]
                                 let mut fut = unsafe { Pin::new_unchecked(fut) };
 
                                 // Try polling it
@@ -359,6 +363,7 @@ macro_rules! select {
                                 // the specified pattern.
                                 #[allow(unused_variables)]
                                 #[allow(unused_mut)]
+                                #[allow(unreachable_patterns)]
                                 match &out {
                                     $bind => {}
                                     _ => continue,
@@ -381,11 +386,13 @@ macro_rules! select {
             }).await
         };
 
+        #[allow(unreachable_patterns)]
         match output {
             $(
                 $crate::select_variant!(util::Out, ($($skip)*) ($bind)) => $handle,
             )*
             util::Out::Disabled => $else,
+            #[allow(unreachable_code)]
             _ => unreachable!("failed to match bind"),
         }
     }};

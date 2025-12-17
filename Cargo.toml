@@ -10,6 +10,7 @@ members = [
     # "crates/maniac-storage",
     # "crates/maniac-sys",
     # "crates/maniac-usockets",
+    "crates/macros",
     "crates/maniac",
     "crates/raft",           # maniac-raft: OpenRaft adapter for Maniac runtime
     # "moon/rapp",
@@ -18,8 +19,8 @@ members = [
     "crates/libsql-sys",
     "crates/sqlite3-parser",
     # "crates/nuraft",
-    "crates/maniac-libsql",
-    "crates/maniac-wasmtime",
+    "crates/libsql",
+    "crates/wasmtime",
     #    "crates/sanakirja-core",
     #    "crates/sanakirja",
 ]
@@ -139,6 +140,7 @@ zstd = "0.13"
 # maniac-sys = { path = "crates/maniac-sys", version = "0.1.0" }
 # maniac-usockets = { path = "crates/maniac-usockets", version = "0.1.0", default-features = false }
 maniac = { path = "crates/maniac", version = "0.1.0" }
+maniac-macros = { path = "crates/macros", version = "0.1.0" }
 maniac-raft = { path = "crates/raft", version = "0.1.0" }
 # Upstream openraft from git
 openraft = { git = "https://github.com/databendlabs/openraft", branch = "main", default-features = false, features = [
@@ -150,7 +152,7 @@ maniac-rusqlite = { path = "crates/rusqlite", version = "0.9.29" }
 maniac-libsql-ffi = { path = "crates/libsql-ffi", version = "3.45.1" }
 maniac-libsql-sys = { path = "crates/libsql-sys", version = "3.45.1" }
 maniac-sqlite3-parser = { path = "crates/sqlite3-parser", version = "0.13.0" }
-maniac-wasmtime = { path = "crates/maniac-wasmtime", version = "0.1.0" }
+maniac-wasmtime = { path = "crates/wasmtime", version = "0.1.0" }
 #sanakirja-core = { path = "crates/sanakirja-core", version = "1.4.1" }
 #sanakirja = { path = "crates/sanakirja", version = "1.4.1" }
 

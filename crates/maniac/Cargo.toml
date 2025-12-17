@@ -70,9 +70,12 @@ tls-rustls = ["dep:rustls"] # enable rustls TLS support
 tls-native = ["dep:native-tls"] # enable native-tls support
 tls-unsafe-io = [
 ] # enable unsafe zero-copy I/O for TLS (requires careful lifetime management)
+trace_log = [] # for test workflow debugging
 track-allocations = [] # internal feature for testing zero-allocation
 
 [dependencies]
+maniac-macros = { workspace = true }
+
 bincode = { version = "2.0.1", features = ["serde"] }
 anyerror = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
@@ -87,19 +90,22 @@ clap = { workspace = true, optional = true }
 core_affinity = { workspace = true }
 crc64fast-nvme = { workspace = true }
 crossbeam = { workspace = true }
+crossbeam-queue = "0.3"
 crossbeam-epoch = { workspace = true }
 crossbeam-utils = { workspace = true }
-parking_lot = { workspace = true }
 dashmap = { workspace = true }
 derive_more = { workspace = true, features = ["full"] }
 flume = { workspace = true }
 futures-lite = { workspace = true }
 futures = { workspace = true }
+futures-core = "0.3"
+futures-util = "0.3"
 futures-io = { workspace = true }
 hyper = { workspace = true, optional = true }
 libc = { workspace = true }
 log = { workspace = true }
 once_cell = { workspace = true }
+parking_lot = { workspace = true }
 pin-project-lite = { workspace = true }
 pollster = { workspace = true }
 rand = { workspace = true }
@@ -150,8 +156,13 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 loom = { workspace = true }
 tokio = { workspace = true, features = ["full", "io-util"] }
+captains-log = {version="0.13", features = ["ringfile", "tracing"] }
 criterion = { workspace = true }
 pollster = { workspace = true }
+rstest = "0"
+rand = "0.9"
+criterion2 = { version = "3.0.2", features = ["async"] }
+crossbeam-channel = "0.5"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
@@ -167,4 +178,8 @@ unused_unsafe = "allow"
 
 [[bench]]
 name = "signal_waker_perf"
+harness = false
+
+[[bench]]
+name = "multishot_bench"
 harness = false

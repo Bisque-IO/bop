@@ -39,7 +39,8 @@ congee = { workspace = true }
 dashmap = { workspace = true }
 crossfire = "2.1.8"
 flume = "0.12"
-kanal = "0.1"
+# kanal = "0.1"
+kanal = { git = "https://github.com/fereidani/kanal", branch = "main" }
 libmdbx = "0.6"
 parking_lot = { workspace = true }
 rand = { workspace = true }
@@ -53,7 +54,8 @@ tokio = { workspace = true, features = ["full"] }
 bincode = { version = "2.0.1", features = ["serde"] }
 chrono = { workspace = true }
 futures-lite = { workspace = true }
-kanal = "0.1"
+# kanal = "0.1"
+kanal = { git = "https://github.com/fereidani/kanal", branch = "main" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3.10"
 

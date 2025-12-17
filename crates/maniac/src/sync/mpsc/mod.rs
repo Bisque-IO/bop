@@ -17,6 +17,8 @@ use super::signal::AsyncSignalWaker;
 use crate::CachePadded;
 use crate::detail::spsc::Spsc;
 use crate::detail::spsc::UnboundedSpsc;
+use crate::detail::spsc::dynamic::DynSpsc;
+use crate::detail::spsc::dynamic::DynSpscConfig;
 use crate::sync::signal::Signal;
 use crate::utils::bits::find_nearest;
 use crate::{PopError, PushError};
@@ -41,6 +43,7 @@ use std::ptr::{self, NonNull};
 // pub mod bounded; // Commented out - file doesn't exist yet
 pub mod bounded;
 pub mod dynamic;
+pub mod simple;
 
 /// A waker implementation that unparks a thread.
 ///
@@ -61,7 +64,7 @@ impl std::task::Wake for ThreadUnparker {
 }
 
 /// Create a new blocking MPSC queue
-pub fn new<T, const P: usize, const NUM_SEGS_P2: usize>() -> Receiver<T, P, NUM_SEGS_P2> {
+pub fn new<T>() -> Receiver<T> {
     new_with_waker(Arc::new(AsyncSignalWaker::new()))
 }
 
@@ -84,9 +87,9 @@ pub fn new<T, const P: usize, const NUM_SEGS_P2: usize>() -> Receiver<T, P, NUM_
 /// }))));
 /// let receiver = mpsc::new_with_waker(waker);
 /// ```
-pub fn new_with_waker<T, const P: usize, const NUM_SEGS_P2: usize>(
+pub fn new_with_waker<T>(
     waker: Arc<AsyncSignalWaker>,
-) -> Receiver<T, P, NUM_SEGS_P2> {
+) -> Receiver<T> {
     // Create sparse array of AtomicPtr<ProducerSlot>, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
     for _ in 0..MAX_QUEUES {
@@ -113,8 +116,8 @@ pub fn new_with_waker<T, const P: usize, const NUM_SEGS_P2: usize>(
     }
 }
 
-pub fn new_with_sender<T, const P: usize, const NUM_SEGS_P2: usize>()
--> (Sender<T, P, NUM_SEGS_P2>, Receiver<T, P, NUM_SEGS_P2>) {
+pub fn new_with_sender<T>()
+-> (Sender<T>, Receiver<T>) {
     let waker = Arc::new(AsyncSignalWaker::new());
     // Create sparse array of AtomicPtr<ProducerSlot>, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
@@ -166,8 +169,8 @@ type CloseFn = Box<dyn FnOnce()>;
 
 /// A producer queue slot containing both the queue and its associated space waker.
 /// Allocated together for optimal cache locality - the waker is right next to the queue.
-struct ProducerSlot<T, const P: usize, const NUM_SEGS_P2: usize> {
-    queue: Spsc<T, P, NUM_SEGS_P2, AsyncSignalGate>,
+struct ProducerSlot<T> {
+    queue: DynSpsc<T, AsyncSignalGate>,
     space_waker: DiatomicWaker,
 }
 
@@ -182,10 +185,10 @@ struct ProducerSlot<T, const P: usize, const NUM_SEGS_P2: usize> {
 /// - `closed`: Acquire/Release for happens-before between close and other operations
 /// - Sender::drop uses Release fence + Release store to ensure queued items are visible
 /// - Receiver::try_pop uses Acquire fence before checking producer_count == 0
-pub(crate) struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
+pub(crate) struct Inner<T> {
     /// Sparse array of producer slot pointers - always MAX_QUEUES size
     /// Each slot is allocated together with its queue and space waker for cache-friendly access
-    queues: Box<[AtomicPtr<ProducerSlot<T, P, NUM_SEGS_P2>>]>,
+    queues: Box<[AtomicPtr<ProducerSlot<T>>]>,
     queue_count: CachePadded<AtomicUsize>,
     /// Number of registered producers
     producer_count: CachePadded<AtomicUsize>,
@@ -197,7 +200,7 @@ pub(crate) struct Inner<T, const P: usize, const NUM_SEGS_P2: usize> {
     signals: Arc<[Signal; SIGNAL_WORDS]>,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
+impl<T> Inner<T> {
     /// Check if the queue is closed
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
@@ -208,7 +211,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
         self.producer_count.load(Ordering::Relaxed)
     }
 
-    pub fn create_sender(self: &Arc<Self>) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
+    pub fn create_sender(self: &Arc<Self>) -> Result<Sender<T>, PushError<()>> {
         self.create_sender_with_config(0)
     }
 
@@ -245,7 +248,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
     pub fn create_sender_with_config(
         self: &Arc<Self>,
         max_pooled_segments: usize,
-    ) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
+    ) -> Result<Sender<T>, PushError<()>> {
         if self.is_closed() {
             return Err(PushError::Closed(()));
         }
@@ -265,7 +268,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
         }
 
         let mut assigned_id = None;
-        let mut slot_arc: Option<Arc<ProducerSlot<T, P, NUM_SEGS_P2>>> = None;
+        let mut slot_arc: Option<Arc<ProducerSlot<T>>> = None;
 
         for signal_index in 0..SIGNAL_WORDS {
             for bit_index in 0..64 {
@@ -278,13 +281,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
                 }
 
                 let queue = unsafe {
-                    Spsc::<T, P, NUM_SEGS_P2, AsyncSignalGate>::new_unsafe_with_gate_and_config(
+                    DynSpsc::<T, AsyncSignalGate>::new_unsafe(
+                        DynSpscConfig::with_capacity(64, 64, max_pooled_segments),
                         AsyncSignalGate::new(
                             bit_index as u8,
                             self.signals[signal_index].clone(),
                             Arc::clone(&self.summary),
                         ),
-                        max_pooled_segments,
                     )
                 };
 
@@ -293,7 +296,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
                     space_waker: DiatomicWaker::new(),
                 });
 
-                let raw = Arc::into_raw(Arc::clone(&slot)) as *mut ProducerSlot<T, P, NUM_SEGS_P2>;
+                let raw = Arc::into_raw(Arc::clone(&slot)) as *mut ProducerSlot<T>;
                 match self.queues[queue_index].compare_exchange(
                     ptr::null_mut(),
                     raw,
@@ -423,13 +426,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Inner<T, P, NUM_SEGS_P2> {
 /// let value = mpsc.pop_blocking().unwrap();
 /// assert_eq!(value, 42);
 /// ```ignore
-pub struct Sender<T, const P: usize, const NUM_SEGS_P2: usize> {
-    inner: Arc<Inner<T, P, NUM_SEGS_P2>>,
-    slot: Arc<ProducerSlot<T, P, NUM_SEGS_P2>>,
+pub struct Sender<T> {
+    inner: Arc<Inner<T>>,
+    slot: Arc<ProducerSlot<T>>,
     producer_id: usize,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
+impl<T> Sender<T> {
     /// Check if the queue is closed
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Acquire)
@@ -503,18 +506,18 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Sender<T, P, NUM_SEGS_P2> {
     pub fn close(&mut self) -> bool {
         self.inner.close()
     }
-    pub fn downgrade(&self) -> WeakSender<T, P, NUM_SEGS_P2> {
+    pub fn downgrade(&self) -> WeakSender<T> {
         WeakSender {
             inner: Arc::downgrade(&self.inner),
         }
     }
 }
 
-pub struct WeakSender<T, const P: usize, const NUM_SEGS_P2: usize> {
-    inner: std::sync::Weak<Inner<T, P, NUM_SEGS_P2>>,
+pub struct WeakSender<T> {
+    inner: std::sync::Weak<Inner<T>>,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for WeakSender<T, P, NUM_SEGS_P2> {
+impl<T> Clone for WeakSender<T> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -522,21 +525,21 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for WeakSender<T, P, NUM
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> WeakSender<T, P, NUM_SEGS_P2> {
-    pub fn upgrade(&self) -> Option<Sender<T, P, NUM_SEGS_P2>> {
+impl<T> WeakSender<T> {
+    pub fn upgrade(&self) -> Option<Sender<T>> {
         self.inner
             .upgrade()
             .and_then(|inner| inner.create_sender().ok())
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for Sender<T, P, NUM_SEGS_P2> {
+impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         self.inner.create_sender().expect("too many senders")
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS_P2> {
+impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         unsafe {
             self.slot.queue.close();
@@ -555,13 +558,13 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Sender<T, P, NUM_SEGS
     }
 }
 
-pub struct Receiver<T, const P: usize, const NUM_SEGS_P2: usize> {
-    inner: Arc<Inner<T, P, NUM_SEGS_P2>>,
+pub struct Receiver<T> {
+    inner: Arc<Inner<T>>,
     misses: u64,
     seed: u64,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
+impl<T> Receiver<T> {
     pub fn next(&mut self) -> u64 {
         let old_seed = self.seed;
         let next_seed = (old_seed
@@ -573,7 +576,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
     }
 
     /// Get a reference to the inner shared state
-    pub(crate) fn inner(&self) -> &Arc<Inner<T, P, NUM_SEGS_P2>> {
+    pub(crate) fn inner(&self) -> &Arc<Inner<T>> {
         &self.inner
     }
 
@@ -597,7 +600,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
         self.inner.producer_count.load(Ordering::Relaxed)
     }
 
-    pub fn create_sender(&self) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
+    pub fn create_sender(&self) -> Result<Sender<T>, PushError<()>> {
         self.create_sender_with_config(0)
     }
 
@@ -634,7 +637,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
     pub fn create_sender_with_config(
         &self,
         max_pooled_segments: usize,
-    ) -> Result<Sender<T, P, NUM_SEGS_P2>, PushError<()>> {
+    ) -> Result<Sender<T>, PushError<()>> {
         self.inner.create_sender_with_config(max_pooled_segments)
     }
 
@@ -715,7 +718,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
     fn cleanup_closed_slot(
         &self,
         producer_id: usize,
-        slot_ptr: *mut ProducerSlot<T, P, NUM_SEGS_P2>,
+        slot_ptr: *mut ProducerSlot<T>,
     ) {
         let slot_atomic = &self.inner.queues[producer_id];
         let current = slot_atomic.load(Ordering::Acquire);
@@ -739,7 +742,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
         }
     }
 
-    fn acquire(&mut self) -> Option<(usize, *mut ProducerSlot<T, P, NUM_SEGS_P2>)> {
+    fn acquire(&mut self) -> Option<(usize, *mut ProducerSlot<T>)> {
         let random = self.next() as usize;
         // Try selecting signal index from summary hint
         let random_word = random % SIGNAL_WORDS;
@@ -806,53 +809,53 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Receiver<T, P, NUM_SEGS_P2> {
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Receiver<T, P, NUM_SEGS_P2> {
+impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.inner.close();
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for Inner<T, P, NUM_SEGS_P2> {
+impl<T> Drop for Inner<T> {
     fn drop(&mut self) {
         self.close();
     }
 }
 
-struct SenderPtr<'a, T, const P: usize, const NUM_SEGS_P2: usize> {
-    ptr: NonNull<Sender<T, P, NUM_SEGS_P2>>,
+struct SenderPtr<'a, T> {
+    ptr: NonNull<Sender<T>>,
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a, T, const P: usize, const NUM_SEGS_P2: usize> Copy for SenderPtr<'a, T, P, NUM_SEGS_P2> {}
+impl<'a, T> Copy for SenderPtr<'a, T> {}
 
-impl<'a, T, const P: usize, const NUM_SEGS_P2: usize> Clone for SenderPtr<'a, T, P, NUM_SEGS_P2> {
+impl<'a, T> Clone for SenderPtr<'a, T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<'a, T: 'a, const P: usize, const NUM_SEGS_P2: usize> SenderPtr<'a, T, P, NUM_SEGS_P2> {
+impl<'a, T: 'a> SenderPtr<'a, T> {
     #[inline]
     unsafe fn space_waker(self) -> &'a DiatomicWaker {
         let sender = self.ptr.as_ptr();
-        let sender_ref: &Sender<T, P, NUM_SEGS_P2> = unsafe { &*sender };
+        let sender_ref: &Sender<T> = unsafe { &*sender };
         &sender_ref.slot.space_waker
     }
 
     #[inline]
-    unsafe fn with_mut<R>(self, f: impl FnOnce(&mut Sender<T, P, NUM_SEGS_P2>) -> R) -> R {
+    unsafe fn with_mut<R>(self, f: impl FnOnce(&mut Sender<T>) -> R) -> R {
         let sender = self.ptr.as_ptr();
-        let sender_mut: &mut Sender<T, P, NUM_SEGS_P2> = unsafe { &mut *sender };
+        let sender_mut: &mut Sender<T> = unsafe { &mut *sender };
         f(sender_mut)
     }
 }
 
-unsafe impl<T: Send, const P: usize, const NUM_SEGS_P2: usize> Send
-    for SenderPtr<'_, T, P, NUM_SEGS_P2>
+unsafe impl<T: Send> Send
+    for SenderPtr<'_, T>
 {
 }
-unsafe impl<T: Send, const P: usize, const NUM_SEGS_P2: usize> Sync
-    for SenderPtr<'_, T, P, NUM_SEGS_P2>
+unsafe impl<T: Send> Sync
+    for SenderPtr<'_, T>
 {
 }
 
@@ -860,13 +863,13 @@ unsafe impl<T: Send, const P: usize, const NUM_SEGS_P2: usize> Sync
 ///
 /// Provides receiver-side waker management. Producer-side space wakers are stored
 /// per-producer in `Inner::space_wakers` for targeted notification (no spurious wakeups).
-struct AsyncMpscShared<T, const P: usize, const NUM_SEGS_P2: usize> {
+struct AsyncMpscShared<T> {
     receiver_waiter: CachePadded<DiatomicWaker>,
-    inner: Arc<Inner<T, P, NUM_SEGS_P2>>,
+    inner: Arc<Inner<T>>,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncMpscShared<T, P, NUM_SEGS_P2> {
-    fn new(inner: Arc<Inner<T, P, NUM_SEGS_P2>>) -> Self {
+impl<T> AsyncMpscShared<T> {
+    fn new(inner: Arc<Inner<T>>) -> Self {
         Self {
             receiver_waiter: CachePadded::new(DiatomicWaker::new()),
             inner,
@@ -892,21 +895,21 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncMpscShared<T, P, NUM_SEGS
     }
 }
 
-pub struct AsyncMpscSender<T, const P: usize, const NUM_SEGS_P2: usize> {
-    sender: Sender<T, P, NUM_SEGS_P2>,
-    shared: Arc<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
+pub struct AsyncMpscSender<T> {
+    sender: Sender<T>,
+    shared: Arc<AsyncMpscShared<T>>,
 }
 
-pub struct AsyncMpscReceiver<T, const P: usize, const NUM_SEGS_P2: usize> {
-    receiver: Receiver<T, P, NUM_SEGS_P2>,
-    shared: Arc<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
+pub struct AsyncMpscReceiver<T> {
+    receiver: Receiver<T>,
+    shared: Arc<AsyncMpscShared<T>>,
 }
 
-pub struct WeakAsyncMpscSender<T, const P: usize, const NUM_SEGS_P2: usize> {
-    shared: std::sync::Weak<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
+pub struct WeakAsyncMpscSender<T> {
+    shared: std::sync::Weak<AsyncMpscShared<T>>,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for WeakAsyncMpscSender<T, P, NUM_SEGS_P2> {
+impl<T> Clone for WeakAsyncMpscSender<T> {
     fn clone(&self) -> Self {
         Self {
             shared: self.shared.clone(),
@@ -914,24 +917,24 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for WeakAsyncMpscSender<
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> WeakAsyncMpscSender<T, P, NUM_SEGS_P2> {
-    pub fn upgrade(&self) -> Option<AsyncMpscSender<T, P, NUM_SEGS_P2>> {
+impl<T> WeakAsyncMpscSender<T> {
+    pub fn upgrade(&self) -> Option<AsyncMpscSender<T>> {
         let shared = self.shared.upgrade()?;
         let sender = shared.inner.create_sender().ok()?;
         Some(AsyncMpscSender::new(sender, shared))
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncMpscSender<T, P, NUM_SEGS_P2> {
+impl<T> AsyncMpscSender<T> {
     fn new(
-        sender: Sender<T, P, NUM_SEGS_P2>,
-        shared: Arc<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
+        sender: Sender<T>,
+        shared: Arc<AsyncMpscShared<T>>,
     ) -> Self {
         // space_waker is already allocated in the ProducerSlot by create_sender
         Self { sender, shared }
     }
 
-    pub fn downgrade(&self) -> WeakAsyncMpscSender<T, P, NUM_SEGS_P2> {
+    pub fn downgrade(&self) -> WeakAsyncMpscSender<T> {
         WeakAsyncMpscSender {
             shared: Arc::downgrade(&self.shared),
         }
@@ -1079,20 +1082,20 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncMpscSender<T, P, NUM_SEGS
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for AsyncMpscSender<T, P, NUM_SEGS_P2> {
+impl<T> Clone for AsyncMpscSender<T> {
     fn clone(&self) -> Self {
         let sender = self.sender.clone();
         Self::new(sender, Arc::clone(&self.shared))
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for AsyncMpscSender<T, P, NUM_SEGS_P2> {
+impl<T> Drop for AsyncMpscSender<T> {
     fn drop(&mut self) {
         self.shared.notify_receiver();
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Sink<T> for AsyncMpscSender<T, P, NUM_SEGS_P2> {
+impl<T> Sink<T> for AsyncMpscSender<T> {
     type Error = PushError<T>;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), PushError<T>>> {
@@ -1132,10 +1135,10 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Sink<T> for AsyncMpscSender<T,
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncMpscReceiver<T, P, NUM_SEGS_P2> {
+impl<T> AsyncMpscReceiver<T> {
     fn new(
-        receiver: Receiver<T, P, NUM_SEGS_P2>,
-        shared: Arc<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
+        receiver: Receiver<T>,
+        shared: Arc<AsyncMpscShared<T>>,
     ) -> Self {
         Self { receiver, shared }
     }
@@ -1260,7 +1263,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> AsyncMpscReceiver<T, P, NUM_SE
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Stream for AsyncMpscReceiver<T, P, NUM_SEGS_P2> {
+impl<T> Stream for AsyncMpscReceiver<T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -1286,17 +1289,17 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Stream for AsyncMpscReceiver<T
 ///
 /// Multiple blocking senders can be created and used concurrently. They share the same
 /// waker infrastructure as async senders, allowing perfect interoperability.
-pub struct BlockingMpscSender<T, const P: usize, const NUM_SEGS_P2: usize> {
-    sender: Sender<T, P, NUM_SEGS_P2>,
-    shared: Arc<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
+pub struct BlockingMpscSender<T> {
+    sender: Sender<T>,
+    shared: Arc<AsyncMpscShared<T>>,
     parker: Parker,
     parker_waker: Arc<ThreadUnparker>,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingMpscSender<T, P, NUM_SEGS_P2> {
+impl<T> BlockingMpscSender<T> {
     fn new(
-        sender: Sender<T, P, NUM_SEGS_P2>,
-        shared: Arc<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
+        sender: Sender<T>,
+        shared: Arc<AsyncMpscShared<T>>,
     ) -> Self {
         let parker = Parker::new();
         let parker_waker = Arc::new(ThreadUnparker {
@@ -1329,7 +1332,7 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingMpscSender<T, P, NUM_S
 
     /// Blocking send that parks the thread until space is available.
     pub fn send(&mut self, mut value: T) -> Result<(), PushError<T>> {
-        let sender_ptr = &mut self.sender as *mut Sender<T, P, NUM_SEGS_P2>;
+        let sender_ptr = &mut self.sender as *mut Sender<T>;
 
         // Fast path: try immediate send
         match unsafe { (&mut *sender_ptr).try_push(value) } {
@@ -1445,14 +1448,14 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingMpscSender<T, P, NUM_S
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Clone for BlockingMpscSender<T, P, NUM_SEGS_P2> {
+impl<T> Clone for BlockingMpscSender<T> {
     fn clone(&self) -> Self {
         let sender = self.sender.clone();
         Self::new(sender, Arc::clone(&self.shared))
     }
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for BlockingMpscSender<T, P, NUM_SEGS_P2> {
+impl<T> Drop for BlockingMpscSender<T> {
     fn drop(&mut self) {
         self.shared.notify_receiver();
     }
@@ -1461,15 +1464,15 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> Drop for BlockingMpscSender<T,
 /// Blocking MPSC receiver.
 ///
 /// The blocking receiver can work with both async and blocking senders.
-pub struct BlockingMpscReceiver<T, const P: usize, const NUM_SEGS_P2: usize> {
-    receiver: Receiver<T, P, NUM_SEGS_P2>,
-    shared: Arc<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
+pub struct BlockingMpscReceiver<T> {
+    receiver: Receiver<T>,
+    shared: Arc<AsyncMpscShared<T>>,
 }
 
-impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingMpscReceiver<T, P, NUM_SEGS_P2> {
+impl<T> BlockingMpscReceiver<T> {
     fn new(
-        receiver: Receiver<T, P, NUM_SEGS_P2>,
-        shared: Arc<AsyncMpscShared<T, P, NUM_SEGS_P2>>,
+        receiver: Receiver<T>,
+        shared: Arc<AsyncMpscShared<T>>,
     ) -> Self {
         Self { receiver, shared }
     }
@@ -1622,20 +1625,20 @@ impl<T, const P: usize, const NUM_SEGS_P2: usize> BlockingMpscReceiver<T, P, NUM
     }
 }
 
-pub fn async_mpsc<T, const P: usize, const NUM_SEGS_P2: usize>() -> (
-    AsyncMpscSender<T, P, NUM_SEGS_P2>,
-    AsyncMpscReceiver<T, P, NUM_SEGS_P2>,
+pub fn async_mpsc<T>() -> (
+    AsyncMpscSender<T>,
+    AsyncMpscReceiver<T>,
 ) {
     let (sender, receiver) = new_with_sender();
     async_mpsc_from_parts(sender, receiver)
 }
 
-pub fn async_mpsc_from_parts<T, const P: usize, const NUM_SEGS_P2: usize>(
-    sender: Sender<T, P, NUM_SEGS_P2>,
-    receiver: Receiver<T, P, NUM_SEGS_P2>,
+pub fn async_mpsc_from_parts<T>(
+    sender: Sender<T>,
+    receiver: Receiver<T>,
 ) -> (
-    AsyncMpscSender<T, P, NUM_SEGS_P2>,
-    AsyncMpscReceiver<T, P, NUM_SEGS_P2>,
+    AsyncMpscSender<T>,
+    AsyncMpscReceiver<T>,
 ) {
     let inner = Arc::clone(receiver.inner());
     let shared = Arc::new(AsyncMpscShared::new(inner));
@@ -1647,21 +1650,21 @@ pub fn async_mpsc_from_parts<T, const P: usize, const NUM_SEGS_P2: usize>(
 /// Creates a default blocking MPSC queue.
 ///
 /// Both senders and receiver use blocking operations that park threads.
-pub fn blocking_mpsc<T, const P: usize, const NUM_SEGS_P2: usize>() -> (
-    BlockingMpscSender<T, P, NUM_SEGS_P2>,
-    BlockingMpscReceiver<T, P, NUM_SEGS_P2>,
+pub fn blocking_mpsc<T>() -> (
+    BlockingMpscSender<T>,
+    BlockingMpscReceiver<T>,
 ) {
     let (sender, receiver) = new_with_sender();
     blocking_mpsc_from_parts(sender, receiver)
 }
 
 /// Creates a blocking MPSC queue from existing parts.
-pub fn blocking_mpsc_from_parts<T, const P: usize, const NUM_SEGS_P2: usize>(
-    sender: Sender<T, P, NUM_SEGS_P2>,
-    receiver: Receiver<T, P, NUM_SEGS_P2>,
+pub fn blocking_mpsc_from_parts<T>(
+    sender: Sender<T>,
+    receiver: Receiver<T>,
 ) -> (
-    BlockingMpscSender<T, P, NUM_SEGS_P2>,
-    BlockingMpscReceiver<T, P, NUM_SEGS_P2>,
+    BlockingMpscSender<T>,
+    BlockingMpscReceiver<T>,
 ) {
     let inner = Arc::clone(receiver.inner());
     let shared = Arc::new(AsyncMpscShared::new(inner));
@@ -1696,21 +1699,21 @@ pub fn blocking_mpsc_from_parts<T, const P: usize, const NUM_SEGS_P2: usize>(
 ///     }
 /// });
 /// ```
-pub fn blocking_async_mpsc<T, const P: usize, const NUM_SEGS_P2: usize>() -> (
-    BlockingMpscSender<T, P, NUM_SEGS_P2>,
-    AsyncMpscReceiver<T, P, NUM_SEGS_P2>,
+pub fn blocking_async_mpsc<T>() -> (
+    BlockingMpscSender<T>,
+    AsyncMpscReceiver<T>,
 ) {
     let (sender, receiver) = new_with_sender();
     blocking_async_mpsc_from_parts(sender, receiver)
 }
 
 /// Creates a mixed MPSC queue with blocking senders and async receiver from existing parts.
-pub fn blocking_async_mpsc_from_parts<T, const P: usize, const NUM_SEGS_P2: usize>(
-    sender: Sender<T, P, NUM_SEGS_P2>,
-    receiver: Receiver<T, P, NUM_SEGS_P2>,
+pub fn blocking_async_mpsc_from_parts<T>(
+    sender: Sender<T>,
+    receiver: Receiver<T>,
 ) -> (
-    BlockingMpscSender<T, P, NUM_SEGS_P2>,
-    AsyncMpscReceiver<T, P, NUM_SEGS_P2>,
+    BlockingMpscSender<T>,
+    AsyncMpscReceiver<T>,
 ) {
     let inner = Arc::clone(receiver.inner());
     let shared = Arc::new(AsyncMpscShared::new(inner));
@@ -1745,21 +1748,21 @@ pub fn blocking_async_mpsc_from_parts<T, const P: usize, const NUM_SEGS_P2: usiz
 ///     }
 /// });
 /// ```
-pub fn async_blocking_mpsc<T, const P: usize, const NUM_SEGS_P2: usize>() -> (
-    AsyncMpscSender<T, P, NUM_SEGS_P2>,
-    BlockingMpscReceiver<T, P, NUM_SEGS_P2>,
+pub fn async_blocking_mpsc<T>() -> (
+    AsyncMpscSender<T>,
+    BlockingMpscReceiver<T>,
 ) {
     let (sender, receiver) = new_with_sender();
     async_blocking_mpsc_from_parts(sender, receiver)
 }
 
 /// Creates a mixed MPSC queue with async senders and blocking receiver from existing parts.
-pub fn async_blocking_mpsc_from_parts<T, const P: usize, const NUM_SEGS_P2: usize>(
-    sender: Sender<T, P, NUM_SEGS_P2>,
-    receiver: Receiver<T, P, NUM_SEGS_P2>,
+pub fn async_blocking_mpsc_from_parts<T>(
+    sender: Sender<T>,
+    receiver: Receiver<T>,
 ) -> (
-    AsyncMpscSender<T, P, NUM_SEGS_P2>,
-    BlockingMpscReceiver<T, P, NUM_SEGS_P2>,
+    AsyncMpscSender<T>,
+    BlockingMpscReceiver<T>,
 ) {
     let inner = Arc::clone(receiver.inner());
     let shared = Arc::new(AsyncMpscShared::new(inner));
@@ -2635,7 +2638,7 @@ mod tests {
 
     #[test]
     fn try_pop_drains_and_reports_closed() {
-        let (mut tx, mut rx) = new_with_sender::<u64, 6, 8>();
+        let (mut tx, mut rx) = new_with_sender::<u64>();
 
         tx.try_push(42).unwrap();
         assert_eq!(rx.try_pop().unwrap(), 42);
@@ -2647,7 +2650,7 @@ mod tests {
 
     #[test]
     fn dropping_local_sender_clears_producer_slot() {
-        let (tx, rx) = new_with_sender::<u64, 6, 8>();
+        let (tx, rx) = new_with_sender::<u64>();
         assert_eq!(tx.producer_count(), 1);
 
         drop(tx);
@@ -2662,7 +2665,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_async_basic_send_recv() {
-        let (mut sender, mut receiver) = async_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = async_mpsc::<u64>();
 
         sender.send(42).await.unwrap();
         assert_eq!(receiver.recv().await.unwrap(), 42);
@@ -2670,7 +2673,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_async_multiple_senders() {
-        let (sender, mut receiver) = async_mpsc::<u64, 6, 8>();
+        let (sender, mut receiver) = async_mpsc::<u64>();
         let mut sender1 = sender.clone();
         let mut sender2 = sender.clone();
         let mut sender3 = sender.clone();
@@ -2695,7 +2698,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_async_batch_operations() {
-        let (mut sender, mut receiver) = async_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = async_mpsc::<u64>();
 
         // Send batch
         assert!(
@@ -2715,7 +2718,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_async_closed_queue() {
-        let (mut sender, mut receiver) = async_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = async_mpsc::<u64>();
 
         sender.send(42).await.unwrap();
         assert_eq!(receiver.recv().await.unwrap(), 42);
@@ -2731,7 +2734,7 @@ mod tests {
 
     #[test]
     fn blocking_blocking_basic_send_recv() {
-        let (mut sender, mut receiver) = blocking_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = blocking_mpsc::<u64>();
 
         sender.send(42).unwrap();
         assert_eq!(receiver.recv().unwrap(), 42);
@@ -2739,7 +2742,7 @@ mod tests {
 
     #[test]
     fn blocking_blocking_multiple_senders() {
-        let (sender, receiver) = blocking_mpsc::<u64, 6, 8>();
+        let (sender, receiver) = blocking_mpsc::<u64>();
         let receiver = Arc::new(std::sync::Mutex::new(receiver));
 
         let mut handles = Vec::new();
@@ -2766,7 +2769,7 @@ mod tests {
 
     #[test]
     fn blocking_blocking_batch_operations() {
-        let (mut sender, mut receiver) = blocking_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = blocking_mpsc::<u64>();
 
         // Send batch
         assert!(sender.send_slice(vec![1, 2, 3, 4, 5]).unwrap().is_empty());
@@ -2780,7 +2783,7 @@ mod tests {
 
     #[test]
     fn blocking_blocking_closed_queue() {
-        let (mut sender, mut receiver) = blocking_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = blocking_mpsc::<u64>();
 
         sender.send(42).unwrap();
         assert_eq!(receiver.recv().unwrap(), 42);
@@ -2796,7 +2799,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocking_async_basic_send_recv() {
-        let (mut sender, mut receiver) = blocking_async_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = blocking_async_mpsc::<u64>();
 
         // Blocking sender in a thread
         let handle = thread::spawn(move || {
@@ -2809,7 +2812,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocking_async_multiple_blocking_senders() {
-        let (sender, mut receiver) = blocking_async_mpsc::<u64, 6, 8>();
+        let (sender, mut receiver) = blocking_async_mpsc::<u64>();
 
         let mut handles = Vec::new();
         for i in 0..5 {
@@ -2833,7 +2836,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocking_async_wakeup_async_receiver() {
-        let (mut sender, mut receiver) = blocking_async_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = blocking_async_mpsc::<u64>();
 
         // Start async receiver waiting
         let recv_handle = tokio::spawn(async move { receiver.recv().await.unwrap() });
@@ -2851,7 +2854,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocking_async_batch_operations() {
-        let (mut sender, mut receiver) = blocking_async_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = blocking_async_mpsc::<u64>();
 
         // Blocking sender sends batch
         thread::spawn(move || {
@@ -2869,7 +2872,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_blocking_basic_send_recv() {
-        let (mut sender, receiver) = async_blocking_mpsc::<u64, 6, 8>();
+        let (mut sender, receiver) = async_blocking_mpsc::<u64>();
         let receiver = Arc::new(std::sync::Mutex::new(receiver));
 
         // Start blocking receiver first (will wait)
@@ -2887,7 +2890,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_blocking_multiple_async_senders() {
-        let (sender, receiver) = async_blocking_mpsc::<u64, 6, 8>();
+        let (sender, receiver) = async_blocking_mpsc::<u64>();
         let receiver = Arc::new(std::sync::Mutex::new(receiver));
 
         // Multiple async senders
@@ -2913,7 +2916,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_blocking_wakeup_blocking_receiver() {
-        let (mut sender, receiver) = async_blocking_mpsc::<u64, 6, 8>();
+        let (mut sender, receiver) = async_blocking_mpsc::<u64>();
         let receiver = Arc::new(std::sync::Mutex::new(receiver));
 
         // Start blocking receiver waiting
@@ -2935,7 +2938,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_blocking_batch_operations() {
-        let (mut sender, receiver) = async_blocking_mpsc::<u64, 6, 8>();
+        let (mut sender, receiver) = async_blocking_mpsc::<u64>();
         let receiver = Arc::new(std::sync::Mutex::new(receiver));
 
         // Async sender sends batch
@@ -2975,7 +2978,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_async_try_send_full() {
-        let (mut sender, _receiver) = async_mpsc::<u64, 6, 8>();
+        let (mut sender, _receiver) = async_mpsc::<u64>();
 
         // Fill the queue (this depends on queue capacity)
         // For now, just test that try_send works
@@ -2984,14 +2987,14 @@ mod tests {
 
     #[test]
     fn blocking_blocking_try_send_full() {
-        let (mut sender, _receiver) = blocking_mpsc::<u64, 6, 8>();
+        let (mut sender, _receiver) = blocking_mpsc::<u64>();
 
         assert!(sender.try_send(1).is_ok());
     }
 
     #[tokio::test]
     async fn async_async_closed_sender() {
-        let (mut sender, mut receiver) = async_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = async_mpsc::<u64>();
 
         // Send one item and receive it
         sender.send(1).await.unwrap();
@@ -3006,7 +3009,7 @@ mod tests {
 
     #[test]
     fn blocking_blocking_closed_sender() {
-        let (mut sender, mut receiver) = blocking_mpsc::<u64, 6, 8>();
+        let (mut sender, mut receiver) = blocking_mpsc::<u64>();
 
         // Send one item and receive it
         sender.send(1).unwrap();

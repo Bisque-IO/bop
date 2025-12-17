@@ -5,6 +5,7 @@ use std::{io, marker::PhantomData};
 use crate::driver::IoUringDriver;
 #[cfg(feature = "poll")]
 use crate::driver::PollerDriver;
+use crate::driver::unpark::Unpark;
 #[cfg(any(feature = "poll", feature = "iouring"))]
 use crate::utils::thread_id::gen_id;
 use crate::{driver::Driver, scoped_thread_local};
@@ -488,6 +489,11 @@ impl IoDriver {
             self.runtime.poll_once_unchecked(timeout)?;
         }
         Ok(1)
+    }
+
+    #[inline]
+    pub fn unpark(&self) -> crate::driver::UnparkHandle {
+        self.runtime.unpark()
     }
 
     /// Execute a closure within the context of the inner runtime

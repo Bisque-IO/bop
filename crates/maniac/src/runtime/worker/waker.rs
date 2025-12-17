@@ -1,7 +1,9 @@
+use std::cell::UnsafeCell;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::driver::unpark::Unpark;
 use crate::runtime::worker::io::IoDriver;
 use crate::utils::CachePadded;
 
@@ -12,6 +14,14 @@ pub const STATUS_SUMMARY_MASK: u64 = (1u64 << STATUS_SUMMARY_BITS) - 1;
 pub const STATUS_SUMMARY_WORDS: usize = STATUS_SUMMARY_BITS as usize;
 pub const STATUS_BIT_PARTITION: u64 = 1u64 << 62;
 pub const STATUS_BIT_YIELD: u64 = 1u64 << 63;
+
+pub struct NoopUnparker;
+
+impl crate::driver::unpark::Unpark for NoopUnparker {
+    fn unpark(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// A cache-optimized waker that packs queue summaries and control flags into a single status word.
 ///
@@ -158,6 +168,12 @@ pub struct WorkerWaker {
     /// When partition_summary transitions 0→non-zero, `STATUS_BIT_PARTITION`
     /// is set and a permit is added to wake the worker.
     partition_summary: CachePadded<AtomicU64>,
+
+    current_scheduled: CachePadded<AtomicU64>,
+    pub(crate) io_driver: usize, // this holds Box<IoDriver>
+    unparker: crate::driver::UnparkHandle,
+    partition_start: usize,
+    partition_end: usize,
 }
 
 impl WorkerWaker {
@@ -167,11 +183,18 @@ impl WorkerWaker {
             0,
             "status control bits must not overlap summary mask"
         );
+        let io_driver = Box::new(IoDriver::new().unwrap());
+        let unparker = io_driver.unpark();
         Self {
             status: CachePadded::new(AtomicU64::new(0)),
             permits: CachePadded::new(AtomicU64::new(0)),
             sleepers: CachePadded::new(AtomicUsize::new(0)),
             partition_summary: CachePadded::new(AtomicU64::new(0)),
+            current_scheduled: CachePadded::new(AtomicU64::new(0)),
+            partition_start: 0,
+            partition_end: 0,
+            io_driver: Box::into_raw(io_driver) as *const () as usize,
+            unparker,
         }
     }
 
@@ -609,7 +632,7 @@ impl WorkerWaker {
     ///
     /// - `true` if a permit was acquired
     /// - `false` if returned due to I/O event (no permit acquired)
-    pub fn acquire_with_io(&self, event_loop: &mut IoDriver) -> bool {
+    pub(crate) unsafe fn acquire(&self) -> bool {
         if self.status() != 0 || self.partition_summary() != 0 || self.snapshot_summary() != 0 {
             return true;
         }
@@ -636,7 +659,7 @@ impl WorkerWaker {
             // 1. I/O event
             // 2. Waker notification (via release())
             // 3. Timer expiration (if using integrated timer wheel)
-            if let Err(_) = event_loop.poll_once(None) {
+            if let Err(_) = unsafe { &mut *(self.io_driver as *mut IoDriver) }.poll_once(None) {
                 // If polling fails, we should probably return to avoid infinite loop
                 self.sleepers.fetch_sub(1, Ordering::Relaxed);
                 return false;
@@ -653,7 +676,7 @@ impl WorkerWaker {
     /// Blocking acquire with timeout.
     ///
     /// Like `acquire_with_io()`, but returns after `timeout` if no permit becomes available.
-    pub fn acquire_timeout_with_io(&self, event_loop: &mut IoDriver, timeout: Duration) -> bool {
+    pub(crate) unsafe fn acquire_timeout(&self, timeout: Duration) -> bool {
         if self.status() != 0 || self.partition_summary() != 0 || self.snapshot_summary() != 0 {
             return true;
         }
@@ -681,7 +704,8 @@ impl WorkerWaker {
             let left = timeout - elapsed;
 
             // Poll with timeout
-            if let Err(_) = event_loop.poll_once(Some(left)) {
+            if let Err(_) = unsafe { &mut *(self.io_driver as *mut IoDriver) }.poll_once(Some(left))
+            {
                 break;
             }
         }
@@ -722,8 +746,7 @@ impl WorkerWaker {
             return;
         }
         self.permits.fetch_add(n as u64, Ordering::Release);
-        // Wakeup is handled externally via EventLoop's waker mechanism.
-        // Permits accumulate here; sleeping threads wake via I/O polling.
+        let _ = self.unparker.unpark();
     }
 
     // ────────────────────────────────────────────────────────────────────────────
@@ -814,7 +837,7 @@ impl WorkerWaker {
     /// Bitmap of active leafs in this worker's partition
     #[inline]
     pub fn partition_summary(&self) -> u64 {
-        self.partition_summary.load(Ordering::Relaxed)
+        self.partition_summary.load(Ordering::Acquire)
     }
 
     /// Check if a specific leaf in the partition has work.
@@ -925,6 +948,16 @@ impl WorkerWaker {
     }
 }
 
+impl Drop for WorkerWaker {
+    fn drop(&mut self) {
+        unsafe {
+            if self.io_driver != 0 {
+                drop(Box::from_raw(self.io_driver as *mut IoDriver));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,17 +1019,16 @@ mod tests {
     #[test]
     fn test_acquire_timeout_with_event_loop() {
         let waker = Arc::new(WorkerWaker::new());
-        let mut event_loop = IoDriver::new().unwrap();
 
         // Test timeout behavior - should return false after timeout when no permits
         let start = std::time::Instant::now();
-        assert!(!waker.acquire_timeout_with_io(&mut event_loop, Duration::from_millis(50)));
+        assert!(!unsafe { waker.acquire_timeout(Duration::from_millis(50)) });
         assert!(start.elapsed() >= Duration::from_millis(50));
 
         // Add a permit and verify immediate acquisition
         waker.mark_active(0);
         assert_eq!(waker.permits(), 1);
-        assert!(waker.acquire_timeout_with_io(&mut event_loop, Duration::from_millis(50)));
+        assert!(unsafe { waker.acquire_timeout(Duration::from_millis(50)) });
         assert_eq!(waker.permits(), 0);
     }
 

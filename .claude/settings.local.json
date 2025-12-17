@@ -109,7 +109,8 @@
       "Bash(RUST_LOG=maniac_raft::multi::tcp_transport=trace,maniac_raft::multi::rpc_server=trace timeout 10:*)",
       "Bash(RUST_LOG=maniac_raft::multi::rpc_server=debug timeout 12 ./target/release/examples/multi_raft_cluster:*)",
       "Bash(RUST_LOG=maniac_raft::multi::storage_impl=trace timeout 10 ./target/release/examples/multi_raft_cluster:*)",
-      "Bash(RUST_LOG=maniac_raft::multi::rpc_server=trace timeout:*)"
+      "Bash(RUST_LOG=maniac_raft::multi::rpc_server=trace timeout:*)",
+      "Bash(ls:*)"
     ],
     "deny": [],
     "ask": []

@@ -9,6 +9,7 @@ use crate::runtime::preemption::GeneratorYieldReason;
 use crate::runtime::task::{GeneratorOwnership, Task, TaskHandle};
 use crate::runtime::timer::wheel::TimerWheel;
 use crate::runtime::timer::{Timer, TimerHandle};
+use crate::runtime::worker::waker::WorkerWaker;
 use crate::runtime::{mpsc, preemption};
 use crate::utils::bits;
 use std::ptr;
@@ -80,12 +81,15 @@ pub struct Worker<'a> {
     pub(crate) current_scope: *mut (),
     /// Preemption flag for this worker - set by signal handler (Unix) or timer thread (Windows)
     pub(crate) preemption_requested: AtomicBool,
+    pub(crate) waker: &'a WorkerWaker,
     /// Per-worker EventLoop for async I/O operations (boxed to avoid stack overflow)
-    pub(crate) io: Box<crate::runtime::worker::io::IoDriver>,
+    pub(crate) io: &'a mut crate::runtime::worker::io::IoDriver,
     /// I/O budget per run_once iteration (prevents I/O from starving tasks)
     pub(crate) io_budget: usize,
 
     pub(crate) panic_reason: Option<Box<dyn std::any::Any + Send>>,
+
+    pub(crate) counter: u64,
 }
 
 impl Drop for Worker<'_> {
@@ -183,7 +187,8 @@ impl<'a> Worker<'a> {
 
     #[inline(always)]
     fn poll_system_tasks(&mut self, run_ctx: &mut RunContext) -> usize {
-        let mut count = self.poll_io();
+        // let mut count = self.poll_io();
+        let mut count = 0;
 
         if self.poll_timers() {
             count += 1;
@@ -256,62 +261,217 @@ impl<'a> Worker<'a> {
         // }
 
         let leaf_count = self.scheduler.arena.leaf_count();
+        let leaf_idx_max = self.scheduler.arena.leaf_count() - 1;
         let worker_count = self.scheduler.worker_count;
         let partition_len = leaf_count / worker_count;
         let partition_start = self.worker_id as usize * partition_len;
         let mut now = self.timer_wheel.now_ns();
         let ticks = 0u64;
         let start_idx = self.next_u64();
-        let mut empty_tries = 0u64;
+        let mut empty_tries = 4u64;
         let mut full_empty_tries = 0u64;
-        const MAX_EMPTY_TRIES: u64 = 8;
-        const ALLOW_WORK_STEALING: bool = false;
+        const MAX_EMPTY_TRIES: u64 = 1;
+        const ALLOW_WORK_STEALING: bool = true;
         const WORK_STEALING_CADENCE: usize = 127;
+        // let waker = self.scheduler.wakers[self.worker_id as usize];
+
+        // for i in (partition_start..partition_start+partition_len) {
+        //     if self.process_leaf(run_ctx, (i as u64 + (self.counter % partition_len as u64)) as usize) {
+        //         did_work = true;
+        //     }
+        //     self.counter += 1;
+        // }
+
+        // for i in (0..leaf_count) {
+        //     if self.process_leaf(run_ctx, i) {
+        //         did_work = true;
+        //     }
+        //     self.counter += 1;
+        // }
+
         // let partition_start = self.partition_start;
         // let partition_len = self.partition_len.min(1);
-        for i in 0..(MAX_EMPTY_TRIES * 2) {
-            let next_idx = self.next_u64() as usize;
-            if self.process_leaf(run_ctx, partition_start + (next_idx % partition_len)) {
-                // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
-                // if self.process_leaf(run_ctx, i % leaf_count) {
-                did_work = true;
-                // self.stats.leaf_steal_successes += 1;
-                if run_ctx.should_exit_generator() {
-                    return did_work;
-                }
+        for i in 0..(MAX_EMPTY_TRIES) {
+            let mut next_idx = self.next_u64() as usize;
 
-                empty_tries = 0;
-            } else {
-                empty_tries += 1;
-            }
+            // if self.process_leaf(run_ctx, next_idx % leaf_count) {
+            //     // if self.process_leaf(run_ctx, partition_start + (next_idx % partition_len)) {
+            //     // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
+            //     // if self.process_leaf(run_ctx, i % leaf_count) {
+            //     did_work = true;
+            //     // self.stats.leaf_steal_successes += 1;
+            //     if run_ctx.should_exit_generator() {
+            //         return did_work;
+            //     }
+
+            //     empty_tries = 0;
+            // }
 
             if ALLOW_WORK_STEALING {
-                if next_idx & WORK_STEALING_CADENCE == 0 {
-                    if self.shutdown.load(Ordering::Relaxed) {
-                        self.current_scope = core::ptr::null_mut();
+                let leaf_id = bits::find_nearest(
+                    self.scheduler.wakers[self.worker_id as usize].partition_summary(),
+                    next_idx as u64 & 63,
+                ) as usize;
+
+                if leaf_id >= 64 {
+                    // for i in partition_start..(partition_start + partition_len).min(leaf_idx_max) {
+                    //     if self.process_leaf(run_ctx, i) {
+                    //         // self.stats.steal_successes += 1;
+                    //         did_work = true;
+                    //         // self.stats.leaf_steal_successes += 1;
+                    //         if run_ctx.should_exit_generator() {
+                    //             return did_work;
+                    //         }
+
+                    //         empty_tries = 0;
+
+                    //         // break;
+                    //         return did_work;
+                    //     }
+                    // }
+
+                    if ALLOW_WORK_STEALING {
+                        // std::hint::spin_loop();
+                        for i in 1..=1 {
+                            self.stats.steal_attempts += 1;
+                            // let steal_worker_id = next_idx % worker_count as usize;
+                            let steal_worker_id = (self.worker_id + 1) as usize % worker_count;
+                            let leaf_id = bits::find_nearest(
+                                self.scheduler.wakers[steal_worker_id]
+                                    // self.scheduler.wakers
+                                    // [(self.worker_id as usize + 1) % worker_count as usize]
+                                    .partition_summary(),
+                                next_idx as u64 & 63,
+                            ) as usize;
+                            if leaf_id < 64 {
+                                if self.process_leaf(
+                                    run_ctx,
+                                    ((steal_worker_id * partition_len) + leaf_id).min(leaf_idx_max),
+                                ) {
+                                    self.stats.steal_successes += 1;
+                                    did_work = true;
+                                    // self.stats.leaf_steal_successes += 1;
+                                    if run_ctx.should_exit_generator() {
+                                        return did_work;
+                                    }
+
+                                    empty_tries = 0;
+
+                                    // break;
+                                    return did_work;
+                                }
+                                next_idx = self.next_u64() as usize;
+                            }
+                        }
+
+                        for i in 0..1 {
+                            if self.process_leaf(run_ctx, next_idx % leaf_count) {
+                                self.stats.steal_successes += 1;
+                                did_work = true;
+                                // self.stats.leaf_steal_successes += 1;
+                                if run_ctx.should_exit_generator() {
+                                    return did_work;
+                                }
+
+                                empty_tries = 0;
+
+                                // break;
+                                return did_work;
+                            }
+                        }
+                    } else {
+                    }
+                    // std::hint::spin_loop();
+
+                    self.poll_system_tasks(run_ctx);
+
+                    // if did_work {
+                    //     return did_work;
+                    // }
+                    // return did_work;
+                } else if self.process_leaf(run_ctx, (partition_start + leaf_id).min(leaf_idx_max))
+                {
+                    // } else if self.process_leaf(run_ctx, next_idx % leaf_count) {
+                    // if self.process_leaf(run_ctx, partition_start + (next_idx % partition_len)) {
+                    // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
+                    // if self.process_leaf(run_ctx, i % leaf_count) {
+                    did_work = true;
+                    // self.stats.leaf_steal_successes += 1;
+                    if run_ctx.should_exit_generator() {
                         return did_work;
                     }
 
-                    for x in 0..4 {
+                    empty_tries = 0;
+
+                    return did_work;
+                } else {
+                    // std::hint::spin_loop();
+                    // std::thread::yield_now();
+                    empty_tries += 1;
+                    // let start_idx = self.next_u64() as usize % partition_len;
+
+                    // for i in partition_start..(partition_start + partition_len).min(leaf_idx_max) {
+                    //     if self.process_leaf(run_ctx, i) {
+                    //         did_work = true;
+                    //         // self.stats.leaf_steal_successes += 1;
+                    //         if run_ctx.should_exit_generator() {
+                    //             return did_work;
+                    //         }
+
+                    //         empty_tries = 0;
+
+                    //         // break;
+                    //         return did_work;
+                    //     }
+                    // }
+
+                    for i in 0..1 {
                         self.stats.steal_attempts += 1;
-                        if self.process_leaf(run_ctx, next_idx % leaf_count) {
+                        next_idx = self.next_u64() as usize % leaf_count;
+                        if self.process_leaf(run_ctx, next_idx) {
                             self.stats.steal_successes += 1;
-                            // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
-                            // if self.process_leaf(run_ctx, i % leaf_count) {
                             did_work = true;
                             // self.stats.leaf_steal_successes += 1;
                             if run_ctx.should_exit_generator() {
                                 return did_work;
                             }
 
-                            full_empty_tries = 0;
-                            break;
-                        } else {
-                            full_empty_tries += 1;
+                            empty_tries = 0;
+
+                            // break;
+                            return did_work;
                         }
                     }
                 }
             }
+
+            // if ALLOW_WORK_STEALING {
+            //     if next_idx & WORK_STEALING_CADENCE == 0 {
+            //         if self.shutdown.load(Ordering::Relaxed) {
+            //             self.current_scope = core::ptr::null_mut();
+            //             return did_work;
+            //         }
+
+            //         for x in 0..4 {
+            //             self.stats.steal_attempts += 1;
+            //             if self.process_leaf(run_ctx, next_idx % leaf_count) {
+            //                 self.stats.steal_successes += 1;
+            //                 // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
+            //                 // if self.process_leaf(run_ctx, i % leaf_count) {
+            //                 did_work = true;
+            //                 // self.stats.leaf_steal_successes += 1;
+            //                 if run_ctx.should_exit_generator() {
+            //                     return did_work;
+            //                 }
+
+            //                 full_empty_tries = 0;
+            //                 break;
+            //             } else {
+            //                 full_empty_tries += 1;
+            //             }
+            //         }
+            //     }
+            // }
 
             // if self.poll_io() > 0 {
             //     if run_ctx.should_exit_generator() {
@@ -334,31 +494,31 @@ impl<'a> Worker<'a> {
             //     }
             // }
 
-            if ALLOW_WORK_STEALING {
-                if empty_tries >= MAX_EMPTY_TRIES {
-                    for x in 0..MAX_EMPTY_TRIES {
-                        self.stats.steal_attempts += 1;
-                        if self.process_leaf(run_ctx, next_idx % leaf_count) {
-                            self.stats.steal_successes += 1;
-                            // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
-                            // if self.process_leaf(run_ctx, i % leaf_count) {
-                            did_work = true;
-                            // self.stats.leaf_steal_successes += 1;
-                            if run_ctx.should_exit_generator() {
-                                return did_work;
-                            }
+            // if ALLOW_WORK_STEALING {
+            //     if empty_tries >= MAX_EMPTY_TRIES {
+            //         for x in 0..MAX_EMPTY_TRIES {
+            //             self.stats.steal_attempts += 1;
+            //             if self.process_leaf(run_ctx, next_idx % leaf_count) {
+            //                 self.stats.steal_successes += 1;
+            //                 // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
+            //                 // if self.process_leaf(run_ctx, i % leaf_count) {
+            //                 did_work = true;
+            //                 // self.stats.leaf_steal_successes += 1;
+            //                 if run_ctx.should_exit_generator() {
+            //                     return did_work;
+            //                 }
 
-                            full_empty_tries = 0;
-                        } else {
-                            full_empty_tries += 1;
-                        }
-                    }
+            //                 full_empty_tries = 0;
+            //             } else {
+            //                 full_empty_tries += 1;
+            //             }
+            //         }
 
-                    if full_empty_tries >= MAX_EMPTY_TRIES {
-                        break;
-                    }
-                }
-            }
+            //         if full_empty_tries >= MAX_EMPTY_TRIES {
+            //             break;
+            //         }
+            //     }
+            // }
 
             // // if self.try_partition_random(run_ctx) {
             // if self.try_any_partition_random(run_ctx, self.service.arena.leaf_count()) {
@@ -647,7 +807,9 @@ impl<'a> Worker<'a> {
                                     progress = true;
                                 }
 
-                                worker.run_once_exhaustive(&mut run_ctx);
+                                // if worker.run_once_exhaustive(&mut run_ctx) {
+                                //     progress = true;
+                                // }
 
                                 if worker.poll_timers() {
                                     progress = true;
@@ -692,19 +854,19 @@ impl<'a> Worker<'a> {
                             if !progress {
                                 spin_count += 1;
 
-                                // if spin_count >= worker.wait_strategy.spin_before_sleep {
-                                //     core::hint::spin_loop();
+                                if spin_count >= worker.wait_strategy.spin_before_sleep {
+                                    core::hint::spin_loop();
 
-                                //     if progress {
-                                //         spin_count = 0;
-                                //         continue;
-                                //     }
-                                // } else if spin_count < worker.wait_strategy.spin_before_sleep {
-                                //     core::hint::spin_loop();
-                                //     continue;
-                                // }
+                                    if progress {
+                                        spin_count = 0;
+                                        continue;
+                                    }
+                                } else if spin_count < worker.wait_strategy.spin_before_sleep {
+                                    core::hint::spin_loop();
+                                    continue;
+                                }
 
-                                progress = worker.run_once_exhaustive(&mut run_ctx);
+                                // progress = worker.run_once_exhaustive(&mut run_ctx);
 
                                 // if progress {
                                 //     spin_count = 0;
@@ -714,6 +876,7 @@ impl<'a> Worker<'a> {
                                 // Calculate park duration considering timer deadlines
                                 // let park_duration = worker.calculate_park_duration();
                                 let park_duration = Some(Duration::from_millis(1));
+                                // let park_duration = Some(Duration::ZERO);
 
                                 // Park on WorkerWaker with timer-aware timeout
                                 // On Windows, also use alertable wait for APC-based preemption
@@ -729,21 +892,25 @@ impl<'a> Worker<'a> {
                                         // No timers actually ready - do a minimal yield to avoid
                                         // pegging CPU when timer_wheel.next_deadline() returns
                                         // stale data
-                                        std::thread::yield_now();
+                                        // std::thread::yield_now();
                                     }
                                     Some(duration) => {
                                         // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                                        worker.scheduler.wakers[waker_id]
-                                            .acquire_timeout_with_io(&mut worker.io, duration);
+                                        unsafe {
+                                            worker.waker.acquire_timeout(duration);
+                                        }
                                     }
                                     None => {
                                         // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                                        worker.scheduler.wakers[waker_id].acquire_timeout_with_io(
-                                            &mut worker.io,
-                                            Duration::from_millis(250),
-                                        );
+                                        unsafe {
+                                            worker
+                                                .waker
+                                                .acquire_timeout(Duration::from_millis(250));
+                                        }
                                     }
                                 }
+
+                                let _ = worker.poll_system_tasks(&mut run_ctx);
                                 spin_count = 0;
                             } else {
                                 spin_count = 0;
@@ -893,9 +1060,9 @@ impl<'a> Worker<'a> {
 
     #[inline]
     fn process_messages(&mut self) -> bool {
-        if self.scheduler.wakers[self.worker_id as usize].status() == 0 {
-            return false;
-        }
+        // if self.scheduler.wakers[self.worker_id as usize].status() == 0 {
+        //     return false;
+        // }
         let mut progress = false;
         loop {
             match self.receiver.try_pop() {
@@ -1202,17 +1369,17 @@ impl<'a> Worker<'a> {
             (1u64 << signals_per_leaf) - 1
         };
 
-        self.stats.leaf_summary_checks = self.stats.leaf_summary_checks.saturating_add(1);
+        self.stats.leaf_summary_checks += 1;
         let mut available =
             self.scheduler.summary().leaf_words[leaf_idx].load(Ordering::Acquire) & mask;
         if available == 0 {
-            self.stats.empty_scans = self.stats.empty_scans.saturating_add(1);
+            self.stats.empty_scans += 1;
             return None;
         }
-        self.stats.leaf_summary_hits = self.stats.leaf_summary_hits.saturating_add(1);
+        self.stats.leaf_summary_hits += 1;
 
         // let mut attempts = signals_per_leaf;
-        let mut attempts = 2;
+        let mut attempts = 1;
 
         while available != 0 && attempts > 0 {
             let start = (self.next_u64() as usize) % signals_per_leaf;
@@ -1229,16 +1396,15 @@ impl<'a> Worker<'a> {
                 let candidate = bits::find_nearest(available, start as u64);
                 if candidate >= 64 {
                     // No bits set in local `available` - reload from atomic
-                    self.stats.leaf_summary_checks =
-                        self.stats.leaf_summary_checks.saturating_add(1);
+                    self.stats.leaf_summary_checks += 1;
                     available = self.scheduler.summary().leaf_words[leaf_idx]
                         .load(Ordering::Acquire)
                         & mask;
                     if available == 0 {
-                        self.stats.empty_scans = self.stats.empty_scans.saturating_add(1);
+                        self.stats.empty_scans += 1;
                         return None;
                     }
-                    self.stats.leaf_summary_hits = self.stats.leaf_summary_hits.saturating_add(1);
+                    self.stats.leaf_summary_hits += 1;
                     // Decrement attempts on reload to bound total iterations
                     attempts -= 1;
                     continue;
@@ -1278,7 +1444,7 @@ impl<'a> Worker<'a> {
 
             let (remaining, acquired) = signal.try_acquire(bit_idx);
             if !acquired {
-                self.stats.cas_failures = self.stats.cas_failures.saturating_add(1);
+                self.stats.cas_failures += 1;
                 available &= !(1u64 << signal_idx);
                 attempts -= 1;
                 continue;
@@ -1299,13 +1465,13 @@ impl<'a> Worker<'a> {
                 }
             }
 
-            self.stats.signal_polls = self.stats.signal_polls.saturating_add(1);
+            self.stats.signal_polls += 1;
             let slot_idx = signal_idx * 64 + bit_idx as usize;
             let task = unsafe { self.scheduler.arena().task(leaf_idx, slot_idx) };
             return Some(TaskHandle::from_task(task));
         }
 
-        self.stats.empty_scans = self.stats.empty_scans.saturating_add(1);
+        self.stats.empty_scans += 1;
         None
     }
 
@@ -1552,7 +1718,7 @@ impl<'a> Worker<'a> {
         match poll_result {
             Some(Poll::Ready(())) => {
                 task.finish();
-                self.stats.completed_count = self.stats.completed_count.saturating_add(1);
+                self.stats.completed_count += 1;
 
                 // Check if generator was pinned during poll (e.g., via pin_stack() call)
                 if task.has_pinned_generator() {

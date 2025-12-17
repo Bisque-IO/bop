@@ -3,9 +3,9 @@ use crate::sync::mpsc::{
 };
 pub use crate::{PopError, PushError};
 
-pub type MpscSender<T> = AsyncMpscSender<T, 6, 8>;
-pub type MpscReceiver<T> = AsyncMpscReceiver<T, 6, 8>;
-pub type WeakMpscSender<T> = WeakAsyncMpscSender<T, 6, 8>;
+pub type MpscSender<T> = AsyncMpscSender<T>;
+pub type MpscReceiver<T> = AsyncMpscReceiver<T>;
+pub type WeakMpscSender<T> = WeakAsyncMpscSender<T>;
 
 pub use crate::PushError as SendError;
 

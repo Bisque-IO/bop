@@ -10,6 +10,7 @@ use crate::runtime::timer::TimerHandle;
 use crate::runtime::timer::ticker::TickService;
 use crate::runtime::timer::ticker::{TickHandler, TickHandlerRegistration};
 use crate::runtime::timer::wheel::TimerWheel;
+use crate::runtime::worker::io::IoDriver;
 use crate::runtime::{mpsc, preemption};
 use crate::{PushError, utils};
 use parking_lot::Mutex;
@@ -459,7 +460,7 @@ impl Scheduler {
 
         // Create per-worker WorkerWakers
         let mut wakers = Vec::with_capacity(worker_count_val);
-        for _ in 0..worker_count_val {
+        for i in 0..worker_count_val {
             wakers.push(Arc::new(WorkerWaker::new()));
         }
         let wakers = wakers.into_boxed_slice();
@@ -694,12 +695,13 @@ impl Scheduler {
 
         let service_clone = Arc::clone(service);
         let timer_resolution_ns = self.tick_duration().as_nanos().max(1) as u64;
-        let partition_len = partition_end.saturating_sub(partition_start);
+        let partition_len = partition_end.saturating_sub(partition_start).min(1);
 
         let join = std::thread::spawn(move || {
             let core_ids = crate::utils::cpu_cores();
             let core_id = worker_id + 1;
-            core_affinity::set_for_current(core_ids[core_id % core_ids.len()]);
+            // core_affinity::set_for_current(core_ids[core_id % core_ids.len()]);
+            core_affinity::set_for_current(core_ids[core_id]);
 
             let task_slot = crate::runtime::task::TaskSlot::new(std::ptr::null_mut());
             let task_slot_ptr = &task_slot as *const _ as *mut crate::runtime::task::TaskSlot;
@@ -716,12 +718,9 @@ impl Scheduler {
                 message_batch.push(WorkerMessage::Noop);
             }
 
-            // Create EventLoop for this worker (with integrated SingleWheel timer)
-            // Box it to avoid stack overflow (EventLoop contains large Slab and buffers)
-            let event_loop = Box::new(
-                crate::runtime::worker::io::IoDriver::new()
-                    .expect("Failed to create EventLoop for worker"),
-            );
+            let waker = service_clone.wakers[worker_id].as_ref();
+
+            let io_driver = unsafe { &mut *(waker.io_driver as *mut IoDriver) };
 
             let mut w = Worker {
                 scheduler: Arc::clone(&service_clone),
@@ -754,9 +753,11 @@ impl Scheduler {
                 current_task: std::ptr::null_mut(),
                 current_scope: std::ptr::null_mut(),
                 preemption_requested: AtomicBool::new(false),
-                io: event_loop,
+                waker,
+                io: io_driver,
                 io_budget: 16, // Process up to 16 I/O events per run_once iteration
                 panic_reason: None,
+                counter: 0,
             };
 
             // Wrap execution in monoio context and set user_data
@@ -898,6 +899,11 @@ impl Scheduler {
                 unsafe { base_ptr.add(std::mem::size_of::<FutureHeader>()) as *const JoinState<T> };
             // Safety: We know this points to a JoinState<T> after the header
             unsafe { (*join_state_ptr).complete(result) };
+
+            // Clear the future pointer immediately after completion
+            // This prevents any further polling attempts
+            task.take_future();
+
             service_for_future.release_task(release_handle);
         };
 
