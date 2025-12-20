@@ -356,6 +356,7 @@ async fn create_node(
         segment_size: 64 * 1024 * 1024, // 64MB segment files
         fsync_interval: None,
         max_cache_entries_per_group: 10000,
+        max_record_size: Some(1024 * 1024),
     };
 
     // Create the sharded log storage

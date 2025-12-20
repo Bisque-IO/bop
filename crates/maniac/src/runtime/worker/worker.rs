@@ -875,7 +875,8 @@ impl<'a> Worker<'a> {
 
                                 // Calculate park duration considering timer deadlines
                                 // let park_duration = worker.calculate_park_duration();
-                                let park_duration = Some(Duration::from_millis(1));
+                                // let park_duration = Some(Duration::from_millis(1));
+                                let park_duration = Some(Duration::from_micros(50));
                                 // let park_duration = Some(Duration::ZERO);
 
                                 // Park on WorkerWaker with timer-aware timeout

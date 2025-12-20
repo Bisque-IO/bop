@@ -77,7 +77,7 @@ impl<T> From<AsyncTx<T>> for Tx<T> {
     }
 }
 
-impl<T: Send + 'static> Tx<T> {
+impl<T: Send> Tx<T> {
     #[inline(always)]
     pub(crate) fn _send_bounded(
         &self,
@@ -379,8 +379,8 @@ impl<T> Deref for MTx<T> {
 }
 
 /// For writing generic code with MTx & Tx
-pub trait BlockingTxTrait<T: Send + 'static>:
-    Send + 'static + fmt::Debug + fmt::Display + AsRef<ChannelShared<T>> + Sized
+pub trait BlockingTxTrait<T: Send>:
+    Send + fmt::Debug + fmt::Display + AsRef<ChannelShared<T>> + Sized
 {
     /// Sends a message. This method will block until the message is sent or the channel is closed.
     ///
@@ -441,7 +441,7 @@ pub trait BlockingTxTrait<T: Send + 'static>:
     fn clone_to_vec(self, count: usize) -> Vec<Self>;
 }
 
-impl<T: Send + 'static> BlockingTxTrait<T> for Tx<T> {
+impl<T: Send> BlockingTxTrait<T> for Tx<T> {
     #[inline(always)]
     fn clone_to_vec(self, _count: usize) -> Vec<Self> {
         assert_eq!(_count, 1);
@@ -464,7 +464,7 @@ impl<T: Send + 'static> BlockingTxTrait<T> for Tx<T> {
     }
 }
 
-impl<T: Send + 'static> BlockingTxTrait<T> for MTx<T> {
+impl<T: Send> BlockingTxTrait<T> for MTx<T> {
     #[inline(always)]
     fn clone_to_vec(self, count: usize) -> Vec<Self> {
         let mut v = Vec::with_capacity(count);

@@ -52,7 +52,7 @@ impl BenchResult {
     }
 }
 
-const NUM_PRODUCERS: usize = 2;
+const NUM_PRODUCERS: usize = 4;
 const MESSAGES_PER_PRODUCER: u64 = MESSAGES / NUM_PRODUCERS as u64;
 
 // ============================================================================
@@ -566,6 +566,48 @@ mod tokio_benches {
         }
     }
 
+    pub async fn bench_contention_crossfire_mpsc() -> BenchResult {
+        use maniac::chan::mpsc;
+
+        let (tx, rx) = mpsc::bounded_async::<Payload>(64);
+
+        let start = Instant::now();
+
+        let mut sender_handles = Vec::new();
+        for p in 0..NUM_PRODUCERS {
+            let tx = tx.clone();
+            let base = p as u64 * MESSAGES_PER_PRODUCER;
+            sender_handles.push(tokio::spawn(async move {
+                for i in 0..MESSAGES_PER_PRODUCER {
+                    tx.send(Payload::new(base + i)).await.unwrap();
+                }
+            }));
+        }
+        drop(tx);
+
+        let receiver_handle = tokio::spawn(async move {
+            let mut count = 0u64;
+            for _ in 0..MESSAGES {
+                rx.recv().await.unwrap();
+                count += 1;
+            }
+            count
+        });
+
+        for h in sender_handles {
+            h.await.unwrap();
+        }
+
+        let received = receiver_handle.await.unwrap();
+        let duration = start.elapsed();
+
+        BenchResult {
+            name: "[maniac] crossfire MPSC",
+            duration,
+            messages: received,
+        }
+    }
+
     pub async fn bench_contention_kanal() -> BenchResult {
         let (tx, rx) = kanal::bounded_async::<u64>(64);
         let counter = Arc::new(AtomicU64::new(0));
@@ -777,7 +819,7 @@ mod maniac_benches {
     }
 
     pub fn bench_crossfire_spsc(rt: &Runtime) -> BenchResult {
-        use crossfire::mpsc;
+        use maniac::chan::mpsc;
 
         let (tx, rx) = mpsc::bounded_async::<Payload>(CAPACITY);
 
@@ -960,7 +1002,7 @@ mod maniac_benches {
     }
 
     pub fn bench_crossfire_mpsc(rt: &Runtime) -> BenchResult {
-        use crossfire::mpsc;
+        use maniac::chan::mpsc;
 
         let (tx, rx) = mpsc::bounded_async::<Payload>(CAPACITY);
 
@@ -1102,7 +1144,7 @@ mod maniac_benches {
     }
 
     pub fn bench_contention_crossfire_mpsc(rt: &Runtime) -> BenchResult {
-        use crossfire::mpsc;
+        use maniac::chan::mpsc;
 
         let (tx, rx) = mpsc::bounded_async::<Payload>(64);
 
@@ -1261,128 +1303,6 @@ fn main() {
     const TOKIO: bool = true;
     const MANIAC: bool = true;
 
-    if TOKIO {
-        // ========================================================================
-        // Tokio Runtime Benchmarks
-        // ========================================================================
-        println!("=== TOKIO RUNTIME (4 worker threads) ===");
-        println!();
-
-        // let maniac_rt = maniac::runtime::new_multi_threaded(1, 4096).unwrap();
-
-        let tokio_rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()
-            .unwrap();
-
-        // let tokio_rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-
-        println!("SPSC (Single Producer, Single Consumer)");
-        println!("---------------------------------------");
-
-        for _ in 0..ITERATIONS {
-            tokio_rt
-                .block_on(tokio_benches::bench_maniac_spsc_dynamic())
-                .print();
-            // maniac_benches::bench_maniac_spsc_dynamic(&maniac_rt).print();
-        }
-        println!();
-
-        for _ in 0..ITERATIONS {
-            tokio_rt
-                .block_on(tokio_benches::bench_maniac_spsc())
-                .print();
-            // maniac_benches::bench_maniac_spsc(&maniac_rt).print();
-        }
-        println!();
-
-        for _ in 0..ITERATIONS {
-            tokio_rt
-                .block_on(tokio_benches::bench_crossfire_spsc())
-                .print();
-            // maniac_benches::bench_crossfire_spsc(&maniac_rt).print();
-        }
-        println!();
-
-        // for _ in 0..ITERATIONS {
-        //     tokio_rt.block_on(tokio_benches::bench_tokio_spsc()).print();
-        // }
-        // println!();
-
-        for _ in 0..ITERATIONS {
-            tokio_rt.block_on(tokio_benches::bench_kanal_spsc()).print();
-            // maniac_benches::bench_kanal_spsc(&maniac_rt).print();
-        }
-        println!();
-
-        for _ in 0..ITERATIONS {
-            tokio_rt.block_on(tokio_benches::bench_flume_spsc()).print();
-            // maniac_benches::bench_flume_spsc(&maniac_rt).print();
-        }
-        println!();
-
-        println!("MPSC ({} Producers, Single Consumer)", NUM_PRODUCERS);
-        println!("---------------------------------------");
-
-        for _ in 0..ITERATIONS {
-            tokio_rt
-                .block_on(tokio_benches::bench_maniac_mpsc())
-                .print();
-            // maniac_benches::bench_maniac_mpsc(&maniac_rt).print();
-        }
-        println!();
-
-        for _ in 0..ITERATIONS {
-            tokio_rt
-                .block_on(tokio_benches::bench_crossfire_mpsc())
-                .print();
-            // maniac_benches::bench_crossfire_mpsc(&maniac_rt).print();
-        }
-        println!();
-
-        // for _ in 0..ITERATIONS {
-        //     tokio_rt.block_on(tokio_benches::bench_tokio_mpsc()).print();
-        // }
-        // println!();
-
-        for _ in 0..ITERATIONS {
-            tokio_rt.block_on(tokio_benches::bench_kanal_mpsc()).print();
-            // maniac_benches::bench_kanal_mpsc(&maniac_rt).print();
-        }
-        println!();
-
-        // for _ in 0..ITERATIONS {
-        //     tokio_rt.block_on(tokio_benches::bench_flume_mpsc()).print();
-        //     maniac_benches::bench_flume_mpsc(&maniac_rt).print();
-        // }
-        // println!();
-
-        println!(
-            "Contention Benchmark ({} Producers, small buffer)",
-            NUM_PRODUCERS
-        );
-        println!("--------------------------------------------------");
-
-        for _ in 0..ITERATIONS {
-            tokio_rt
-                .block_on(tokio_benches::bench_contention_maniac())
-                .print();
-            // maniac_benches::bench_contention_maniac(&maniac_rt).print();
-        }
-        println!();
-
-        for _ in 0..ITERATIONS {
-            tokio_rt
-                .block_on(tokio_benches::bench_contention_kanal())
-                .print();
-            // maniac_benches::bench_contention_kanal(&maniac_rt).print();
-        }
-        println!();
-
-        drop(tokio_rt);
-    }
-
     if MANIAC {
         // ========================================================================
         // Maniac Runtime Benchmarks
@@ -1392,15 +1312,15 @@ fn main() {
         // println!();
 
         // let maniac_rt = maniac::runtime::new_multi_threaded(8, 4096 * 64 * 8).unwrap();
-        let maniac_rt = maniac::runtime::new_multi_threaded(4, 4096 * 32 * 2).unwrap();
+        let maniac_rt = maniac::runtime::new_multi_threaded(8, 4096 * 4 * 2).unwrap();
 
         println!("SPSC (Single Producer, Single Consumer)");
         println!("---------------------------------------");
 
-        for _ in 0..ITERATIONS {
-            maniac_benches::bench_maniac_spsc_dynamic(&maniac_rt).print();
-        }
-        println!();
+        // for _ in 0..ITERATIONS {
+        //     maniac_benches::bench_maniac_spsc_dynamic(&maniac_rt).print();
+        // }
+        // println!();
 
         // for _ in 0..ITERATIONS {
         //     maniac_benches::bench_maniac_spsc(&maniac_rt).print();
@@ -1474,5 +1394,109 @@ fn main() {
         println!("\nManiac Runtime Stats:");
         println!("====================");
         println!("{}", stats);
+    }
+
+    if TOKIO {
+        // ========================================================================
+        // Tokio Runtime Benchmarks
+        // ========================================================================
+        println!("=== TOKIO RUNTIME (4 worker threads) ===");
+        println!();
+
+        // let maniac_rt = maniac::runtime::new_multi_threaded(1, 4096).unwrap();
+
+        let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // let tokio_rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+
+        println!("SPSC (Single Producer, Single Consumer)");
+        println!("---------------------------------------");
+
+        // for _ in 0..ITERATIONS {
+        //     tokio_rt
+        //         .block_on(tokio_benches::bench_maniac_spsc_dynamic())
+        //         .print();
+        //     // maniac_benches::bench_maniac_spsc_dynamic(&maniac_rt).print();
+        // }
+        // println!();
+
+        for _ in 0..ITERATIONS {
+            tokio_rt
+                .block_on(tokio_benches::bench_crossfire_spsc())
+                .print();
+            // maniac_benches::bench_crossfire_spsc(&maniac_rt).print();
+        }
+        println!();
+
+        // for _ in 0..ITERATIONS {
+        //     tokio_rt.block_on(tokio_benches::bench_tokio_spsc()).print();
+        // }
+        // println!();
+
+        for _ in 0..ITERATIONS {
+            tokio_rt.block_on(tokio_benches::bench_kanal_spsc()).print();
+            // maniac_benches::bench_kanal_spsc(&maniac_rt).print();
+        }
+        println!();
+
+        // for _ in 0..ITERATIONS {
+        //     tokio_rt.block_on(tokio_benches::bench_flume_spsc()).print();
+        //     // maniac_benches::bench_flume_spsc(&maniac_rt).print();
+        // }
+        // println!();
+
+        println!("MPSC ({} Producers, Single Consumer)", NUM_PRODUCERS);
+        println!("---------------------------------------");
+
+        for _ in 0..ITERATIONS {
+            tokio_rt
+                .block_on(tokio_benches::bench_crossfire_mpsc())
+                .print();
+            // maniac_benches::bench_crossfire_mpsc(&maniac_rt).print();
+        }
+        println!();
+
+        // for _ in 0..ITERATIONS {
+        //     tokio_rt.block_on(tokio_benches::bench_tokio_mpsc()).print();
+        // }
+        // println!();
+
+        for _ in 0..ITERATIONS {
+            tokio_rt.block_on(tokio_benches::bench_kanal_mpsc()).print();
+            // maniac_benches::bench_kanal_mpsc(&maniac_rt).print();
+        }
+        println!();
+
+        // for _ in 0..ITERATIONS {
+        //     tokio_rt.block_on(tokio_benches::bench_flume_mpsc()).print();
+        //     maniac_benches::bench_flume_mpsc(&maniac_rt).print();
+        // }
+        // println!();
+
+        println!(
+            "Contention Benchmark ({} Producers, small buffer)",
+            NUM_PRODUCERS
+        );
+        println!("--------------------------------------------------");
+
+        for _ in 0..ITERATIONS {
+            tokio_rt
+                .block_on(tokio_benches::bench_contention_crossfire_mpsc())
+                .print();
+        }
+        println!();
+
+        for _ in 0..ITERATIONS {
+            tokio_rt
+                .block_on(tokio_benches::bench_contention_kanal())
+                .print();
+        }
+        println!();
+
+        drop(tokio_rt);
     }
 }

@@ -171,10 +171,12 @@ impl<P> WakerInner<P> {
 
     #[inline(always)]
     pub fn try_change_state(&self, cur: WakerState, new_state: WakerState) -> Result<(), u8> {
+        // Release: publishes that waker/payload are set up and we're ready to be woken
+        // Acquire on failure: need to see what state we're actually in
         if let Err(s) = self.state.compare_exchange(
             cur as u8,
             new_state as u8,
-            Ordering::SeqCst,
+            Ordering::Release,
             Ordering::Acquire,
         ) {
             return Err(s);
@@ -246,10 +248,12 @@ impl<P> WakerInner<P> {
         // Save one load()
         let mut state = condition as u8;
         loop {
+            // AcqRel: Release publishes cancellation/close, Acquire synchronizes with wake()
+            // Acquire on failure: to see current state
             match self.state.compare_exchange_weak(
                 state,
                 target as u8,
-                Ordering::SeqCst,
+                Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
@@ -267,7 +271,8 @@ impl<P> WakerInner<P> {
 
     #[inline(always)]
     pub fn get_state(&self) -> u8 {
-        self.state.load(Ordering::SeqCst)
+        // Acquire: synchronize with Release store from wake()/abandon()
+        self.state.load(Ordering::Acquire)
     }
 
     #[inline(always)]
@@ -285,29 +290,17 @@ impl<P> WakerInner<P> {
             if state >= WakerState::Woken as u8 {
                 return WakeResult::Skip;
             } else if state == WakerState::Waiting as u8 {
-                // Use CAS to atomically transition from Waiting -> Woken
-                // This prevents race with abandon() which also tries to change Waiting state
-                match self.state.compare_exchange(
-                    WakerState::Waiting as u8,
-                    WakerState::Woken as u8,
-                    Ordering::SeqCst,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        self._wake_nolock();
-                        return WakeResult::Woken;
-                    }
-                    Err(s) => {
-                        // State changed, re-evaluate
-                        state = s;
-                        continue;
-                    }
-                }
+                // Release: pairs with waiter's Acquire load after waking
+                self.state.store(WakerState::Woken as u8, Ordering::Release);
+                self._wake_nolock();
+                return WakeResult::Woken;
             } else {
+                // Release: pairs with waiter's Acquire load after waking
+                // Acquire on failure: to see current state
                 match self.state.compare_exchange_weak(
                     WakerState::Init as u8,
                     WakerState::Woken as u8,
-                    Ordering::SeqCst,
+                    Ordering::Release,
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
@@ -328,11 +321,10 @@ impl<P> WakerInner<P> {
         // There might be situation like spurious wakeup, poll() again under no waking up ever
         // happened, waker still exists in registry but cannot be used to wake the current future.
         let o_waker = self.get_waker();
-        match o_waker {
-            WakerType::Async(_waker) => _waker.will_wake(ctx.waker()),
-            // For blocking wakers, we can't meaningfully compare with an async Context's waker,
-            // so we return false to indicate the waker needs to be re-registered
-            WakerType::Blocking(_) => false,
+        if let WakerType::Async(_waker) = o_waker {
+            return _waker.will_wake(ctx.waker());
+        } else {
+            unreachable!();
         }
     }
 
@@ -366,57 +358,27 @@ impl<T> WakerInner<*const T> {
             } else if state == WakerState::Waiting as u8 {
                 let p = self.get_payload();
                 if p == std::ptr::null_mut() {
-                    // Use CAS to atomically transition from Waiting -> Woken
-                    match self.state.compare_exchange(
-                        WakerState::Waiting as u8,
-                        WakerState::Woken as u8,
-                        Ordering::SeqCst,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(_) => {
-                            self._wake_nolock();
-                            return WakeResult::Woken;
-                        }
-                        Err(s) => {
-                            state = s;
-                            continue;
-                        }
-                    }
+                    // Release: pairs with waiter's Acquire load after waking
+                    self.state.store(WakerState::Woken as u8, Ordering::Release);
+                    self._wake_nolock();
+                    return WakeResult::Woken;
                 }
-                // First, try to atomically claim the Waiting state by transitioning to Woken.
-                // This prevents race conditions where another thread might also try to wake.
-                // We use a temporary transition to Woken, then perform the copy, then update to final state.
-                match self.state.compare_exchange(
-                    WakerState::Waiting as u8,
-                    WakerState::Woken as u8,
-                    Ordering::SeqCst,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        // We've successfully claimed the waker. Now perform the copy.
-                        let new_state = copy_f(p as *const T);
-                        // Update to final state (Done or keep as Woken)
-                        if new_state == WakerState::Done as u8 {
-                            self.state.store(WakerState::Done as u8, Ordering::SeqCst);
-                            self._wake_nolock();
-                            return WakeResult::Sent;
-                        } else {
-                            // Already Woken, just wake
-                            self._wake_nolock();
-                            return WakeResult::Woken;
-                        }
-                    }
-                    Err(s) => {
-                        // State changed concurrently, re-evaluate
-                        state = s;
-                        continue;
-                    }
+                state = copy_f(p as *const T);
+                // Release: publishes the copy completion, pairs with waiter's Acquire
+                self.state.store(state as u8, Ordering::Release);
+                self._wake_nolock();
+                if state == WakerState::Done as u8 {
+                    return WakeResult::Sent;
+                } else {
+                    return WakeResult::Woken;
                 }
             } else {
+                // Release: pairs with waiter's Acquire load after waking
+                // Acquire on failure: to see current state
                 match self.state.compare_exchange_weak(
                     WakerState::Init as u8,
                     WakerState::Woken as u8,
-                    Ordering::SeqCst,
+                    Ordering::Release,
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
@@ -454,10 +416,6 @@ impl<P: Copy> WakerCache<P> {
     pub(crate) fn push(&self, waker: ChannelWaker<P>) {
         debug_assert!(waker.get_state() >= WakerState::Woken as u8);
         let a = waker.to_arc();
-        // Use a fence to ensure we see the most recent reference counts.
-        // The weak_count check is important - if there are weak references,
-        // the waker may still be referenced in a registry.
-        std::sync::atomic::fence(Ordering::Acquire);
         if Arc::weak_count(&a) == 0 && Arc::strong_count(&a) == 1 {
             self.0.try_put(a);
         }

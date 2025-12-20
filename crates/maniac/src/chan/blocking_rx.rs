@@ -297,8 +297,8 @@ impl<T> From<MAsyncRx<T>> for MRx<T> {
 }
 
 /// For writing generic code with MRx & Rx
-pub trait BlockingRxTrait<T: Send + 'static>:
-    Send + 'static + fmt::Debug + fmt::Display + AsRef<ChannelShared<T>> + Sized
+pub trait BlockingRxTrait<T: Send>:
+    Send + fmt::Debug + fmt::Display + AsRef<ChannelShared<T>> + Sized
 {
     /// Receives a message from the channel. This method will block until a message is received or the channel is closed.
     ///
@@ -359,7 +359,7 @@ pub trait BlockingRxTrait<T: Send + 'static>:
     fn clone_to_vec(self, count: usize) -> Vec<Self>;
 }
 
-impl<T: Send + 'static> BlockingRxTrait<T> for Rx<T> {
+impl<T: Send> BlockingRxTrait<T> for Rx<T> {
     #[inline(always)]
     fn clone_to_vec(self, _count: usize) -> Vec<Self> {
         assert_eq!(_count, 1);
@@ -382,7 +382,7 @@ impl<T: Send + 'static> BlockingRxTrait<T> for Rx<T> {
     }
 }
 
-impl<T: Send + 'static> BlockingRxTrait<T> for MRx<T> {
+impl<T: Send> BlockingRxTrait<T> for MRx<T> {
     #[inline(always)]
     fn clone_to_vec(self, count: usize) -> Vec<Self> {
         let mut v = Vec::with_capacity(count);
