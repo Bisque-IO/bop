@@ -641,12 +641,12 @@ impl File {
             }
             #[cfg(windows)]
             {
-                use std::os::windows::io::FromRawHandle;
-                let handle = self.fd.raw_socket() as std::os::windows::io::RawHandle;
+                use std::os::windows::io::AsRawHandle;
+                // Store handle as usize for Send safety
+                let handle = self.fd.as_raw_handle() as usize;
                 crate::blocking::unblock(move || {
-                    let file = unsafe {
-                        std::mem::ManuallyDrop::new(std::fs::File::from_raw_handle(handle))
-                    };
+                    use std::os::windows::io::FromRawHandle;
+                    let file = unsafe { std::fs::File::from_raw_handle(handle as _) };
                     file.set_len(size)
                 })
                 .await

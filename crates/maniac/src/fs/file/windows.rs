@@ -93,22 +93,35 @@ pub(crate) async fn read_vectored<T: IoVecBufMut>(
     fd: SharedFd,
     mut buf_vec: T,
 ) -> crate::BufResult<usize, T> {
-    // Convert the mutable buffer vector into raw pointers that can be used in unsafe operations
-    let raw_bufs = buf_vec.write_wsabuf_ptr();
+    // Convert the mutable buffer vector into raw pointers
+    let raw_bufs_ptr = buf_vec.write_wsabuf_ptr();
     let len = buf_vec.write_wsabuf_len();
 
-    let wsabufs = unsafe { std::slice::from_raw_parts(raw_bufs, len) };
+    // Early exit for empty buffer
+    if len == 0 || raw_bufs_ptr.is_null() {
+        return (Ok(0), buf_vec);
+    }
+
+    // Copy wsabuf data to owned storage inside a block that ends before async operations
+    // This ensures the raw pointer is dropped before any await points
+    let bufs: Vec<(usize, usize)> = {
+        let raw_bufs = raw_bufs_ptr;
+        (0..len)
+            .map(|i| {
+                let wsabuf = unsafe { &*raw_bufs.add(i) };
+                (wsabuf.buf as usize, wsabuf.len as usize)
+            })
+            .collect()
+    }; // raw_bufs is dropped here when the block ends
 
     let mut total_bytes_read = 0;
+    let fd = fd.clone();
 
-    // Iterate through each WSABUF structure and read data into it
-    for wsabuf in wsabufs.iter() {
-        // Safely create a Vec from the WSABUF pointer, then pass it to the read function
+    // Process each buffer - only usize values cross the await boundary
+    for (buf_ptr, buf_len) in bufs {
         let (res, _) = read(
             fd.clone(),
-            ManuallyDrop::new(unsafe {
-                Vec::from_raw_parts(wsabuf.buf, wsabuf.len as usize, wsabuf.len as usize)
-            }),
+            ManuallyDrop::new(unsafe { Vec::from_raw_parts(buf_ptr as *mut u8, buf_len, buf_len) }),
         )
         .await;
 
@@ -117,7 +130,7 @@ pub(crate) async fn read_vectored<T: IoVecBufMut>(
             Ok(bytes_read) => {
                 total_bytes_read += bytes_read;
                 // If fewer bytes were read than requested, stop further reads
-                if bytes_read < wsabuf.len as usize {
+                if bytes_read < buf_len {
                     break;
                 }
             }
@@ -142,21 +155,35 @@ pub(crate) async fn write_vectored<T: IoVecBuf>(
     fd: SharedFd,
     buf_vec: T,
 ) -> crate::BufResult<usize, T> {
-    // Convert the buffer vector into raw pointers that can be used in unsafe operations
-    let raw_bufs = buf_vec.read_wsabuf_ptr() as *mut WSABUF;
+    // Convert the buffer vector into raw pointers
+    let raw_bufs_ptr = buf_vec.read_wsabuf_ptr() as *mut WSABUF;
     let len = buf_vec.read_wsabuf_len();
 
-    let wsabufs = unsafe { std::slice::from_raw_parts(raw_bufs, len) };
-    let mut total_bytes_write = 0;
+    // Early exit for empty buffer
+    if len == 0 || raw_bufs_ptr.is_null() {
+        return (Ok(0), buf_vec);
+    }
 
-    // Iterate through each WSABUF structure and write data from it
-    for wsabuf in wsabufs.iter() {
-        // Safely create a Vec from the WSABUF pointer, then pass it to the write function
+    // Copy wsabuf data to owned storage inside a block that ends before async operations
+    // This ensures the raw pointer is dropped before any await points
+    let bufs: Vec<(usize, usize)> = {
+        let raw_bufs = raw_bufs_ptr;
+        (0..len)
+            .map(|i| {
+                let wsabuf = unsafe { &*raw_bufs.add(i) };
+                (wsabuf.buf as usize, wsabuf.len as usize)
+            })
+            .collect()
+    }; // raw_bufs is dropped here when the block ends
+
+    let mut total_bytes_write = 0;
+    let fd = fd.clone();
+
+    // Process each buffer - only usize values cross the await boundary
+    for (buf_ptr, buf_len) in bufs {
         let (res, _) = write(
             fd.clone(),
-            ManuallyDrop::new(unsafe {
-                Vec::from_raw_parts(wsabuf.buf, wsabuf.len as usize, wsabuf.len as usize)
-            }),
+            ManuallyDrop::new(unsafe { Vec::from_raw_parts(buf_ptr as *mut u8, buf_len, buf_len) }),
         )
         .await;
 
@@ -165,7 +192,7 @@ pub(crate) async fn write_vectored<T: IoVecBuf>(
             Ok(bytes_write) => {
                 total_bytes_write += bytes_write;
                 // If fewer bytes were written than requested, stop further writes
-                if bytes_write < wsabuf.len as usize {
+                if bytes_write < buf_len {
                     break;
                 }
             }

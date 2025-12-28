@@ -156,7 +156,6 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 loom = { workspace = true }
 tokio = { workspace = true, features = ["full", "io-util"] }
-captains-log = {version="0.13", features = ["ringfile", "tracing"] }
 criterion = { workspace = true }
 pollster = { workspace = true }
 rstest = "0"

@@ -40,7 +40,7 @@ const BENCHMARKS: &[BenchmarkConfig] = &[
     //     yields_per_task: 100_000, // 51.2M yields total
     // },
     BenchmarkConfig {
-        worker_count: 32,
+        worker_count: 8,
         total_tasks: 1024,
         yields_per_task: 10_000, // 51.2M yields total
     },

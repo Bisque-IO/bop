@@ -35,6 +35,7 @@ use self::poller::PollerInner;
 pub use self::uring::IoUringDriver;
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use self::uring::UringInner;
+use self::worker_ops::WorkerOps;
 
 /// Unpark a runtime of another thread.
 pub(crate) mod unpark {
@@ -97,9 +98,29 @@ pub(crate) enum Inner {
 }
 
 // SAFETY: Inner is Send + Sync because:
-// 1. The UringInner/PollerInner are accessed through Arc<UnsafeCell<...>>
-// 2. The slab inside UringInner is protected by a mutex for thread-safe access
-// 3. All operations are properly synchronized
+//
+// For UringInner (io_uring):
+// - Accessed through Arc<UnsafeCell<...>>
+// - io_uring can be accessed by any thread (thread-agnostic design)
+// - The slab inside UringInner is protected by a mutex for thread-safe access
+//
+// For PollerInner (epoll/kqueue):
+// - Accessed through Arc<UnsafeCell<...>>
+// - Only accessed by its owning worker thread (single-threaded access)
+// - park() and dispatch() are only called by the owning thread
+// - The slab does NOT need mutex protection because access is never concurrent
+//
+// Work-stealing semantics:
+// - Tasks can be stolen and migrated between workers
+// - When a task with I/O is stolen, the Op holds the original worker's Inner
+// - Polling the I/O operation (doing the actual read/write syscall) happens on the
+//   stealing worker's thread, which is safe because only one thread executes a task at a time
+// - PollerInner::dispatch() only wakes up the task (via waker), not polling I/O
+//
+// Synchronization boundaries:
+// - ScopedKey (scoped TLS) in CURRENT provides the primary synchronization boundary
+// - Each worker accesses its own driver via CURRENT, ensuring single-threaded driver operations
+// - Cross-thread communication happens through safe abstractions (wakers, Arc)
 unsafe impl Send for Inner {}
 unsafe impl Sync for Inner {}
 

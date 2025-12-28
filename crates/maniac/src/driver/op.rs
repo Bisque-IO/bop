@@ -76,6 +76,15 @@ pub(crate) struct MaybeFd {
     fd: u32,
 }
 
+impl Default for MaybeFd {
+    fn default() -> Self {
+        Self {
+            is_fd: false,
+            fd: 0,
+        }
+    }
+}
+
 impl MaybeFd {
     #[inline]
     pub(crate) unsafe fn new_result(fdr: io::Result<u32>, is_fd: bool) -> io::Result<Self> {

@@ -167,3 +167,6 @@ maniac-wasmtime = { path = "crates/wasmtime", version = "0.1.0" }
 # panic = "abort"   # Smaller binary size (no unwinding)
 # # strip = "symbols" # Strip debug symbols (more aggressive than `true`)
 # debug = true
+
+# Patches for incompatible dependencies
+[patch.crates-io]

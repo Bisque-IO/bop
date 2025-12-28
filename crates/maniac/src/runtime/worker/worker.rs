@@ -270,7 +270,7 @@ impl<'a> Worker<'a> {
         let start_idx = self.next_u64();
         let mut empty_tries = 4u64;
         let mut full_empty_tries = 0u64;
-        const MAX_EMPTY_TRIES: u64 = 1;
+        const MAX_EMPTY_TRIES: u64 = 1024 * 1;
         const ALLOW_WORK_STEALING: bool = true;
         const WORK_STEALING_CADENCE: usize = 127;
         // let waker = self.scheduler.wakers[self.worker_id as usize];
@@ -307,7 +307,7 @@ impl<'a> Worker<'a> {
             //     empty_tries = 0;
             // }
 
-            if ALLOW_WORK_STEALING {
+            if ALLOW_WORK_STEALING && i as usize & WORK_STEALING_CADENCE == 0 {
                 let leaf_id = bits::find_nearest(
                     self.scheduler.wakers[self.worker_id as usize].partition_summary(),
                     next_idx as u64 & 63,
@@ -383,7 +383,7 @@ impl<'a> Worker<'a> {
                     }
                     // std::hint::spin_loop();
 
-                    self.poll_system_tasks(run_ctx);
+                    // self.poll_system_tasks(run_ctx);
 
                     // if did_work {
                     //     return did_work;
@@ -425,6 +425,7 @@ impl<'a> Worker<'a> {
                     //     }
                     // }
 
+                    self.poll_system_tasks(run_ctx);
                     for i in 0..1 {
                         self.stats.steal_attempts += 1;
                         next_idx = self.next_u64() as usize % leaf_count;
@@ -526,49 +527,49 @@ impl<'a> Worker<'a> {
             // }
 
             // Ensure we give system tasks and work stealing some CPU on tick boundaries
-            // let next_now = self.timer_wheel.now_ns();
-            // if now != next_now {
-            //     now = next_now;
+            let next_now = self.timer_wheel.now_ns();
+            if now != next_now {
+                now = next_now;
 
-            //     if self.shutdown.load(Ordering::Relaxed) {
-            //         self.current_scope = core::ptr::null_mut();
-            //         return did_work;
-            //     }
+                if self.shutdown.load(Ordering::Relaxed) {
+                    self.current_scope = core::ptr::null_mut();
+                    return did_work;
+                }
 
-            //     if self.poll_system_tasks(run_ctx) > 0 {
-            //         if run_ctx.should_exit_generator() {
-            //             return true;
-            //         }
-            //         did_work = true;
-            //     }
+                if self.poll_system_tasks(run_ctx) > 0 {
+                    if run_ctx.should_exit_generator() {
+                        return true;
+                    }
+                    did_work = true;
+                }
 
-            //     if ALLOW_WORK_STEALING {
-            //         for x in 0..8 {
-            //             let next_idx = self.next_u64() as usize;
-            //             self.stats.steal_attempts += 1;
-            //             if self.process_leaf(run_ctx, next_idx % leaf_count) {
-            //                 self.stats.steal_successes += 1;
-            //                 // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
-            //                 // if self.process_leaf(run_ctx, i % leaf_count) {
-            //                 did_work = true;
-            //                 // self.stats.leaf_steal_successes += 1;
-            //                 if run_ctx.should_exit_generator() {
-            //                     return did_work;
-            //                 }
-            //                 break;
-            //             }
-            //         }
-            //     }
+                if ALLOW_WORK_STEALING {
+                    for x in 0..8 {
+                        let next_idx = self.next_u64() as usize;
+                        self.stats.steal_attempts += 1;
+                        if self.process_leaf(run_ctx, next_idx % leaf_count) {
+                            self.stats.steal_successes += 1;
+                            // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
+                            // if self.process_leaf(run_ctx, i % leaf_count) {
+                            did_work = true;
+                            // self.stats.leaf_steal_successes += 1;
+                            if run_ctx.should_exit_generator() {
+                                return did_work;
+                            }
+                            break;
+                        }
+                    }
+                }
 
-            //     // let yielded = self.poll_yield(run_ctx, self.yield_queue.len());
-            //     // // let yielded = self.poll_yield(run_ctx, 1024*32);
-            //     // if yielded > 0 {
-            //     //     did_work = true;
-            //     // }
-            //     // if run_ctx.should_exit_generator() {
-            //     //     return did_work;
-            //     // }
-            // }
+                // let yielded = self.poll_yield(run_ctx, self.yield_queue.len());
+                // // let yielded = self.poll_yield(run_ctx, 1024*32);
+                // if yielded > 0 {
+                //     did_work = true;
+                // }
+                // if run_ctx.should_exit_generator() {
+                //     return did_work;
+                // }
+            }
         }
 
         // if self.poll_system_tasks(run_ctx) > 0 {
@@ -876,8 +877,8 @@ impl<'a> Worker<'a> {
                                 // Calculate park duration considering timer deadlines
                                 // let park_duration = worker.calculate_park_duration();
                                 // let park_duration = Some(Duration::from_millis(1));
-                                let park_duration = Some(Duration::from_micros(50));
-                                // let park_duration = Some(Duration::ZERO);
+                                // let park_duration = Some(Duration::from_micros(50));
+                                let park_duration = Some(Duration::ZERO);
 
                                 // Park on WorkerWaker with timer-aware timeout
                                 // On Windows, also use alertable wait for APC-based preemption

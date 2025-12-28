@@ -36,9 +36,11 @@ impl ChildStdinInner {
     }
 
     pub(crate) fn write<T: IoBuf>(&mut self, buf: T) -> impl Future<Output = BufResult<usize, T>> {
-        let handle = self.handle as HANDLE;
+        // Store handle as usize for Send safety
+        let handle = self.handle as usize;
 
         async move {
+            let handle = handle as HANDLE;
             // Synchronous write - pipes typically don't block for writes
             let mut bytes_written: u32 = 0;
             let success = unsafe {
@@ -64,26 +66,32 @@ impl ChildStdinInner {
         &mut self,
         buf_vec: T,
     ) -> impl Future<Output = BufResult<usize, T>> {
-        let handle = self.handle as HANDLE;
+        // Extract all data before async block to avoid capturing raw pointers
+        let handle = self.handle as usize;
+        let wsabuf_len = buf_vec.read_wsabuf_len();
+        let wsabuf_ptr = buf_vec.read_wsabuf_ptr();
+
+        // Extract wsabuf data as usize to make it Send-safe
+        let (wsabuf_addr, wsabuf_len_val): (usize, usize) =
+            if wsabuf_len == 0 || wsabuf_ptr.is_null() {
+                (0, 0)
+            } else {
+                let wsabuf = unsafe { &*wsabuf_ptr };
+                (wsabuf.buf as usize, wsabuf.len as usize)
+            };
 
         async move {
-            let wsabuf_len = buf_vec.read_wsabuf_len();
-            if wsabuf_len == 0 {
+            // If no valid wsabuf, return early
+            if wsabuf_addr == 0 || wsabuf_len_val == 0 {
                 return (Ok(0), buf_vec);
             }
 
-            let wsabuf_ptr = buf_vec.read_wsabuf_ptr();
-            if wsabuf_ptr.is_null() {
-                return (Ok(0), buf_vec);
-            }
-
-            let wsabuf = unsafe { &*wsabuf_ptr };
             let mut bytes_written: u32 = 0;
             let success = unsafe {
                 WriteFile(
-                    handle,
-                    wsabuf.buf as *const _,
-                    wsabuf.len as u32,
+                    handle as HANDLE,
+                    wsabuf_addr as *const _,
+                    wsabuf_len_val as u32,
                     &mut bytes_written,
                     std::ptr::null_mut(),
                 )

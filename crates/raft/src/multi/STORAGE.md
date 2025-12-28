@@ -200,19 +200,20 @@ Both range operations use `U64Congee::range()` in batches (256 keys per batch) t
 For each index:
 
 1. Try `cache` (DashMap lookup).
-2. On miss: consult `LogIndex` and read the record from disk synchronously.
+2. On miss: consult `LogIndex` and read the record from disk asynchronously.
 3. Decode the entry payload.
 4. If within cache window, insert into cache.
 5. If any index is missing, stop and return partial results.
 
-#### Why reads use blocking std I/O
+#### Async I/O with alignment fallbacks
 
-Random-offset reads using Maniac’s async file interface can hit **alignment / direct-I/O constraints** on some configurations, producing `EINVAL` or partial reads.
+Reads use Maniac's async filesystem layer (io-uring on Linux, poll-based on other platforms). The implementation handles direct-I/O alignment constraints with a three-tier fallback strategy:
 
-To avoid this, disk-backed reads (and recovery replay scanning) use:
-- `std::fs::File` + `seek()` + `read_exact_at()`
+1. **Primary path**: `file.read_exact_at()` with aligned buffers (DIO when supported)
+2. **Fallback for EINVAL**: `read_exact_at_unaligned_into()` for unaligned access
+3. **Last resort**: `maniac::blocking::unblock_fread_at()` on a thread pool for problematic configurations
 
-- **Correctness-first** choice: ensures portable, reliable random access.
+This approach provides **portable, correct async I/O** while maximizing performance where alignment constraints don't apply.
 
 ---
 
@@ -318,7 +319,7 @@ trait MultiplexedStorage {
 ### Limitations / trade-offs
 ### Limitations / trade-offs
 
-- **Blocking std I/O on read/recovery**: chosen for correctness and portability vs. direct-I/O alignment constraints.
+- **Async I/O with three-tier fallback on read/recovery**: Uses `maniac::fs::File::read_exact_at()` (async direct I/O) as primary path, with fallbacks for unaligned access and thread-pool blocking I/O when needed. This provides portability while maintaining async semantics.
 - **LogIndex free-list**: slots are reused; the side `locations` vector can grow until reused.
 - **Truncate backward-compatibility**: older logs may have `Truncate` records with just an index (u64). Recovery attempts to handle both formats.
 - **Concurrent group initialization**: best-effort double-check; concurrent `get_or_create_group` can do duplicate recovery work, but only one result is stored in `GroupIndex`.
