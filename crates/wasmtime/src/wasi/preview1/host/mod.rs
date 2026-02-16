@@ -33,7 +33,11 @@ pub fn add_wasi_snapshot_preview1_to_linker<T: WasiView + 'static>(
     linker.func_wrap("wasi_snapshot_preview1", "args_get", args_get)?;
     linker.func_wrap("wasi_snapshot_preview1", "args_sizes_get", args_sizes_get)?;
     linker.func_wrap("wasi_snapshot_preview1", "environ_get", environ_get)?;
-    linker.func_wrap("wasi_snapshot_preview1", "environ_sizes_get", environ_sizes_get)?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "environ_sizes_get",
+        environ_sizes_get,
+    )?;
 
     // Clock
     linker.func_wrap("wasi_snapshot_preview1", "clock_res_get", clock_res_get)?;
@@ -45,14 +49,34 @@ pub fn add_wasi_snapshot_preview1_to_linker<T: WasiView + 'static>(
     linker.func_wrap("wasi_snapshot_preview1", "fd_close", fd_close)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_datasync", fd_datasync)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_fdstat_get", fd_fdstat_get)?;
-    linker.func_wrap("wasi_snapshot_preview1", "fd_fdstat_set_flags", fd_fdstat_set_flags)?;
-    linker.func_wrap("wasi_snapshot_preview1", "fd_fdstat_set_rights", fd_fdstat_set_rights)?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_fdstat_set_flags",
+        fd_fdstat_set_flags,
+    )?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_fdstat_set_rights",
+        fd_fdstat_set_rights,
+    )?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_filestat_get", fd_filestat_get)?;
-    linker.func_wrap("wasi_snapshot_preview1", "fd_filestat_set_size", fd_filestat_set_size)?;
-    linker.func_wrap("wasi_snapshot_preview1", "fd_filestat_set_times", fd_filestat_set_times)?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_filestat_set_size",
+        fd_filestat_set_size,
+    )?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_filestat_set_times",
+        fd_filestat_set_times,
+    )?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_pread", fd_pread)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_prestat_get", fd_prestat_get)?;
-    linker.func_wrap("wasi_snapshot_preview1", "fd_prestat_dir_name", fd_prestat_dir_name)?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "fd_prestat_dir_name",
+        fd_prestat_dir_name,
+    )?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_pwrite", fd_pwrite)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_read", fd_read)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_readdir", fd_readdir)?;
@@ -63,16 +87,36 @@ pub fn add_wasi_snapshot_preview1_to_linker<T: WasiView + 'static>(
     linker.func_wrap("wasi_snapshot_preview1", "fd_write", fd_write)?;
 
     // Path operations
-    linker.func_wrap("wasi_snapshot_preview1", "path_create_directory", path_create_directory)?;
-    linker.func_wrap("wasi_snapshot_preview1", "path_filestat_get", path_filestat_get)?;
-    linker.func_wrap("wasi_snapshot_preview1", "path_filestat_set_times", path_filestat_set_times)?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "path_create_directory",
+        path_create_directory,
+    )?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "path_filestat_get",
+        path_filestat_get,
+    )?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "path_filestat_set_times",
+        path_filestat_set_times,
+    )?;
     linker.func_wrap("wasi_snapshot_preview1", "path_link", path_link)?;
     linker.func_wrap("wasi_snapshot_preview1", "path_open", path_open)?;
     linker.func_wrap("wasi_snapshot_preview1", "path_readlink", path_readlink)?;
-    linker.func_wrap("wasi_snapshot_preview1", "path_remove_directory", path_remove_directory)?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "path_remove_directory",
+        path_remove_directory,
+    )?;
     linker.func_wrap("wasi_snapshot_preview1", "path_rename", path_rename)?;
     linker.func_wrap("wasi_snapshot_preview1", "path_symlink", path_symlink)?;
-    linker.func_wrap("wasi_snapshot_preview1", "path_unlink_file", path_unlink_file)?;
+    linker.func_wrap(
+        "wasi_snapshot_preview1",
+        "path_unlink_file",
+        path_unlink_file,
+    )?;
 
     // Poll
     linker.func_wrap("wasi_snapshot_preview1", "poll_oneoff", poll_oneoff)?;
@@ -96,4 +140,3 @@ pub fn add_wasi_snapshot_preview1_to_linker<T: WasiView + 'static>(
 
     Ok(())
 }
-

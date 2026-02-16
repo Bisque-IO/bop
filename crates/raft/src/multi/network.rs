@@ -1,11 +1,11 @@
-use maniac::io::{AsyncReadRent, AsyncWriteRent};
 use crate::multi::config::MultiRaftConfig;
+use dashmap::DashMap;
+use maniac::io::{AsyncReadRent, AsyncWriteRent};
 use maniac::sync::mpsc::bounded as mpsc_bounded;
 use maniac::sync::oneshot;
-use dashmap::DashMap;
+use openraft::Instant;
 use openraft::OptionalSend;
 use openraft::OptionalSync;
-use openraft::Instant;
 use openraft::RaftTypeConfig;
 use openraft::StorageError;
 use openraft::async_runtime::AsyncRuntime;
@@ -261,7 +261,8 @@ where
                                 }
                             } else {
                                 let err = BatchError::new_static("Missing response in batch");
-                                let rpc_err = RPCError::Network(openraft::error::NetworkError::new(&err));
+                                let rpc_err =
+                                    RPCError::Network(openraft::error::NetworkError::new(&err));
                                 for sender in waiters {
                                     let _ = sender.send(Err(rpc_err.clone()));
                                 }
@@ -357,9 +358,7 @@ where
 
             if let Err(_) = self.buffer.tx.send((self.group_id, rpc, tx)).await {
                 let err = BatchError::new_static("Heartbeat buffer closed");
-                return Err(RPCError::Network(openraft::error::NetworkError::new(
-                    &err,
-                )));
+                return Err(RPCError::Network(openraft::error::NetworkError::new(&err)));
             }
 
             // Wait for response
@@ -367,9 +366,7 @@ where
                 Ok(res) => res.decompose_infallible(),
                 Err(_) => {
                     let err = BatchError::new_static("Heartbeat channel closed");
-                    Err(RPCError::Network(openraft::error::NetworkError::new(
-                        &err,
-                    )))
+                    Err(RPCError::Network(openraft::error::NetworkError::new(&err)))
                 }
             }
         } else {
@@ -439,11 +436,9 @@ where
                     Ok(Ok(r)) => r,
                     Ok(Err(_snapshot_err)) => {
                         // InstallSnapshotError is received - convert to network error
-                        return Err(StreamingError::Network(
-                            openraft::error::NetworkError::new(&BatchError::new_static(
-                                "Snapshot rejected by remote",
-                            )),
-                        ));
+                        return Err(StreamingError::Network(openraft::error::NetworkError::new(
+                            &BatchError::new_static("Snapshot rejected by remote"),
+                        )));
                     }
                     Err(rpc_err) => return Err(StreamingError::from(rpc_err)),
                 };
@@ -466,11 +461,9 @@ where
             {
                 Ok(Ok(_)) => {}
                 Ok(Err(_snapshot_err)) => {
-                    return Err(StreamingError::Network(
-                        openraft::error::NetworkError::new(&BatchError::new_static(
-                            "Snapshot rejected by remote",
-                        )),
-                    ));
+                    return Err(StreamingError::Network(openraft::error::NetworkError::new(
+                        &BatchError::new_static("Snapshot rejected by remote"),
+                    )));
                 }
                 Err(rpc_err) => return Err(StreamingError::from(rpc_err)),
             }
@@ -491,7 +484,10 @@ mod tests {
     use crate::multi::type_config::ManiacRaftTypeConfig;
     use dashmap::DashMap;
     use openraft::error::{RPCError, RaftError};
-    use openraft::raft::{AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse, InstallSnapshotRequest, InstallSnapshotResponse};
+    use openraft::raft::{
+        AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
+        InstallSnapshotResponse, VoteRequest, VoteResponse,
+    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -555,16 +551,18 @@ mod tests {
                 .unwrap_or(0)
         }
 
-        fn get_heartbeat_batch(&self, target: u64, idx: usize) -> Option<Vec<(u64, AppendEntriesRequest<TestConfig>)>> {
-            self.heartbeat_batch_calls
-                .get(&target)
-                .and_then(|v| {
-                    if idx < v.len() {
-                        Some(v[idx].clone())
-                    } else {
-                        None
-                    }
-                })
+        fn get_heartbeat_batch(
+            &self,
+            target: u64,
+            idx: usize,
+        ) -> Option<Vec<(u64, AppendEntriesRequest<TestConfig>)>> {
+            self.heartbeat_batch_calls.get(&target).and_then(|v| {
+                if idx < v.len() {
+                    Some(v[idx].clone())
+                } else {
+                    None
+                }
+            })
         }
     }
 
@@ -574,7 +572,8 @@ mod tests {
             target: u64,
             group_id: u64,
             rpc: AppendEntriesRequest<TestConfig>,
-        ) -> Result<AppendEntriesResponse<TestConfig>, RPCError<TestConfig, RaftError<TestConfig>>> {
+        ) -> Result<AppendEntriesResponse<TestConfig>, RPCError<TestConfig, RaftError<TestConfig>>>
+        {
             self.call_count.fetch_add(1, Ordering::Relaxed);
             let key = (target, group_id);
             // Clone manually since AppendEntriesRequest may not implement Clone
@@ -667,13 +666,14 @@ mod tests {
         }
     }
 
-    fn make_append_request(term: u64, node_id: u64, data: String) -> AppendEntriesRequest<TestConfig> {
-        use openraft::entry::RaftEntry;
+    fn make_append_request(
+        term: u64,
+        node_id: u64,
+        data: String,
+    ) -> AppendEntriesRequest<TestConfig> {
         use openraft::LogId;
-        let leader_id = openraft::impls::leader_id_adv::LeaderId {
-            term,
-            node_id,
-        };
+        use openraft::entry::RaftEntry;
+        let leader_id = openraft::impls::leader_id_adv::LeaderId { term, node_id };
         AppendEntriesRequest {
             vote: openraft::impls::Vote::new(term, node_id),
             prev_log_id: None,
@@ -704,7 +704,9 @@ mod tests {
 
             // Empty entries = heartbeat, should go through buffer
             let heartbeat = make_heartbeat_request(1, 1);
-            let result = network.append_entries(heartbeat, RPCOption::new(Duration::from_secs(30))).await;
+            let result = network
+                .append_entries(heartbeat, RPCOption::new(Duration::from_secs(30)))
+                .await;
             assert!(result.is_ok());
 
             // Wait for flush
@@ -734,7 +736,9 @@ mod tests {
 
             // Non-empty entries = not heartbeat, should bypass buffer
             let append = make_append_request(1, 1, "test data".to_string());
-            let result = network.append_entries(append.clone(), RPCOption::new(Duration::from_secs(30))).await;
+            let result = network
+                .append_entries(append.clone(), RPCOption::new(Duration::from_secs(30)))
+                .await;
             assert!(result.is_ok());
 
             // Should have gone directly to transport
@@ -753,7 +757,10 @@ mod tests {
             let config = MultiRaftConfig {
                 heartbeat_interval: Duration::from_millis(50),
             };
-            let factory = Arc::new(MultiRaftNetworkFactory::new(Arc::new(transport.clone()), config));
+            let factory = Arc::new(MultiRaftNetworkFactory::new(
+                Arc::new(transport.clone()),
+                config,
+            ));
 
             // Send multiple heartbeats for same group
             let hb1 = make_heartbeat_request(1, 1);
@@ -798,7 +805,10 @@ mod tests {
                 // but short enough for the test to complete quickly.
                 heartbeat_interval: Duration::from_millis(100),
             };
-            let factory = Arc::new(MultiRaftNetworkFactory::new(Arc::new(transport.clone()), config));
+            let factory = Arc::new(MultiRaftNetworkFactory::new(
+                Arc::new(transport.clone()),
+                config,
+            ));
 
             // Exceed MAX_COALESCED_HEARTBEATS (256) by creating many distinct groups and issuing
             // heartbeats concurrently. This avoids a slow "sleep per heartbeat interval" loop.
@@ -828,13 +838,18 @@ mod tests {
     fn test_error_propagation() {
         run_async(async {
             let transport = FakeTransport::new();
-            let error = RPCError::Network(openraft::error::NetworkError::new(&std::io::Error::new(std::io::ErrorKind::Other, "test error")));
+            let error = RPCError::Network(openraft::error::NetworkError::new(
+                &std::io::Error::new(std::io::ErrorKind::Other, "test error"),
+            ));
             transport.set_batch_error(1, error.clone());
 
             let config = MultiRaftConfig {
                 heartbeat_interval: Duration::from_millis(50),
             };
-            let factory = Arc::new(MultiRaftNetworkFactory::new(Arc::new(transport.clone()), config));
+            let factory = Arc::new(MultiRaftNetworkFactory::new(
+                Arc::new(transport.clone()),
+                config,
+            ));
             let mut group_factory = GroupNetworkFactory::new(factory.clone(), 1);
 
             let node = openraft::impls::BasicNode {
@@ -844,7 +859,9 @@ mod tests {
             let mut network = group_factory_mut.new_client(1, &node).await;
 
             let hb = make_heartbeat_request(1, 1);
-            let result = network.append_entries(hb, RPCOption::new(Duration::from_secs(30))).await;
+            let result = network
+                .append_entries(hb, RPCOption::new(Duration::from_secs(30)))
+                .await;
 
             // Wait for flush
             maniac::time::sleep(Duration::from_millis(100)).await;
@@ -859,14 +876,20 @@ mod tests {
         run_async(async {
             let transport = FakeTransport::new();
             // Return batch with missing group
-            transport.set_batch_response(1, vec![
-                (2, AppendEntriesResponse::Success), // Missing group 1
-            ]);
+            transport.set_batch_response(
+                1,
+                vec![
+                    (2, AppendEntriesResponse::Success), // Missing group 1
+                ],
+            );
 
             let config = MultiRaftConfig {
                 heartbeat_interval: Duration::from_millis(50),
             };
-            let factory = Arc::new(MultiRaftNetworkFactory::new(Arc::new(transport.clone()), config));
+            let factory = Arc::new(MultiRaftNetworkFactory::new(
+                Arc::new(transport.clone()),
+                config,
+            ));
             let mut group_factory = GroupNetworkFactory::new(factory.clone(), 1);
 
             let node = openraft::impls::BasicNode {
@@ -876,7 +899,9 @@ mod tests {
             let mut network = group_factory_mut.new_client(1, &node).await;
 
             let hb = make_heartbeat_request(1, 1);
-            let result = network.append_entries(hb, RPCOption::new(Duration::from_secs(30))).await;
+            let result = network
+                .append_entries(hb, RPCOption::new(Duration::from_secs(30)))
+                .await;
 
             // Wait for flush
             maniac::time::sleep(Duration::from_millis(100)).await;

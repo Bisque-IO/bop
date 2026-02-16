@@ -1,9 +1,10 @@
 pub mod codec;
 pub mod config;
 pub mod manager;
-pub mod network;
 pub(crate) mod manifest_mdbx;
+pub mod network;
 pub mod rpc_server;
+pub(crate) mod segment_footer;
 pub mod storage;
 pub mod storage_impl;
 pub mod tcp_transport;

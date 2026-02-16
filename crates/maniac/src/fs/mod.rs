@@ -188,11 +188,7 @@ pub async fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
 /// ```
 pub async fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<Vec<std::fs::DirEntry>> {
     let path = path.as_ref().to_owned();
-    crate::blocking::unblock(move || {
-        std::fs::read_dir(&path)?
-            .collect::<Result<Vec<_>, _>>()
-    })
-    .await
+    crate::blocking::unblock(move || std::fs::read_dir(&path)?.collect::<Result<Vec<_>, _>>()).await
 }
 
 /// Copies the contents of one file to another.

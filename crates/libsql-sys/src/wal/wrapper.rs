@@ -1,4 +1,4 @@
-use std::ffi::{c_int, CStr};
+use std::ffi::{CStr, c_int};
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
 

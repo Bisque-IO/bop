@@ -87,9 +87,7 @@ pub fn new<T>() -> Receiver<T> {
 /// }))));
 /// let receiver = mpsc::new_with_waker(waker);
 /// ```
-pub fn new_with_waker<T>(
-    waker: Arc<AsyncSignalWaker>,
-) -> Receiver<T> {
+pub fn new_with_waker<T>(waker: Arc<AsyncSignalWaker>) -> Receiver<T> {
     // Create sparse array of AtomicPtr<ProducerSlot>, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
     for _ in 0..MAX_QUEUES {
@@ -116,8 +114,7 @@ pub fn new_with_waker<T>(
     }
 }
 
-pub fn new_with_sender<T>()
--> (Sender<T>, Receiver<T>) {
+pub fn new_with_sender<T>() -> (Sender<T>, Receiver<T>) {
     let waker = Arc::new(AsyncSignalWaker::new());
     // Create sparse array of AtomicPtr<ProducerSlot>, all initialized to null
     let mut queues = Vec::with_capacity(MAX_QUEUES);
@@ -715,11 +712,7 @@ impl<T> Receiver<T> {
         (0, None)
     }
 
-    fn cleanup_closed_slot(
-        &self,
-        producer_id: usize,
-        slot_ptr: *mut ProducerSlot<T>,
-    ) {
+    fn cleanup_closed_slot(&self, producer_id: usize, slot_ptr: *mut ProducerSlot<T>) {
         let slot_atomic = &self.inner.queues[producer_id];
         let current = slot_atomic.load(Ordering::Acquire);
         if current != slot_ptr {
@@ -850,14 +843,8 @@ impl<'a, T: 'a> SenderPtr<'a, T> {
     }
 }
 
-unsafe impl<T: Send> Send
-    for SenderPtr<'_, T>
-{
-}
-unsafe impl<T: Send> Sync
-    for SenderPtr<'_, T>
-{
-}
+unsafe impl<T: Send> Send for SenderPtr<'_, T> {}
+unsafe impl<T: Send> Sync for SenderPtr<'_, T> {}
 
 /// Shared state for async MPSC coordination.
 ///
@@ -926,10 +913,7 @@ impl<T> WeakAsyncMpscSender<T> {
 }
 
 impl<T> AsyncMpscSender<T> {
-    fn new(
-        sender: Sender<T>,
-        shared: Arc<AsyncMpscShared<T>>,
-    ) -> Self {
+    fn new(sender: Sender<T>, shared: Arc<AsyncMpscShared<T>>) -> Self {
         // space_waker is already allocated in the ProducerSlot by create_sender
         Self { sender, shared }
     }
@@ -1136,10 +1120,7 @@ impl<T> Sink<T> for AsyncMpscSender<T> {
 }
 
 impl<T> AsyncMpscReceiver<T> {
-    fn new(
-        receiver: Receiver<T>,
-        shared: Arc<AsyncMpscShared<T>>,
-    ) -> Self {
+    fn new(receiver: Receiver<T>, shared: Arc<AsyncMpscShared<T>>) -> Self {
         Self { receiver, shared }
     }
 
@@ -1297,10 +1278,7 @@ pub struct BlockingMpscSender<T> {
 }
 
 impl<T> BlockingMpscSender<T> {
-    fn new(
-        sender: Sender<T>,
-        shared: Arc<AsyncMpscShared<T>>,
-    ) -> Self {
+    fn new(sender: Sender<T>, shared: Arc<AsyncMpscShared<T>>) -> Self {
         let parker = Parker::new();
         let parker_waker = Arc::new(ThreadUnparker {
             unparker: parker.unparker(),
@@ -1470,10 +1448,7 @@ pub struct BlockingMpscReceiver<T> {
 }
 
 impl<T> BlockingMpscReceiver<T> {
-    fn new(
-        receiver: Receiver<T>,
-        shared: Arc<AsyncMpscShared<T>>,
-    ) -> Self {
+    fn new(receiver: Receiver<T>, shared: Arc<AsyncMpscShared<T>>) -> Self {
         Self { receiver, shared }
     }
 
@@ -1625,10 +1600,7 @@ impl<T> BlockingMpscReceiver<T> {
     }
 }
 
-pub fn async_mpsc<T>() -> (
-    AsyncMpscSender<T>,
-    AsyncMpscReceiver<T>,
-) {
+pub fn async_mpsc<T>() -> (AsyncMpscSender<T>, AsyncMpscReceiver<T>) {
     let (sender, receiver) = new_with_sender();
     async_mpsc_from_parts(sender, receiver)
 }
@@ -1636,10 +1608,7 @@ pub fn async_mpsc<T>() -> (
 pub fn async_mpsc_from_parts<T>(
     sender: Sender<T>,
     receiver: Receiver<T>,
-) -> (
-    AsyncMpscSender<T>,
-    AsyncMpscReceiver<T>,
-) {
+) -> (AsyncMpscSender<T>, AsyncMpscReceiver<T>) {
     let inner = Arc::clone(receiver.inner());
     let shared = Arc::new(AsyncMpscShared::new(inner));
     let async_sender = AsyncMpscSender::new(sender, Arc::clone(&shared));
@@ -1650,10 +1619,7 @@ pub fn async_mpsc_from_parts<T>(
 /// Creates a default blocking MPSC queue.
 ///
 /// Both senders and receiver use blocking operations that park threads.
-pub fn blocking_mpsc<T>() -> (
-    BlockingMpscSender<T>,
-    BlockingMpscReceiver<T>,
-) {
+pub fn blocking_mpsc<T>() -> (BlockingMpscSender<T>, BlockingMpscReceiver<T>) {
     let (sender, receiver) = new_with_sender();
     blocking_mpsc_from_parts(sender, receiver)
 }
@@ -1662,10 +1628,7 @@ pub fn blocking_mpsc<T>() -> (
 pub fn blocking_mpsc_from_parts<T>(
     sender: Sender<T>,
     receiver: Receiver<T>,
-) -> (
-    BlockingMpscSender<T>,
-    BlockingMpscReceiver<T>,
-) {
+) -> (BlockingMpscSender<T>, BlockingMpscReceiver<T>) {
     let inner = Arc::clone(receiver.inner());
     let shared = Arc::new(AsyncMpscShared::new(inner));
     let blocking_sender = BlockingMpscSender::new(sender, Arc::clone(&shared));
@@ -1699,10 +1662,7 @@ pub fn blocking_mpsc_from_parts<T>(
 ///     }
 /// });
 /// ```
-pub fn blocking_async_mpsc<T>() -> (
-    BlockingMpscSender<T>,
-    AsyncMpscReceiver<T>,
-) {
+pub fn blocking_async_mpsc<T>() -> (BlockingMpscSender<T>, AsyncMpscReceiver<T>) {
     let (sender, receiver) = new_with_sender();
     blocking_async_mpsc_from_parts(sender, receiver)
 }
@@ -1711,10 +1671,7 @@ pub fn blocking_async_mpsc<T>() -> (
 pub fn blocking_async_mpsc_from_parts<T>(
     sender: Sender<T>,
     receiver: Receiver<T>,
-) -> (
-    BlockingMpscSender<T>,
-    AsyncMpscReceiver<T>,
-) {
+) -> (BlockingMpscSender<T>, AsyncMpscReceiver<T>) {
     let inner = Arc::clone(receiver.inner());
     let shared = Arc::new(AsyncMpscShared::new(inner));
     let blocking_sender = BlockingMpscSender::new(sender, Arc::clone(&shared));
@@ -1748,10 +1705,7 @@ pub fn blocking_async_mpsc_from_parts<T>(
 ///     }
 /// });
 /// ```
-pub fn async_blocking_mpsc<T>() -> (
-    AsyncMpscSender<T>,
-    BlockingMpscReceiver<T>,
-) {
+pub fn async_blocking_mpsc<T>() -> (AsyncMpscSender<T>, BlockingMpscReceiver<T>) {
     let (sender, receiver) = new_with_sender();
     async_blocking_mpsc_from_parts(sender, receiver)
 }
@@ -1760,10 +1714,7 @@ pub fn async_blocking_mpsc<T>() -> (
 pub fn async_blocking_mpsc_from_parts<T>(
     sender: Sender<T>,
     receiver: Receiver<T>,
-) -> (
-    AsyncMpscSender<T>,
-    BlockingMpscReceiver<T>,
-) {
+) -> (AsyncMpscSender<T>, BlockingMpscReceiver<T>) {
     let inner = Arc::clone(receiver.inner());
     let shared = Arc::new(AsyncMpscShared::new(inner));
     let async_sender = AsyncMpscSender::new(sender, Arc::clone(&shared));

@@ -1,3 +1,4 @@
+use super::backoff::WorkStealingBackoff;
 use super::scheduler::{
     Scheduler, TimerSchedule, WorkerBus, WorkerHealthSnapshot, WorkerMessage, WorkerStats,
     drop_future,
@@ -110,17 +111,21 @@ impl Drop for Worker<'_> {
     }
 }
 
-/// Context tracking generator state during worker execution.
-///
-/// This struct captures whether the worker's generator was pinned to a task
-/// and provides information needed for proper cleanup and error handling.
-///
-/// Note: Panic handling is delegated to the generator's own mechanism (context.err).
-/// We don't use catch_unwind around generator.resume() because it interferes with
-/// the generator's context switching. Panics inside generators will propagate up
-/// through the generator's error handling.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorkResult {
+    Progress,
+    Idle,
+    Exit,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WorkerState {
+    Working,
+    Spinning,
+    Parking,
+}
+
 struct RunContext {
-    /// Generator was pinned to a task - worker must create new generator.
     pinned: bool,
 }
 
@@ -129,13 +134,11 @@ impl RunContext {
         Self { pinned: false }
     }
 
-    /// Mark that the generator was pinned to a task.
     #[inline]
     fn mark_pinned(&mut self) {
         self.pinned = true;
     }
 
-    /// Check if we should exit the generator loop.
     #[inline]
     fn should_exit_generator(&self) -> bool {
         self.pinned
@@ -250,379 +253,77 @@ impl<'a> Worker<'a> {
     }
 
     #[inline(always)]
-    fn run_once(&mut self, run_ctx: &mut RunContext) -> bool {
-        let mut did_work = false;
+    fn run_once(&mut self, run_ctx: &mut RunContext) -> WorkResult {
+        let partition_summary = self.scheduler.wakers[self.worker_id as usize].partition_summary();
+        if partition_summary != 0 {
+            if self.try_own_partition_guided(run_ctx, partition_summary) {
+                if run_ctx.should_exit_generator() {
+                    return WorkResult::Exit;
+                }
+                return WorkResult::Progress;
+            }
+        }
 
-        // if self.poll_system_tasks(run_ctx) > 0 {
+        // if self.poll_timers() {
+        //     return WorkResult::Progress;
+        // }
+        // if self.process_messages() {
+        //     return WorkResult::Progress;
+        // }
+        // self.poll_io();
+
+        // if self.try_steal_work(run_ctx) {
         //     if run_ctx.should_exit_generator() {
-        //         return true;
+        //         return WorkResult::Exit;
         //     }
-        //     did_work = true;
+        //     return WorkResult::Progress;
         // }
 
+        WorkResult::Idle
+    }
+
+    #[inline(always)]
+    fn try_own_partition_guided(&mut self, run_ctx: &mut RunContext, summary: u64) -> bool {
         let leaf_count = self.scheduler.arena.leaf_count();
-        let leaf_idx_max = self.scheduler.arena.leaf_count() - 1;
-        let worker_count = self.scheduler.worker_count;
-        let partition_len = leaf_count / worker_count;
-        let partition_start = self.worker_id as usize * partition_len;
-        let mut now = self.timer_wheel.now_ns();
-        let ticks = 0u64;
-        let start_idx = self.next_u64();
-        let mut empty_tries = 4u64;
-        let mut full_empty_tries = 0u64;
-        const MAX_EMPTY_TRIES: u64 = 1024 * 1;
-        const ALLOW_WORK_STEALING: bool = true;
-        const WORK_STEALING_CADENCE: usize = 127;
-        // let waker = self.scheduler.wakers[self.worker_id as usize];
+        let hint = bits::find_nearest(summary, self.next_u64() & 63);
+        if hint >= 64 {
+            return false;
+        }
 
-        // for i in (partition_start..partition_start+partition_len) {
-        //     if self.process_leaf(run_ctx, (i as u64 + (self.counter % partition_len as u64)) as usize) {
-        //         did_work = true;
-        //     }
-        //     self.counter += 1;
-        // }
+        let leaf_idx = (self.partition_start + hint as usize).min(leaf_count - 1);
+        self.process_leaf(run_ctx, leaf_idx)
+    }
 
-        // for i in (0..leaf_count) {
-        //     if self.process_leaf(run_ctx, i) {
-        //         did_work = true;
-        //     }
-        //     self.counter += 1;
-        // }
+    #[inline(always)]
+    fn try_steal_work(&mut self, run_ctx: &mut RunContext) -> bool {
+        let leaf_count = self.scheduler.arena.leaf_count();
+        if leaf_count == 0 {
+            return false;
+        }
 
-        // let partition_start = self.partition_start;
-        // let partition_len = self.partition_len.min(1);
-        for i in 0..(MAX_EMPTY_TRIES) {
-            let mut next_idx = self.next_u64() as usize;
+        let start_leaf = (self.next_u64() as usize) % leaf_count;
 
-            // if self.process_leaf(run_ctx, next_idx % leaf_count) {
-            //     // if self.process_leaf(run_ctx, partition_start + (next_idx % partition_len)) {
-            //     // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
-            //     // if self.process_leaf(run_ctx, i % leaf_count) {
-            //     did_work = true;
-            //     // self.stats.leaf_steal_successes += 1;
-            //     if run_ctx.should_exit_generator() {
-            //         return did_work;
-            //     }
+        for offset in 0..leaf_count {
+            let leaf_idx = (start_leaf + self.next_u64() as usize) % leaf_count;
 
-            //     empty_tries = 0;
+            // if leaf_idx >= self.partition_start && leaf_idx < self.partition_end {
+            //     continue;
             // }
 
-            if ALLOW_WORK_STEALING && i as usize & WORK_STEALING_CADENCE == 0 {
-                let leaf_id = bits::find_nearest(
-                    self.scheduler.wakers[self.worker_id as usize].partition_summary(),
-                    next_idx as u64 & 63,
-                ) as usize;
-
-                if leaf_id >= 64 {
-                    // for i in partition_start..(partition_start + partition_len).min(leaf_idx_max) {
-                    //     if self.process_leaf(run_ctx, i) {
-                    //         // self.stats.steal_successes += 1;
-                    //         did_work = true;
-                    //         // self.stats.leaf_steal_successes += 1;
-                    //         if run_ctx.should_exit_generator() {
-                    //             return did_work;
-                    //         }
-
-                    //         empty_tries = 0;
-
-                    //         // break;
-                    //         return did_work;
-                    //     }
-                    // }
-
-                    if ALLOW_WORK_STEALING {
-                        // std::hint::spin_loop();
-                        for i in 1..=1 {
-                            self.stats.steal_attempts += 1;
-                            // let steal_worker_id = next_idx % worker_count as usize;
-                            let steal_worker_id = (self.worker_id + 1) as usize % worker_count;
-                            let leaf_id = bits::find_nearest(
-                                self.scheduler.wakers[steal_worker_id]
-                                    // self.scheduler.wakers
-                                    // [(self.worker_id as usize + 1) % worker_count as usize]
-                                    .partition_summary(),
-                                next_idx as u64 & 63,
-                            ) as usize;
-                            if leaf_id < 64 {
-                                if self.process_leaf(
-                                    run_ctx,
-                                    ((steal_worker_id * partition_len) + leaf_id).min(leaf_idx_max),
-                                ) {
-                                    self.stats.steal_successes += 1;
-                                    did_work = true;
-                                    // self.stats.leaf_steal_successes += 1;
-                                    if run_ctx.should_exit_generator() {
-                                        return did_work;
-                                    }
-
-                                    empty_tries = 0;
-
-                                    // break;
-                                    return did_work;
-                                }
-                                next_idx = self.next_u64() as usize;
-                            }
-                        }
-
-                        for i in 0..1 {
-                            if self.process_leaf(run_ctx, next_idx % leaf_count) {
-                                self.stats.steal_successes += 1;
-                                did_work = true;
-                                // self.stats.leaf_steal_successes += 1;
-                                if run_ctx.should_exit_generator() {
-                                    return did_work;
-                                }
-
-                                empty_tries = 0;
-
-                                // break;
-                                return did_work;
-                            }
-                        }
-                    } else {
-                    }
-                    // std::hint::spin_loop();
-
-                    // self.poll_system_tasks(run_ctx);
-
-                    // if did_work {
-                    //     return did_work;
-                    // }
-                    // return did_work;
-                } else if self.process_leaf(run_ctx, (partition_start + leaf_id).min(leaf_idx_max))
-                {
-                    // } else if self.process_leaf(run_ctx, next_idx % leaf_count) {
-                    // if self.process_leaf(run_ctx, partition_start + (next_idx % partition_len)) {
-                    // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
-                    // if self.process_leaf(run_ctx, i % leaf_count) {
-                    did_work = true;
-                    // self.stats.leaf_steal_successes += 1;
-                    if run_ctx.should_exit_generator() {
-                        return did_work;
-                    }
-
-                    empty_tries = 0;
-
-                    return did_work;
-                } else {
-                    // std::hint::spin_loop();
-                    // std::thread::yield_now();
-                    empty_tries += 1;
-                    // let start_idx = self.next_u64() as usize % partition_len;
-
-                    // for i in partition_start..(partition_start + partition_len).min(leaf_idx_max) {
-                    //     if self.process_leaf(run_ctx, i) {
-                    //         did_work = true;
-                    //         // self.stats.leaf_steal_successes += 1;
-                    //         if run_ctx.should_exit_generator() {
-                    //             return did_work;
-                    //         }
-
-                    //         empty_tries = 0;
-
-                    //         // break;
-                    //         return did_work;
-                    //     }
-                    // }
-
-                    self.poll_system_tasks(run_ctx);
-                    for i in 0..1 {
-                        self.stats.steal_attempts += 1;
-                        next_idx = self.next_u64() as usize % leaf_count;
-                        if self.process_leaf(run_ctx, next_idx) {
-                            self.stats.steal_successes += 1;
-                            did_work = true;
-                            // self.stats.leaf_steal_successes += 1;
-                            if run_ctx.should_exit_generator() {
-                                return did_work;
-                            }
-
-                            empty_tries = 0;
-
-                            // break;
-                            return did_work;
-                        }
-                    }
-                }
+            let leaf_word = self.scheduler.summary().leaf_words[leaf_idx].load(Ordering::Relaxed);
+            if leaf_word == 0 {
+                continue;
             }
 
-            // if ALLOW_WORK_STEALING {
-            //     if next_idx & WORK_STEALING_CADENCE == 0 {
-            //         if self.shutdown.load(Ordering::Relaxed) {
-            //             self.current_scope = core::ptr::null_mut();
-            //             return did_work;
-            //         }
+            self.stats.steal_attempts += 1;
 
-            //         for x in 0..4 {
-            //             self.stats.steal_attempts += 1;
-            //             if self.process_leaf(run_ctx, next_idx % leaf_count) {
-            //                 self.stats.steal_successes += 1;
-            //                 // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
-            //                 // if self.process_leaf(run_ctx, i % leaf_count) {
-            //                 did_work = true;
-            //                 // self.stats.leaf_steal_successes += 1;
-            //                 if run_ctx.should_exit_generator() {
-            //                     return did_work;
-            //                 }
-
-            //                 full_empty_tries = 0;
-            //                 break;
-            //             } else {
-            //                 full_empty_tries += 1;
-            //             }
-            //         }
-            //     }
-            // }
-
-            // if self.poll_io() > 0 {
-            //     if run_ctx.should_exit_generator() {
-            //         return true;
-            //     }
-            //     did_work = true;
-            // }
-
-            // if next_idx & 2047 == 0 {
-            //     if self.poll_system_tasks(run_ctx) > 0 {
-            //         if run_ctx.should_exit_generator() {
-            //             return true;
-            //         }
-            //         did_work = true;
-            //     }
-
-            //     if self.shutdown.load(Ordering::Relaxed) {
-            //         self.current_scope = core::ptr::null_mut();
-            //         return did_work;
-            //     }
-            // }
-
-            // if ALLOW_WORK_STEALING {
-            //     if empty_tries >= MAX_EMPTY_TRIES {
-            //         for x in 0..MAX_EMPTY_TRIES {
-            //             self.stats.steal_attempts += 1;
-            //             if self.process_leaf(run_ctx, next_idx % leaf_count) {
-            //                 self.stats.steal_successes += 1;
-            //                 // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
-            //                 // if self.process_leaf(run_ctx, i % leaf_count) {
-            //                 did_work = true;
-            //                 // self.stats.leaf_steal_successes += 1;
-            //                 if run_ctx.should_exit_generator() {
-            //                     return did_work;
-            //                 }
-
-            //                 full_empty_tries = 0;
-            //             } else {
-            //                 full_empty_tries += 1;
-            //             }
-            //         }
-
-            //         if full_empty_tries >= MAX_EMPTY_TRIES {
-            //             break;
-            //         }
-            //     }
-            // }
-
-            // // if self.try_partition_random(run_ctx) {
-            // if self.try_any_partition_random(run_ctx, self.service.arena.leaf_count()) {
-            //     did_work = true;
-            // }
-
-            // Ensure we give system tasks and work stealing some CPU on tick boundaries
-            let next_now = self.timer_wheel.now_ns();
-            if now != next_now {
-                now = next_now;
-
-                if self.shutdown.load(Ordering::Relaxed) {
-                    self.current_scope = core::ptr::null_mut();
-                    return did_work;
-                }
-
-                if self.poll_system_tasks(run_ctx) > 0 {
-                    if run_ctx.should_exit_generator() {
-                        return true;
-                    }
-                    did_work = true;
-                }
-
-                if ALLOW_WORK_STEALING {
-                    for x in 0..8 {
-                        let next_idx = self.next_u64() as usize;
-                        self.stats.steal_attempts += 1;
-                        if self.process_leaf(run_ctx, next_idx % leaf_count) {
-                            self.stats.steal_successes += 1;
-                            // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
-                            // if self.process_leaf(run_ctx, i % leaf_count) {
-                            did_work = true;
-                            // self.stats.leaf_steal_successes += 1;
-                            if run_ctx.should_exit_generator() {
-                                return did_work;
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                // let yielded = self.poll_yield(run_ctx, self.yield_queue.len());
-                // // let yielded = self.poll_yield(run_ctx, 1024*32);
-                // if yielded > 0 {
-                //     did_work = true;
-                // }
-                // if run_ctx.should_exit_generator() {
-                //     return did_work;
-                // }
+            if self.process_leaf(run_ctx, leaf_idx) {
+                self.stats.steal_successes += 1;
+                return true;
             }
         }
 
-        // if self.poll_system_tasks(run_ctx) > 0 {
-        //     if run_ctx.should_exit_generator() {
-        //         return true;
-        //     }
-        //     did_work = true;
-        // }
-
-        // let yielded = self.poll_yield(run_ctx, 1024*4096);
-        // // let yielded = self.poll_yield(run_ctx, 1024*32);
-        // if yielded > 0 {
-        //     did_work = true;
-        // }
-        // if run_ctx.should_exit_generator() {
-        //     return did_work;
-        // }
-
-        // if self.try_partition_random(leaf_count) {
-        //     did_work = true;
-        // } else if self.try_partition_linear(leaf_count) {
-        //     did_work = true;
-        // }
-
-        // let rand = self.next_u64();
-
-        // if !did_work && rand & FULL_SUMMARY_SCAN_CADENCE_MASK == 0 {
-        //     let leaf_count = self.service.arena().leaf_count();
-        //     if self.try_any_partition_random(run_ctx, leaf_count) {
-        //         did_work = true;
-        //     }
-        //     if run_ctx.should_exit_generator() {
-        //         return did_work;
-        //     }
-        //     // else if self.try_any_partition_linear(leaf_count) {
-        //     // did_work = true;
-        //     // }
-        // }
-
-        if !did_work {
-            // if self.poll_yield(run_ctx, self.yield_queue.len() as usize) > 0 {
-            //     did_work = true;
-            // }
-            // if run_ctx.should_exit_generator() {
-            //     return did_work;
-            // }
-
-            // if self.poll_yield_steal(run_ctx, 256) > 0 {
-            //     did_work = true;
-            // }
-        }
-
-        did_work
+        false
     }
 
     #[inline(always)]
@@ -724,8 +425,6 @@ impl<'a> Worker<'a> {
                         // SAFETY: worker_addr is the address of a valid Worker that lives for the generator's lifetime
                         let worker = unsafe { &mut *(worker_addr as *mut Worker<'_>) };
                         worker.stats.generators_created += 1;
-                        let mut spin_count = 0;
-                        let waker_id = worker.worker_id as usize;
 
                         // Register this generator's scope for non-cooperative preemption
                         let scope_ptr = &mut scope as *mut _ as *mut ();
@@ -734,188 +433,74 @@ impl<'a> Worker<'a> {
                         worker.current_scope = scope_ptr;
 
                         let mut run_ctx = RunContext::new();
-
-                        let iteration = 0u64;
-
+                        let mut backoff = WorkStealingBackoff::new();
+                        let mut state = WorkerState::Working;
                         let mut now = worker.timer_wheel.now_ns();
-                        // let mut now = std::time::Instant::now();
 
-                        // Inner loop: runs inside generator context
                         loop {
-                            // Check for shutdown
                             if worker.shutdown.load(Ordering::Relaxed) {
                                 worker.current_scope = core::ptr::null_mut();
                                 return GeneratorYieldReason::Shutdown;
                             }
 
-                            // Process one iteration of work
-                            // let mut progress = worker.poll_tasks(&mut run_ctx) > 0;
-                            let mut progress = worker.run_once(&mut run_ctx);
-
-                            // Check if we need to exit the generator
-                            if run_ctx.should_exit_generator() {
-                                worker.current_scope = core::ptr::null_mut();
-
-                                #[cfg(debug_assertions)]
-                                tracing::trace!(
-                                    "[worker {}] Generator pinned to task",
-                                    worker.worker_id
-                                );
-
-                                // Worker's generator was pinned to a task - exit so we can
-                                // create a new generator for the worker
-                                return crate::runtime::preemption::GeneratorYieldReason::Cooperative;
+                            // let _ = worker.run_once(&mut run_ctx);
+                            //
+                            let next_now = worker.timer_wheel.now_ns();
+                            if next_now != now {
+                                worker.process_messages();
+                                worker.poll_system_tasks(&mut run_ctx);
+                                now = next_now;
                             }
 
-                            // if worker.poll_io() > 0 {
-                            //     progress = true;
-                            // }
+                            match state {
+                                WorkerState::Working => match worker.run_once(&mut run_ctx) {
+                                    WorkResult::Progress => {
+                                        // backoff.reset();
+                                    }
+                                    WorkResult::Exit => {
+                                        worker.current_scope = core::ptr::null_mut();
+                                        return GeneratorYieldReason::Cooperative;
+                                    }
+                                    WorkResult::Idle => {
+                                        state = WorkerState::Spinning;
+                                    }
+                                },
 
-                            // if !progress {
-                            //     if worker.poll_system_tasks(&mut run_ctx) > 0 {
-                            //         if run_ctx.should_exit_generator() {
-                            //             worker.current_scope = core::ptr::null_mut();
-                            //             return GeneratorYieldReason::Cooperative;
-                            //         }
-                            //         progress = true;
-                            //     }
-                            // }
-
-                            // if worker.poll_system_tasks(&mut run_ctx) > 0 {
-                            //     if run_ctx.should_exit_generator() {
-                            //         worker.current_scope = core::ptr::null_mut();
-                            //         return GeneratorYieldReason::Cooperative;
-                            //     }
-                            //     progress = true;
-                            // }
-
-                            // if worker.poll_io() > 0 {
-                            //     progress = true;
-                            // }
-                            // Ensure we give system tasks and work stealing some CPU on tick boundaries
-                            // let next_now = Instant::now();
-                            let next_now = worker.timer_wheel.now_ns();
-                            if now != next_now {
-                                // tracing::info!("next_now tick");
-                                now = next_now;
-
-                                if worker.shutdown.load(Ordering::Relaxed) {
-                                    worker.current_scope = core::ptr::null_mut();
-                                    return GeneratorYieldReason::Cooperative;
-                                }
-
-                                if worker.poll_io() > 0 {
-                                    progress = true;
-                                }
-
-                                // if worker.run_once_exhaustive(&mut run_ctx) {
-                                //     progress = true;
-                                // }
-
-                                if worker.poll_timers() {
-                                    progress = true;
-                                }
-
-                                if worker.process_messages() {
-                                    progress = true;
-                                }
-
-                                // if worker.poll_system_tasks(&mut run_ctx) > 0 {
-                                //     if run_ctx.should_exit_generator() {
+                                // WorkerState::Spinning => match worker.run_once(&mut run_ctx) {
+                                //     WorkResult::Progress => {
+                                //         backoff.reset();
+                                //     }
+                                //     WorkResult::Exit => {
                                 //         worker.current_scope = core::ptr::null_mut();
                                 //         return GeneratorYieldReason::Cooperative;
                                 //     }
-                                //     progress = true;
-                                // }
-
-                                // if true {
-                                //     for x in 0..8 {
-                                //         let next_idx = self.next_u64() as usize;
-                                //         self.stats.steal_attempts += 1;
-                                //         if self.process_leaf(run_ctx, next_idx % leaf_count) {
-                                //             self.stats.steal_successes += 1;
-                                //             // if self.process_leaf(run_ctx, 0 + (next_idx % leaf_count)) {
-                                //             // if self.process_leaf(run_ctx, i % leaf_count) {
-                                //             did_work = true;
-                                //             // self.stats.leaf_steal_successes += 1;
-                                //             if run_ctx.should_exit_generator() {
-                                //                 self.current_scope = core::ptr::null_mut();
-                                //                 return GeneratorYieldReason::Cooperative;
-                                //             }
-                                //             break;
+                                //     WorkResult::Idle => {
+                                //         if backoff.backoff(&mut worker.rng) {
+                                //             state = WorkerState::Parking;
+                                //         } else if worker.has_work() {
+                                //             state = WorkerState::Working;
+                                //             backoff.reset();
                                 //         }
                                 //     }
-                                // }
-                            }
+                                // },
+                                WorkerState::Spinning | WorkerState::Parking => {
+                                    // let park_duration = worker.calculate_park_duration();
 
-                            // if worker.scheduler.wakers[waker_id].partition_summary() > 0 {
-                            //     progress = true;
-                            // }
+                                    // if park_duration.is_zero() {
+                                    //     worker.poll_timers();
+                                    //     state = WorkerState::Working;
+                                    //     continue;
+                                    // }
 
-                            if !progress {
-                                spin_count += 1;
-
-                                if spin_count >= worker.wait_strategy.spin_before_sleep {
-                                    core::hint::spin_loop();
-
-                                    if progress {
-                                        spin_count = 0;
-                                        continue;
+                                    worker.process_messages();
+                                    unsafe {
+                                        worker.waker.acquire_timeout(Duration::from_micros(1));
                                     }
-                                } else if spin_count < worker.wait_strategy.spin_before_sleep {
-                                    core::hint::spin_loop();
-                                    continue;
+
+                                    // std::thread::yield_now();
+                                    state = WorkerState::Working;
+                                    backoff.reset();
                                 }
-
-                                // progress = worker.run_once_exhaustive(&mut run_ctx);
-
-                                // if progress {
-                                //     spin_count = 0;
-                                //     continue;
-                                // }
-
-                                // Calculate park duration considering timer deadlines
-                                // let park_duration = worker.calculate_park_duration();
-                                // let park_duration = Some(Duration::from_millis(1));
-                                // let park_duration = Some(Duration::from_micros(50));
-                                let park_duration = Some(Duration::ZERO);
-
-                                // Park on WorkerWaker with timer-aware timeout
-                                // On Windows, also use alertable wait for APC-based preemption
-                                match park_duration {
-                                    Some(duration) if duration.is_zero() => {
-                                        // Timer already expired - process timers to avoid busy spin
-                                        // This can happen if a timer fires between run_once and
-                                        // calculate_park_duration
-                                        if worker.poll_system_tasks(&mut run_ctx) > 0 {
-                                            // Made progress, skip the spin
-                                            continue;
-                                        }
-                                        // No timers actually ready - do a minimal yield to avoid
-                                        // pegging CPU when timer_wheel.next_deadline() returns
-                                        // stale data
-                                        // std::thread::yield_now();
-                                    }
-                                    Some(duration) => {
-                                        // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                                        unsafe {
-                                            worker.waker.acquire_timeout(duration);
-                                        }
-                                    }
-                                    None => {
-                                        // On Windows, WorkerWaker uses alertable waits to allow APC execution
-                                        unsafe {
-                                            worker
-                                                .waker
-                                                .acquire_timeout(Duration::from_millis(250));
-                                        }
-                                    }
-                                }
-
-                                let _ = worker.poll_system_tasks(&mut run_ctx);
-                                spin_count = 0;
-                            } else {
-                                spin_count = 0;
                             }
                         }
                     }));
@@ -1027,36 +612,35 @@ impl<'a> Worker<'a> {
         tracing::trace!("Worker is done running: {}", self.worker_id);
     }
 
-    /// Calculate how long the worker can park, considering both the wait strategy
-    /// and the next timer deadline.
     #[inline]
-    fn calculate_park_duration(&mut self) -> Option<Duration> {
-        // Check if we have pending timers
+    fn calculate_park_duration(&mut self) -> Duration {
+        const MAX_PARK_DURATION: Duration = Duration::from_millis(250);
+
+        let waker = &self.scheduler.wakers[self.worker_id as usize];
+        if waker.status() != 0 || waker.partition_summary() != 0 {
+            return Duration::ZERO;
+        }
+
         if let Some(next_deadline_ns) = self.timer_wheel.next_deadline() {
             let now_ns = self.timer_wheel.now_ns();
 
-            if next_deadline_ns > now_ns {
-                let timer_duration_ns = next_deadline_ns - now_ns;
-                let timer_duration = Duration::from_nanos(timer_duration_ns);
-
-                // Use the minimum of wait_strategy timeout and timer deadline
-                let duration = match self.wait_strategy.park_timeout {
-                    Some(strategy_timeout) => Some(strategy_timeout.min(timer_duration)),
-                    None => Some(timer_duration),
-                };
-                // tracing::info!("calculate_park_duration: {}", duration.unwrap().as_nanos());
-                return duration;
-            } else {
-                // Timer already expired, don't sleep at all
-                return Some(Duration::ZERO);
+            if next_deadline_ns <= now_ns {
+                return Duration::ZERO;
             }
+
+            let timer_duration = Duration::from_nanos(next_deadline_ns - now_ns);
+
+            return match self.wait_strategy.park_timeout {
+                Some(strategy_timeout) => {
+                    timer_duration.min(strategy_timeout).min(MAX_PARK_DURATION)
+                }
+                None => timer_duration.min(MAX_PARK_DURATION),
+            };
         }
 
-        // No timers scheduled - cap at 250ms to check for new timers periodically
-        const MAX_PARK_DURATION: Duration = Duration::from_millis(250);
         match self.wait_strategy.park_timeout {
-            Some(timeout) => Some(timeout.min(MAX_PARK_DURATION)),
-            None => Some(MAX_PARK_DURATION),
+            Some(timeout) => timeout.min(MAX_PARK_DURATION),
+            None => MAX_PARK_DURATION,
         }
     }
 
@@ -1380,8 +964,7 @@ impl<'a> Worker<'a> {
         }
         self.stats.leaf_summary_hits += 1;
 
-        // let mut attempts = signals_per_leaf;
-        let mut attempts = 1;
+        let mut attempts = signals_per_leaf.min(8);
 
         while available != 0 && attempts > 0 {
             let start = (self.next_u64() as usize) % signals_per_leaf;
@@ -1457,8 +1040,6 @@ impl<'a> Worker<'a> {
                 self.scheduler
                     .summary()
                     .mark_signal_inactive(leaf_idx, signal_idx);
-                // Re-check: A task might have set a bit between our CAS and
-                // mark_signal_inactive. If so, re-activate the summary bit.
                 let recheck = signal.load(Ordering::Acquire);
                 if recheck != 0 {
                     self.scheduler

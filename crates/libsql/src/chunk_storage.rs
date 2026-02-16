@@ -208,6 +208,9 @@ mod tests {
     fn test_chunk_key_path_format() {
         let key = ChunkKey::new(1, 2, 100, 200);
         let path = key.to_path();
-        assert_eq!(path, "0000000000000001/00000002/wal/0000000000000064-00000000000000c8");
+        assert_eq!(
+            path,
+            "0000000000000001/00000002/wal/0000000000000064-00000000000000c8"
+        );
     }
 }

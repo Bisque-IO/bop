@@ -26,13 +26,13 @@ use openraft::raft::{
     VoteRequest, VoteResponse,
 };
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::cell::RefCell;
 use std::time::Duration;
 
 // Thread-local buffer pool for encoding to avoid repeated allocations.
@@ -286,11 +286,7 @@ impl MultiplexedConnection {
 
     /// IO loop that handles both reading responses and writing requests
     /// Uses split stream with separate reader and writer tasks for true concurrency
-    async fn io_loop(
-        self: Arc<Self>,
-        stream: TcpStream,
-        write_rx: flume::Receiver<WriteRequest>,
-    ) {
+    async fn io_loop(self: Arc<Self>, stream: TcpStream, write_rx: flume::Receiver<WriteRequest>) {
         // Map of pending requests awaiting responses
         let pending: Arc<DashMap<u64, PendingResponseSender>> = Arc::new(DashMap::new());
 
@@ -571,7 +567,9 @@ impl MultiplexedConnectionPool {
         // No usable connection and we have capacity to create one.
         // Create new connection without holding the lock
         let stream = factory().await.map_err(|e| {
-            ManiacTransportError::ConnectionError(format!("Failed to connect to {}: {}", addr, e).into())
+            ManiacTransportError::ConnectionError(
+                format!("Failed to connect to {}: {}", addr, e).into(),
+            )
         })?;
 
         let conn_id = self.next_conn_id();
@@ -745,7 +743,8 @@ where
         let request_data = ENCODE_BUFFER.with(|buf| {
             let mut borrowed = buf.borrow_mut();
             borrowed.clear();
-            request_msg.encode_into(&mut borrowed)
+            request_msg
+                .encode_into(&mut borrowed)
                 .map_err(|e| ManiacTransportError::CodecError(e.to_string().into()))?;
             // Clone the data - this is a fast memcpy, the buffer keeps its capacity
             Ok::<_, ManiacTransportError>(borrowed.clone())
@@ -813,9 +812,10 @@ where
             RawBytes, ToCodec,
         };
 
-        let addr = self.node_registry.resolve(&target).ok_or_else(|| {
-            ManiacTransportError::UnknownNode(target)
-        })?;
+        let addr = self
+            .node_registry
+            .resolve(&target)
+            .ok_or_else(|| ManiacTransportError::UnknownNode(target))?;
         let request_id = self.next_request_id();
 
         // Convert entries using ToCodec trait - pre-allocate capacity
@@ -866,7 +866,9 @@ where
                     }
                 }
             }
-            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error.into()).into()),
+            RpcMessage::Error { error, .. } => {
+                Err(ManiacTransportError::RemoteError(error.into()).into())
+            }
             _ => Err(ManiacTransportError::InvalidResponse.into()),
         }
     }
@@ -921,7 +923,9 @@ where
                     .last_log_id
                     .map(|l| openraft::LogId::<C>::from_codec(l)),
             }),
-            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error.into()).into()),
+            RpcMessage::Error { error, .. } => {
+                Err(ManiacTransportError::RemoteError(error.into()).into())
+            }
             _ => Err(ManiacTransportError::InvalidResponse.into()),
         }
     }
@@ -936,9 +940,10 @@ where
             FromCodec, InstallSnapshotRequest as CodecInstallSnapshotRequest, RawBytes, ToCodec,
         };
 
-        let addr = self.node_registry.resolve(&target).ok_or_else(|| {
-            ManiacTransportError::UnknownNode(target)
-        })?;
+        let addr = self
+            .node_registry
+            .resolve(&target)
+            .ok_or_else(|| ManiacTransportError::UnknownNode(target))?;
         let request_id = self.next_request_id();
 
         let codec_rpc = CodecInstallSnapshotRequest {
@@ -972,7 +977,9 @@ where
             } => Ok(InstallSnapshotResponse {
                 vote: openraft::impls::Vote::<C>::from_codec(resp.vote),
             }),
-            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error.into()).into()),
+            RpcMessage::Error { error, .. } => {
+                Err(ManiacTransportError::RemoteError(error.into()).into())
+            }
             _ => Err(ManiacTransportError::InvalidResponse.into()),
         }
     }
@@ -987,9 +994,10 @@ where
             Entry as CodecEntry, FromCodec, RawBytes, RpcMessage, ToCodec,
         };
 
-        let addr = self.node_registry.resolve(&target).ok_or_else(|| {
-            ManiacTransportError::UnknownNode(target)
-        })?;
+        let addr = self
+            .node_registry
+            .resolve(&target)
+            .ok_or_else(|| ManiacTransportError::UnknownNode(target))?;
 
         let request_id = self.next_request_id();
 
@@ -999,7 +1007,8 @@ where
 
         for (gid, rpc) in batch {
             // Pre-allocate entry conversion vector
-            let mut codec_entries: Vec<CodecEntry<RawBytes>> = Vec::with_capacity(rpc.entries.len());
+            let mut codec_entries: Vec<CodecEntry<RawBytes>> =
+                Vec::with_capacity(rpc.entries.len());
             for entry in rpc.entries.iter() {
                 codec_entries.push(entry.to_codec());
             }
@@ -1044,13 +1053,13 @@ where
         };
 
         match response {
-            RpcMessage::HeartbeatBatchMultiResponse { responses, .. } => {
-                Ok(responses
-                    .into_iter()
-                    .map(|(gid, resp)| (gid, convert_resp(resp)))
-                    .collect())
+            RpcMessage::HeartbeatBatchMultiResponse { responses, .. } => Ok(responses
+                .into_iter()
+                .map(|(gid, resp)| (gid, convert_resp(resp)))
+                .collect()),
+            RpcMessage::Error { error, .. } => {
+                Err(ManiacTransportError::RemoteError(error.into()).into())
             }
-            RpcMessage::Error { error, .. } => Err(ManiacTransportError::RemoteError(error.into()).into()),
             _ => Err(ManiacTransportError::InvalidResponse.into()),
         }
     }

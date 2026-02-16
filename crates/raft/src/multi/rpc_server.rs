@@ -318,7 +318,10 @@ where
 
             match response_rx.recv_async().await {
                 Ok(response_data) => {
-                    tracing::debug!("RPC writer: sending response ({} bytes)", response_data.len());
+                    tracing::debug!(
+                        "RPC writer: sending response ({} bytes)",
+                        response_data.len()
+                    );
                     // Use vectored I/O to avoid copying the payload
                     match write_frame_vectored(&mut write_half, response_data).await {
                         Ok(returned_buf) => {
@@ -379,7 +382,11 @@ where
                         };
 
                     let request_id = request.request_id();
-                    tracing::debug!("RPC reader: received request {} from {}", request_id, peer_addr);
+                    tracing::debug!(
+                        "RPC reader: received request {} from {}",
+                        request_id,
+                        peer_addr
+                    );
                     let manager = self.manager.clone();
                     let snapshot_transfers = self.snapshot_transfers.clone();
                     let tx = response_tx.clone();
@@ -388,27 +395,36 @@ where
                     // Spawn handler for this request
                     let _ = maniac::spawn(async move {
                         tracing::debug!("RPC handler: processing request {}", request_id);
-                        let response =
-                            Self::process_codec_request(
-                                &manager,
-                                &snapshot_transfers,
-                                request,
-                                max_concurrent_requests,
-                            )
-                            .await;
-                        tracing::debug!("RPC handler: request {} processed, encoding response", request_id);
+                        let response = Self::process_codec_request(
+                            &manager,
+                            &snapshot_transfers,
+                            request,
+                            max_concurrent_requests,
+                        )
+                        .await;
+                        tracing::debug!(
+                            "RPC handler: request {} processed, encoding response",
+                            request_id
+                        );
 
                         // Serialize and send response to writer
                         match response.encode_to_vec() {
                             Ok(response_data) => {
-                                tracing::debug!("RPC handler: sending response for request {} ({} bytes)", request_id, response_data.len());
+                                tracing::debug!(
+                                    "RPC handler: sending response for request {} ({} bytes)",
+                                    request_id,
+                                    response_data.len()
+                                );
                                 if tx.send_async(response_data).await.is_err() {
                                     tracing::debug!(
                                         "RPC handler: response channel closed for request {}",
                                         request_id
                                     );
                                 } else {
-                                    tracing::debug!("RPC handler: response for request {} sent to writer", request_id);
+                                    tracing::debug!(
+                                        "RPC handler: response for request {} sent to writer",
+                                        request_id
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -487,10 +503,17 @@ where
                         leader_commit,
                     };
 
-                    tracing::trace!("AppendEntries handler: calling raft.append_entries (req_id={}, entries={})", request_id, entry_count);
+                    tracing::trace!(
+                        "AppendEntries handler: calling raft.append_entries (req_id={}, entries={})",
+                        request_id,
+                        entry_count
+                    );
                     match raft.append_entries(raft_rpc).await {
                         Ok(response) => {
-                            tracing::trace!("AppendEntries handler: got Ok response (req_id={})", request_id);
+                            tracing::trace!(
+                                "AppendEntries handler: got Ok response (req_id={})",
+                                request_id
+                            );
                             let codec_response = match response {
                                 openraft::raft::AppendEntriesResponse::Success => {
                                     CodecAppendEntriesResponse::Success
@@ -513,12 +536,16 @@ where
                             }
                         }
                         Err(e) => {
-                            tracing::trace!("AppendEntries handler: got Err response (req_id={}): {}", request_id, e);
+                            tracing::trace!(
+                                "AppendEntries handler: got Err response (req_id={}): {}",
+                                request_id,
+                                e
+                            );
                             CodecRpcMessage::Error {
                                 request_id,
                                 error: format!("AppendEntries failed: {}", e),
                             }
-                        },
+                        }
                     }
                 } else {
                     CodecRpcMessage::Error {
@@ -836,36 +863,37 @@ where
                     std::cmp::min(max_concurrent_requests, heartbeats.len()),
                 );
 
-                let responses: Result<Vec<(u64, CodecAppendEntriesResponse)>, String> = stream::iter(
-                    heartbeats.into_iter(),
-                )
-                .map(|(group_id, rpc)| {
-                    let manager = manager.clone();
-                    async move {
-                        if let Some(raft) = manager.get_group(group_id) {
-                            let vote = openraft::impls::Vote::<C>::from_codec(rpc.vote);
-                            let prev_log_id =
-                                rpc.prev_log_id.map(|l| openraft::LogId::<C>::from_codec(l));
-                            let leader_commit = rpc
-                                .leader_commit
-                                .map(|l| openraft::LogId::<C>::from_codec(l));
+                let responses: Result<Vec<(u64, CodecAppendEntriesResponse)>, String> =
+                    stream::iter(heartbeats.into_iter())
+                        .map(|(group_id, rpc)| {
+                            let manager = manager.clone();
+                            async move {
+                                if let Some(raft) = manager.get_group(group_id) {
+                                    let vote = openraft::impls::Vote::<C>::from_codec(rpc.vote);
+                                    let prev_log_id = rpc
+                                        .prev_log_id
+                                        .map(|l| openraft::LogId::<C>::from_codec(l));
+                                    let leader_commit = rpc
+                                        .leader_commit
+                                        .map(|l| openraft::LogId::<C>::from_codec(l));
 
-                            // Pre-allocate entry conversion vector
-                            let mut entries: Vec<C::Entry> = Vec::with_capacity(rpc.entries.len());
-                            for e in rpc.entries {
-                                entries.push(openraft::impls::Entry::<C>::from_codec(e));
-                            }
+                                    // Pre-allocate entry conversion vector
+                                    let mut entries: Vec<C::Entry> =
+                                        Vec::with_capacity(rpc.entries.len());
+                                    for e in rpc.entries {
+                                        entries.push(openraft::impls::Entry::<C>::from_codec(e));
+                                    }
 
-                            let raft_rpc = openraft::raft::AppendEntriesRequest {
-                                vote,
-                                prev_log_id,
-                                entries,
-                                leader_commit,
-                            };
+                                    let raft_rpc = openraft::raft::AppendEntriesRequest {
+                                        vote,
+                                        prev_log_id,
+                                        entries,
+                                        leader_commit,
+                                    };
 
-                            match raft.append_entries(raft_rpc).await {
-                                Ok(response) => {
-                                    let codec_response = match response {
+                                    match raft.append_entries(raft_rpc).await {
+                                        Ok(response) => {
+                                            let codec_response = match response {
                                         openraft::raft::AppendEntriesResponse::Success => {
                                             CodecAppendEntriesResponse::Success
                                         }
@@ -882,25 +910,31 @@ where
                                         }
                                     };
 
-                                    Ok((group_id, codec_response))
+                                            Ok((group_id, codec_response))
+                                        }
+                                        Err(e) => Err(format!(
+                                            "HeartbeatBatchMulti failed for group {}: {}",
+                                            group_id, e
+                                        )),
+                                    }
+                                } else {
+                                    Err(format!("Group {} not found", group_id))
                                 }
-                                Err(e) => Err(format!("HeartbeatBatchMulti failed for group {}: {}", group_id, e)),
                             }
-                        } else {
-                            Err(format!("Group {} not found", group_id))
-                        }
-                    }
-                })
-                .buffer_unordered(concurrency)
-                .try_collect()
-                .await;
+                        })
+                        .buffer_unordered(concurrency)
+                        .try_collect()
+                        .await;
 
                 match responses {
                     Ok(responses) => CodecRpcMessage::HeartbeatBatchMultiResponse {
                         request_id,
                         responses,
                     },
-                    Err(e) => CodecRpcMessage::Error { request_id, error: e },
+                    Err(e) => CodecRpcMessage::Error {
+                        request_id,
+                        error: e,
+                    },
                 }
             }
 
@@ -999,7 +1033,10 @@ mod tests {
     #[test]
     fn test_snapshot_accumulator_append_chunk() {
         let vote = CodecVote {
-            leader_id: crate::multi::codec::LeaderId { term: 1, node_id: 1 },
+            leader_id: crate::multi::codec::LeaderId {
+                term: 1,
+                node_id: 1,
+            },
             committed: true,
         };
         let meta = CodecSnapshotMeta {
@@ -1027,7 +1064,10 @@ mod tests {
     #[test]
     fn test_snapshot_accumulator_expiry() {
         let vote = CodecVote {
-            leader_id: crate::multi::codec::LeaderId { term: 1, node_id: 1 },
+            leader_id: crate::multi::codec::LeaderId {
+                term: 1,
+                node_id: 1,
+            },
             committed: true,
         };
         let meta = CodecSnapshotMeta {
@@ -1050,7 +1090,10 @@ mod tests {
         let manager = SnapshotTransferManager::new(Duration::from_secs(60));
 
         let vote = CodecVote {
-            leader_id: crate::multi::codec::LeaderId { term: 1, node_id: 1 },
+            leader_id: crate::multi::codec::LeaderId {
+                term: 1,
+                node_id: 1,
+            },
             committed: true,
         };
         let meta = CodecSnapshotMeta {
@@ -1087,7 +1130,10 @@ mod tests {
         let manager = SnapshotTransferManager::new(Duration::from_secs(1));
 
         let vote = CodecVote {
-            leader_id: crate::multi::codec::LeaderId { term: 1, node_id: 1 },
+            leader_id: crate::multi::codec::LeaderId {
+                term: 1,
+                node_id: 1,
+            },
             committed: true,
         };
         let meta = CodecSnapshotMeta {

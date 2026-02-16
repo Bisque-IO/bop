@@ -46,8 +46,8 @@ use std::error;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{self, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{self, AtomicUsize, Ordering};
 use std::task::Context;
 use std::task::Poll;
 

@@ -27,22 +27,17 @@ const BENCHMARKS: &[BenchmarkConfig] = &[
     // BenchmarkConfig {
     //     worker_count: 1,
     //     total_tasks: 128,
-    //     yields_per_task: 100_000, // 12.8M yields total
-    // },
-    // BenchmarkConfig {
-    //     worker_count: 2,
-    //     total_tasks: 256,
-    //     yields_per_task: 100_000, // 25.6M yields total
+    //     yields_per_task: 10_000,
     // },
     // BenchmarkConfig {
     //     worker_count: 4,
     //     total_tasks: 512,
-    //     yields_per_task: 100_000, // 51.2M yields total
+    //     yields_per_task: 10_000,
     // },
     BenchmarkConfig {
-        worker_count: 8,
+        worker_count: 128,
         total_tasks: 1024,
-        yields_per_task: 10_000, // 51.2M yields total
+        yields_per_task: 10_000,
     },
 ];
 
@@ -55,8 +50,8 @@ async fn yield_n_times_maniac(mut remaining: usize) {
 
 async fn yield_n_times_tokio(mut remaining: usize) {
     while remaining > 0 {
-        tokio::task::yield_now().await;
-        // futures_lite::future::yield_now().await;
+        // tokio::task::yield_now().await;
+        futures_lite::future::yield_now().await;
         remaining -= 1;
     }
 }
@@ -70,7 +65,7 @@ fn run_maniac_benchmark(config: &BenchmarkConfig) {
     let _arena_config =
         TaskArenaConfig::new(DEFAULT_LEAVES, DEFAULT_TASKS_PER_LEAF).expect("arena config");
     let runtime =
-        maniac::runtime::new_multi_threaded(config.worker_count, (config.worker_count * 8) * 4096)
+        maniac::runtime::new_multi_threaded(config.worker_count, (config.worker_count * 16) * 4096)
             .expect("runtime");
 
     let mut completion_counters = Vec::with_capacity(config.total_tasks);

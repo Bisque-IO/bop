@@ -8,12 +8,12 @@
 //! Run with: cargo run --release --example dashmap_vs_congee_bench
 
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use congee::epoch;
 use congee::U64Congee;
+use congee::epoch;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
@@ -462,12 +462,9 @@ fn bench_dashmap(num_entries: u64, num_threads: usize, duration_secs: u64) -> Be
 
     // Read-only benchmark
     let idx = index.clone();
-    let read_ops = bench_reads(
-        num_entries,
-        num_threads,
-        duration_secs,
-        move |group_id| idx.get(group_id),
-    );
+    let read_ops = bench_reads(num_entries, num_threads, duration_secs, move |group_id| {
+        idx.get(group_id)
+    });
 
     // Write benchmark (insert/remove cycle)
     let idx1 = index.clone();
@@ -517,12 +514,9 @@ fn bench_congee(num_entries: u64, num_threads: usize, duration_secs: u64) -> Ben
 
     // Read-only benchmark
     let idx = index.clone();
-    let read_ops = bench_reads(
-        num_entries,
-        num_threads,
-        duration_secs,
-        move |group_id| idx.get(group_id),
-    );
+    let read_ops = bench_reads(num_entries, num_threads, duration_secs, move |group_id| {
+        idx.get(group_id)
+    });
 
     // Write benchmark
     let idx1 = index.clone();
@@ -572,12 +566,9 @@ fn bench_congee_rwlock(num_entries: u64, num_threads: usize, duration_secs: u64)
 
     // Read-only benchmark
     let idx = index.clone();
-    let read_ops = bench_reads(
-        num_entries,
-        num_threads,
-        duration_secs,
-        move |group_id| idx.get(group_id),
-    );
+    let read_ops = bench_reads(num_entries, num_threads, duration_secs, move |group_id| {
+        idx.get(group_id)
+    });
 
     // Write benchmark
     let idx1 = index.clone();
@@ -629,12 +620,9 @@ fn bench_atomic_slab(num_entries: u64, num_threads: usize, duration_secs: u64) -
 
     // Read-only benchmark
     let idx = index.clone();
-    let read_ops = bench_reads(
-        num_entries,
-        num_threads,
-        duration_secs,
-        move |group_id| idx.get(group_id),
-    );
+    let read_ops = bench_reads(num_entries, num_threads, duration_secs, move |group_id| {
+        idx.get(group_id)
+    });
 
     // Write benchmark
     let idx1 = index.clone();
@@ -685,12 +673,9 @@ fn bench_two_level_slab(num_entries: u64, num_threads: usize, duration_secs: u64
 
     // Read-only benchmark
     let idx = index.clone();
-    let read_ops = bench_reads(
-        num_entries,
-        num_threads,
-        duration_secs,
-        move |group_id| idx.get(group_id),
-    );
+    let read_ops = bench_reads(num_entries, num_threads, duration_secs, move |group_id| {
+        idx.get(group_id)
+    });
 
     // Write benchmark
     let idx1 = index.clone();

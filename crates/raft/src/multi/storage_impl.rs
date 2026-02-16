@@ -66,6 +66,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering}
 use std::time::Duration;
 
 use super::manifest_mdbx::{ManifestManager, SegmentMeta};
+use super::segment_footer::{SegmentFooter, SegmentFooterTracker, read_footer_from_segment};
 use parking_lot::RwLock;
 use tokio::sync::oneshot;
 
@@ -885,18 +886,14 @@ where
     let mut last_log_id_hint: Option<LogId<C>> = None;
     let mut cache: Vec<(u64, Arc<C::Entry>)> = Vec::new();
     let mut cache_low: u64 = 0;
-    // Note: cache_low is computed and used later in recovery process
 
-    // Reusable buffer for reading record fields/bodies.
     let mut read_buf: Vec<u8> = Vec::with_capacity(4096);
     let mut dio_scratch = AlignedBuf::default();
 
-    // Calculate max record size from config
     let max_record_size = manifest
         .get(0)
         .and_then(|m| m.1.checked_sub(1).map(|i| i as usize))
         .unwrap_or(DEFAULT_CHUNK_SIZE);
-    // Note: cache_low is computed and used later in recovery process
 
     for (segment_id, valid_bytes) in manifest.iter().copied() {
         if valid_bytes == 0 {
@@ -906,7 +903,6 @@ where
         let path = SegmentedLog::segment_path(group_dir, group_id, segment_id);
         let file = open_segment_file(&path, true, false, false, false).await?;
 
-        // Use streaming record iterator for efficient bulk reading
         let mut record_iter = RecordIterator::new(
             &file,
             0u64,
@@ -915,7 +911,6 @@ where
             &mut dio_scratch,
         );
 
-        // Pre-read first chunk
         record_iter.read_chunk().await?;
 
         while let Some((record_offset, parsed)) = record_iter.next_record().await? {
@@ -959,7 +954,6 @@ where
                     last_index = last_index.max(index);
                     last_log_id_hint = Some(log_id);
 
-                    // Maintain a simple "last N" cache window.
                     if max_cache_entries > 0 {
                         let keep = max_cache_entries as u64;
                         cache_low = last_index
@@ -967,13 +961,11 @@ where
                             .max(first_index);
                         if index >= cache_low {
                             cache.push((index, Arc::new(entry)));
-                            // Prune old cached entries.
                             cache.retain(|(i, _)| *i >= cache_low);
                         }
                     }
                 }
                 RecordType::Truncate => {
-                    // New format: full LogId. Backwards compat: old payload was only u64 index.
                     let (truncate_index, truncate_log_id) =
                         match CodecLogId::decode_from_slice(&parsed.payload) {
                             Ok(codec_lid) => {
@@ -1013,9 +1005,7 @@ where
                     first_index = purge_index.saturating_add(1);
                     cache.retain(|(i, _)| *i >= first_index);
                 }
-                _ => {
-                    // LibSQL and other record types are ignored for Raft recovery state here.
-                }
+                _ => {}
             }
         }
     }
@@ -1366,22 +1356,15 @@ impl AtomicLogId {
     }
 }
 
-/// Write request sent to shard writer task
 enum WriteRequest<C: RaftTypeConfig> {
-    /// Write data to the log
     Write {
         data: Vec<u8>,
-        /// Optional entry index range covered by this write (min,max), for segment metadata/compaction.
         entry_index_range: Option<(u64, u64)>,
-        /// Complete these callbacks after the next durable fsync that covers this write.
+        record_infos: Vec<RecordInfo>,
         callbacks: Callbacks<C>,
-        /// If true, fsync immediately after writing (and before replying).
         sync_immediately: bool,
-        /// Response completes when the write is processed; includes fsync result if `sync_immediately`.
-        /// Always returns the `Vec<u8>` so the sender can reuse its capacity.
         respond_to: oneshot::Sender<(io::Result<()>, Vec<u8>, Option<WritePlacement>)>,
     },
-    /// Shutdown the writer task
     Shutdown,
 }
 
@@ -1438,31 +1421,33 @@ struct WritePlacement {
     offset: u64,
 }
 
-/// Manages segmented log files for a group
+/// Information about a single record within a write batch, used for footer tracking.
+#[derive(Debug, Clone, Copy)]
+struct RecordInfo {
+    /// Type of the record
+    record_type: RecordType,
+    /// For Entry records: the log entry index
+    entry_index: Option<u64>,
+    /// Offset of the record relative to the start of the batch
+    relative_offset: u64,
+    /// Length of the record in bytes
+    len: u32,
+}
+
 struct SegmentedLog {
-    /// Base directory for this group's segments
     group_dir: PathBuf,
-    /// Group ID
     group_id: u64,
-    /// Maximum segment size
     segment_size: u64,
-    /// Current segment ID (monotonically increasing)
     current_segment_id: u64,
-    /// Current segment file
     current_file: File,
-    /// Current segment's size
     current_size: u64,
-    /// First and last entry index contained in this segment (best-effort; updated on writes).
-    /// Used for segment-level compaction decisions.
     min_entry_index: Option<u64>,
     max_entry_index: Option<u64>,
-    /// Best-effort write time range (unix nanos) for entries written into this segment.
     min_ts: Option<u64>,
     max_ts: Option<u64>,
-    /// A sealed segment update emitted when `rotate()` is called.
     sealed_update: Option<SegmentMeta>,
-    /// Manifest update channel (best-effort, non-blocking).
     manifest_tx: MAsyncTx<SegmentMeta>,
+    footer_tracker: SegmentFooterTracker,
 }
 
 impl SegmentedLog {
@@ -1624,6 +1609,7 @@ impl SegmentedLog {
                 max_ts: None,
                 sealed_update: None,
                 manifest_tx,
+                footer_tracker: SegmentFooterTracker::new(group_id, current_segment_id),
             },
             replay_manifest,
         ))
@@ -1782,15 +1768,14 @@ impl SegmentedLog {
         Ok((offset, file_len))
     }
 
-    /// Write data to the current segment, rotating if needed
     async fn write(
         &mut self,
         data: Vec<u8>,
         index_range: Option<(u64, u64)>,
+        record_infos: &[RecordInfo],
     ) -> io::Result<(Vec<u8>, WritePlacement)> {
         let data_len = data.len() as u64;
 
-        // Check if we need to rotate to a new segment
         let mut base_offset = self.current_size;
         if self.current_size + data_len > self.segment_size {
             self.rotate().await?;
@@ -1804,9 +1789,24 @@ impl SegmentedLog {
                 Some(self.max_entry_index.map(|v| v.max(max_i)).unwrap_or(max_i));
         }
 
-        // Write to current segment at the computed offset.
-        // The file may be opened with direct I/O; use the unaligned helper to stay correct with
-        // variable-length records.
+        for info in record_infos {
+            let absolute_offset = base_offset + info.relative_offset;
+            match info.record_type {
+                RecordType::Vote => self.footer_tracker.record_vote(),
+                RecordType::Entry => {
+                    if let Some(entry_index) = info.entry_index {
+                        self.footer_tracker.record_entry(entry_index);
+                    }
+                }
+                RecordType::Truncate => self.footer_tracker.record_truncate(),
+                RecordType::Purge => self.footer_tracker.record_purge(),
+                RecordType::WalFrame => self.footer_tracker.record_wal_frame(),
+                RecordType::Changeset => self.footer_tracker.record_changeset(),
+                RecordType::Checkpoint => self.footer_tracker.record_checkpoint(),
+                RecordType::WalMetadata => self.footer_tracker.record_wal_metadata(),
+            }
+        }
+
         self.current_file
             .write_all_at_unaligned(base_offset, &data)
             .await?;
@@ -1822,12 +1822,33 @@ impl SegmentedLog {
         ))
     }
 
-    /// Rotate to a new segment
     async fn rotate(&mut self) -> io::Result<()> {
-        // Sync current segment before rotating
+        let footer = std::mem::replace(
+            &mut self.footer_tracker,
+            SegmentFooterTracker::new(self.group_id, self.current_segment_id + 1),
+        )
+        .build(self.current_size);
+
+        let footer_bytes = footer.encode();
+        let footer_len = footer_bytes.len() as u64;
+
+        if self.current_size + footer_len <= self.segment_size {
+            self.current_file
+                .write_all_at_unaligned(self.current_size, &footer_bytes)
+                .await?;
+            self.current_size += footer_len;
+        } else {
+            tracing::warn!(
+                "segment {} full, footer truncated (data_size={}, footer_size={}, segment_size={})",
+                self.current_segment_id,
+                self.current_size,
+                footer_len,
+                self.segment_size
+            );
+        }
+
         self.current_file.sync_all().await?;
 
-        // Record a sealed segment update (best-effort) for the segment we're leaving.
         self.sealed_update = Some(SegmentMeta {
             group_id: self.group_id,
             segment_id: self.current_segment_id,
@@ -1839,11 +1860,9 @@ impl SegmentedLog {
             sealed: true,
         });
 
-        // Create new segment
         self.current_segment_id += 1;
         let path = Self::segment_path(&self.group_dir, self.group_id, self.current_segment_id);
 
-        // Use async OpenOptions to create the new segment file
         self.current_file = open_segment_file(&path, true, true, true, true).await?;
         self.current_size = 0;
         self.min_entry_index = None;
@@ -1980,6 +1999,7 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
                     WriteRequest::Write {
                         mut data,
                         entry_index_range,
+                        record_infos,
                         callbacks,
                         sync_immediately,
                         respond_to,
@@ -1999,7 +2019,8 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
                             );
 
                             if !data.is_empty() {
-                                let write_result = log.write(data, entry_index_range).await;
+                                let write_result =
+                                    log.write(data, entry_index_range, &record_infos).await;
                                 match write_result {
                                     Ok((returned, pl)) => {
                                         data = returned;
@@ -2160,11 +2181,11 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
         }
     }
 
-    /// Send a write request to the shard
     async fn write(
         &self,
         data: Vec<u8>,
         entry_index_range: Option<(u64, u64)>,
+        record_infos: Vec<RecordInfo>,
         callbacks: Callbacks<C>,
         sync_immediately: bool,
     ) -> io::Result<(Vec<u8>, Option<WritePlacement>)> {
@@ -2184,6 +2205,7 @@ impl<C: RaftTypeConfig + 'static> ShardState<C> {
             .send_async(WriteRequest::Write {
                 data,
                 entry_index_range,
+                record_infos,
                 callbacks,
                 sync_immediately,
                 respond_to: tx,
@@ -2492,6 +2514,7 @@ impl<C: RaftTypeConfig + 'static> PerGroupLogStorage<C> {
             disk_read_buf: Vec::with_capacity(4096),
             disk_dio_scratch: AlignedBuf::default(),
             index_updates_buf: Vec::with_capacity(256),
+            record_infos_buf: Vec::with_capacity(256),
         })
     }
 
@@ -2600,16 +2623,12 @@ pub struct GroupLogStorage<C: RaftTypeConfig> {
     group_id: u64,
     config: StorageConfig,
     state: Arc<GroupState<C>>,
-    /// Reusable buffer for encoding records (avoids allocation per write)
     encode_buf: Vec<u8>,
-    /// Reusable buffer for encoding payloads before wrapping in record format
     payload_buf: Vec<u8>,
-    /// Reusable buffer for reading records from disk (avoid allocation per read).
     disk_read_buf: Vec<u8>,
-    /// Scratch buffer for direct-I/O fallback reads (reused).
     disk_dio_scratch: AlignedBuf,
-    /// Reusable index update list for batched `append()` (avoid allocation per call).
     index_updates_buf: Vec<(u64, u64, u32)>,
+    record_infos_buf: Vec<RecordInfo>,
 }
 
 impl<C: RaftTypeConfig> Clone for GroupLogStorage<C> {
@@ -2618,18 +2637,17 @@ impl<C: RaftTypeConfig> Clone for GroupLogStorage<C> {
             group_id: self.group_id,
             config: self.config.clone(),
             state: self.state.clone(),
-            encode_buf: Vec::new(), // Each clone gets its own buffer
+            encode_buf: Vec::new(),
             payload_buf: Vec::new(),
             disk_read_buf: Vec::new(),
             disk_dio_scratch: AlignedBuf::default(),
             index_updates_buf: Vec::new(),
+            record_infos_buf: Vec::new(),
         }
     }
 }
 
 impl<C: RaftTypeConfig> GroupLogStorage<C> {
-    /// Send the data in encode_buf to the shard writer.
-    /// This takes the buffer and gives it to the writer task.
     async fn send_encoded(
         &mut self,
         entry_index_range: Option<(u64, u64)>,
@@ -2637,25 +2655,36 @@ impl<C: RaftTypeConfig> GroupLogStorage<C> {
         sync_immediately: bool,
     ) -> Result<Option<WritePlacement>, io::Error> {
         let data = std::mem::take(&mut self.encode_buf);
+        let record_infos = std::mem::take(&mut self.record_infos_buf);
         let (buf, placement) = self
             .state
             .shard
-            .write(data, entry_index_range, callbacks, sync_immediately)
+            .write(
+                data,
+                entry_index_range,
+                record_infos,
+                callbacks,
+                sync_immediately,
+            )
             .await?;
         self.encode_buf = buf;
         Ok(placement)
     }
 
-    /// Encode a record into the internal buffer and send it to the shard writer.
-    /// The buffer is taken and a new empty buffer is received back from the channel
-    /// response (amortizing allocation over time).
     async fn write_record(
         &mut self,
         record_type: RecordType,
         payload: &[u8],
     ) -> Result<(), io::Error> {
-        encode_record_into(&mut self.encode_buf, record_type, self.group_id, payload);
-        // Records without IOFlushed callback must be durable before returning.
+        let record_start = self.encode_buf.len() as u64;
+        let record_len =
+            encode_record_into(&mut self.encode_buf, record_type, self.group_id, payload);
+        self.record_infos_buf.push(RecordInfo {
+            record_type,
+            entry_index: None,
+            relative_offset: record_start,
+            len: record_len as u32,
+        });
         let _ = self.send_encoded(None, Callbacks::None, true).await?;
         Ok(())
     }
@@ -3074,14 +3103,19 @@ where
             .encode_into(&mut self.payload_buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-        // Build the record directly from payload_buf contents
-        encode_record_into(
+        let record_start = self.encode_buf.len() as u64;
+        let record_len = encode_record_into(
             &mut self.encode_buf,
             RecordType::Vote,
             self.group_id,
             &self.payload_buf,
         );
-        // Vote must be durably persisted before returning.
+        self.record_infos_buf.push(RecordInfo {
+            record_type: RecordType::Vote,
+            entry_index: None,
+            relative_offset: record_start,
+            len: record_len as u32,
+        });
         let _ = self.send_encoded(None, Callbacks::None, true).await?;
 
         Ok(())
@@ -3097,18 +3131,17 @@ where
 
         self.encode_buf.clear();
         self.index_updates_buf.clear();
+        self.record_infos_buf.clear();
         for entry in entries {
             let log_id = entry.log_id();
             let index = log_id.index;
 
-            // Convert entry to codec type and serialize - reuse payload buffer
             let codec_entry: CodecEntry<RawBytes> = entry.to_codec();
             self.payload_buf.clear();
             codec_entry
                 .encode_into(&mut self.payload_buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-            // Append record to the batch buffer.
             let record_start = self.encode_buf.len() as u64;
             let record_len = append_record_into(
                 &mut self.encode_buf,
@@ -3118,11 +3151,15 @@ where
             );
             self.index_updates_buf
                 .push((index, record_start, record_len as u32));
+            self.record_infos_buf.push(RecordInfo {
+                record_type: RecordType::Entry,
+                entry_index: Some(index),
+                relative_offset: record_start,
+                len: record_len as u32,
+            });
 
-            // Store in cache
             self.state.cache.insert(index, Arc::new(entry));
 
-            // Update last index
             self.state.last_index.fetch_max(index, Ordering::Relaxed);
             last_log_id = Some(log_id);
         }
@@ -3175,18 +3212,24 @@ where
         self.state.last_index.store(index, Ordering::Relaxed);
         self.state.last_log_id.store(Some(&log_id));
 
-        // Persist truncation marker with CRC (store full LogId for recovery correctness).
         let codec_log_id: CodecLogId = log_id.to_codec();
         self.payload_buf.clear();
         codec_log_id
             .encode_into(&mut self.payload_buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        encode_record_into(
+        let record_start = self.encode_buf.len() as u64;
+        let record_len = encode_record_into(
             &mut self.encode_buf,
             RecordType::Truncate,
             self.group_id,
             &self.payload_buf,
         );
+        self.record_infos_buf.push(RecordInfo {
+            record_type: RecordType::Truncate,
+            entry_index: None,
+            relative_offset: record_start,
+            len: record_len as u32,
+        });
         let _ = self.send_encoded(None, Callbacks::None, true).await?;
         self.enforce_cache_window();
 
@@ -3207,21 +3250,25 @@ where
         self.state.first_index.store(index + 1, Ordering::Relaxed);
         self.state.last_purged_log_id.store(Some(&log_id));
 
-        // Persist purge marker with CRC - reuse payload buffer
         let codec_log_id: CodecLogId = log_id.to_codec();
         self.payload_buf.clear();
         codec_log_id
             .encode_into(&mut self.payload_buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-        // Build the record directly from payload_buf contents
-        encode_record_into(
+        let record_start = self.encode_buf.len() as u64;
+        let record_len = encode_record_into(
             &mut self.encode_buf,
             RecordType::Purge,
             self.group_id,
             &self.payload_buf,
         );
-        // Purge must be durably persisted before returning.
+        self.record_infos_buf.push(RecordInfo {
+            record_type: RecordType::Purge,
+            entry_index: None,
+            relative_offset: record_start,
+            len: record_len as u32,
+        });
         let _ = self.send_encoded(None, Callbacks::None, true).await?;
         self.enforce_cache_window();
         // Best-effort: compact fully-purged segments.

@@ -59,7 +59,7 @@ pub use crate::blocking::unblock;
 pub use worker::{SchedulerStats, WorkerSnapshot, WorkerStats};
 
 pub fn new_single_threaded() -> io::Result<DefaultRuntime> {
-    let tick_service = TickService::new(Duration::from_millis(1));
+    let tick_service = TickService::new(Duration::from_micros(500));
     tick_service.start();
     Ok(DefaultRuntime {
         executor: DefaultExecutor::new_with_tick_service(
@@ -89,7 +89,7 @@ pub fn new_multi_threaded(
     max_tasks = max_tasks.next_power_of_two();
     let config = ExecutorConfig::with_max_tasks(worker_count, max_tasks)?;
 
-    let tick_service = TickService::new(Duration::from_millis(1));
+    let tick_service = TickService::new(Duration::from_micros(500));
     tick_service.start();
 
     Ok(DefaultRuntime {

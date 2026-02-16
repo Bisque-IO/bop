@@ -295,7 +295,7 @@ impl TickService {
     pub fn start(self: &Arc<Self>) {
         let cpu_cores = crate::utils::cpu_cores();
         if cpu_cores.len() > 0 {
-            self.start_with_core(Some(cpu_cores[0]));
+            self.start_with_core(Some(cpu_cores[cpu_cores.len() - 1]));
         } else {
             self.start_with_core(None);
         }

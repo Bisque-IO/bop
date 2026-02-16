@@ -7,8 +7,13 @@ pub const SPIN_LIMIT: u16 = 6;
 pub const DEFAULT_LIMIT: u16 = 6;
 pub const MAX_LIMIT: u16 = 10;
 
-static DETECT_CONFIG: AtomicU32 =
-    AtomicU32::new(BackoffConfig { spin_limit: SPIN_LIMIT, limit: DEFAULT_LIMIT }.to_u32());
+static DETECT_CONFIG: AtomicU32 = AtomicU32::new(
+    BackoffConfig {
+        spin_limit: SPIN_LIMIT,
+        limit: DEFAULT_LIMIT,
+    }
+    .to_u32(),
+);
 
 static _INIT: AtomicBool = AtomicBool::new(false);
 
@@ -24,7 +29,10 @@ static _INIT: AtomicBool = AtomicBool::new(false);
 /// and `thread::available_parallelism()` might require I/O on system files, you may not
 /// like it in sandbox scenario.
 pub fn detect_backoff_cfg() {
-    if _INIT.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+    if _INIT
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
         return;
     }
     if thread::available_parallelism().unwrap_or(NonZero::new(1).unwrap())
@@ -33,9 +41,17 @@ pub fn detect_backoff_cfg() {
         // For one core (like VM machine), better use yield_now instead of spin_loop.
         DETECT_CONFIG.store(
             #[cfg(target_arch = "x86_64")]
-            BackoffConfig { spin_limit: 0, limit: DEFAULT_LIMIT }.to_u32(),
+            BackoffConfig {
+                spin_limit: 0,
+                limit: DEFAULT_LIMIT,
+            }
+            .to_u32(),
             #[cfg(not(target_arch = "x86_64"))]
-            BackoffConfig { spin_limit: 0, limit: MAX_LIMIT }.to_u32(),
+            BackoffConfig {
+                spin_limit: 0,
+                limit: MAX_LIMIT,
+            }
+            .to_u32(),
             Ordering::Release,
         );
     }
@@ -177,18 +193,27 @@ mod tests {
 
     #[test]
     fn test_backoff() {
-        let backoff = Backoff::new(BackoffConfig { spin_limit: 1, limit: 0 });
+        let backoff = Backoff::new(BackoffConfig {
+            spin_limit: 1,
+            limit: 0,
+        });
         assert!(backoff.is_completed());
         println!("backoff size {}", size_of::<Backoff>());
         println!("BackoffConfig size {}", size_of::<BackoffConfig>());
         assert_eq!(size_of::<BackoffConfig>(), size_of::<u32>());
-        let config = BackoffConfig { spin_limit: 6, limit: 7 };
+        let config = BackoffConfig {
+            spin_limit: 6,
+            limit: 7,
+        };
         let config_i = config.to_u32();
         let _config = BackoffConfig::from_u32(config_i);
         assert_eq!(config.spin_limit, _config.spin_limit);
         assert_eq!(config.limit, _config.limit);
 
-        let mut backoff = Backoff::new(BackoffConfig { spin_limit: 2, limit: 4 });
+        let mut backoff = Backoff::new(BackoffConfig {
+            spin_limit: 2,
+            limit: 4,
+        });
         assert_eq!(backoff.step, 0);
         backoff.spin();
         assert_eq!(backoff.step, 1);

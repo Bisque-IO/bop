@@ -1225,10 +1225,12 @@ impl<D: Decode> Decode for RpcMessage<D> {
                 request_id: u64::decode(reader)?,
                 responses: Vec::<(u64, ResponseMessage)>::decode(reader)?,
             }),
-            MessageType::HeartbeatBatchMultiResponse => Ok(RpcMessage::HeartbeatBatchMultiResponse {
-                request_id: u64::decode(reader)?,
-                responses: Vec::<(u64, AppendEntriesResponse)>::decode(reader)?,
-            }),
+            MessageType::HeartbeatBatchMultiResponse => {
+                Ok(RpcMessage::HeartbeatBatchMultiResponse {
+                    request_id: u64::decode(reader)?,
+                    responses: Vec::<(u64, AppendEntriesResponse)>::decode(reader)?,
+                })
+            }
             MessageType::ErrorResponse => Ok(RpcMessage::Error {
                 request_id: u64::decode(reader)?,
                 error: String::decode(reader)?,
@@ -1393,7 +1395,14 @@ where
             .collect();
         let nodes: Vec<(u64, BasicNode)> = self
             .nodes()
-            .map(|(id, node)| (*id, BasicNode { addr: node.addr.clone() }))
+            .map(|(id, node)| {
+                (
+                    *id,
+                    BasicNode {
+                        addr: node.addr.clone(),
+                    },
+                )
+            })
             .collect();
         Membership { configs, nodes }
     }
@@ -1406,7 +1415,11 @@ where
 {
     fn from_codec(codec: Membership) -> Self {
         use std::collections::{BTreeMap, BTreeSet};
-        let configs: Vec<BTreeSet<u64>> = codec.configs.into_iter().map(|c| c.into_iter().collect()).collect();
+        let configs: Vec<BTreeSet<u64>> = codec
+            .configs
+            .into_iter()
+            .map(|c| c.into_iter().collect())
+            .collect();
         let nodes: BTreeMap<u64, openraft::impls::BasicNode> = codec
             .nodes
             .into_iter()
@@ -1522,7 +1535,9 @@ where
 {
     fn from_codec(codec: StoredMembership) -> Self {
         openraft::StoredMembership::new(
-            codec.log_id.map(|lid| openraft::LogId::<C>::from_codec(lid)),
+            codec
+                .log_id
+                .map(|lid| openraft::LogId::<C>::from_codec(lid)),
             openraft::Membership::<C>::from_codec(codec.membership),
         )
     }
@@ -1559,7 +1574,9 @@ where
 {
     fn from_codec(codec: SnapshotMeta) -> Self {
         openraft::storage::SnapshotMeta {
-            last_log_id: codec.last_log_id.map(|lid| openraft::LogId::<C>::from_codec(lid)),
+            last_log_id: codec
+                .last_log_id
+                .map(|lid| openraft::LogId::<C>::from_codec(lid)),
             last_membership: openraft::StoredMembership::<C>::from_codec(codec.last_membership),
             snapshot_id: codec.snapshot_id,
         }
@@ -1871,7 +1888,10 @@ mod tests {
         // Heartbeats are AppendEntries requests with empty entries.
         let hb1 = AppendEntriesRequest::<Vec<u8>> {
             vote: Vote {
-                leader_id: LeaderId { term: 1, node_id: 10 },
+                leader_id: LeaderId {
+                    term: 1,
+                    node_id: 10,
+                },
                 committed: true,
             },
             prev_log_id: None,
@@ -1880,16 +1900,25 @@ mod tests {
         };
         let hb2 = AppendEntriesRequest::<Vec<u8>> {
             vote: Vote {
-                leader_id: LeaderId { term: 1, node_id: 10 },
+                leader_id: LeaderId {
+                    term: 1,
+                    node_id: 10,
+                },
                 committed: true,
             },
             prev_log_id: Some(LogId {
-                leader_id: LeaderId { term: 1, node_id: 10 },
+                leader_id: LeaderId {
+                    term: 1,
+                    node_id: 10,
+                },
                 index: 100,
             }),
             entries: vec![],
             leader_commit: Some(LogId {
-                leader_id: LeaderId { term: 1, node_id: 10 },
+                leader_id: LeaderId {
+                    term: 1,
+                    node_id: 10,
+                },
                 index: 100,
             }),
         };
@@ -1914,7 +1943,10 @@ mod tests {
                 (
                     3u64,
                     AppendEntriesResponse::HigherVote(Vote {
-                        leader_id: LeaderId { term: 9, node_id: 99 },
+                        leader_id: LeaderId {
+                            term: 9,
+                            node_id: 99,
+                        },
                         committed: true,
                     }),
                 ),

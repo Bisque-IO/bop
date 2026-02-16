@@ -61,7 +61,6 @@ impl File {
             fstat_to_metadata(fd).await
         }
     }
-
 }
 
 impl AsRawFd for File {
@@ -122,9 +121,7 @@ async fn fstat_to_metadata(fd: RawFd) -> std::io::Result<Metadata> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let file_attr = FileAttr {
-            stat: stat_result,
-        };
+        let file_attr = FileAttr { stat: stat_result };
         Ok(Metadata(file_attr))
     }
 }
@@ -232,7 +229,7 @@ mod fallback_impl {
     // Wrapper type for iovec pointer to implement Send
     // Safety: The caller ensures the buffers outlive the blocking operation
     #[derive(Clone, Copy)]
-    struct SendPtr(usize);  // Store as usize to avoid raw pointer Send issues
+    struct SendPtr(usize); // Store as usize to avoid raw pointer Send issues
     unsafe impl Send for SendPtr {}
     unsafe impl Sync for SendPtr {}
 

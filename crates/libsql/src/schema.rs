@@ -1,4 +1,3 @@
-
 /// Database ID type
 pub type DatabaseId = u64;
 

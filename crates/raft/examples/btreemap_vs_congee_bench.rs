@@ -8,12 +8,12 @@
 //! Run with: cargo run --release --example btreemap_vs_congee_bench
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use congee::epoch;
 use congee::U64Congee;
+use congee::epoch;
 use parking_lot::RwLock;
 
 // ============================================================================
@@ -444,7 +444,11 @@ fn print_results(results: &[BenchResult]) {
     for r in results {
         println!(
             "{:<25} {:>15.0} {:>15.0} {:>15.0} {:>15.0}",
-            r.name, r.read_ops_per_sec, r.write_ops_per_sec, r.mixed_ops_per_sec, r.range_ops_per_sec
+            r.name,
+            r.read_ops_per_sec,
+            r.write_ops_per_sec,
+            r.mixed_ops_per_sec,
+            r.range_ops_per_sec
         );
     }
 

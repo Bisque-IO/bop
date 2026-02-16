@@ -33,8 +33,8 @@
 use crate::raft_log::BranchRef;
 use crate::virtual_wal::WalFrame;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum frames per batch (fits in 16 bits with some headroom)
 pub const MAX_FRAMES_PER_BATCH: usize = 4096;
@@ -46,11 +46,7 @@ pub const BATCH_HEADER_SIZE: usize = 16;
 ///
 /// Returns the encoded bytes. Caller is responsible for framing/transport.
 #[inline]
-pub fn encode_batch(
-    db_id: u64,
-    start_frame: u64,
-    frames: &[WalFrame],
-) -> Vec<u8> {
+pub fn encode_batch(db_id: u64, start_frame: u64, frames: &[WalFrame]) -> Vec<u8> {
     debug_assert!(frames.len() <= MAX_FRAMES_PER_BATCH);
     debug_assert!(start_frame <= 0x0000_FFFF_FFFF_FFFF); // 48 bits max
 
@@ -287,7 +283,8 @@ impl GapBuffer {
 
         // Update page index - remove entries pointing to trimmed frames
         for page_no in pages_to_check {
-            self.page_index.remove_if(&page_no, |_, frame_no| *frame_no <= durable_frame);
+            self.page_index
+                .remove_if(&page_no, |_, frame_no| *frame_no <= durable_frame);
         }
 
         // Update min_frame
@@ -393,9 +390,30 @@ mod tests {
 
         // Insert some frames
         buffer.insert_batch(vec![
-            (10, WalFrame { page_no: 1, db_size: 0, data: vec![0; 64] }),
-            (11, WalFrame { page_no: 2, db_size: 0, data: vec![0; 64] }),
-            (12, WalFrame { page_no: 1, db_size: 0, data: vec![1; 64] }), // page 1 updated
+            (
+                10,
+                WalFrame {
+                    page_no: 1,
+                    db_size: 0,
+                    data: vec![0; 64],
+                },
+            ),
+            (
+                11,
+                WalFrame {
+                    page_no: 2,
+                    db_size: 0,
+                    data: vec![0; 64],
+                },
+            ),
+            (
+                12,
+                WalFrame {
+                    page_no: 1,
+                    db_size: 0,
+                    data: vec![1; 64],
+                },
+            ), // page 1 updated
         ]);
 
         assert_eq!(buffer.min_frame(), 10);
@@ -420,12 +438,10 @@ mod tests {
         let data = vec![
             // Frame 1
             1u8, 0, 0, 0, // page_no
-            0, 0, 0, 0,   // db_size
-            0xAA, 0xAA,   // data (2 bytes)
+            0, 0, 0, 0, // db_size
+            0xAA, 0xAA, // data (2 bytes)
             // Frame 2
-            2, 0, 0, 0,
-            0, 0, 0, 0,
-            0xBB, 0xBB,
+            2, 0, 0, 0, 0, 0, 0, 0, 0xBB, 0xBB,
         ];
 
         let iter = FrameIterator::new(&data, 2, 2, 100);

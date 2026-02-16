@@ -1,10 +1,10 @@
-use maniac::io::{AsyncReadRent, AsyncWriteRent};
 use crate::multi::config::MultiRaftConfig;
 use crate::multi::network::GroupNetworkFactory;
 use crate::multi::network::MultiRaftNetworkFactory;
 use crate::multi::network::MultiplexedTransport;
 use crate::multi::storage::MultiRaftLogStorage;
 use dashmap::DashMap;
+use maniac::io::{AsyncReadRent, AsyncWriteRent};
 use openraft::Config;
 use openraft::Raft;
 use openraft::RaftTypeConfig;
@@ -45,7 +45,10 @@ where
     {
         Self {
             groups: DashMap::new(),
-            network_factory: Arc::new(MultiRaftNetworkFactory::new(Arc::new(transport), config.clone())),
+            network_factory: Arc::new(MultiRaftNetworkFactory::new(
+                Arc::new(transport),
+                config.clone(),
+            )),
             storage: Arc::new(storage),
             config,
         }
@@ -115,7 +118,10 @@ mod tests {
     use crate::multi::type_config::ManiacRaftTypeConfig;
     use dashmap::DashMap;
     use openraft::error::{InstallSnapshotError, RPCError, RaftError};
-    use openraft::raft::{AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse, VoteRequest, VoteResponse};
+    use openraft::raft::{
+        AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
+        InstallSnapshotResponse, VoteRequest, VoteResponse,
+    };
     use openraft::storage::{IOFlushed, LogState, RaftLogReader, RaftLogStorage, RaftStateMachine};
     use openraft::{LogId, OptionalSend};
     use std::collections::BTreeMap;
@@ -176,9 +182,7 @@ mod tests {
                 .map(|e| e.value().log_id);
             let last_purged_index = self.last_purged.load(Ordering::Relaxed);
             let last_purged_log_id = if last_purged_index > 0 {
-                self.log
-                    .get(&last_purged_index)
-                    .map(|e| e.value().log_id)
+                self.log.get(&last_purged_index).map(|e| e.value().log_id)
             } else {
                 None
             };
@@ -258,7 +262,9 @@ mod tests {
             Ok(entries)
         }
 
-        async fn read_vote(&mut self) -> Result<Option<openraft::impls::Vote<TestConfig>>, std::io::Error> {
+        async fn read_vote(
+            &mut self,
+        ) -> Result<Option<openraft::impls::Vote<TestConfig>>, std::io::Error> {
             Ok(self.vote.read().clone())
         }
     }
@@ -315,22 +321,19 @@ mod tests {
         async fn applied_state(
             &mut self,
         ) -> Result<
-            (Option<LogId<TestConfig>>, openraft::StoredMembership<TestConfig>),
+            (
+                Option<LogId<TestConfig>>,
+                openraft::StoredMembership<TestConfig>,
+            ),
             std::io::Error,
         > {
             Ok((None, openraft::StoredMembership::default()))
         }
 
-        async fn apply<Strm>(
-            &mut self,
-            mut entries: Strm,
-        ) -> Result<(), std::io::Error>
+        async fn apply<Strm>(&mut self, mut entries: Strm) -> Result<(), std::io::Error>
         where
             Strm: futures::Stream<
-                    Item = Result<
-                        openraft::storage::EntryResponder<TestConfig>,
-                        std::io::Error,
-                    >,
+                    Item = Result<openraft::storage::EntryResponder<TestConfig>, std::io::Error>,
                 > + Unpin
                 + OptionalSend,
         {
@@ -353,10 +356,7 @@ mod tests {
 
         async fn begin_receiving_snapshot(
             &mut self,
-        ) -> Result<
-            std::io::Cursor<Vec<u8>>,
-            std::io::Error,
-        > {
+        ) -> Result<std::io::Cursor<Vec<u8>>, std::io::Error> {
             Ok(std::io::Cursor::new(Vec::new()))
         }
 
@@ -371,16 +371,15 @@ mod tests {
 
         async fn get_current_snapshot(
             &mut self,
-        ) -> Result<
-            Option<openraft::storage::Snapshot<TestConfig>>,
-            std::io::Error,
-        > {
+        ) -> Result<Option<openraft::storage::Snapshot<TestConfig>>, std::io::Error> {
             Ok(None)
         }
     }
 
     impl openraft::RaftSnapshotBuilder<TestConfig> for TestStateMachine {
-        async fn build_snapshot(&mut self) -> Result<openraft::storage::Snapshot<TestConfig>, std::io::Error> {
+        async fn build_snapshot(
+            &mut self,
+        ) -> Result<openraft::storage::Snapshot<TestConfig>, std::io::Error> {
             let data = self.data.read();
             let content = bincode::serde::encode_to_vec(&*data, bincode::config::standard())
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -405,7 +404,8 @@ mod tests {
             _target: u64,
             _group_id: u64,
             _rpc: AppendEntriesRequest<TestConfig>,
-        ) -> Result<AppendEntriesResponse<TestConfig>, RPCError<TestConfig, RaftError<TestConfig>>> {
+        ) -> Result<AppendEntriesResponse<TestConfig>, RPCError<TestConfig, RaftError<TestConfig>>>
+        {
             Ok(AppendEntriesResponse::Success)
         }
 

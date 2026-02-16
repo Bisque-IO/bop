@@ -7,24 +7,24 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{SocketAddr, TcpListener};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures::FutureExt;
-use maniac_raft::multi::{
-    DefaultNodeRegistry, ManiacRpcServer, ManiacRpcServerConfig,
-    ManiacTcpTransport, ManiacTcpTransportConfig, MultiRaftConfig, MultiRaftManager,
-    MultiplexedLogStorage, MultiplexedStorageConfig, MultiRaftNetworkFactory,
-};
-use maniac_raft::multi::network::GroupNetworkFactory;
 use maniac_raft::multi::NodeAddressResolver;
-use maniac_raft::{ManiacRaftTypeConfig, multi::codec};
 use maniac_raft::multi::codec::{Decode, Encode};
-use openraft::storage::RaftStateMachine;
+use maniac_raft::multi::network::GroupNetworkFactory;
+use maniac_raft::multi::{
+    DefaultNodeRegistry, ManiacRpcServer, ManiacRpcServerConfig, ManiacTcpTransport,
+    ManiacTcpTransportConfig, MultiRaftConfig, MultiRaftManager, MultiRaftNetworkFactory,
+    MultiplexedLogStorage, MultiplexedStorageConfig,
+};
+use maniac_raft::{ManiacRaftTypeConfig, multi::codec};
 use openraft::async_runtime::watch::WatchReceiver;
 use openraft::network::RaftNetworkFactory;
 use openraft::network::v2::RaftNetworkV2;
+use openraft::storage::RaftStateMachine;
 use openraft::{LogId, OptionalSend};
 
 fn pick_unused_local_addr() -> SocketAddr {
@@ -93,7 +93,10 @@ impl RaftStateMachine<TestConfig> for TestStateMachine {
     async fn applied_state(
         &mut self,
     ) -> Result<
-        (Option<LogId<TestConfig>>, openraft::StoredMembership<TestConfig>),
+        (
+            Option<LogId<TestConfig>>,
+            openraft::StoredMembership<TestConfig>,
+        ),
         std::io::Error,
     > {
         Ok((None, openraft::StoredMembership::default()))
@@ -122,7 +125,9 @@ impl RaftStateMachine<TestConfig> for TestStateMachine {
         self.clone()
     }
 
-    async fn begin_receiving_snapshot(&mut self) -> Result<std::io::Cursor<Vec<u8>>, std::io::Error> {
+    async fn begin_receiving_snapshot(
+        &mut self,
+    ) -> Result<std::io::Cursor<Vec<u8>>, std::io::Error> {
         Ok(std::io::Cursor::new(Vec::new()))
     }
 
@@ -231,8 +236,10 @@ fn test_two_node_two_group_cluster() {
             tcp_nodelay: true,
         };
 
-        let transport1 = ManiacTcpTransport::<TestConfig>::new(transport_cfg.clone(), node_registry.clone());
-        let transport2 = ManiacTcpTransport::<TestConfig>::new(transport_cfg.clone(), node_registry.clone());
+        let transport1 =
+            ManiacTcpTransport::<TestConfig>::new(transport_cfg.clone(), node_registry.clone());
+        let transport2 =
+            ManiacTcpTransport::<TestConfig>::new(transport_cfg.clone(), node_registry.clone());
 
         let multi_cfg = MultiRaftConfig {
             heartbeat_interval: Duration::from_millis(50),
@@ -474,13 +481,19 @@ fn test_heartbeat_coalescing_verification() {
                 leader_commit: None,
             };
             futs.push(async move {
-                net.append_entries(hb, openraft::network::RPCOption::new(Duration::from_secs(3)))
-                    .await
+                net.append_entries(
+                    hb,
+                    openraft::network::RPCOption::new(Duration::from_secs(3)),
+                )
+                .await
             });
         }
 
         let results = futures::future::join_all(futs).await;
-        assert!(results.iter().all(|r| r.is_ok()), "all heartbeats should succeed");
+        assert!(
+            results.iter().all(|r| r.is_ok()),
+            "all heartbeats should succeed"
+        );
 
         // Coalescing expectation: should be much closer to "per peer" than "per group".
         // With groups=100 and MAX_COALESCED_HEARTBEATS=256, we expect ~1 batch (maybe a couple due to timing).

@@ -1,7 +1,7 @@
 use std::ptr;
 use std::sync::{
-    atomic::{AtomicPtr, Ordering},
     Arc, Weak,
+    atomic::{AtomicPtr, Ordering},
 };
 
 pub struct ArcCell<T> {
@@ -20,7 +20,9 @@ unsafe impl<T> Sync for ArcCell<T> {}
 impl<T> ArcCell<T> {
     #[inline(always)]
     pub fn new() -> Self {
-        Self { ptr: AtomicPtr::new(ptr::null_mut()) }
+        Self {
+            ptr: AtomicPtr::new(ptr::null_mut()),
+        }
     }
 
     #[inline(always)]
@@ -81,7 +83,9 @@ impl<T> Drop for WeakCell<T> {
 impl<T> WeakCell<T> {
     #[inline(always)]
     pub fn new() -> Self {
-        Self { ptr: AtomicPtr::new(ptr::null_mut()) }
+        Self {
+            ptr: AtomicPtr::new(ptr::null_mut()),
+        }
     }
 
     #[cfg(test)]
@@ -97,7 +101,9 @@ impl<T> WeakCell<T> {
             return None;
         }
         loop {
-            match self.ptr.compare_exchange(v, ptr::null_mut(), Ordering::SeqCst, Ordering::Acquire)
+            match self
+                .ptr
+                .compare_exchange(v, ptr::null_mut(), Ordering::SeqCst, Ordering::Acquire)
             {
                 Ok(_) => return unsafe { Weak::from_raw(v) }.upgrade(),
                 Err(_v) => {

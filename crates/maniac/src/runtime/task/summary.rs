@@ -211,23 +211,30 @@ impl Summary {
         // because WorkerService owns both
         let waker = unsafe { &*self.wakers.add(owner_id) };
 
-        // Compute local leaf index within owner's partition
         if let Some(local_idx) =
             self.global_to_local_leaf_idx(leaf_idx, owner_id, self.worker_count)
         {
-            // Fast path: if partition is already active, just set the bit without wakeup overhead
-            let mask = 1u64 << local_idx;
-            if waker.partition_summary() != 0 {
-                // Partition already has work - atomically set the bit but skip wakeup logic
-                waker.partition_summary_fetch_or(mask);
-                return;
-            }
-            // Slow path: partition was empty, need full wakeup sequence
             waker.mark_partition_leaf_active(local_idx);
         }
     }
 
-    /// Notify the partition owner's SignalWaker that a leaf in their partition became inactive.
+    #[inline(always)]
+    pub fn notify_reschedule(&self, leaf_idx: usize, signal_idx: usize) {
+        // Must update leaf_words so workers scanning for work can find this task
+        self.mark_signal_active(leaf_idx, signal_idx);
+
+        let owner_id = self.compute_partition_owner(leaf_idx, self.worker_count);
+        if owner_id >= self.wakers_len {
+            return;
+        }
+        let waker = unsafe { &*self.wakers.add(owner_id) };
+        if let Some(local_idx) =
+            self.global_to_local_leaf_idx(leaf_idx, owner_id, self.worker_count)
+        {
+            waker.mark_partition_leaf_active(local_idx);
+        }
+    }
+
     #[inline(always)]
     fn notify_partition_owner_inactive(&self, leaf_idx: usize) {
         let owner_id = self.compute_partition_owner(leaf_idx, self.worker_count);
@@ -426,6 +433,16 @@ impl Summary {
         }
         if self.signals_per_leaf == 0 {
             return None;
+        }
+
+        for leaf_idx in 0..self.leaf_count {
+            if let Some(found) = self.try_reserve_in_leaf(
+                self.next_partition.fetch_add(1, Ordering::SeqCst) % self.leaf_count(),
+            )
+            // self.try_reserve_in_leaf(crate::utils::random_usize() % self.leaf_count())
+            {
+                return Some(found);
+            }
         }
 
         let task_count = self.leaf_count * self.signals_per_leaf;
@@ -1406,38 +1423,38 @@ mod tests {
         let barrier = Arc::new(Barrier::new(threads));
 
         let handles: Vec<_> = (0..threads)
-				.map(|thread_id| {
-					let tree = Arc::clone(&tree);
-					let barrier = Arc::clone(&barrier);
-					thread::spawn(move || {
-						barrier.wait();
-						for i in 0..iterations {
-							// Try to reserve - may fail if all slots are taken
-							if let Some((leaf, signal, bit)) = tree.reserve_task() {
-								// Verify the bit is actually set in the reservation bitmap
-								let reservation_word = tree.reservation_word(leaf, signal);
-								let current = reservation_word.load(Ordering::SeqCst);
-								let mask = 1u64 << bit;
+            .map(|thread_id| {
+                let tree = Arc::clone(&tree);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..iterations {
+                        // Try to reserve - may fail if all slots are taken
+                        if let Some((leaf, signal, bit)) = tree.reserve_task() {
+                            // Verify the bit is actually set in the reservation bitmap
+                            let reservation_word = tree.reservation_word(leaf, signal);
+                            let current = reservation_word.load(Ordering::SeqCst);
+                            let mask = 1u64 << bit;
 
-								// The bit should be set
-								assert!(current & mask != 0,
+                            // The bit should be set
+                            assert!(current & mask != 0,
 												"Thread {} iteration {}: Bit {} not set in reservation bitmap for ({}, {})",
 												thread_id, i, bit, leaf, signal);
 
-								// Hold for a bit to create contention
-								thread::sleep(Duration::from_micros(100));
+                            // Hold for a bit to create contention
+                            thread::sleep(Duration::from_micros(100));
 
-								// Release the reservation
-								tree.release_task_in_leaf(leaf, signal, bit as usize);
+                            // Release the reservation
+                            tree.release_task_in_leaf(leaf, signal, bit as usize);
 
-								// Note: We don't verify the bit is cleared here because under high contention,
-								// another thread may immediately re-reserve the same bit. The final check at
-								// the end of the test verifies all bits are eventually released.
-							}
-						}
-					})
-				})
-				.collect();
+                            // Note: We don't verify the bit is cleared here because under high contention,
+                            // another thread may immediately re-reserve the same bit. The final check at
+                            // the end of the test verifies all bits are eventually released.
+                        }
+                    }
+                })
+            })
+            .collect();
 
         // Wait for all threads to complete
         for handle in handles {

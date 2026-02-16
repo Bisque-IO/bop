@@ -1,8 +1,8 @@
 //! Process-related host functions using Maniac.
 
 use super::WasiView;
-use crate::wasi::types::Errno;
 use crate::generator::{is_generator, yield_now};
+use crate::wasi::types::Errno;
 use wasmtime::Caller;
 
 pub fn proc_exit<T: WasiView>(mut caller: Caller<'_, T>, code: i32) -> () {

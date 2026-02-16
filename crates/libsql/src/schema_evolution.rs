@@ -43,11 +43,7 @@ use std::future::Future;
 /// Trait for executing DDL statements on a branch.
 pub trait DdlExecutor: Send + Sync {
     /// Execute a DDL statement on the target branch.
-    fn execute_ddl(
-        &self,
-        branch: BranchRef,
-        sql: &str,
-    ) -> impl Future<Output = Result<()>> + Send;
+    fn execute_ddl(&self, branch: BranchRef, sql: &str) -> impl Future<Output = Result<()>> + Send;
 }
 
 /// Trait for applying changesets from source to target branch.
@@ -93,17 +89,18 @@ impl EvolutionManager {
             .ok_or_else(|| anyhow::anyhow!("Source branch {} not found", source_branch_id))?;
 
         // Create target branch (fork from source)
-        let target_branch_name = format!("{}_evolution_{}", source_branch.name,
+        let target_branch_name = format!(
+            "{}_evolution_{}",
+            source_branch.name,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
-                .unwrap_or(0));
+                .unwrap_or(0)
+        );
 
-        let target_branch_id = self.store.create_branch(
-            db_id,
-            target_branch_name,
-            Some(source_branch_id),
-        )?;
+        let target_branch_id =
+            self.store
+                .create_branch(db_id, target_branch_name, Some(source_branch_id))?;
 
         // Create evolution steps
         let steps: Vec<EvolutionStep> = ddl_statements
@@ -182,10 +179,7 @@ impl EvolutionManager {
                 Err(e) => {
                     evolution.steps[i].error = Some(e.to_string());
                     evolution.state = EvolutionState::Failed;
-                    evolution.error = Some(format!(
-                        "DDL step {} failed: {}",
-                        step_number, e
-                    ));
+                    evolution.error = Some(format!("DDL step {} failed: {}", step_number, e));
                     evolution.updated_at = now();
                     self.store.update_evolution(db_id, &evolution)?;
                     return Err(e);
@@ -231,10 +225,10 @@ impl EvolutionManager {
         let target_branch = BranchRef::new(db_id, evolution.target_branch_id);
 
         // Get source branch's current raft state
-        let source_raft_state = self.store.get_raft_state(db_id, evolution.source_branch_id)?;
-        let source_commit_index = source_raft_state
-            .map(|s| s.commit_index)
-            .unwrap_or(0);
+        let source_raft_state = self
+            .store
+            .get_raft_state(db_id, evolution.source_branch_id)?;
+        let source_commit_index = source_raft_state.map(|s| s.commit_index).unwrap_or(0);
 
         // Determine range to replay
         let start_index = evolution.replayed_log_index + 1;
@@ -348,10 +342,10 @@ impl EvolutionManager {
         let source_branch = BranchRef::new(db_id, evolution.source_branch_id);
         let target_branch = BranchRef::new(db_id, evolution.target_branch_id);
 
-        let source_raft_state = self.store.get_raft_state(db_id, evolution.source_branch_id)?;
-        let source_commit_index = source_raft_state
-            .map(|s| s.commit_index)
-            .unwrap_or(0);
+        let source_raft_state = self
+            .store
+            .get_raft_state(db_id, evolution.source_branch_id)?;
+        let source_commit_index = source_raft_state.map(|s| s.commit_index).unwrap_or(0);
 
         let start_index = evolution.replayed_log_index + 1;
         let end_index = (start_index + batch_size as u64 - 1).min(source_commit_index);
@@ -402,10 +396,10 @@ impl EvolutionManager {
             .ok_or_else(|| anyhow::anyhow!("Evolution {} not found", evolution_id))?;
 
         // Get source branch commit index for progress calculation
-        let source_raft_state = self.store.get_raft_state(db_id, evolution.source_branch_id)?;
-        let source_commit_index = source_raft_state
-            .map(|s| s.commit_index)
-            .unwrap_or(0);
+        let source_raft_state = self
+            .store
+            .get_raft_state(db_id, evolution.source_branch_id)?;
+        let source_commit_index = source_raft_state.map(|s| s.commit_index).unwrap_or(0);
 
         let ddl_progress = if evolution.steps.is_empty() {
             1.0

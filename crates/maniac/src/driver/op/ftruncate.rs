@@ -38,9 +38,7 @@ impl OpAble for Ftruncate {
         use std::os::windows::prelude::{AsRawHandle, FromRawHandle};
 
         let handle = self.fd.as_raw_handle();
-        let file = unsafe {
-            std::mem::ManuallyDrop::new(std::fs::File::from_raw_handle(handle))
-        };
+        let file = unsafe { std::mem::ManuallyDrop::new(std::fs::File::from_raw_handle(handle)) };
         file.set_len(self.len)?;
         Ok(MaybeFd::default())
     }

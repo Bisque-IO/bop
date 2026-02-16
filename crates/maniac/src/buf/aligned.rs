@@ -134,4 +134,3 @@ unsafe impl IoBufMut for AlignedBuf {
         self.init = pos;
     }
 }
-

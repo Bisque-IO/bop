@@ -46,7 +46,7 @@ use maniac_libsql_sys::wal::{
     BusyHandler, CheckpointCallback, CheckpointMode, PageHeaders, Result as WalResult, Sqlite3Db,
     Sqlite3File, UndoHandler, Vfs, Wal, WalManager,
 };
-use std::ffi::{c_int, CStr};
+use std::ffi::{CStr, c_int};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

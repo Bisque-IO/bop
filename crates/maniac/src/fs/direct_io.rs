@@ -47,4 +47,3 @@ impl DirectIoRequirements {
         Ok(())
     }
 }
-

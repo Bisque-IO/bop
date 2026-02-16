@@ -699,8 +699,8 @@ impl Scheduler {
 
         let join = std::thread::spawn(move || {
             let core_ids = crate::utils::cpu_cores();
-            let core_id = worker_id + 1;
-            core_affinity::set_for_current(core_ids[core_id % core_ids.len()]);
+            let core_id = worker_id;
+            // core_affinity::set_for_current(core_ids[core_id % (core_ids.len() - 1)]);
 
             let task_slot = crate::runtime::task::TaskSlot::new(std::ptr::null_mut());
             let task_slot_ptr = &task_slot as *const _ as *mut crate::runtime::task::TaskSlot;

@@ -121,9 +121,21 @@ impl ChunkHeader {
                 return None;
             }
             let size = u32::from_le_bytes(bytes[1..5].try_into().ok()?);
-            Some((Self { flags, original_size: Some(size) }, 5))
+            Some((
+                Self {
+                    flags,
+                    original_size: Some(size),
+                },
+                5,
+            ))
         } else {
-            Some((Self { flags, original_size: None }, 1))
+            Some((
+                Self {
+                    flags,
+                    original_size: None,
+                },
+                1,
+            ))
         }
     }
 }
@@ -139,7 +151,11 @@ pub struct PageCacheKey {
 
 impl PageCacheKey {
     pub fn new(db_id: u64, branch_id: u32, page_id: u64) -> Self {
-        Self { db_id, branch_id, page_id }
+        Self {
+            db_id,
+            branch_id,
+            page_id,
+        }
     }
 }
 
@@ -198,7 +214,8 @@ impl PageCache {
 
     /// Invalidate all pages for a branch.
     pub fn invalidate_branch(&self, db_id: u64, branch_id: u32) {
-        self.cache.retain(|k, _| k.db_id != db_id || k.branch_id != branch_id);
+        self.cache
+            .retain(|k, _| k.db_id != db_id || k.branch_id != branch_id);
     }
 
     /// Clear the entire cache.
@@ -267,8 +284,8 @@ pub fn prepare_chunk_for_storage(data: &[u8], config: &ChunkConfig) -> Vec<u8> {
 
 /// Restores chunk data from storage (decrypt/decompress as needed).
 pub fn restore_chunk_from_storage(data: &[u8], config: &ChunkConfig) -> anyhow::Result<Vec<u8>> {
-    let (header, header_len) = ChunkHeader::from_bytes(data)
-        .ok_or_else(|| anyhow::anyhow!("Invalid chunk header"))?;
+    let (header, header_len) =
+        ChunkHeader::from_bytes(data).ok_or_else(|| anyhow::anyhow!("Invalid chunk header"))?;
 
     let payload = &data[header_len..];
 
@@ -285,8 +302,7 @@ pub fn restore_chunk_from_storage(data: &[u8], config: &ChunkConfig) -> anyhow::
 
     // Decompress if needed
     let decompressed = if header.is_compressed() {
-        decompress_chunk(&decrypted)
-            .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))?
+        decompress_chunk(&decrypted).map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))?
     } else {
         decrypted
     };
@@ -357,7 +373,9 @@ impl<S: ChunkStorage> PageManager<S> {
         }
 
         // 3. Find the chunk containing this page
-        let found = self.store.find_chunk_for_page(branch.db_id, branch.branch_id, page_id)?;
+        let found = self
+            .store
+            .find_chunk_for_page(branch.db_id, branch.branch_id, page_id)?;
         let chunk_id = match found {
             Some(f) => f.chunk_id,
             None => return Ok(None), // Page doesn't exist yet
@@ -386,10 +404,13 @@ impl<S: ChunkStorage> PageManager<S> {
         let page_data = Arc::new(restored[byte_offset..byte_end].to_vec());
 
         // 7. Cache the page
-        self.cache.insert(cache_key, CachedPage {
-            data: page_data.clone(),
-            version: 0, // Could track version from chunk metadata
-        });
+        self.cache.insert(
+            cache_key,
+            CachedPage {
+                data: page_data.clone(),
+                version: 0, // Could track version from chunk metadata
+            },
+        );
 
         Ok(Some(page_data))
     }
@@ -564,9 +585,13 @@ impl<S: AsyncChunkStorage> AsyncPageManager<S> {
         }
 
         // Fall through to async storage via sync_await
-        maniac::runtime::worker::sync_await(
-            self.read_page(branch, start_frame, end_frame, page_no, |_| None),
-        )
+        maniac::runtime::worker::sync_await(self.read_page(
+            branch,
+            start_frame,
+            end_frame,
+            page_no,
+            |_| None,
+        ))
     }
 
     /// Try to read a page synchronously, returning None if not in coroutine context.
@@ -594,9 +619,13 @@ impl<S: AsyncChunkStorage> AsyncPageManager<S> {
         }
 
         // Fall through to async storage via try_sync_await
-        maniac::runtime::worker::try_sync_await(
-            self.read_page(branch, start_frame, end_frame, page_no, |_| None),
-        )
+        maniac::runtime::worker::try_sync_await(self.read_page(
+            branch,
+            start_frame,
+            end_frame,
+            page_no,
+            |_| None,
+        ))
     }
 
     /// Stub for read_page_sync when maniac runtime is not available.
@@ -663,7 +692,10 @@ mod tests {
     #[test]
     fn test_chunk_header_roundtrip() {
         // Uncompressed, unencrypted
-        let header = ChunkHeader { flags: 0, original_size: None };
+        let header = ChunkHeader {
+            flags: 0,
+            original_size: None,
+        };
         let bytes = header.to_bytes();
         let (parsed, len) = ChunkHeader::from_bytes(&bytes).unwrap();
         assert_eq!(len, 1);
@@ -671,7 +703,10 @@ mod tests {
         assert!(!parsed.is_encrypted());
 
         // Compressed
-        let header = ChunkHeader { flags: ChunkHeader::FLAG_COMPRESSED, original_size: Some(1024) };
+        let header = ChunkHeader {
+            flags: ChunkHeader::FLAG_COMPRESSED,
+            original_size: Some(1024),
+        };
         let bytes = header.to_bytes();
         let (parsed, len) = ChunkHeader::from_bytes(&bytes).unwrap();
         assert_eq!(len, 5);
@@ -696,10 +731,13 @@ mod tests {
 
         assert!(cache.get(&key).is_none());
 
-        cache.insert(key, CachedPage {
-            data: Arc::new(vec![0u8; 4096]),
-            version: 1,
-        });
+        cache.insert(
+            key,
+            CachedPage {
+                data: Arc::new(vec![0u8; 4096]),
+                version: 1,
+            },
+        );
 
         assert!(cache.get(&key).is_some());
         assert_eq!(cache.len(), 1);

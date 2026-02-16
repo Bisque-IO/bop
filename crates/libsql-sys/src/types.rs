@@ -2,7 +2,7 @@
 use std::ffi::{c_char, c_int, c_uint, c_void};
 
 pub type Wal = crate::ffi::libsql_wal;
-use crate::ffi::{libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs, PgHdr};
+use crate::ffi::{PgHdr, libsql_wal_methods, sqlite3, sqlite3_file, sqlite3_vfs};
 
 // WAL methods
 pub type XWalLimitFn = extern "C" fn(wal: *mut Wal, limit: i64);

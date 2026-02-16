@@ -234,9 +234,9 @@ impl<S: AsyncChunkStorage + Clone + 'static> DatabaseManager<S> {
     pub fn create_database(&self, name: &str, config: DatabaseConfig) -> Result<Database<'_, S>> {
         config.validate()?;
 
-        let db_id = self
-            .store
-            .create_database(name.to_string(), config.page_size, config.chunk_size)?;
+        let db_id =
+            self.store
+                .create_database(name.to_string(), config.page_size, config.chunk_size)?;
 
         // Create the default "main" branch
         let branch_id = self.store.create_branch(db_id, "main".to_string(), None)?;
@@ -437,9 +437,7 @@ impl<'a, S: AsyncChunkStorage + Clone + 'static> Branch<'a, S> {
     /// Create a new in-memory connection for this branch.
     ///
     /// Uses the virtual WAL path format that encodes branch info.
-    pub fn open_connection_raw(
-        &self,
-    ) -> Result<VirtualWal<S>> {
+    pub fn open_connection_raw(&self) -> Result<VirtualWal<S>> {
         let branch_ref = BranchRef::new(self.db_id, self.branch_id);
         let state = self
             .manager

@@ -49,8 +49,8 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Magic number for WAL segment files: "WALS"
@@ -645,7 +645,11 @@ impl<B: WalStorageBackend> WalWriter<B> {
         // Take all pending remote frames
         let frames: Vec<PendingFrame> = self.pending_remote.drain(..).collect();
         // Update pending size (remote frames are now gone)
-        self.pending_size = self.pending_local.iter().map(|f| 8 + f.frame.data.len()).sum();
+        self.pending_size = self
+            .pending_local
+            .iter()
+            .map(|f| 8 + f.frame.data.len())
+            .sum();
 
         let start_frame = frames.first().unwrap().frame_no;
         let end_frame = frames.last().unwrap().frame_no;
@@ -664,7 +668,9 @@ impl<B: WalStorageBackend> WalWriter<B> {
 
         // Write to remote backend
         let data_len = segment_data.len();
-        self.remote_backend.write_segment(&key, segment_data).await?;
+        self.remote_backend
+            .write_segment(&key, segment_data)
+            .await?;
 
         // Update state
         self.remote_durable_frame_no = end_frame;
@@ -842,8 +848,7 @@ impl<'a> Iterator for WalFrameIterator<'a> {
 
         let offset = self.reader.offset;
 
-        let page_no =
-            u32::from_le_bytes(self.reader.data[offset..offset + 4].try_into().unwrap());
+        let page_no = u32::from_le_bytes(self.reader.data[offset..offset + 4].try_into().unwrap());
         let db_size =
             u32::from_le_bytes(self.reader.data[offset + 4..offset + 8].try_into().unwrap());
         let data = self.reader.data[offset + 8..offset + 8 + page_size].to_vec();

@@ -7,8 +7,8 @@ use maniac::io::{AsyncReadRent, AsyncReadRentExt, AsyncWriteRent, AsyncWriteRent
 use maniac::net::TcpListener;
 use maniac::net::TcpStream;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 // Simple framed protocol: 4-byte length prefix + payload
@@ -211,7 +211,9 @@ async fn run_client(
                 .await
             {
                 Ok(Ok(data)) => {
-                    reader_stats.responses_received.fetch_add(1, Ordering::Relaxed);
+                    reader_stats
+                        .responses_received
+                        .fetch_add(1, Ordering::Relaxed);
                     reader_stats
                         .bytes_received
                         .fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -287,7 +289,15 @@ async fn run_stress_test(
         let stats = client_stats.clone();
         let shutdown = shutdown.clone();
         maniac::spawn(async move {
-            run_client(i, server_addr, stats, shutdown, payload_size, concurrent_per_client).await;
+            run_client(
+                i,
+                server_addr,
+                stats,
+                shutdown,
+                payload_size,
+                concurrent_per_client,
+            )
+            .await;
         });
     }
 
@@ -346,8 +356,7 @@ fn main() {
     println!("Starting network stress test...\n");
 
     // Create runtime with 4 workers to test multi-threaded slab fix
-    let runtime =
-        maniac::runtime::new_multi_threaded(4, 65536).expect("Failed to create runtime");
+    let runtime = maniac::runtime::new_multi_threaded(4, 65536).expect("Failed to create runtime");
 
     let handle = runtime.spawn(async_main()).expect("Failed to spawn");
 

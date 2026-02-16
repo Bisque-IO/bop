@@ -10,7 +10,57 @@ use core::{
 };
 use std::thread;
 
-use branches::{likely, unlikely};
+use crate::utils::Random;
+
+#[derive(Debug)]
+pub struct WorkStealingBackoff {
+    consecutive_idles: u32,
+}
+
+impl WorkStealingBackoff {
+    // Park immediately to prevent thundering herd when workers >> tasks
+    const PARK_THRESHOLD: u32 = 1;
+
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            consecutive_idles: 0,
+        }
+    }
+
+    #[inline]
+    pub fn backoff(&mut self, _rng: &mut Random) -> bool {
+        self.consecutive_idles += 1;
+        self.consecutive_idles >= Self::PARK_THRESHOLD
+    }
+
+    #[inline]
+    pub fn reset(&mut self) {
+        self.consecutive_idles = 0;
+    }
+
+    #[inline]
+    pub fn should_park(&self) -> bool {
+        self.consecutive_idles >= Self::PARK_THRESHOLD
+    }
+}
+
+impl Default for WorkStealingBackoff {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Branch prediction hints - these compile to no-ops but help document intent.
+// On nightly, these could use core::intrinsics::{likely, unlikely} for actual hints.
+#[inline(always)]
+fn likely(b: bool) -> bool {
+    b
+}
+#[inline(always)]
+fn unlikely(b: bool) -> bool {
+    b
+}
 
 /// Puts the current thread to sleep for a specified duration.
 #[inline(always)]

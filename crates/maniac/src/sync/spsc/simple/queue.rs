@@ -158,7 +158,10 @@ impl<T> Queue<T> {
 
         // Check available space using cached tail
         let tail_cached = unsafe { *self.tail_cache.get() };
-        let mut free = self.buffer.len().wrapping_sub(head.wrapping_sub(tail_cached));
+        let mut free = self
+            .buffer
+            .len()
+            .wrapping_sub(head.wrapping_sub(tail_cached));
 
         if free == 0 {
             // Cache miss - reload tail from atomic
@@ -340,9 +343,7 @@ impl<T> Drop for Queue<T> {
         // Drop all values in the queue.
         // Safety: single-thread access is guaranteed since the dropping thread
         // holds exclusive ownership.
-        unsafe {
-            while self.pop().is_ok() {}
-        }
+        unsafe { while self.pop().is_ok() {} }
     }
 }
 

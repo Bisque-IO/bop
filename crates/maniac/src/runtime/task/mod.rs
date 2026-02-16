@@ -776,11 +776,11 @@ impl Task {
     pub(crate) fn finish_and_schedule(&self) {
         self.state.store(TASK_SCHEDULED, Ordering::Release);
         let signal = unsafe { &*self.signal_ptr };
-        let (was_empty, was_set) = signal.set(self.signal_bit as u64);
-        if was_empty && was_set && !self.summary_tree_ptr.is_null() {
+        signal.set(self.signal_bit as u64);
+        if !self.summary_tree_ptr.is_null() {
             unsafe {
                 (*self.summary_tree_ptr)
-                    .mark_signal_active(self.leaf_idx as usize, self.signal_idx as usize);
+                    .notify_reschedule(self.leaf_idx as usize, self.signal_idx as usize);
             }
         }
     }
@@ -978,11 +978,7 @@ impl Task {
     /// # Safety
     /// Only call from the worker thread that owns this task.
     #[inline(always)]
-    pub unsafe fn pin_generator(
-        &self,
-        generator_ptr: *mut usize,
-        ownership: GeneratorOwnership,
-    ) {
+    pub unsafe fn pin_generator(&self, generator_ptr: *mut usize, ownership: GeneratorOwnership) {
         self.pinned_generator_ptr
             .store(generator_ptr as *mut (), Ordering::Release);
         self.pinned_generator_ownership

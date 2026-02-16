@@ -110,7 +110,10 @@ pub trait RaftSegmentStorage: Send + Sync {
 
     /// Rotate the current segment, creating a new one.
     /// Returns metadata for the completed segment.
-    fn rotate_segment(&self, branch: BranchRef) -> impl Future<Output = StorageResult<RaftSegment>> + Send;
+    fn rotate_segment(
+        &self,
+        branch: BranchRef,
+    ) -> impl Future<Output = StorageResult<RaftSegment>> + Send;
 
     /// Delete a segment file.
     fn delete_segment(&self, segment_path: &str) -> impl Future<Output = StorageResult<()>> + Send;
@@ -248,7 +251,9 @@ impl<S: ChunkStorage, R: RaftSegmentStorage> RaftLogManager<S, R> {
         }
 
         // Get WAL segments to determine highest durable frame
-        let wal_segments = self.store.get_wal_segments(branch.db_id, branch.branch_id, 0)?;
+        let wal_segments = self
+            .store
+            .get_wal_segments(branch.db_id, branch.branch_id, 0)?;
         if let Some(last_seg) = wal_segments.last() {
             state.wal_durable_frame = last_seg.end_frame;
         }
@@ -281,7 +286,9 @@ impl<S: ChunkStorage, R: RaftSegmentStorage> RaftLogManager<S, R> {
 
     /// Get compaction info for all segments of a branch.
     pub fn get_compaction_info(&self, branch: BranchRef) -> Result<Vec<SegmentCompactionInfo>> {
-        let segments = self.store.get_raft_segments(branch.db_id, branch.branch_id)?;
+        let segments = self
+            .store
+            .get_raft_segments(branch.db_id, branch.branch_id)?;
         let durability = self.durability_cache.get(&branch);
 
         let mut result = Vec::with_capacity(segments.len());
@@ -340,9 +347,12 @@ impl<S: ChunkStorage, R: RaftSegmentStorage> RaftLogManager<S, R> {
         };
 
         // Start from the lowest possible and find the highest compactable
-        let entries = self
-            .store
-            .get_raft_entries(branch.db_id, branch.branch_id, 0, durability.committed_index)?;
+        let entries = self.store.get_raft_entries(
+            branch.db_id,
+            branch.branch_id,
+            0,
+            durability.committed_index,
+        )?;
 
         let mut highest_compactable = None;
 

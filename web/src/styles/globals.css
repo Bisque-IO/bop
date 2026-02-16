@@ -1,0 +1,241 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 98%;
+    --foreground: 0 0% 4%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 4%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 4%;
+    --primary: 0 0% 24%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 90%;
+    --secondary-foreground: 0 0% 4%;
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 45%;
+    --accent: 0 0% 90%;
+    --accent-foreground: 0 0% 4%;
+    --destructive: 0 0% 30%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 0 0% 24%;
+    --radius: 0.5rem;
+    --font-sans: 'Plus Jakarta Sans', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  .dark {
+    --background: 0 0% 2%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 6%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 6%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 85%;
+    --primary-foreground: 0 0% 2%;
+    --secondary: 0 0% 18%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 12%;
+    --muted-foreground: 0 0% 60%;
+    --accent: 0 0% 18%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 0% 70%;
+    --destructive-foreground: 0 0% 2%;
+    --border: 0 0% 18%;
+    --input: 0 0% 18%;
+    --ring: 0 0% 85%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scrollbar-color: hsl(0 0% 40%) hsl(0 0% 12%);
+    scrollbar-width: thin;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: hsl(0 0% 12%);
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(0 0% 30%);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(0 0% 40%);
+}
+
+.light::-webkit-scrollbar-track {
+  background: hsl(0 0% 95%);
+}
+
+.light::-webkit-scrollbar-thumb {
+  background: hsl(0 0% 70%);
+}
+
+.light::-webkit-scrollbar-thumb:hover {
+  background: hsl(0 0% 60%);
+}
+
+pre[class*="language-"],
+code[class*="language-"] {
+  color: hsl(0 0% 85%) !important;
+  background: transparent !important;
+  text-shadow: none !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.875rem !important;
+}
+
+pre[class*="language-"] {
+  background: hsl(0 0% 8%) !important;
+  border: 1px solid hsl(0 0% 18%) !important;
+  border-radius: 0.5rem !important;
+  padding: 1rem !important;
+  margin: 0 !important;
+  overflow: auto !important;
+}
+
+.light pre[class*="language-"] {
+  background: hsl(0 0% 96%) !important;
+  border-color: hsl(0 0% 90%) !important;
+}
+
+.light pre[class*="language-"],
+.light code[class*="language-"] {
+  color: hsl(0 0% 20%) !important;
+}
+
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: hsl(0 0% 50%) !important;
+}
+
+.token.punctuation {
+  color: hsl(0 0% 70%) !important;
+}
+
+.token.property,
+.token.tag,
+.token.boolean,
+.token.number,
+.token.constant,
+.token.symbol,
+.token.deleted {
+  color: hsl(0 0% 75%) !important;
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+  color: hsl(0 0% 65%) !important;
+}
+
+.token.operator,
+.token.entity,
+.token.url,
+.language-css .token.string,
+.style .token.string {
+  color: hsl(0 0% 70%) !important;
+}
+
+.token.atrule,
+.token.attr-value,
+.token.keyword {
+  color: hsl(0 0% 80%) !important;
+}
+
+.token.function,
+.token.class-name {
+  color: hsl(0 0% 90%) !important;
+}
+
+.token.regex,
+.token.important,
+.token.variable {
+  color: hsl(0 0% 75%) !important;
+}
+
+.light .token.comment,
+.light .token.prolog,
+.light .token.doctype,
+.light .token.cdata {
+  color: hsl(0 0% 50%) !important;
+}
+
+.light .token.punctuation {
+  color: hsl(0 0% 40%) !important;
+}
+
+.light .token.property,
+.light .token.tag,
+.light .token.boolean,
+.light .token.number,
+.light .token.constant,
+.light .token.symbol,
+.light .token.deleted {
+  color: hsl(0 0% 30%) !important;
+}
+
+.light .token.selector,
+.light .token.attr-name,
+.light .token.string,
+.light .token.char,
+.light .token.builtin,
+.light .token.inserted {
+  color: hsl(0 0% 35%) !important;
+}
+
+.light .token.operator,
+.light .token.entity,
+.light .token.url,
+.light .language-css .token.string,
+.light .style .token.string {
+  color: hsl(0 0% 40%) !important;
+}
+
+.light .token.atrule,
+.light .token.attr-value,
+.light .token.keyword {
+  color: hsl(0 0% 25%) !important;
+}
+
+.light .token.function,
+.light .token.class-name {
+  color: hsl(0 0% 15%) !important;
+}
+
+.light .token.regex,
+.light .token.important,
+.light .token.variable {
+  color: hsl(0 0% 30%) !important;
+}

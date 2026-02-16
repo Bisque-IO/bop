@@ -35,7 +35,6 @@ use self::poller::PollerInner;
 pub use self::uring::IoUringDriver;
 #[cfg(all(target_os = "linux", feature = "iouring"))]
 use self::uring::UringInner;
-use self::worker_ops::WorkerOps;
 
 /// Unpark a runtime of another thread.
 pub(crate) mod unpark {

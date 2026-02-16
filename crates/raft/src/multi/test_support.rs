@@ -3,21 +3,21 @@
 //! Provides helpers to run async tests inside Maniac runtime and common fixtures.
 
 use futures::FutureExt;
-use maniac::runtime::{DefaultExecutor, Executor};
-use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
 use maniac::future::block_on;
+use maniac::runtime::task::{TaskArenaConfig, TaskArenaOptions};
+use maniac::runtime::{DefaultExecutor, Executor};
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::panic::AssertUnwindSafe;
 use tempfile::TempDir;
 
 /// Run an async future inside a Maniac runtime
-/// 
+///
 /// This creates a Maniac executor and runs the future within it.
 /// This is required because `ManiacRaftTypeConfig` uses `ManiacRuntime`,
-/// and `C::AsyncRuntime::spawn` (which calls `maniac::spawn`) needs to be called 
+/// and `C::AsyncRuntime::spawn` (which calls `maniac::spawn`) needs to be called
 /// from within a Maniac worker task context.
-/// 
+///
 /// The approach: spawn the test future on the executor, then block on the join handle.
 /// The executor workers run in background threads and will process the task.
 /// The JoinHandle's poll will drive executor progress.
@@ -29,7 +29,7 @@ where
     // Create a single-threaded executor for tests
     // This automatically starts a worker thread that will process tasks
     let executor = DefaultExecutor::new_single_threaded();
-    
+
     // Spawn the test future on the executor.
     // This puts it in the executor's task queue for the worker to process
     //
@@ -39,7 +39,7 @@ where
     let handle = executor
         .spawn(async move { AssertUnwindSafe(f).catch_unwind().await })
         .expect("Failed to spawn test task in Maniac runtime");
-    
+
     // Block on the handle to completion using futures_lite block_on
     // This will poll the JoinHandle, which internally drives the executor
     // to make progress on the spawned task
